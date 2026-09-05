@@ -240,6 +240,124 @@ pub enum IssueMonitorEffectPayload {
         pr_number: u64,
         compensates_effect_id: String,
     },
+    /// Issue #3917: close or annotate an Issue whose work branch merged. A
+    /// grant like `ArmAutoMerge`: revoked on authority advance, never
+    /// compensated (a close is reversible by a human reopen).
+    SettleMergedIssue {
+        issue_number: u64,
+        pr_number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge_sha: Option<String>,
+        action: MergedIssueSettlementAction,
+    },
+}
+
+/// Issue #3917: what a merged-Issue settlement does on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MergedIssueSettlementAction {
+    /// Every acceptance criterion is checked, or the remainder was delegated
+    /// to another Issue: post the close comment and close (AC-1 / AC-2).
+    Close {
+        #[serde(default)]
+        delegated: bool,
+    },
+    /// Auto-close is off: record the merge in a comment and leave the Issue
+    /// open for a human (AC-5).
+    AwaitClose {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unmet: Vec<String>,
+    },
+    /// Unchecked criteria without a delegation record: comment and hand the
+    /// Issue to a human (AC-2). An empty list means the block is missing.
+    UnmetAcceptance {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unmet: Vec<String>,
+    },
+}
+
+/// One merged pull request for an Issue's work branch, as the scan saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedIssueDelivery {
+    pub pr_number: u64,
+    pub merge_sha: Option<String>,
+    pub merged_at: Option<String>,
+}
+
+/// Durable record that one delivery was settled (Issue #3917 AC-4): the same
+/// PR + merge SHA is never settled twice, even after a human reopen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedIssueSettlement {
+    pub issue_number: u64,
+    pub pr_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_sha: Option<String>,
+    pub action: MergedIssueSettlementAction,
+    pub settled_at: String,
+}
+
+/// Phrases that record "the remaining acceptance criteria were delegated to
+/// another Issue" in a PR body or Issue comment (Issue #3917 AC-2). Matched
+/// case-insensitively as substrings.
+const MERGED_ISSUE_DELEGATION_MARKERS: &[&str] = &[
+    "残 ac は別 issue に委譲",
+    "残acは別issueに委譲",
+    "remaining acceptance criteria delegated",
+    "remaining ac delegated",
+];
+
+/// Whether any text carries a delegation record.
+pub fn delegation_recorded<'a>(texts: impl IntoIterator<Item = &'a str>) -> bool {
+    texts.into_iter().any(|text| {
+        let lower = text.to_lowercase();
+        MERGED_ISSUE_DELEGATION_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+    })
+}
+
+/// Issue #3917: decide what settling a merged delivery does for `issue`.
+///
+/// Pure. `delegation_evidence` is consulted only when unchecked criteria
+/// remain and auto-close is on, so callers can defer the PR-body / comment
+/// readback to that case; `None` from it means the evidence could not be read
+/// and the decision is deferred to a later scan. Returns `None` when nothing
+/// must happen: the Issue is already closed, it is a `gwt-spec` Issue whose
+/// tasks are not all complete (AC-3: phase merges never settle the SPEC), or
+/// the evidence is unavailable.
+pub fn decide_merged_issue_settlement(
+    issue: &IssueMonitorIssue,
+    auto_close: bool,
+    delegation_evidence: impl FnOnce(&[String]) -> Option<bool>,
+) -> Option<MergedIssueSettlementAction> {
+    if issue.state != IssueMonitorIssueState::Open {
+        return None;
+    }
+    let is_spec = issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    if is_spec && issue.readiness != IssueMonitorReadiness::ReadyWithCompletedTasks {
+        return None;
+    }
+    let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+        issue.body.as_deref().unwrap_or(""),
+    );
+    let unmet = if criteria.machine_checkable {
+        criteria.unchecked.clone()
+    } else {
+        Vec::new()
+    };
+    if !auto_close {
+        return Some(MergedIssueSettlementAction::AwaitClose { unmet });
+    }
+    if criteria.all_checked() {
+        return Some(MergedIssueSettlementAction::Close { delegated: false });
+    }
+    if criteria.machine_checkable && delegation_evidence(&unmet)? {
+        return Some(MergedIssueSettlementAction::Close { delegated: true });
+    }
+    Some(MergedIssueSettlementAction::UnmetAcceptance { unmet })
 }
 
 /// Stable identity of one delivery attempt. Results are accepted only when all
@@ -416,6 +534,9 @@ fn revoke_uncommitted_effects_for_closed_issue(
             } | IssueMonitorEffectPayload::ArmAutoMerge {
                 issue_number: pending_issue,
                 ..
+            } | IssueMonitorEffectPayload::SettleMergedIssue {
+                issue_number: pending_issue,
+                ..
             } if pending_issue == issue_number
         )
     });
@@ -441,7 +562,8 @@ fn revoke_uncommitted_effects_for_closed_issue(
                 );
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
-            | IssueMonitorEffectPayload::DisarmAutoMerge { .. } => {}
+            | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
+            | IssueMonitorEffectPayload::SettleMergedIssue { .. } => {}
         }
     }
 }
@@ -530,6 +652,7 @@ fn advance_effect_authority(
                 effect.payload,
                 IssueMonitorEffectPayload::AcquireClaim { .. }
                     | IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                    | IssueMonitorEffectPayload::SettleMergedIssue { .. }
             )
     });
 
@@ -588,7 +711,8 @@ fn advance_effect_authority(
                 )
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
-            | IssueMonitorEffectPayload::DisarmAutoMerge { .. } => continue,
+            | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
+            | IssueMonitorEffectPayload::SettleMergedIssue { .. } => continue,
         };
         if !already_compensated {
             next_effects.push(PendingIssueMonitorEffect::prepared(
@@ -815,6 +939,14 @@ pub struct IssueMonitorPrefs {
     /// `false` preserves SPEC #3165 human-gated behavior exactly (FR-001).
     #[serde(default)]
     pub autonomous_mode: bool,
+    /// Issue #3917 AC-5: close delivered Issues after their work merges.
+    /// `None` follows `autonomous_mode`; `Some` is an explicit override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_close_merged_issues: Option<bool>,
+    /// Issue #3917 AC-4: deliveries already settled (closed / annotated), so
+    /// the same merge is never settled twice after a human reopen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_issue_settlements: Vec<MergedIssueSettlement>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     #[serde(default)]
     pub autonomous_tuning: AutonomousTuning,
@@ -883,6 +1015,8 @@ impl Default for IssueMonitorPrefs {
             completion_records: Vec::new(),
             closure_records: Vec::new(),
             autonomous_mode: false,
+            auto_close_merged_issues: None,
+            merged_issue_settlements: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
             effect_authority_epoch: 0,
@@ -2462,6 +2596,12 @@ pub struct IssueMonitorState {
     closure_reopen_tombstones: BTreeSet<u64>,
     /// SPEC #3200 FR-001: opt-in autonomous (unattended) resolution mode.
     autonomous_mode: bool,
+    /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
+    #[serde(default)]
+    auto_close_merged_issues: Option<bool>,
+    /// Issue #3917 AC-4: settled deliveries keyed by Issue number.
+    #[serde(default)]
+    merged_issue_settlements: BTreeMap<u64, MergedIssueSettlement>,
     /// SPEC #3200 Phase 7: authority generation and durable remote-effect
     /// journal, mirrored losslessly by [`IssueMonitorPrefs`].
     #[serde(default)]
@@ -4127,6 +4267,8 @@ impl IssueMonitorState {
             closure_records: BTreeMap::new(),
             closure_reopen_tombstones: BTreeSet::new(),
             autonomous_mode: false,
+            auto_close_merged_issues: None,
+            merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
             last_control_receipt: None,
@@ -4296,6 +4438,12 @@ impl IssueMonitorState {
             state.merge_closure_record(record);
         }
         state.autonomous_mode = prefs.autonomous_mode;
+        state.auto_close_merged_issues = prefs.auto_close_merged_issues;
+        for settlement in prefs.merged_issue_settlements {
+            state
+                .merged_issue_settlements
+                .insert(settlement.issue_number, settlement);
+        }
         state.effect_authority_epoch = prefs.effect_authority_epoch;
         state.pending_effects = prefs.pending_effects;
         state.last_control_receipt = prefs.last_control_receipt;
@@ -4373,6 +4521,8 @@ impl IssueMonitorState {
             completion_records: self.completion_records.values().cloned().collect(),
             closure_records: self.closure_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
+            auto_close_merged_issues: self.auto_close_merged_issues,
+            merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
             last_control_receipt: self.last_control_receipt.clone(),
@@ -4546,6 +4696,27 @@ impl IssueMonitorState {
     fn merge_closure_records_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
         for record in Self::closure_records_from_prefs(disk).into_values() {
             self.merge_closure_record(record);
+        }
+    }
+
+    /// Issue #3917: settlements are monotonic facts; the newest per Issue wins.
+    fn merge_merged_issue_settlements_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        for settlement in &disk.merged_issue_settlements {
+            // Order by the parsed instant, not the string: a writer that
+            // stamps a non-`Z` offset would otherwise sort after a later `Z`
+            // instant and keep the older settlement.
+            let incoming_at = parse_rfc3339_utc(&settlement.settled_at);
+            let newer = self
+                .merged_issue_settlements
+                .get(&settlement.issue_number)
+                .is_none_or(|current| {
+                    (incoming_at, settlement.pr_number)
+                        > (parse_rfc3339_utc(&current.settled_at), current.pr_number)
+                });
+            if newer {
+                self.merged_issue_settlements
+                    .insert(settlement.issue_number, settlement.clone());
+            }
         }
     }
 
@@ -4736,7 +4907,8 @@ impl IssueMonitorState {
                     .iter()
                     .filter_map(|effect| match &effect.payload {
                         IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
-                        | IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. } => {
+                        | IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
+                        | IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
                             Some(*issue_number)
                         }
                         IssueMonitorEffectPayload::ReleaseClaim { .. }
@@ -6388,6 +6560,7 @@ impl IssueMonitorState {
         self.launch_profiles = disk.launch_profile_pool();
         self.launch_usage_threshold_percent = disk.launch_usage_threshold_percent;
         self.autonomous_mode = disk.autonomous_mode;
+        self.auto_close_merged_issues = disk.auto_close_merged_issues;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
@@ -6647,6 +6820,7 @@ impl IssueMonitorState {
             })
             .collect::<BTreeMap<_, _>>();
         self.merge_closure_records_from_prefs(disk);
+        self.merge_merged_issue_settlements_from_prefs(disk);
         let reopened_completion_fences = self.local_reopened_completion_fences(disk);
         // Issue #3757: resolve the exact recovery/fresh-claim authority before
         // union-merging in-flight companions. Otherwise a stale local launch
@@ -7646,6 +7820,198 @@ impl IssueMonitorState {
         self.autonomous_mode
     }
 
+    /// Issue #3917 AC-5: the explicit auto-close override, if any.
+    pub fn auto_close_merged_issues(&self) -> Option<bool> {
+        self.auto_close_merged_issues
+    }
+
+    /// Issue #3917 AC-5: whether merged Issues are closed by gwt. Without an
+    /// override this follows `autonomous_mode`.
+    pub fn auto_close_merged_issues_enabled(&self) -> bool {
+        self.auto_close_merged_issues
+            .unwrap_or(self.autonomous_mode)
+    }
+
+    /// Change the auto-close override. Like the autonomous toggle, a change
+    /// advances the effect authority so unsubmitted settlement grants are
+    /// revoked and an in-flight one cannot close under stale authority.
+    /// Returns the (possibly unchanged) authority epoch, `None` on overflow.
+    pub fn set_auto_close_merged_issues_with_effect_revocation(
+        &mut self,
+        value: Option<bool>,
+    ) -> Option<u64> {
+        if self.auto_close_merged_issues == value {
+            return Some(self.effect_authority_epoch);
+        }
+        let next_epoch =
+            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        self.auto_close_merged_issues = value;
+        Some(next_epoch)
+    }
+
+    /// Issue #3917: the settlement recorded for `issue_number`, if any.
+    pub fn merged_issue_settlement(&self, issue_number: u64) -> Option<&MergedIssueSettlement> {
+        self.merged_issue_settlements.get(&issue_number)
+    }
+
+    /// Issue #3917: Open rows whose work branch has a merged delivery that is
+    /// not settled yet. A pure join over the inbox; the caller decides the
+    /// action with [`decide_merged_issue_settlement`].
+    pub fn merged_issue_settlement_candidates(
+        &self,
+        deliveries: &BTreeMap<String, MergedIssueDelivery>,
+    ) -> Vec<(IssueMonitorIssue, MergedIssueDelivery)> {
+        self.inbox
+            .iter()
+            .filter(|item| {
+                item.issue.state == IssueMonitorIssueState::Open
+                    && !matches!(
+                        item.state,
+                        MonitorInboxState::NeedsHuman
+                            | MonitorInboxState::LaunchFailed
+                            | MonitorInboxState::AgentFailed
+                            | MonitorInboxState::Released
+                    )
+            })
+            .filter_map(|item| {
+                let branch = &item.launch_plan.as_ref()?.branch_name;
+                let delivery = deliveries.get(branch)?;
+                self.merged_issue_settlement_applies(item.issue.number, delivery)
+                    .then(|| (item.issue.clone(), delivery.clone()))
+            })
+            .collect()
+    }
+
+    /// Whether `delivery` may still be settled for `issue_number`. Fail-closed:
+    /// a settled delivery, a pending settlement, a closed Issue, and a reopen
+    /// with no settlement history all refuse.
+    fn merged_issue_settlement_applies(
+        &self,
+        issue_number: u64,
+        delivery: &MergedIssueDelivery,
+    ) -> bool {
+        if self.issue_is_closed(issue_number) {
+            return false;
+        }
+        let settled = self.merged_issue_settlements.get(&issue_number);
+        if settled.is_some_and(|settlement| {
+            settlement.pr_number == delivery.pr_number && settlement.merge_sha == delivery.merge_sha
+        }) {
+            return false;
+        }
+        if self.pending_effects.iter().any(|effect| {
+            matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::SettleMergedIssue {
+                    issue_number: pending_issue,
+                    pr_number,
+                    merge_sha,
+                    ..
+                } if *pending_issue == issue_number
+                    && *pr_number == delivery.pr_number
+                    && *merge_sha == delivery.merge_sha
+            )
+        }) {
+            return false;
+        }
+        // AC-4: a closure lineage beyond its first generation means the Issue
+        // was closed and reopened. Only a delivery merged after gwt's own
+        // earlier settlement may settle it again; anything else is a human
+        // decision.
+        let reopened = self
+            .closure_records
+            .get(&issue_number)
+            .is_some_and(|record| {
+                record.state == IssueClosureState::Reopened && record.generation > 1
+            });
+        if reopened {
+            let merged_at = delivery
+                .merged_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let settled_at = settled.and_then(|settlement| {
+                chrono::DateTime::parse_from_rfc3339(&settlement.settled_at).ok()
+            });
+            return matches!((merged_at, settled_at), (Some(merged), Some(settled)) if merged > settled);
+        }
+        true
+    }
+
+    /// Issue #3917: propose settling `delivery` for `issue_number`. Returns
+    /// `false` when the delivery does not apply or is already proposed.
+    pub fn propose_merged_issue_settlement(
+        &mut self,
+        issue_number: u64,
+        delivery: &MergedIssueDelivery,
+        action: MergedIssueSettlementAction,
+    ) -> bool {
+        if !self.merged_issue_settlement_applies(issue_number, delivery) {
+            return false;
+        }
+        let epoch = self.effect_authority_epoch;
+        let sha = delivery.merge_sha.as_deref().unwrap_or("unknown");
+        self.prepare_effect(PendingIssueMonitorEffect::prepared(
+            format!("settle:{issue_number}:{}:{sha}:{epoch}", delivery.pr_number),
+            epoch,
+            IssueMonitorEffectPayload::SettleMergedIssue {
+                issue_number,
+                pr_number: delivery.pr_number,
+                merge_sha: delivery.merge_sha.clone(),
+                action,
+            },
+        ))
+    }
+
+    /// Issue #3917: the settlement effect committed on GitHub. Records the
+    /// delivery as settled, then applies the local consequence: a close
+    /// releases the Issue (AC-1), unmet criteria hand it to a human (AC-2),
+    /// and awaiting close changes nothing else (AC-5).
+    pub fn record_merged_issue_settlement(
+        &mut self,
+        issue_number: u64,
+        pr_number: u64,
+        merge_sha: Option<String>,
+        action: MergedIssueSettlementAction,
+        settled_at: &str,
+    ) {
+        self.merged_issue_settlements.insert(
+            issue_number,
+            MergedIssueSettlement {
+                issue_number,
+                pr_number,
+                merge_sha,
+                action: action.clone(),
+                settled_at: settled_at.to_string(),
+            },
+        );
+        match action {
+            MergedIssueSettlementAction::Close { .. } => {
+                self.record_released(issue_number);
+                self.push_autonomous_notice(
+                    "done",
+                    issue_number,
+                    format!("Issue #{issue_number} closed after PR #{pr_number} merged"),
+                );
+            }
+            MergedIssueSettlementAction::UnmetAcceptance { unmet } => {
+                let detail = if unmet.is_empty() {
+                    "acceptance criteria block missing".to_string()
+                } else {
+                    unmet.join(", ")
+                };
+                // Issue #3944: the kind names who can answer. Only the owner
+                // can decide whether the outstanding criteria are delegated
+                // elsewhere or the Issue stays open — never a mechanical cause.
+                self.escalate_to_needs_human(
+                    issue_number,
+                    NeedsHumanKind::UserChoiceRequired,
+                    format!("PR #{pr_number} merged with unmet acceptance criteria: {detail}"),
+                );
+            }
+            MergedIssueSettlementAction::AwaitClose { .. } => {}
+        }
+    }
+
     /// SPEC #3200 T-047/FR-001: toggle unattended autonomous mode. Default OFF
     /// keeps the SPEC #3165 human-gated behavior exactly.
     pub fn set_autonomous_mode(&mut self, enabled: bool) {
@@ -8455,6 +8821,18 @@ impl IssueMonitorState {
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        // Issue #3917: a delivered Issue whose settlement (close / comment) is
+        // still in flight must not be relaunched by the same scan.
+        let settling = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
+                    Some(issue_number)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let available = max_active
             .saturating_sub(self.active_launches.len())
             .saturating_sub(pending_claims.len());
@@ -8465,7 +8843,9 @@ impl IssueMonitorState {
             .queue
             .iter()
             .copied()
-            .filter(|issue_number| !pending_claims.contains(issue_number))
+            .filter(|issue_number| {
+                !pending_claims.contains(issue_number) && !settling.contains(issue_number)
+            })
             .collect();
         (available, candidates)
     }
@@ -9545,6 +9925,24 @@ impl IssueMonitorState {
                 && item.launch_plan.is_some()
                 && !self.merged_issues.contains(&item.issue.number)
                 && !self.active_launches.contains(&item.issue.number)
+        })
+    }
+
+    /// Issue #3917: whether any Open row with a launch plan could still be
+    /// settled, so the merged-PR query is not skipped on a monitor whose only
+    /// remaining work is closing delivered Issues.
+    pub fn has_merged_issue_settlement_prospects(&self) -> bool {
+        self.inbox.iter().any(|item| {
+            item.issue.state == IssueMonitorIssueState::Open
+                && item.launch_plan.is_some()
+                && !matches!(
+                    item.state,
+                    MonitorInboxState::NeedsHuman
+                        | MonitorInboxState::LaunchFailed
+                        | MonitorInboxState::AgentFailed
+                        | MonitorInboxState::Released
+                )
+                && !self.issue_is_closed(item.issue.number)
         })
     }
 
@@ -18712,12 +19110,14 @@ mod tests {
             ids: vec!["AC-1".to_string()],
             machine_checkable: true,
             visual_surface: false,
+            unchecked: vec!["AC-1".to_string()],
             defect: None,
         };
         let no_criteria = AcceptanceCriteria {
             ids: vec![],
             machine_checkable: false,
             visual_surface: false,
+            unchecked: vec![],
             defect: Some(crate::issue_monitor_gate::AcceptanceDefect::MissingHeading),
         };
         let verified = BranchProtectionStatus::Verified {
@@ -21266,6 +21666,424 @@ mod tests {
         assert_eq!(
             monitor, before,
             "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
+        );
+    }
+
+    // ---- Issue #3917: merged Issue settlement (auto-close) ----
+
+    fn merged_delivery(pr_number: u64, sha: &str, merged_at: &str) -> MergedIssueDelivery {
+        MergedIssueDelivery {
+            pr_number,
+            merge_sha: Some(sha.to_string()),
+            merged_at: Some(merged_at.to_string()),
+        }
+    }
+
+    fn checked_issue(number: u64) -> IssueMonitorIssue {
+        let mut issue = issue(number);
+        issue.body = Some("## Acceptance Criteria\n- [x] AC-1: done\n".to_string());
+        issue
+    }
+
+    fn settle_effect_for(
+        monitor: &IssueMonitorState,
+        issue: u64,
+    ) -> Option<PendingIssueMonitorEffect> {
+        monitor
+            .pending_effects()
+            .iter()
+            .find(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } if issue_number == issue
+                )
+            })
+            .cloned()
+    }
+
+    #[test]
+    fn auto_close_merged_issues_defaults_to_autonomous_mode_and_round_trips() {
+        // Issue #3917 AC-5: the override defaults to following autonomous_mode.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(monitor.auto_close_merged_issues(), None);
+        assert!(!monitor.auto_close_merged_issues_enabled());
+        assert!(monitor
+            .set_autonomous_mode_with_effect_revocation(true)
+            .is_some());
+        assert!(
+            monitor.auto_close_merged_issues_enabled(),
+            "no override follows autonomous_mode"
+        );
+        let epoch = monitor.effect_authority_epoch();
+        assert!(monitor
+            .set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .is_some());
+        assert!(!monitor.auto_close_merged_issues_enabled());
+        assert!(
+            monitor.effect_authority_epoch() > epoch,
+            "changing the override revokes pending grants like the autonomous toggle"
+        );
+        let unchanged = monitor.set_auto_close_merged_issues_with_effect_revocation(Some(false));
+        assert_eq!(unchanged, Some(monitor.effect_authority_epoch()));
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.auto_close_merged_issues, Some(false));
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.auto_close_merged_issues(), Some(false));
+        assert!(restored.autonomous_mode());
+        assert!(!restored.auto_close_merged_issues_enabled());
+    }
+
+    #[test]
+    fn decide_merged_issue_settlement_truth_table() {
+        use MergedIssueSettlementAction::{AwaitClose, Close, UnmetAcceptance};
+        let all_checked = checked_issue(42);
+        assert_eq!(
+            decide_merged_issue_settlement(&all_checked, true, |_| panic!("no evidence needed")),
+            Some(Close { delegated: false })
+        );
+        assert_eq!(
+            decide_merged_issue_settlement(&all_checked, false, |_| panic!("off mode never reads")),
+            Some(AwaitClose { unmet: vec![] }),
+            "AC-5: auto-close off records the merge without closing"
+        );
+
+        let mut unmet = issue(43);
+        unmet.body =
+            Some("## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: later\n".to_string());
+        assert_eq!(
+            decide_merged_issue_settlement(&unmet, true, |ids| {
+                assert_eq!(ids, ["AC-2"]);
+                Some(true)
+            }),
+            Some(Close { delegated: true }),
+            "AC-2: a delegation record closes despite unchecked criteria"
+        );
+        assert_eq!(
+            decide_merged_issue_settlement(&unmet, true, |_| Some(false)),
+            Some(UnmetAcceptance {
+                unmet: vec!["AC-2".to_string()]
+            })
+        );
+        assert_eq!(
+            decide_merged_issue_settlement(&unmet, true, |_| None),
+            None,
+            "unreadable evidence defers the decision instead of escalating"
+        );
+        assert_eq!(
+            decide_merged_issue_settlement(&unmet, false, |_| panic!("off mode never reads")),
+            Some(AwaitClose {
+                unmet: vec!["AC-2".to_string()]
+            })
+        );
+
+        let no_block = issue(44);
+        assert_eq!(
+            decide_merged_issue_settlement(&no_block, true, |_| Some(false)),
+            Some(UnmetAcceptance { unmet: vec![] }),
+            "a missing AC block is never vacuously satisfied"
+        );
+
+        let mut spec_open = spec_issue(
+            45,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-08-01T00:00:00Z",
+        );
+        spec_open.body = all_checked.body.clone();
+        assert_eq!(
+            decide_merged_issue_settlement(&spec_open, true, |_| Some(true)),
+            None,
+            "AC-3: a phase merge of a gwt-spec Issue never settles"
+        );
+        let mut spec_done = spec_issue(
+            46,
+            IssueMonitorReadiness::ReadyWithCompletedTasks,
+            "2026-08-01T00:00:00Z",
+        );
+        spec_done.body = all_checked.body.clone();
+        assert_eq!(
+            decide_merged_issue_settlement(&spec_done, true, |_| Some(true)),
+            Some(Close { delegated: false })
+        );
+
+        let mut closed = checked_issue(47);
+        closed.state = IssueMonitorIssueState::Closed;
+        assert_eq!(
+            decide_merged_issue_settlement(&closed, true, |_| Some(true)),
+            None,
+            "an already closed Issue has nothing to settle"
+        );
+    }
+
+    #[test]
+    fn delegation_marker_is_recognized_in_pr_body_or_comments() {
+        assert!(delegation_recorded([
+            "残 AC は別 Issue に委譲しました (#99)"
+        ]));
+        assert!(delegation_recorded([
+            "Remaining acceptance criteria delegated to #99"
+        ]));
+        assert!(!delegation_recorded(["all done"]));
+        assert!(!delegation_recorded(std::iter::empty::<&str>()));
+    }
+
+    #[test]
+    fn merged_issue_settlement_candidates_join_open_rows_with_merged_branches() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[checked_issue(42), checked_issue(43), checked_issue(44)],
+            "2026-09-01T00:00:00Z",
+        );
+        monitor.escalate_to_needs_human(44, NeedsHumanKind::UserChoiceRequired, "stuck");
+        let mut deliveries = BTreeMap::new();
+        deliveries.insert(
+            "work/issue-42".to_string(),
+            merged_delivery(7, "aaa", "2026-09-01T00:00:00Z"),
+        );
+        deliveries.insert(
+            "work/issue-44".to_string(),
+            merged_delivery(8, "bbb", "2026-09-01T00:00:00Z"),
+        );
+        deliveries.insert(
+            "work/issue-99".to_string(),
+            merged_delivery(9, "ccc", "2026-09-01T00:00:00Z"),
+        );
+        let candidates = monitor.merged_issue_settlement_candidates(&deliveries);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(issue, _)| issue.number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "only non-terminal Open rows whose work branch merged qualify"
+        );
+        assert_eq!(candidates[0].1.pr_number, 7);
+    }
+
+    #[test]
+    fn merged_issue_settlement_is_proposed_once_per_delivery_and_respects_reopen() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
+        let delivery = merged_delivery(7, "aaa", "2026-09-01T00:00:00Z");
+        let close = MergedIssueSettlementAction::Close { delegated: false };
+        assert!(monitor.propose_merged_issue_settlement(42, &delivery, close.clone()));
+        let effect = settle_effect_for(&monitor, 42).expect("settlement proposed");
+        assert_eq!(
+            effect.effect_id,
+            format!("settle:42:7:aaa:{}", monitor.effect_authority_epoch())
+        );
+        assert_eq!(effect.state, IssueMonitorEffectState::Prepared);
+        assert!(
+            !monitor.propose_merged_issue_settlement(42, &delivery, close.clone()),
+            "the same delivery is proposed once"
+        );
+        let mut deliveries = BTreeMap::new();
+        deliveries.insert("work/issue-42".to_string(), delivery.clone());
+        assert!(
+            monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .is_empty(),
+            "a pending settlement removes the row from the candidate set"
+        );
+
+        let key = effect.attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        assert!(monitor.complete_pending_effect(&key).is_some());
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".to_string()),
+            close.clone(),
+            "2026-09-01T01:00:00Z",
+        );
+        assert!(
+            monitor.inbox_item(42).is_none(),
+            "AC-1: a close settlement releases the Issue"
+        );
+        assert_eq!(
+            monitor
+                .prefs()
+                .closure_records
+                .iter()
+                .find(|record| record.issue_number == 42)
+                .map(|record| record.state),
+            Some(IssueClosureState::Closed)
+        );
+        let settlement = monitor
+            .merged_issue_settlement(42)
+            .expect("settlement recorded");
+        assert_eq!(
+            (settlement.pr_number, settlement.merge_sha.as_deref()),
+            (7, Some("aaa"))
+        );
+        assert_eq!(monitor.prefs().merged_issue_settlements.len(), 1);
+
+        // A human reopens the Issue: it becomes a candidate row again, but the
+        // same merge must never settle it a second time (AC-4).
+        let mut reopened = checked_issue(42);
+        reopened.updated_at = Some("2026-09-02T00:00:00Z".to_string());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[reopened],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-09-02T00:00:01Z",
+        );
+        assert!(monitor.inbox_item(42).is_some(), "reopened row returns");
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+        assert!(!monitor.propose_merged_issue_settlement(42, &delivery, close.clone()));
+
+        // A newer merge of the same branch is a new delivery and settles again.
+        let second = merged_delivery(9, "bbb", "2026-09-03T00:00:00Z");
+        deliveries.insert("work/issue-42".to_string(), second.clone());
+        let candidates = monitor.merged_issue_settlement_candidates(&deliveries);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].1.pr_number, 9);
+        assert!(monitor.propose_merged_issue_settlement(42, &second, close));
+    }
+
+    #[test]
+    fn reopened_issue_without_settlement_history_is_left_to_humans() {
+        // Pre-feature history: merged, closed by hand, then reopened by a
+        // human. gwt never settled anything here, so it must not start now.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[checked_issue(42)], "2026-08-01T00:00:01Z");
+        monitor.record_released(42);
+        let mut reopened = checked_issue(42);
+        reopened.updated_at = Some("2026-09-05T00:00:00Z".to_string());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[reopened],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-09-05T00:00:01Z",
+        );
+        let mut deliveries = BTreeMap::new();
+        for delivery in [
+            merged_delivery(7, "aaa", "2026-09-01T00:00:00Z"),
+            merged_delivery(9, "bbb", "2026-09-06T00:00:00Z"),
+        ] {
+            deliveries.insert("work/issue-42".to_string(), delivery);
+            assert!(
+                monitor
+                    .merged_issue_settlement_candidates(&deliveries)
+                    .is_empty(),
+                "AC-4: a reopened Issue gwt never settled is a human decision"
+            );
+        }
+    }
+
+    #[test]
+    fn unmet_and_await_settlements_record_without_closing() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut unmet = issue(43);
+        unmet.body =
+            Some("## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: later\n".to_string());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[unmet, checked_issue(42)],
+            "2026-09-01T00:00:00Z",
+        );
+        monitor.record_merged_issue_settlement(
+            43,
+            7,
+            Some("aaa".to_string()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-2".to_string()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        let row = monitor.inbox_item(43).expect("row stays");
+        assert_eq!(
+            row.state,
+            MonitorInboxState::NeedsHuman,
+            "AC-2: unmet criteria need a human"
+        );
+        let message = row.error_message.clone().unwrap_or_default();
+        assert!(
+            message.contains("AC-2") && message.contains("#7"),
+            "{message}"
+        );
+        assert!(!monitor
+            .prefs()
+            .closure_records
+            .iter()
+            .any(|record| record.issue_number == 43));
+
+        monitor.record_merged_issue_settlement(
+            42,
+            8,
+            None,
+            MergedIssueSettlementAction::AwaitClose { unmet: vec![] },
+            "2026-09-01T01:00:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "AC-5: awaiting close changes nothing but the settlement record"
+        );
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.merged_issue_settlements.len(), 2);
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            restored.merged_issue_settlement(42).map(|s| s.pr_number),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn pending_settlement_keeps_the_issue_out_of_claim_candidates() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        scan_issue_monitor_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
+        assert_eq!(monitor.claim_probe_plan(1).1, vec![42]);
+        let delivery = merged_delivery(7, "aaa", "2026-09-01T00:00:00Z");
+        assert!(monitor.propose_merged_issue_settlement(
+            42,
+            &delivery,
+            MergedIssueSettlementAction::Close { delegated: false },
+        ));
+        assert!(
+            monitor.claim_probe_plan(1).1.is_empty(),
+            "a delivered Issue is not relaunched while its settlement is in flight"
+        );
+        let key = settle_effect_for(&monitor, 42)
+            .expect("proposed")
+            .attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        assert!(monitor.complete_pending_effect(&key).is_some());
+        assert_eq!(monitor.claim_probe_plan(1).1, vec![42]);
+    }
+
+    #[test]
+    fn settle_effects_follow_grant_authority_rules() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
+        let delivery = merged_delivery(7, "aaa", "2026-09-01T00:00:00Z");
+        let close = MergedIssueSettlementAction::Close { delegated: false };
+        assert!(monitor.propose_merged_issue_settlement(42, &delivery, close.clone()));
+        assert!(monitor
+            .set_autonomous_mode_with_effect_revocation(true)
+            .is_some());
+        assert!(
+            settle_effect_for(&monitor, 42).is_none(),
+            "a prepared settlement is a grant and is revoked on authority advance"
+        );
+        assert!(monitor.propose_merged_issue_settlement(42, &delivery, close));
+        let key = settle_effect_for(&monitor, 42)
+            .expect("re-proposed")
+            .attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        monitor.record_released(42);
+        assert!(
+            settle_effect_for(&monitor, 42).is_none(),
+            "a closed Issue revokes its settlement effects"
         );
     }
 

@@ -1076,6 +1076,17 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                             crate::IssueMonitorEffectPayload::ArmAutoMerge { .. } => {
                                 monitor.config.enabled && monitor.autonomous_mode()
                             }
+                            // Issue #3917: a close needs the auto-close authority;
+                            // comment-only settlements need only the monitor.
+                            crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                                action, ..
+                            } => {
+                                monitor.config.enabled
+                                    && (!matches!(
+                                        action,
+                                        crate::MergedIssueSettlementAction::Close { .. }
+                                    ) || monitor.auto_close_merged_issues_enabled())
+                            }
                             crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
                             | crate::IssueMonitorEffectPayload::DisarmAutoMerge { .. } => true,
                         };
@@ -1505,6 +1516,8 @@ enum IssueMonitorControl {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
+        /// Issue #3917 AC-5: explicit auto-close override.
+        auto_close_merged_issues: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
     },
@@ -1741,8 +1754,9 @@ fn issue_monitor_control_is_authorizing(control: &IssueMonitorControl) -> bool {
         IssueMonitorControl::ConfigSet {
             enabled,
             autonomous_mode,
+            auto_close_merged_issues,
             ..
-        } if enabled.is_some() || autonomous_mode.is_some()
+        } if enabled.is_some() || autonomous_mode.is_some() || auto_close_merged_issues.is_some()
     )
 }
 
@@ -1846,6 +1860,7 @@ fn try_apply_issue_monitor_control(
             enabled,
             autonomous_mode,
             max_active_agents,
+            auto_close_merged_issues,
             launch_agent,
         } => {
             if enabled == Some(true)
@@ -1854,6 +1869,7 @@ fn try_apply_issue_monitor_control(
                 || (enabled.is_none()
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
+                    && auto_close_merged_issues.is_none()
                     && launch_agent.is_none())
             {
                 return None;
@@ -1872,6 +1888,11 @@ fn try_apply_issue_monitor_control(
             }
             if let Some(max_active_agents) = max_active_agents {
                 candidate.set_max_active_agents(max_active_agents);
+            }
+            if let Some(auto_close_merged_issues) = auto_close_merged_issues {
+                candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
+                    auto_close_merged_issues,
+                ))?;
             }
             *monitor = candidate;
             Some(true)
@@ -2463,6 +2484,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
                 };
+                let auto_close_merged_issues = match config.get("auto_close_merged_issues") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
                 // Issue #3923 AC-5: a blank agent name is a malformed control.
                 let launch_agent = match config.get("launch_agent") {
                     None | Some(serde_json::Value::Null) => None,
@@ -2480,6 +2505,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     || (enabled.is_none()
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
+                        && auto_close_merged_issues.is_none()
                         && launch_agent.is_none())
                 {
                     return None;
@@ -2488,6 +2514,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     enabled,
                     autonomous_mode,
                     max_active_agents,
+                    auto_close_merged_issues,
                     launch_agent,
                 });
             }
@@ -3103,6 +3130,12 @@ enum IssueMonitorEffectOutcome {
         gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimReleaseOutcome>,
     ),
     AutoMerge(gwt_git::pr_status::AutoMergeMutationOutcome),
+    /// Issue #3917: comment + optional verified close of a delivered Issue.
+    MergedIssueSettlement(
+        gwt_github::client::OwnerMutationResult<
+            crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+        >,
+    ),
 }
 
 #[derive(Debug)]
@@ -3369,6 +3402,37 @@ fn execute_issue_monitor_effect(
                 IssueMonitorEffectOutcome::AutoMerge(outcome)
             }
         }
+        crate::IssueMonitorEffectPayload::SettleMergedIssue {
+            issue_number,
+            pr_number,
+            merge_sha,
+            action,
+        } => {
+            if !authority_current {
+                return IssueMonitorEffectOutcome::MergedIssueSettlement(Err(
+                    OwnerMutationError::PreSubmit(gwt_github::ApiError::Unexpected(
+                        "authority revoked before merged-issue settlement".to_string(),
+                    )),
+                ));
+            }
+            IssueMonitorEffectOutcome::MergedIssueSettlement(
+                match issue_monitor_http_client_with_repository(scope) {
+                    Ok((client, repository)) => {
+                        crate::issue_monitor_settlement::settle_merged_issue(
+                            &client,
+                            &repository,
+                            *issue_number,
+                            *pr_number,
+                            merge_sha.as_deref(),
+                            action,
+                        )
+                    }
+                    Err(error) => Err(OwnerMutationError::PreSubmit(
+                        gwt_github::ApiError::Network(error),
+                    )),
+                },
+            )
+        }
         crate::IssueMonitorEffectPayload::DisarmAutoMerge { pr_number, .. } => {
             let Some(remote) = gwt_git::pr_status::fetch_pr_auto_merge_remote_state(
                 &scope.project_root,
@@ -3401,6 +3465,14 @@ fn claim_ttl_secs(heartbeat_at: &str, expires_at: &str) -> u64 {
 }
 
 fn issue_monitor_http_client(scope: &RuntimeScope) -> Result<HttpIssueClient, String> {
+    issue_monitor_http_client_with_repository(scope).map(|(client, _)| client)
+}
+
+/// The monitor's HTTP client plus the explicit repository identity that
+/// owner-resolution style mutations (verified close) require.
+fn issue_monitor_http_client_with_repository(
+    scope: &RuntimeScope,
+) -> Result<(HttpIssueClient, gwt_github::client::RepositoryIdentity), String> {
     #[cfg(test)]
     if let Some(marker) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_HTTP_CLIENT_MARKER") {
         let _ = fs::write(marker, b"attempted");
@@ -3408,7 +3480,11 @@ fn issue_monitor_http_client(scope: &RuntimeScope) -> Result<HttpIssueClient, St
     let (owner, repo) =
         crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root)
             .map_err(|error| error.to_string())?;
-    HttpIssueClient::from_gh_auth(&owner, &repo).map_err(|error| error.to_string())
+    let client = HttpIssueClient::from_gh_auth(&owner, &repo).map_err(|error| error.to_string())?;
+    Ok((
+        client,
+        gwt_github::client::RepositoryIdentity::new(owner, repo),
+    ))
 }
 
 /// Commit an executor result only against the exact Attempting tuple still on
@@ -3634,6 +3710,56 @@ fn commit_issue_monitor_effect_result(
                         );
                     }
                     settled = true;
+                }
+                (
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number,
+                        pr_number,
+                        merge_sha,
+                        action,
+                    },
+                    IssueMonitorEffectOutcome::MergedIssueSettlement(Ok(outcome)),
+                ) => {
+                    let _ = candidate.complete_pending_effect(&key);
+                    // The remote fact stands whatever the authority is now:
+                    // record it so the same delivery is never proposed again
+                    // (Issue #3917 AC-4) and apply the local consequence.
+                    tracing::info!(
+                        issue = issue_number,
+                        pr = pr_number,
+                        ?outcome,
+                        "merged issue settlement committed"
+                    );
+                    candidate.record_merged_issue_settlement(
+                        *issue_number,
+                        *pr_number,
+                        merge_sha.clone(),
+                        action.clone(),
+                        &completed.completed_at,
+                    );
+                    settled = true;
+                }
+                (
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue { .. },
+                    IssueMonitorEffectOutcome::MergedIssueSettlement(Err(
+                        OwnerMutationError::PreSubmit(_),
+                    )),
+                ) => {
+                    if current_authority {
+                        let _ = candidate.retry_pending_effect(&key);
+                    } else {
+                        let _ = candidate.complete_pending_effect(&key);
+                        settled = true;
+                    }
+                }
+                (
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue { .. },
+                    IssueMonitorEffectOutcome::MergedIssueSettlement(Err(
+                        OwnerMutationError::RemoteOutcomeUnknown(_),
+                    )),
+                ) => {
+                    // Keep Attempting. The next pass re-reads the marker
+                    // comment and the Issue state before mutating again.
                 }
                 (
                     crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
@@ -3876,8 +4002,10 @@ fn scan_issue_monitor_once_blocking(
     // Issue #3928 AC-2: inside a rate-limit window the merged-PR readback is
     // refused before it spawns. That is a wait, not a fault: the slots it
     // would have freed stay occupied until the window ends, and the scan
-    // still reaches its inbox, status, and launch stages.
-    match crate::issue_monitor_worker::run_scan_stage(
+    // still reaches its inbox, status, and launch stages. Issue #3917's
+    // merged-issue settlement then runs on an empty delivery set: nothing was
+    // read, so nothing is proposed until the window ends.
+    let merge_reconciliation = match crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
@@ -3888,7 +4016,7 @@ fn scan_issue_monitor_once_blocking(
             )
         },
     ) {
-        Ok(_) => {}
+        Ok(reconciliation) => reconciliation,
         Err(failure) if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) => {
             degradations.push(
                 crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
@@ -3897,9 +4025,10 @@ fn scan_issue_monitor_once_blocking(
                     crate::issue_monitor_worker::IssueMonitorScanContinuation::PreviousCandidates,
                 ),
             );
+            crate::issue_monitor_worker::IssueMonitorMergeReconciliation::default()
         }
         Err(failure) => return Err(failure),
-    }
+    };
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
@@ -3967,6 +4096,23 @@ fn scan_issue_monitor_once_blocking(
                 &now,
             )?,
         );
+        // Issue #3917: settle delivered Issues (close / annotate) whose work
+        // branch merged. Runs after the autonomous advance so a SHA-mismatch
+        // escalation wins over a close, and only proposes: the durable
+        // executor owns the GitHub mutation.
+        let proposed = crate::issue_monitor_worker::propose_merged_issue_settlements(
+            &mut monitor,
+            &scope.project_root,
+            &owner,
+            &repo,
+            &merge_reconciliation.deliveries,
+        );
+        if !proposed.is_empty() {
+            tracing::info!(
+                issues = ?proposed,
+                "issue monitor proposed merged issue settlements"
+            );
+        }
     }
     if (loaded.authorizes_remote_effects() || candidates_are_from_previous_result)
         && monitor.config.enabled
@@ -5000,6 +5146,34 @@ if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "lis
     exit 1
   fi
   printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED"}]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "settle_close" ] || [ "$GWT_FAKE_GH_MODE" = "settle_unmet" ] || [ "$GWT_FAKE_GH_MODE" = "settle_delegated" ]; then
+  # Issue #3917: one merged delivery for work/issue-43 plus the readbacks the
+  # settlement proposal may need (PR body, Issue comments).
+  if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+    printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED","number":7,"mergeCommit":{"oid":"c0ffee"},"mergedAt":"2026-09-01T00:00:00Z","baseRefName":"develop"}]'
+    exit 0
+  fi
+  if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+    if [ "$GWT_FAKE_GH_MODE" = "settle_delegated" ]; then
+      printf '%s\n' '{"body":"残 AC は別 Issue に委譲 (#99)"}'
+    else
+      printf '%s\n' '{"body":"no delegation here"}'
+    fi
+    exit 0
+  fi
+  if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+    printf '%s\n' '{"comments":[{"body":"progress note"}]}'
+    exit 0
+  fi
+  # A human reopen advances the Issue revision; tests bump it explicitly.
+  rev="${GWT_FAKE_GH_REVISION:-2026-09-01T00:00:00Z}"
+  if [ "$GWT_FAKE_GH_MODE" = "settle_close" ]; then
+    printf '%s%s%s\n' '[{"number":43,"title":"Delivered issue","body":"## Acceptance Criteria\n- [x] AC-1: shipped","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"' "$rev" '"}]'
+  else
+    printf '%s%s%s\n' '[{"number":43,"title":"Delivered issue","body":"## Acceptance Criteria\n- [x] AC-1: shipped\n- [ ] AC-2: docs","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"' "$rev" '"}]'
+  fi
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
@@ -8499,6 +8673,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                auto_close_merged_issues: None,
                 launch_agent: None,
             }
         );
@@ -8608,6 +8783,7 @@ exit 0
                 enabled: None,
                 autonomous_mode: None,
                 max_active_agents: None,
+                auto_close_merged_issues: None,
                 launch_agent: Some("claude".to_string()),
             }
         );
@@ -8812,6 +8988,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                auto_close_merged_issues: None,
                 launch_agent: None,
             },
         ));
@@ -10004,6 +10181,296 @@ exit 0
             "a positive merged-branch signal frees the slot without terminalizing an Open Issue"
         );
         assert!(!monitor.prefs().merged_issues.contains(&43));
+    }
+
+    // ---- Issue #3917: merged Issue settlement through the daemon scan ----
+
+    /// Run one daemon scan against a fake `gh` in `mode` with `prefs` seeded on
+    /// disk, then hand the proposal-bearing monitor to `test`.
+    fn with_settlement_scan_fixture(
+        mode: &str,
+        prefs: crate::IssueMonitorPrefs,
+        test: impl FnOnce(&RuntimeScope, &Path, crate::IssueMonitorState),
+    ) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = workspace_home.join("repo.git");
+        fs::create_dir_all(&workspace_home).expect("create workspace home");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&bare_repo)
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        git_remote_add_origin(&bare_repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            workspace_home,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let monitor = super::scan_issue_monitor_once_blocking(scope.clone(), monitor, false)
+            .expect("settlement scan succeeds");
+        test(&scope, &prefs_path, monitor);
+    }
+
+    /// Issue #43 was launched on `work/issue-43`, which the fake `gh` reports
+    /// as merged through PR #7.
+    fn delivered_prefs(autonomous_mode: bool) -> crate::IssueMonitorPrefs {
+        crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "window-43".to_string(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        }
+    }
+
+    fn settlement_effect(
+        monitor: &crate::IssueMonitorState,
+    ) -> Option<crate::PendingIssueMonitorEffect> {
+        monitor
+            .pending_effects()
+            .iter()
+            .find(|effect| {
+                matches!(
+                    effect.payload,
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue { .. }
+                )
+            })
+            .cloned()
+    }
+
+    /// Fence the proposal on disk and commit the executor outcome, exactly as
+    /// the driver would.
+    fn commit_settlement(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        effect: &crate::PendingIssueMonitorEffect,
+        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+    ) -> bool {
+        let key = effect.attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        crate::save_issue_monitor_prefs(prefs_path, &monitor.prefs()).expect("persist attempting");
+        let attempting = monitor
+            .pending_effects()
+            .iter()
+            .find(|pending| pending.attempt_key() == key)
+            .cloned()
+            .expect("attempting effect");
+        super::commit_issue_monitor_effect_result(
+            prefs_path,
+            monitor,
+            super::CompletedIssueMonitorEffect {
+                effect: attempting,
+                outcome: super::IssueMonitorEffectOutcome::MergedIssueSettlement(Ok(outcome)),
+                completed_at: "2026-09-01T01:00:00Z".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn daemon_scan_closes_a_delivered_issue_after_its_branch_merges() {
+        // Issue #3917 AC-1 / AC-6: merged delivery → close settlement fires.
+        with_settlement_scan_fixture(
+            "settle_close",
+            delivered_prefs(true),
+            |scope, prefs_path, mut monitor| {
+                let effect = settlement_effect(&monitor)
+                    .expect("a merged delivery with every AC checked proposes a close");
+                assert_eq!(
+                    effect.payload,
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number: 43,
+                        pr_number: 7,
+                        merge_sha: Some("c0ffee".to_string()),
+                        action: crate::MergedIssueSettlementAction::Close { delegated: false },
+                    }
+                );
+                assert_eq!(effect.state, crate::IssueMonitorEffectState::Prepared);
+                assert_eq!(
+                    monitor.status_view().active_count,
+                    0,
+                    "the merge still frees the active slot"
+                );
+
+                assert!(commit_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    &effect,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: true,
+                        already_closed: false,
+                    },
+                ));
+                assert!(
+                    monitor.inbox_item(43).is_none(),
+                    "a closed Issue leaves the inbox"
+                );
+                assert!(monitor.prefs().closure_records.iter().any(|record| {
+                    record.issue_number == 43
+                        && record.state == crate::issue_monitor::IssueClosureState::Closed
+                }));
+                let persisted = crate::load_issue_monitor_prefs(prefs_path).expect("prefs");
+                assert_eq!(
+                    persisted
+                        .merged_issue_settlements
+                        .iter()
+                        .map(|settlement| (settlement.issue_number, settlement.pr_number))
+                        .collect::<Vec<_>>(),
+                    vec![(43, 7)]
+                );
+
+                // AC-4: a human reopens #43 (the live row comes back Open at a
+                // newer revision). The same merge must not fire again.
+                let _reopened = ScopedEnvVar::set("GWT_FAKE_GH_REVISION", "2026-09-02T00:00:00Z");
+                let monitor =
+                    super::scan_issue_monitor_once_blocking(scope.clone(), monitor, false)
+                        .expect("second scan");
+                assert!(monitor.inbox_item(43).is_some(), "the reopened row returns");
+                assert!(
+                    settlement_effect(&monitor).is_none(),
+                    "AC-4: the same delivery is never settled twice"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn daemon_scan_hands_unmet_acceptance_to_a_human_instead_of_closing() {
+        // Issue #3917 AC-2 / AC-6: unchecked criteria → comment + needs_human.
+        with_settlement_scan_fixture(
+            "settle_unmet",
+            delivered_prefs(true),
+            |_, prefs_path, mut monitor| {
+                let effect = settlement_effect(&monitor).expect("unmet criteria still settle");
+                assert!(
+                    matches!(
+                        &effect.payload,
+                        crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                            issue_number: 43,
+                            pr_number: 7,
+                            action: crate::MergedIssueSettlementAction::UnmetAcceptance { unmet },
+                            ..
+                        } if unmet == &["AC-2".to_string()]
+                    ),
+                    "{:?}",
+                    effect.payload
+                );
+                assert!(commit_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    &effect,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: false,
+                        already_closed: false,
+                    },
+                ));
+                assert_eq!(
+                    monitor.inbox_item(43).map(|item| item.state),
+                    Some(crate::MonitorInboxState::NeedsHuman)
+                );
+                assert!(
+                    !monitor
+                        .prefs()
+                        .closure_records
+                        .iter()
+                        .any(|record| record.issue_number == 43
+                            && record.state == crate::issue_monitor::IssueClosureState::Closed),
+                    "AC-2: an Issue with unmet criteria is never closed"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn daemon_scan_closes_when_the_remaining_criteria_were_delegated() {
+        // Issue #3917 AC-2: a delegation record in the PR body substitutes
+        // for the unchecked criteria.
+        with_settlement_scan_fixture(
+            "settle_delegated",
+            delivered_prefs(true),
+            |_, _, monitor| {
+                let effect = settlement_effect(&monitor).expect("delegated delivery settles");
+                assert!(
+                    matches!(
+                        effect.payload,
+                        crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                            issue_number: 43,
+                            action: crate::MergedIssueSettlementAction::Close { delegated: true },
+                            ..
+                        }
+                    ),
+                    "{:?}",
+                    effect.payload
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn daemon_scan_only_records_the_merge_when_auto_close_is_off() {
+        // Issue #3917 AC-5: an explicit override wins over autonomous_mode.
+        let prefs = crate::IssueMonitorPrefs {
+            auto_close_merged_issues: Some(false),
+            ..delivered_prefs(true)
+        };
+        with_settlement_scan_fixture("settle_close", prefs, |_, prefs_path, mut monitor| {
+            let effect = settlement_effect(&monitor).expect("the merge is still recorded");
+            assert_eq!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                    issue_number: 43,
+                    pr_number: 7,
+                    merge_sha: Some("c0ffee".to_string()),
+                    action: crate::MergedIssueSettlementAction::AwaitClose { unmet: vec![] },
+                }
+            );
+            assert!(commit_settlement(
+                prefs_path,
+                &mut monitor,
+                &effect,
+                crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                    commented: true,
+                    closed: false,
+                    already_closed: false,
+                },
+            ));
+            assert_eq!(
+                monitor.inbox_item(43).map(|item| item.state),
+                Some(crate::MonitorInboxState::Queued),
+                "AC-5: nothing but the settlement record changes"
+            );
+            assert!(monitor.merged_issue_settlement(43).is_some());
+            assert!(monitor.prefs().closure_records.iter().all(|record| {
+                record.issue_number != 43
+                    || record.state != crate::issue_monitor::IssueClosureState::Closed
+            }));
+        });
     }
 
     #[test]

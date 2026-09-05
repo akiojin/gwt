@@ -2492,6 +2492,19 @@ fn probe_host_runner_bounded_with_hub(
     let spawn_id = next_agent_spawn_id();
     let label = runner_probe_trace_label(kind);
     let start = Instant::now();
+    if let Some(denial) = package_runner_probe_denial(kind, command, &args, env_vars) {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            spawn_id = spawn_id,
+            label = %label,
+            probe_kind = ?kind,
+            phase = "end",
+            success = false,
+            "package-runner probe refused by the test guard",
+        );
+        return HostRunnerProbeOutcome::failure_with_stderr(&denial);
+    }
     tracing::info!(
         target: "gwt.process.summary",
         kind = "agent",
@@ -2598,6 +2611,43 @@ fn runner_probe_trace_label(kind: HostRunnerProbeKind) -> &'static str {
         HostRunnerProbeKind::Metadata => "package metadata probe",
         HostRunnerProbeKind::Package => "exact package runner health probe",
     }
+}
+
+/// Issue #3972: probes that spawn the host package runner (`npx` / `bunx`) or
+/// query the registry through it. `Direct` is excluded — it probes the agent's
+/// own CLI, which tests already pin to a fixture executable on the launch
+/// `PATH`.
+fn is_package_runner_probe(kind: HostRunnerProbeKind) -> bool {
+    matches!(
+        kind,
+        HostRunnerProbeKind::Runner | HostRunnerProbeKind::Metadata | HostRunnerProbeKind::Package
+    )
+}
+
+/// The test guard's refusal for this probe, or `None` when it may proceed.
+///
+/// Markers are looked up in the launch environment the probe would run with
+/// before the process environment, so a test can scope the opt-in to one
+/// `LaunchConfig` instead of mutating the process-global environment
+/// (Issue #3895).
+fn package_runner_probe_denial(
+    kind: HostRunnerProbeKind,
+    command: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if !is_package_runner_probe(kind) {
+        return None;
+    }
+    gwt_core::process_console::real_package_runner_probe_denial(
+        &format!("{command} {}", args.join(" ")),
+        |marker| {
+            env_vars
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case(marker))
+                || std::env::var_os(marker).is_some()
+        },
+    )
 }
 
 fn run_runner_probe_in_isolated_runtime(
