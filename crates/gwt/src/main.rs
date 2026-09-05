@@ -6112,7 +6112,13 @@ mod tests {
         let ok = crate::probe_host_package_runner_with_timeout(
             command,
             args,
-            &HashMap::new(),
+            // The "runner" here is a shell fixture, not the host package
+            // runner, so the Issue #3972 guard must let it through — otherwise
+            // this asserts the refusal instead of the timeout it is about.
+            &HashMap::from([(
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            )]),
             &[],
             None,
             Duration::from_millis(100),

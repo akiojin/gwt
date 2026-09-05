@@ -136,6 +136,9 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
+        /// stored value untouched).
+        auto_close_merged_issues: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
     },
