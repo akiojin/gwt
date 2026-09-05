@@ -728,14 +728,19 @@ pub enum ExactSessionRuntimeDisposition {
 }
 
 /// Issue #3934: durable holder states that may release an execution generation
-/// once the runtime evidence says no Host is running the holder.
+/// on a terminal runtime proof alone.
 ///
-/// `Running` is excluded on purpose. A durably Running holder is the one state
-/// that can still mean a live execution whose Host simply lost its runtime
-/// bookkeeping, and taking its generation away would kill work in flight; it
-/// keeps refusing every fresh launch until a human or a Continue work
-/// successor resolves it. `WaitingInput` and `Unknown` are excluded for the
-/// same fail-closed reason: neither is a statement that the holder finished.
+/// `Running` is excluded on purpose. A terminal sidecar under a durably
+/// Running holder is conflicting bookkeeping, and taking the generation away
+/// on that reading could kill work in flight; it keeps refusing every fresh
+/// launch until a human or a Continue work successor resolves it.
+/// `WaitingInput` and `Unknown` are excluded for the same fail-closed reason:
+/// neither is a statement that the holder finished.
+///
+/// Issue #3964 AC-2: this predicate no longer decides when the runtime
+/// evidence itself proves that nothing can be running the holder — no sidecar
+/// anywhere, or only sidecars whose Hosts are dead. Those release the
+/// generation whatever the durable state says.
 #[must_use]
 pub fn holder_status_permits_generation_reclaim(status: gwt_agent::AgentStatus) -> bool {
     matches!(
@@ -745,6 +750,103 @@ pub fn holder_status_permits_generation_reclaim(status: gwt_agent::AgentStatus) 
             | gwt_agent::AgentStatus::Idle
     )
 }
+
+/// Issue #3964: the refusal every fresh launch produces while an owner's
+/// generation is held by another Session. The GUI launch path formats it and
+/// the Issue Monitor keys its stranded-hold release on it, so the text has one
+/// source.
+pub const EXECUTION_GENERATION_CONFLICT_PREFIX: &str = "an execution generation already exists for";
+
+/// Whether a launch failure message is the held-generation refusal.
+#[must_use]
+pub fn is_execution_generation_conflict(message: &str) -> bool {
+    message.contains(EXECUTION_GENERATION_CONFLICT_PREFIX)
+}
+
+/// Issue #3964 AC-1 / AC-4: what still holds an owner's generation, read from
+/// the owner ledger alone.
+///
+/// The Issue Monitor keeps an `agent_failed` row for every launch the held
+/// generation refused. Once the generation is Blocked or Completed the hold
+/// protects nothing — a fresh launch takes the successor route — so the row
+/// can return to the queue without an operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerGenerationHold {
+    pub status: ExecutionControlStatus,
+    /// Durable holder state (`Interrupted`, `Running`, ...), or `missing` /
+    /// `unreadable` when the holder Session cannot be read.
+    pub holder_session_state: String,
+}
+
+/// Read [`OwnerGenerationHold`] for `owner_number` from the repository's
+/// owner ledger tree, resolved from any path inside the project.
+///
+/// Deliberately independent of the worktree publication: the refused launch
+/// materialized a worktree and published nothing into it, so the pointer /
+/// projection pair the strict readers want does not exist for exactly the
+/// owners this question is asked about. An owner without a ledger holds
+/// nothing and answers `None`.
+pub fn owner_generation_hold_for_project(
+    project_root: &Path,
+    owner_number: u64,
+) -> io::Result<Option<OwnerGenerationHold>> {
+    let owner_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root)
+        .join("trusted")
+        .join("execution-owners")
+        .join(format!("owner-{owner_number}"));
+    let Some(contents) = read_owner_ledger_from_dir(&owner_dir)? else {
+        return Ok(None);
+    };
+    let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
+        invalid_generation_data(format!("malformed generation ledger: {error}"))
+    })?;
+    let Some(current) = ledger.current_generation() else {
+        return Ok(None);
+    };
+    let status = ledger.effective_status_for(current);
+    let holder_path = gwt_core::paths::gwt_sessions_dir()
+        .join(format!("{}.toml", current.identity.initial_session_id));
+    let holder_session_state = match gwt_agent::inspect_session_path(&holder_path) {
+        gwt_agent::SessionPathState::Present(holder) => format!("{:?}", holder.status),
+        gwt_agent::SessionPathState::Missing => "missing".to_string(),
+        gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
+    };
+    Ok(Some(OwnerGenerationHold {
+        status,
+        holder_session_state,
+    }))
+}
+
+/// Issue #3964: a sidecar's PID namespace names the Host that wrote it only
+/// while that PID still belongs to the same process. The OS recycles PIDs; in
+/// production four holders' sidecars named PIDs that had become a browser
+/// renderer and a model server, and `kill(pid, 0)` alone kept reporting the
+/// writer as reachable, so every ambiguous reading stayed `Unknown` forever.
+///
+/// A Host that recorded its start time is the writer only when the live
+/// process still has that start time. A legacy sidecar without one is judged
+/// by the order of events instead: a process that started after the sidecar
+/// was last written cannot have written it. A process whose start time cannot
+/// be read keeps the fail-closed "reachable" answer.
+fn sidecar_host_is_alive(host_pid: u32, runtime: &gwt_agent::SessionRuntimeState) -> bool {
+    if !crate::process::is_host_process_alive(host_pid) {
+        return false;
+    }
+    let Some(started_at) = crate::process::host_process_start_time(host_pid) else {
+        return true;
+    };
+    match runtime.host_started_at.filter(|value| *value > 0) {
+        Some(recorded) => started_at == recorded,
+        None => i64::try_from(started_at).map_or(true, |started_at| {
+            started_at <= runtime.updated_at.timestamp() + SIDECAR_HOST_START_TOLERANCE_SECS
+        }),
+    }
+}
+
+/// Clock slack between a Host's recorded process start and the wall-clock
+/// stamp of the first sidecar it wrote. Both come from the same machine, so
+/// only rounding separates them; a recycled PID is off by hours or days.
+const SIDECAR_HOST_START_TOLERANCE_SECS: i64 = 5;
 
 /// Classify exact runtime evidence without treating a dead host PID as child
 /// exit proof. A terminal result names the exact PID namespace and process
@@ -807,7 +909,7 @@ pub fn classify_exact_session_runtime(
         // must not poison the classification with ambiguity. Before this, a
         // partial sidecar left by a dead Host made the holder unclassifiable
         // and its generation could never be released.
-        let host_alive = crate::process::is_host_process_alive(host_pid);
+        let host_alive = sidecar_host_is_alive(host_pid, &runtime);
         if runtime.execution_identity.as_ref() != Some(expected) {
             if host_alive {
                 saw_unknown = true;
@@ -946,25 +1048,21 @@ pub fn classify_exact_session_runtime(
     })
 }
 
-/// Read the current generation's exact durable Session holder without scanning
-/// runtime namespaces. Startup uses this only after the canonical coarse
+/// Read a startup candidate's exact durable Session holder without scanning
+/// runtime namespaces. The reaper uses this only after the canonical coarse
 /// liveness prefilter; the reaper transaction still revalidates exact runtime
 /// evidence while holding the owner and Session leases.
-pub fn current_generation_holder_identity(
+///
+/// Issue #3964: the holder is named by the owner ledger the candidate was
+/// scanned from, never by the worktree's flat projection. A refused relaunch
+/// materializes the worktree again and publishes nothing into it, so the
+/// projection is exactly what is missing for a stranded owner, and reading
+/// it silently counted every such owner as unchanged.
+pub fn startup_candidate_holder_identity(
     sessions_dir: &Path,
-    worktree: &Path,
-    owner: ExecutionOwnerKey,
+    candidate: &StartupActiveGenerationCandidate,
 ) -> io::Result<Option<gwt_agent::SessionExecutionIdentity>> {
-    let Some(record) = load(worktree)? else {
-        return Ok(None);
-    };
-    if record.owner_kind != owner.kind || record.owner_number != owner.number {
-        return Ok(None);
-    }
-    let Some(current) = current_execution_binding(worktree, owner)? else {
-        return Ok(None);
-    };
-    let holder_path = sessions_dir.join(format!("{}.toml", record.primary_session_id));
+    let holder_path = sessions_dir.join(format!("{}.toml", candidate.session_id));
     let holder = match gwt_agent::inspect_session_path(&holder_path) {
         gwt_agent::SessionPathState::Present(holder) => holder,
         gwt_agent::SessionPathState::Missing => return Ok(None),
@@ -973,7 +1071,7 @@ pub fn current_generation_holder_identity(
     Ok(gwt_agent::SessionExecutionIdentity::from_session(&holder)
         .ok()
         .flatten()
-        .filter(|identity| identity.execution_binding.identity == current))
+        .filter(|identity| identity.execution_binding.identity == candidate.execution_binding))
 }
 
 /// Issue #3457 / Issue #3472: identify the current generation's holder when no
@@ -1543,6 +1641,12 @@ pub fn reap_startup_defunct_active_generation(
         return Ok(StartupActiveGenerationReapOutcome::Unchanged);
     }
     let operation_id = startup_active_reaper_operation_id(candidate);
+    // Issue #3964: a refused relaunch materializes the worktree again and
+    // publishes nothing into it, so the strict read below would fail on a
+    // missing pointer for exactly the owners this reaper exists for. The
+    // heal is idempotent and never touches the owner ledger; a heal error is
+    // reported by the strict read that follows, never masked here.
+    let _ = heal_missing_generation_publication(&candidate.worktree, candidate.owner);
     with_generation_activation_leases(&candidate.worktree, candidate.owner, |context| {
         let mut owner_ledger =
             load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
@@ -1661,11 +1765,13 @@ pub fn reap_startup_defunct_active_generation(
                         "startup recovery found an exact terminal Active holder",
                         holder_status_permits_generation_reclaim(session.status),
                     ),
-                    // Issue #3934: the holder's Hosts are all gone. Nothing is
-                    // running it, so the durable Session state decides alone.
+                    // Issue #3934 / #3964 AC-2: the holder's Hosts are all
+                    // gone. Nothing is running it, whatever the durable state
+                    // says: a Host that died took its PTY child with it, and a
+                    // durably Running record only means nobody wrote the end.
                     ExactSessionRuntimeDisposition::HostDead => (
                         "startup recovery found only dead Hosts for the Active holder",
-                        holder_status_permits_generation_reclaim(session.status),
+                        true,
                     ),
                     ExactSessionRuntimeDisposition::Defunct(_) => (
                         "startup recovery found an exact defunct Active holder",
@@ -2485,20 +2591,17 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
             let holder_permits = holder
                 .as_ref()
                 .is_some_and(|holder| holder_status_permits_generation_reclaim(holder.status));
+            // Issue #3964 AC-2: same rule as the reaper transaction — dead
+            // Hosts release the generation whatever the durable state says.
             let runtime_releases = matches!(
                 runtime,
                 Some(
                     ExactSessionRuntimeDisposition::Absent
                         | ExactSessionRuntimeDisposition::Defunct(_)
+                        | ExactSessionRuntimeDisposition::HostDead
                 )
             ) || (holder_permits
-                && matches!(
-                    runtime,
-                    Some(
-                        ExactSessionRuntimeDisposition::Terminal(_)
-                            | ExactSessionRuntimeDisposition::HostDead
-                    )
-                ));
+                && matches!(runtime, Some(ExactSessionRuntimeDisposition::Terminal(_))));
             diagnosis.reclaimable = runtime_releases;
             if runtime_releases {
                 diagnosis.recommended_recovery = "generation-reaper".to_string();
@@ -15583,11 +15686,14 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let _session_env = unset_live_session_env();
 
+        // Issue #3964 AC-2: a durably Running holder whose every Host is gone
+        // is not running anywhere either. Production kept 8 such generations
+        // (#3721 / #3722 among them) held until a human intervened.
         for (index, (status, expect_reaped)) in [
             (gwt_agent::AgentStatus::Interrupted, true),
             (gwt_agent::AgentStatus::Stopped, true),
             (gwt_agent::AgentStatus::Idle, true),
-            (gwt_agent::AgentStatus::Running, false),
+            (gwt_agent::AgentStatus::Running, true),
         ]
         .into_iter()
         .enumerate()
@@ -15627,6 +15733,11 @@ mod tests {
                 ExactSessionRuntimeDisposition::HostDead,
                 "{status:?}: a sidecar left by a dead Host is evidence of a dead Host"
             );
+            assert_eq!(
+                diagnose_owner(worktree.path(), owner).reclaimable,
+                expect_reaped,
+                "{status:?}: the owner diagnosis must advertise the same rule the reaper applies"
+            );
 
             let authority_before = generation_authority_bytes(worktree.path(), owner);
             let outcome =
@@ -15660,6 +15771,143 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Issue #3964: a Host PID is recycled by the OS. In production the
+    /// sidecars of four holders named PIDs that now belong to a browser
+    /// renderer and a model server, and `kill(pid, 0)` alone reported those
+    /// Hosts as reachable, so every reading stayed `Unknown` and the
+    /// generations were never released. A process that started after the
+    /// sidecar was last written cannot have written it.
+    #[test]
+    fn exact_runtime_treats_a_recycled_host_pid_as_a_dead_host() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "recycled-host-pid-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Interrupted,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        // A legacy sidecar: no `host_started_at`, written years before this
+        // test process (the "Host" its PID namespace now names) started.
+        let written_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut stale = gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            16,
+        );
+        stale.updated_at = written_at;
+        stale.last_activity_at = written_at;
+        stale
+            .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+            .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::HostDead,
+            "a Host that started after the sidecar was written did not write it"
+        );
+        assert_eq!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Reaped,
+        );
+
+        // The same shape written just now under a live PID stays ambiguous:
+        // the Host that wrote it can still be asked.
+        let mut fresh = gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            17,
+        );
+        fresh.updated_at = Utc::now();
+        fresh.last_activity_at = fresh.updated_at;
+        fresh
+            .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+            .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Unknown,
+            "a reachable Host that could have written the sidecar keeps the reading ambiguous"
+        );
+    }
+
+    /// Issue #3964 AC-1 / AC-4: the Issue Monitor releases a stranded
+    /// `agent_failed` row by asking whether the owner's generation is still
+    /// Active. That question has to be answerable from a project root and
+    /// from the owner ledger alone, because the refused launch never published
+    /// anything into the worktree it materialized.
+    #[test]
+    fn owner_generation_hold_reads_the_owner_ledger_without_a_worktree_publication() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-hold-interrupted-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Interrupted,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number).unwrap(),
+            Some(OwnerGenerationHold {
+                status: ExecutionControlStatus::Active,
+                holder_session_state: "Interrupted".to_string(),
+            }),
+        );
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number + 999).unwrap(),
+            None,
+            "an owner without a ledger holds nothing"
+        );
+
+        // Drop the worktree publication entirely: the answer must not change.
+        let trusted_dir =
+            crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path()).unwrap();
+        fs::remove_file(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap();
+        fs::remove_file(trusted_dir.join("execution-control.json")).unwrap();
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number)
+                .unwrap()
+                .map(|hold| hold.status),
+            Some(ExecutionControlStatus::Active),
+        );
+
+        assert_eq!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Reaped,
+            "the reaper republishes the lost worktree publication before judging the holder"
+        );
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number)
+                .unwrap()
+                .map(|hold| hold.status),
+            Some(ExecutionControlStatus::Blocked),
+        );
     }
 
     /// Issue #3934: two Hosts that both recorded a terminal exit cannot name

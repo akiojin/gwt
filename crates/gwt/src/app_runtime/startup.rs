@@ -208,13 +208,30 @@ fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
 /// Issue #3934: read the holder's durable state to decide whether the reaper
 /// is even allowed to consider it. Unreadable and missing records answer
 /// `false` so this can only ever widen what the exact stage revalidates.
-fn durable_holder_status_permits_reclaim(sessions_dir: &Path, session_id: &str) -> bool {
+///
+/// Issue #3964 AC-2: a durably `Running` holder is admitted too. A launch that
+/// died before its agent ever ran leaves exactly that record with no runtime
+/// sidecar anywhere, and only the exact stage can tell that apart from a live
+/// agent — it answers `Unchanged` for a live one.
+fn durable_holder_status_admits_exact_stage(sessions_dir: &Path, session_id: &str) -> bool {
     match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
         gwt_agent::SessionPathState::Present(session) => {
             gwt::cli::execution_state::holder_status_permits_generation_reclaim(session.status)
+                || session.status == gwt_agent::AgentStatus::Running
         }
         gwt_agent::SessionPathState::Missing | gwt_agent::SessionPathState::Error(_) => false,
     }
+}
+
+/// How the reaper reports owner ledgers it cannot inspect.
+///
+/// Startup reports each one once at `warn`; the scan cadence would repeat the
+/// same permanent set (owners whose worktree was deleted) every tick, so it
+/// reports them at `debug` and lets the summary count carry the signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GenerationReaperFailureLog {
+    Warn,
+    Debug,
 }
 
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
@@ -494,6 +511,7 @@ impl AppRuntime {
             startup_worktrees,
             &protected_exact_sessions,
             &protected_unknown_session_ids,
+            GenerationReaperFailureLog::Warn,
         )
     }
 }
@@ -513,6 +531,7 @@ pub(super) fn reap_defunct_active_generations(
     worktrees: &[PathBuf],
     protected_exact_sessions: &[gwt_agent::SessionExecutionIdentity],
     protected_unknown_session_ids: &HashSet<String>,
+    failure_log: GenerationReaperFailureLog,
 ) -> StartupGenerationReaperSummary {
     let started_at = std::time::Instant::now();
     let scan = gwt::cli::execution_state::inspect_startup_active_generation_ledgers(worktrees);
@@ -521,11 +540,18 @@ pub(super) fn reap_defunct_active_generations(
         ..StartupGenerationReaperSummary::default()
     };
     for failure in &scan.failures {
-        tracing::warn!(
-            path = %failure.path.display(),
-            error = %failure.message,
-            "startup Active generation owner inspection failed closed"
-        );
+        match failure_log {
+            GenerationReaperFailureLog::Warn => tracing::warn!(
+                path = %failure.path.display(),
+                error = %failure.message,
+                "startup Active generation owner inspection failed closed"
+            ),
+            GenerationReaperFailureLog::Debug => tracing::debug!(
+                path = %failure.path.display(),
+                error = %failure.message,
+                "scan Active generation owner inspection failed closed"
+            ),
+        }
     }
 
     let liveness_by_session = super::continuation::classify_nonlocal_active_owner_liveness_batch_at(
@@ -574,15 +600,14 @@ pub(super) fn reap_defunct_active_generations(
         // so admit every durable state the exact stage is allowed to
         // reclaim and let that stage make the decision.
         if !matches!(liveness, ActiveOwnerLiveness::Stale(_))
-            && !durable_holder_status_permits_reclaim(sessions_dir, &candidate.session_id)
+            && !durable_holder_status_admits_exact_stage(sessions_dir, &candidate.session_id)
         {
             summary.unchanged += 1;
             continue;
         }
-        let exact_holder = match gwt::cli::execution_state::current_generation_holder_identity(
+        let exact_holder = match gwt::cli::execution_state::startup_candidate_holder_identity(
             sessions_dir,
-            &candidate.worktree,
-            candidate.owner,
+            &candidate,
         ) {
             Ok(Some(identity)) => identity,
             Ok(None) => {
