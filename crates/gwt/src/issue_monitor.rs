@@ -6359,12 +6359,17 @@ impl IssueMonitorState {
         self.autonomous_tuning = disk.autonomous_tuning.clone();
         // Issue #3964 AC-4: whichever process ran the newer reclaim owns the
         // summary; an older in-memory copy must not re-stamp over it.
-        if disk.generation_reclaim.as_ref().is_some_and(|from_disk| {
-            self.generation_reclaim
-                .as_ref()
-                .is_none_or(|local| from_disk.recorded_at > local.recorded_at)
-        }) {
-            self.generation_reclaim = disk.generation_reclaim.clone();
+        if let Some(from_disk) = disk.generation_reclaim.as_ref() {
+            if let Some(disk_at) = parse_rfc3339_utc(&from_disk.recorded_at) {
+                let newer = self
+                    .generation_reclaim
+                    .as_ref()
+                    .and_then(|local| parse_rfc3339_utc(&local.recorded_at))
+                    .is_none_or(|local_at| disk_at > local_at);
+                if newer {
+                    self.generation_reclaim = Some(from_disk.clone());
+                }
+            }
         }
         // Issue #3478: the hook (and the answer operation) write handoffs from
         // outside this process, so disk is the inbound source for them.
@@ -10209,8 +10214,19 @@ impl IssueMonitorState {
                 || "unknown".to_string(),
                 |hold| hold.holder_session_state.clone(),
             );
+            // Same guard as `requeue_failed_issue`: a row a launch still owns
+            // is never released here, because clearing its tracking would
+            // strand the running agent's slot. It stays reported instead.
+            let launch_live = self.active_launches.contains(&issue_number)
+                || self.launched_windows.contains_key(&issue_number)
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == issue_number);
             match hold.map(|hold| hold.status) {
-                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed) => {
+                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed)
+                    if !launch_live =>
+                {
                     let reason = format!(
                         "stranded execution generation released (holder Session {holder_state}); returned to the queue by the Issue Monitor"
                     );
@@ -10227,7 +10243,7 @@ impl IssueMonitorState {
                         *released_by_holder_state.entry(holder_state).or_default() += 1;
                     }
                 }
-                Some(ExecutionControlStatus::Active) | None => {
+                Some(_) | None => {
                     summary.stranded.push(issue_number);
                     *summary
                         .stranded_by_holder_state
@@ -15656,6 +15672,53 @@ mod tests {
         assert_eq!(third.released, vec![43]);
         assert_eq!(third.released_at.as_deref(), Some("2026-09-05T00:10:00Z"));
         assert_eq!(third.stranded, vec![42]);
+    }
+
+    /// Issue #3964 (review follow-up): the automatic release applies the same
+    /// live-launch guard as `requeue_failed_issue`. A hold that still has a
+    /// launch in flight — a stale failure row racing a fresh launch — is not
+    /// released, because clearing its tracking would strand the running
+    /// agent's slot; it stays reported instead.
+    #[test]
+    fn release_stranded_generation_failures_never_touches_a_row_with_a_live_launch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-05T00:00:00Z");
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Interrupted"));
+        // A fresh launch of the same Issue is in flight while the failure row
+        // from the previous attempt is still persisted.
+        monitor.active_launches.push(42);
+        monitor
+            .launched_windows
+            .insert(42, "tab-1::agent-9".to_string());
+        let before = monitor.prefs();
+
+        let summary = monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |_| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                holder_session_state: "Interrupted".to_string(),
+            })
+        });
+
+        assert!(
+            summary.released.is_empty(),
+            "a live launch is never released"
+        );
+        assert_eq!(summary.stranded, vec![42]);
+        // Reporting the row is the only change: the hold, the launch tracking
+        // and the release audit are exactly as they were.
+        let mut after = monitor.prefs();
+        assert_eq!(after.generation_reclaim, Some(summary.clone()));
+        after.generation_reclaim = None;
+        assert_eq!(
+            after, before,
+            "the row and its launch tracking stay untouched"
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(monitor
+            .prefs()
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 42));
     }
 
     /// Issue #3964 AC-3: an `agent_failed` row at the head of the priority

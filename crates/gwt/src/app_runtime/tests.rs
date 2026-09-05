@@ -33249,6 +33249,16 @@ fn startup_reaper_heals_a_lost_worktree_publication_before_judging_the_holder() 
         summary.reaped, 1,
         "the owner ledger is the authority; a lost publication is republished, not skipped: {summary:?}"
     );
+    assert!(
+        trusted_dir
+            .join("execution-generation-pointer.json")
+            .is_file(),
+        "the reaper republishes the worktree pointer before judging the holder"
+    );
+    assert!(
+        trusted_dir.join("execution-control.json").is_file(),
+        "the reaper republishes the worktree projection before judging the holder"
+    );
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
             .expect("load ledger")
