@@ -1771,11 +1771,20 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
+        // Issue #3962 AC-5: the swap is reported, not silent.
+        let notice = state
+            .model_fallback_notice
+            .as_deref()
+            .expect("a removed Quick Start model must be reported");
+        assert!(
+            notice.contains("gpt-5.2-codex") && notice.contains("gpt-6-astra"),
+            "the notice must name both models: {notice}"
+        );
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+                    assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -2165,7 +2174,7 @@ mod tests {
         state.step = LaunchWizardStep::ModelSelect;
         state.selected = 0;
         state.apply_selection();
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
 
         state.step = LaunchWizardStep::ReasoningLevel;
         state.selected = 1;
