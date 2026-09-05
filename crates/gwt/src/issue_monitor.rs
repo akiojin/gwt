@@ -53,7 +53,7 @@ const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
 
-fn normalize_issue_monitor_provider(raw: &str) -> Option<String> {
+pub(crate) fn normalize_issue_monitor_provider(raw: &str) -> Option<String> {
     gwt_agent::resolve_agent_id(raw).map(|id| id.command().to_ascii_lowercase())
 }
 
