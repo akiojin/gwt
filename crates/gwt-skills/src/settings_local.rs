@@ -588,6 +588,22 @@ pub(crate) fn codex_event_hook_commands(event: &str) -> Vec<String> {
     codex_event_hook_commands_with_bin(&gwt_hook_bin_path(), event)
 }
 
+/// The repo-owned `gwt-self-improvement-stop` Stop hook, verbatim as this
+/// repository commits it in `.codex/hooks.json`.
+///
+/// Unlike the managed event hooks this one is tracked content rather than
+/// generated output: `existing_user_hooks` preserves it untouched, which is why
+/// it lands at Stop group index 1 and why its fallback stays the machine
+/// independent literal `gwtd` instead of an absolute install path. It is still
+/// a gwt hook transport, so gwt pre-trusts it rather than making every fresh
+/// worktree stop on Codex's `Hooks need review` prompt (Issue #3967).
+pub(crate) fn codex_self_improvement_stop_hook_commands() -> Vec<String> {
+    vec![
+        "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true"
+            .to_string(),
+    ]
+}
+
 pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
     vec![
         posix_codex_event_hook_command_with_bin(bin, event),

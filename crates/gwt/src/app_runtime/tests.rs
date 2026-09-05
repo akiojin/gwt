@@ -51444,8 +51444,192 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
     );
 }
 
+/// Issue #3967: materialize a real linked git worktree so the launch-path
+/// trust registration is exercised against the same `.codex/hooks.json` layout
+/// Codex actually discovers (worktree-local plus workspace-home).
+fn codex_hook_trust_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).expect("create repo dir");
+    let git = |args: &[&str], cwd: &Path| {
+        let status = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
+        assert!(status.success(), "git {args:?} failed with {status}");
+    };
+    git(&["init", "--initial-branch=develop"], &repo);
+    git(&["config", "user.email", "test@example.com"], &repo);
+    git(&["config", "user.name", "Test User"], &repo);
+    // The repo-owned Stop hook is tracked content in this repository, so a
+    // fresh worktree always carries it alongside the five managed hooks.
+    fs::create_dir_all(repo.join(".codex")).expect("create .codex dir");
+    fs::write(
+        repo.join(".codex/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true",
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .unwrap(),
+    )
+    .expect("seed tracked codex hooks");
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-m", "seed"], &repo);
+
+    let worktree = root.join("issue-worktree");
+    let status = gwt_core::process::hidden_command("git")
+        .args(["worktree", "add", "-b", "work/issue-3967"])
+        .arg(&worktree)
+        .arg("develop")
+        .current_dir(&repo)
+        .status()
+        .expect("materialize linked worktree");
+    assert!(status.success(), "git worktree add failed with {status}");
+    (repo, worktree)
+}
+
+/// Every hook handler present in `hooks_path` must have a `[hooks.state]`
+/// entry in `config`, otherwise Codex reports it as "new or changed" and
+/// blocks the pane on `Hooks need review`.
+fn assert_every_codex_hook_is_trusted(config: &toml::Value, hooks_path: &Path) {
+    let events = [
+        ("SessionStart", "session_start"),
+        ("UserPromptSubmit", "user_prompt_submit"),
+        ("PreToolUse", "pre_tool_use"),
+        ("PostToolUse", "post_tool_use"),
+        ("Stop", "stop"),
+    ];
+    let canonical = fs::canonicalize(hooks_path).expect("canonicalize hooks path");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(hooks_path).expect("read hooks.json"))
+            .expect("parse hooks.json");
+    let state = config
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("Codex config has no [hooks.state]: {config:?}"));
+    let mut checked = 0usize;
+    for (event_json, event_snake) in events {
+        let Some(groups) = hooks["hooks"].get(event_json).and_then(|g| g.as_array()) else {
+            continue;
+        };
+        for (group_index, group) in groups.iter().enumerate() {
+            let handlers = group["hooks"].as_array().expect("hook handlers");
+            for handler_index in 0..handlers.len() {
+                let key = format!(
+                    "{}:{event_snake}:{group_index}:{handler_index}",
+                    canonical.display()
+                );
+                assert!(
+                    state.contains_key(&key),
+                    "hook {key} is not trusted; Codex would prompt. state keys: {:?}",
+                    state.keys().collect::<Vec<_>>()
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "fixture must contain at least one hook");
+}
+
+/// Issue #3967 AC-3: a Monitor launch into a fresh linked worktree must leave
+/// no `.codex/hooks.json` that Codex would flag as "new or changed" — neither
+/// the worktree-local copy nor the workspace-home copy.
 #[test]
-fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
+fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let fixture_root = tempdir().expect("fixture tempdir");
+    let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
+
+    // Both copies exist on disk in a real worktree: the workspace-home copy is
+    // written by the launch refresh, the worktree-local copy is tracked content
+    // refreshed by the `Both`-mode managed-asset writers.
+    gwt_skills::generate_codex_hooks_for_mode(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+    )
+    .expect("refresh managed codex hooks");
+
+    let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &profile_config_path,
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        None,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .expect("launch trust registration must succeed")
+    .expect("Codex host launch registers trust");
+
+    assert!(
+        report.untrusted_gwt_hooks.is_empty(),
+        "no gwt hook may be left for human review: {report:?}"
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&report.config_path).expect("read codex config"))
+            .expect("parse codex config");
+    assert_every_codex_hook_is_trusted(&config, &worktree.join(".codex/hooks.json"));
+    assert_every_codex_hook_is_trusted(&config, &repo.join(".codex/hooks.json"));
+}
+
+/// Issue #3967 AC-4: a pre-registration that cannot vouch for the gwt hooks
+/// must fail the launch with a concrete reason instead of handing the agent a
+/// human-only prompt that silently holds the Issue Monitor slot.
+#[test]
+fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let worktree = tempdir().expect("worktree tempdir");
+    gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    let hooks_path = worktree.path().join(".codex/hooks.json");
+    let mut hooks_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    hooks_json["hooks"]["Stop"][0]["hooks"][0]["command"] =
+        serde_json::Value::String("'/tmp/attacker/gwtd' hook event Stop".to_string());
+    fs::write(
+        &hooks_path,
+        serde_json::to_string_pretty(&hooks_json).unwrap(),
+    )
+    .unwrap();
+
+    let result = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &profile_config_path,
+        worktree.path(),
+        &gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        None,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    );
+
+    let error = result.expect_err("untrusted gwt hook must abort the launch");
+    assert!(
+        error.contains("Hooks need review") && error.contains("stop:0:0"),
+        "launch failure must name the cause and the hook: {error}"
+    );
+}
+
+/// Issue #3967 AC-4: an unwritable Codex config used to be swallowed as a
+/// warning, which launched the agent straight into `Hooks need review` and let
+/// the pane hold its Issue Monitor slot in silence. The launch now fails with
+/// the reason so the slot is released and the cause is visible.
+#[test]
+fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
     let profile_config_path = home.path().join(".gwt/config.toml");
@@ -51465,13 +51649,10 @@ fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
     );
 
+    let error = result.expect_err("unwritable Codex trust state must abort the launch");
     assert!(
-        result.is_ok(),
-        "optional trust registration must not abort launch: {result:?}"
-    );
-    assert!(
-        result.unwrap().is_none(),
-        "skip paths must not create Codex config"
+        error.contains("Codex hook trust"),
+        "launch failure must name the cause: {error}"
     );
 }
 
