@@ -146,7 +146,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::SetHermesOption { .. } => "set_hermes_option",
             gwt::LaunchWizardAction::SetHermesSafeMode { .. } => "set_hermes_safe_mode",
-            gwt::LaunchWizardAction::RunOpenCodeSetup => "run_opencode_setup",
+            gwt::LaunchWizardAction::RunAgentSetup => "run_agent_setup",
             gwt::LaunchWizardAction::Submit => "submit",
             gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
         }
@@ -552,8 +552,31 @@ impl AppRuntime {
     fn missing_binary_install_hint(detail: &str) -> Option<&'static str> {
         MISSING_BINARY_INSTALL_HINTS
             .iter()
-            .find(|(command, _)| Self::is_missing_binary_error(detail, command))
+            .find(|(command, _)| {
+                Self::is_missing_binary_error(detail, command)
+                    || Self::is_unresolved_preflight_runner_error(detail, command)
+            })
             .map(|(_, hint)| *hint)
+    }
+
+    /// SPEC-3864 FR-008: the preflight health check
+    /// (`resolve_host_runner_health_checked`) fails before any PTY spawn with
+    /// `<Display name> installed runner failed its health check ... direct
+    /// runner executable not resolved ...`. That is the same "binary is
+    /// missing" condition as `Unable to spawn <command>`, so the install
+    /// guidance must fire for it too — but only when no package fallback
+    /// could stand in (a resolvable-but-broken fallback is a different
+    /// failure whose diagnostic must stay visible).
+    fn is_unresolved_preflight_runner_error(detail: &str, command: &str) -> bool {
+        let Some(descriptor) = gwt_agent::builtin_agent_descriptor_for_command(command) else {
+            return false;
+        };
+        detail.contains(&format!(
+            "{} installed runner failed its health check",
+            descriptor.display_name
+        )) && detail.contains("direct runner executable not resolved")
+            && (detail.contains("No runtime package route is available")
+                || detail.contains("could not be resolved"))
     }
 
     fn is_missing_binary_error(detail: &str, command: &str) -> bool {
@@ -599,5 +622,39 @@ impl AppRuntime {
                 detail,
             }),
         ]
+    }
+}
+
+#[cfg(test)]
+mod install_hint_tests {
+    use super::AppRuntime;
+
+    #[test]
+    fn raw_spawn_failure_still_maps_to_install_hint() {
+        let detail = "Unable to spawn agy: No viable candidates found in PATH";
+        let user = AppRuntime::user_facing_launch_error_detail(detail);
+        assert!(user.contains("antigravity.google/cli/install.sh"), "{user}");
+    }
+
+    /// SPEC-3864 FR-008 (AC-7): the preflight health check fails before any
+    /// PTY spawn, so the install guidance must also fire on that shape.
+    #[test]
+    fn preflight_unresolved_runner_maps_to_install_hint() {
+        let detail = "Antigravity CLI installed runner failed its health check. Probe detail: direct runner executable not resolved. No runtime package route is available. Setup required: install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` and relaunch.";
+        let user = AppRuntime::user_facing_launch_error_detail(detail);
+        assert!(user.contains("antigravity.google/cli/install.sh"), "{user}");
+        assert!(user.contains("not found in PATH"), "{user}");
+
+        let opencode = "OpenCode installed runner failed its health check. Probe detail: direct runner executable not resolved. Latest package fallback 'opencode-ai@latest' could not be resolved.";
+        let user = AppRuntime::user_facing_launch_error_detail(opencode);
+        assert!(user.contains("npm i -g opencode-ai"), "{user}");
+    }
+
+    #[test]
+    fn preflight_failure_with_healthy_fallback_route_keeps_raw_detail() {
+        // A resolvable-but-broken runner is a different failure; the raw
+        // diagnostic must not be replaced by install guidance.
+        let detail = "OpenCode installed runner failed its health check. Probe detail: exit status 1; runner broken. Latest package fallback 'opencode-ai@latest' is also unhealthy: bunx exploded";
+        assert_eq!(AppRuntime::user_facing_launch_error_detail(detail), detail);
     }
 }

@@ -191,6 +191,39 @@ export function createLaunchWizardSurface({
         return button;
       }
 
+      // SPEC-3864 FR-005..FR-007: agent-independent setup affordance. The
+      // backend derives `launchWizard.agent_setup` from the selected agent's
+      // descriptor (install when no Installed / latest route exists,
+      // configure when first-time setup is missing); this renders whatever
+      // it says without any per-agent branch.
+      function appendAgentSetupNote(parent, setup) {
+        if (!setup) return null;
+        const note = createNode("div", "launch-note launch-agent-setup");
+        note.dataset.agentId = setup.agent_id || "";
+        note.dataset.setupKind = setup.kind || "";
+        note.setAttribute("role", "note");
+        note.appendChild(
+          createNode("div", "launch-agent-setup__title", setup.title || ""),
+        );
+        note.appendChild(
+          createNode("div", "launch-agent-setup__detail", setup.detail || ""),
+        );
+        if (setup.action_label) {
+          const button = createNode(
+            "button",
+            "launch-choice-button launch-agent-setup__action",
+            setup.action_label,
+          );
+          button.type = "button";
+          button.addEventListener("click", () =>
+            sendWizardAction({ kind: "run_agent_setup" }),
+          );
+          note.appendChild(button);
+        }
+        parent.appendChild(note);
+        return note;
+      }
+
       function appendChoiceField(
         parent,
         label,
@@ -1700,6 +1733,9 @@ export function createLaunchWizardSurface({
             );
           }
           section.appendChild(grid);
+          if (launchWizard.show_agent_settings) {
+            appendAgentSetupNote(section, launchWizard.agent_setup);
+          }
           panel.appendChild(section);
         }
 
@@ -1773,14 +1809,6 @@ export function createLaunchWizardSurface({
             "Hermes options",
             "Provider, model, profile, toolsets and skills for the Hermes agent, listed from your ~/.hermes config. Blank fields use your hermes setup (config.yaml); pick Other… for values not in config.",
           );
-          if (launchWizard.hermes_needs_setup) {
-            const note = createNode(
-              "div",
-              "launch-note",
-              "Hermes is not set up yet (no credentials in ~/.hermes). Run `hermes setup` (or `hermes model`) in a terminal to choose a provider and sign in; gwt will then bridge it into every worktree. You can still launch — Hermes will prompt for setup.",
-            );
-            section.appendChild(note);
-          }
           const grid = createNode("div", "launch-form-grid");
           appendHermesChoiceField(
             grid,
@@ -1881,34 +1909,16 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // SPEC-3151 FR-008/009/010: OpenCode-specific launch options, rendered
-        // only for the OpenCode agent. OpenCode takes a single free-text
+        // SPEC-3151 FR-008: OpenCode-specific launch options, rendered only
+        // for the OpenCode agent. OpenCode takes a single free-text
         // `provider/model` string (auth is host-global, so no provider bridge
-        // is needed). When no AI provider is configured, a non-blocking note
-        // offers an in-pane setup launcher that runs `opencode auth login`.
+        // is needed). The "not set up" hint and its in-pane launcher moved to
+        // the agent-independent setup affordance (SPEC-3864).
         if (showSetupForms && launchWizard.show_opencode_options) {
           const section = createLaunchSection(
             "OpenCode options",
             "Model and provider sign-in for the OpenCode agent. Blank model uses your OpenCode config.",
           );
-          if (launchWizard.opencode_needs_setup) {
-            const note = createNode(
-              "div",
-              "launch-note",
-              "OpenCode has no AI provider configured yet. Run `/connect` inside OpenCode or `opencode auth login` to sign in. You can still launch — OpenCode will prompt for setup.",
-            );
-            const setupButton = createNode(
-              "button",
-              "launch-choice-button",
-              "Run OpenCode setup",
-            );
-            setupButton.type = "button";
-            setupButton.addEventListener("click", () =>
-              sendWizardAction({ kind: "run_opencode_setup" }),
-            );
-            note.appendChild(setupButton);
-            section.appendChild(note);
-          }
           const grid = createNode("div", "launch-form-grid");
           appendTextField(
             grid,

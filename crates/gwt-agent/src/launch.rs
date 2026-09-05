@@ -254,7 +254,7 @@ fn resolve_runner_with_effective_env(
         };
     }
 
-    let Some(package) = agent_id.package_name() else {
+    let Some(package) = agent_id.npm_package() else {
         // No npm package — fall back to direct command
         return ResolvedRunner {
             executable: agent_id.command().to_string(),
@@ -675,7 +675,7 @@ fn apply_host_bunx_cache_fast_path_from_uid(
         return false;
     }
 
-    let Some(package) = config.agent_id.package_name() else {
+    let Some(package) = config.agent_id.npm_package() else {
         return false;
     };
     let Some(version) = config.tool_version.as_deref() else {
@@ -3033,10 +3033,11 @@ mod tests {
 
     #[test]
     fn resolve_runner_no_npm_package_falls_back_to_direct() {
-        // OpenClaw still has no npm package, so a versioned request must fall
-        // back to the direct command rather than a package runner.
-        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
-        assert_eq!(runner.executable, "openclaw");
+        // SPEC-3864: Antigravity has no runtime package route (installer
+        // only), so a versioned request must fall back to the direct command
+        // rather than a package runner.
+        let runner = resolve_runner(&AgentId::Antigravity, "latest");
+        assert_eq!(runner.executable, "agy");
         assert!(runner.base_args.is_empty());
     }
 

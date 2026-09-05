@@ -78,8 +78,7 @@ impl LaunchWizardState {
             hermes_max_turns: String::new(),
             hermes_safe_mode: false,
             hermes_choices: Default::default(),
-            hermes_needs_setup: false,
-            opencode_needs_setup: false,
+            needs_configuration: std::collections::BTreeSet::new(),
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -573,8 +572,8 @@ impl LaunchWizardState {
             LaunchWizardAction::SetHermesSafeMode { enabled } => {
                 self.hermes_safe_mode = enabled;
             }
-            LaunchWizardAction::RunOpenCodeSetup => {
-                self.run_opencode_setup();
+            LaunchWizardAction::RunAgentSetup => {
+                self.run_agent_setup();
             }
             LaunchWizardAction::Back => {
                 if self.show_confirm() {
@@ -1711,45 +1710,101 @@ impl LaunchWizardState {
 
     /// SPEC-3152 FR-005: whether the user's global Hermes home is unconfigured,
     /// populated by the app runtime at wizard open.
-    pub fn set_hermes_needs_setup(&mut self, needs_setup: bool) {
-        self.hermes_needs_setup = needs_setup;
-    }
-
-    /// SPEC-3151 FR-009: whether OpenCode's global data home has no configured
-    /// AI provider, populated by the app runtime at wizard open.
-    pub fn set_opencode_needs_setup(&mut self, needs_setup: bool) {
-        self.opencode_needs_setup = needs_setup;
-    }
-
-    /// SPEC-3151 FR-010: resolve the OpenCode runner for the wizard's selected
-    /// version and produce a Shell launch that runs `<runner> auth login` on the
-    /// host. OpenCode auth is host-global (`$XDG_DATA_HOME/opencode/auth.json`),
-    /// so the setup launcher is forced to the Host runtime regardless of the
-    /// wizard's Docker selection.
-    fn run_opencode_setup(&mut self) {
-        let version = if self.version.is_empty() {
-            "latest"
+    pub fn set_agent_needs_configuration(&mut self, agent_id: &str, needs_configuration: bool) {
+        if needs_configuration {
+            self.needs_configuration.insert(agent_id.to_string());
         } else {
-            self.version.as_str()
+            self.needs_configuration.remove(agent_id);
+        }
+    }
+
+    pub(super) fn agent_needs_configuration(&self, agent_id: &str) -> bool {
+        self.needs_configuration.contains(agent_id)
+    }
+
+    /// SPEC-3864 FR-005..FR-007: the setup affordance for one agent option,
+    /// derived from its built-in descriptor. Custom agents never get one.
+    pub(super) fn agent_setup_affordance_for(
+        &self,
+        agent: &AgentOption,
+    ) -> Option<AgentSetupAffordance> {
+        if agent.custom_agent.is_some() {
+            return None;
+        }
+        let descriptor = agent_id_from_key(&agent.id).builtin_descriptor()?;
+        agent_setup_affordance(
+            descriptor,
+            agent.available,
+            self.agent_needs_configuration(&agent.id),
+        )
+    }
+
+    /// SPEC-3864 FR-006 / FR-007: run the selected agent's setup affordance as
+    /// a Host shell launch. Install affordances run the descriptor's install
+    /// command through the platform shell; configure affordances resolve the
+    /// agent runner for the selected version and append the descriptor's
+    /// `setup_args` (e.g. `opencode auth login`). Setup state is host-global,
+    /// so the launch always runs on the host regardless of the wizard's
+    /// runtime target.
+    fn run_agent_setup(&mut self) {
+        let Some(agent) = self.selected_agent().cloned() else {
+            self.error = Some("Agent option is unavailable".to_string());
+            return;
         };
-        let runner = gwt_agent::launch::resolve_runner(&gwt_agent::AgentId::OpenCode, version);
-        let mut args = runner.base_args.clone();
-        args.push("auth".to_string());
-        args.push("login".to_string());
+        let agent_id = agent_id_from_key(&agent.id);
+        let Some(descriptor) = agent_id.builtin_descriptor() else {
+            self.error = Some("Setup is only available for built-in agents".to_string());
+            return;
+        };
+        let Some(affordance) = self.agent_setup_affordance_for(&agent) else {
+            self.error = Some(format!(
+                "{} does not need setup right now",
+                descriptor.display_name
+            ));
+            return;
+        };
+        let (command_override, args) = match affordance.kind {
+            AgentSetupKind::Install => {
+                let Some(install_command) = descriptor.distribution.install_shell_command() else {
+                    self.error = Some(format!(
+                        "{} has no installer gwt can run; install it manually",
+                        descriptor.display_name
+                    ));
+                    return;
+                };
+                let (shell, flag) = if cfg!(windows) {
+                    ("cmd", "/C")
+                } else {
+                    ("sh", "-c")
+                };
+                (shell.to_string(), vec![flag.to_string(), install_command])
+            }
+            AgentSetupKind::Configure => {
+                let version = if self.version.is_empty() {
+                    "latest"
+                } else {
+                    self.version.as_str()
+                };
+                let runner = gwt_agent::launch::resolve_runner(&agent_id, version);
+                let mut args = runner.base_args.clone();
+                args.extend(descriptor.setup_args.iter().map(|arg| (*arg).to_string()));
+                (runner.executable, args)
+            }
+        };
 
         self.launch_target = LaunchTargetKind::Shell;
         let config = ShellLaunchConfig {
             working_dir: self.context.worktree_path.clone(),
             branch: (!self.branch_name.is_empty()).then(|| self.branch_name.clone()),
             base_branch: None,
-            display_name: "OpenCode Setup".to_string(),
+            display_name: format!("{} Setup", descriptor.display_name),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
             windows_shell: self.windows_shell_for_launch(),
             env_vars: HashMap::new(),
             remove_env: Vec::new(),
-            command_override: Some(runner.executable),
+            command_override: Some(command_override),
             command_args_override: Some(args),
         };
         self.completion = Some(LaunchWizardCompletion::Launch(Box::new(
@@ -1934,7 +1989,10 @@ impl LaunchWizardState {
         }
     }
 
-    fn current_version_options_for(&self, agent: &AgentOption) -> Vec<gwt_agent::VersionOption> {
+    pub(super) fn current_version_options_for(
+        &self,
+        agent: &AgentOption,
+    ) -> Vec<gwt_agent::VersionOption> {
         gwt_agent::build_version_options(
             agent.available,
             agent.installed_version.as_deref(),

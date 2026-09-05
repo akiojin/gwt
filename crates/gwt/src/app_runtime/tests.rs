@@ -62280,6 +62280,60 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
     );
 }
 
+/// SPEC-3864 T-006: install detection must not sit on the startup critical
+/// path. The fake `agy` cannot finish its version probe until the test drops
+/// a sentinel file *after* `LaunchWizardMemoryCache::load` has returned, so a
+/// load that waited for detection would only ever see the probe killed at
+/// its deadline (no version). A non-blocking load lets the probe complete
+/// and the first wizard access joins the background result.
+#[cfg(unix)]
+#[test]
+fn launch_wizard_memory_cache_load_does_not_block_on_agent_detection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create bin");
+    let sentinel = temp.path().join("probe-may-finish");
+    let gated_agy = bin.join("agy");
+    fs::write(
+        &gated_agy,
+        format!(
+            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nprintf '9.9.9\\n'\n",
+            sentinel.display()
+        ),
+    )
+    .expect("write gated agy");
+    fs::set_permissions(&gated_agy, fs::Permissions::from_mode(0o755)).expect("chmod gated agy");
+    let _path = prepend_tool_parent_to_path(&gated_agy);
+    let _no_custom = ScopedEnvVar::set(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV, "1");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let cache = LaunchWizardMemoryCache::load(&sessions_dir);
+    // Only now may the probe finish: a blocking load would already have hit
+    // the probe deadline and lost the version.
+    fs::write(&sentinel, b"go").expect("release gated probe");
+
+    let options = cache.agent_options();
+    let agy = options
+        .iter()
+        .find(|option| option.id == "agy")
+        .expect("Antigravity option");
+    assert!(
+        agy.available,
+        "background detection must still feed availability"
+    );
+    assert_eq!(
+        agy.installed_version.as_deref(),
+        Some("9.9.9"),
+        "load must return before the probe completes"
+    );
+}
+
 // Issue #3863 AC-6: every wizard-open path must inject the Hermes launch
 // choices enumerated from the user's global Hermes home. Missing one path
 // would leave that entry point with empty candidates only.

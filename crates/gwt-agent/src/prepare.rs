@@ -360,6 +360,20 @@ impl HostRunnerProbeOutcome {
         }
     }
 
+    /// Synthesized outcome for a runner that never spawned (e.g. the direct
+    /// executable is not on PATH). SPEC-3864 T-011: it carries no
+    /// `exit_code`, so the diagnostic cannot read as a real process exit.
+    pub fn unresolved(reason: &str) -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: Some(reason.to_string()),
+        }
+    }
+
     fn combined_output(&self) -> String {
         format!("{}\n{}", self.stdout, self.stderr)
     }
@@ -1280,7 +1294,7 @@ where
     let direct_probe_args = crate::launch::builtin_version_probe_args(&config.agent_id)
         .expect("built-in descriptor checked above");
     let direct_probe = direct_command.as_deref().map_or_else(
-        || HostRunnerProbeOutcome::failure_with_stderr("direct runner executable not resolved"),
+        || HostRunnerProbeOutcome::unresolved("direct runner executable not resolved"),
         |direct_command| {
             probe(
                 HostRunnerProbeKind::Direct,
@@ -1329,9 +1343,20 @@ where
         );
         return Ok(report);
     }
-    let Some(package) = config.agent_id.package_name() else {
+    let Some(package) = config.agent_id.npm_package() else {
+        // SPEC-3864 FR-013 / T-010: no runtime `latest` route exists, so the
+        // only recovery is a pre-install. Name the route's install command
+        // when the descriptor declares one.
+        let setup_hint = config
+            .agent_id
+            .distribution()
+            .install_shell_command()
+            .map_or_else(
+                || " Setup required: install it manually and relaunch.".to_string(),
+                |command| format!(" Setup required: install it with `{command}` and relaunch."),
+            );
         return Err(format!(
-            "{agent_name} installed runner failed its health check. {direct_diagnostic} No supported npm fallback is available."
+            "{agent_name} installed runner failed its health check. {direct_diagnostic} No runtime package route is available.{setup_hint}"
         ));
     };
 
@@ -1411,7 +1436,7 @@ where
 {
     let package = config
         .agent_id
-        .package_name()
+        .npm_package()
         .expect("targeted official provider has an npm package");
     let version_spec = host_package_runner_version_spec(config);
     let agent_args = version_spec.as_deref().map_or_else(
@@ -3984,7 +4009,7 @@ fn resolve_docker_exec_program(
 }
 
 fn package_runner_version_spec(config: &LaunchConfig) -> Option<String> {
-    let package = config.agent_id.package_name()?;
+    let package = config.agent_id.npm_package()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
         return None;
@@ -6256,11 +6281,13 @@ mod tests {
         let worktree = temp.path().join("repo-feature");
         let sessions_dir = temp.path().join("sessions");
         fs::create_dir_all(&worktree).expect("create worktree");
-        let direct = temp.path().join("openclaw");
+        // SPEC-3864: Antigravity has no runtime package route, so a hanging
+        // direct runner cannot be rescued by a bunx/npx fallback.
+        let direct = temp.path().join("agy");
         fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
         fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
             .expect("chmod hanging runner");
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenClaw)
+        let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
             .working_dir(&worktree)
             .build();
         config.command = direct.display().to_string();
