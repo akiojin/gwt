@@ -1,8 +1,9 @@
 //! Agent detection: discover installed coding agents via PATH lookup.
 
 use std::{
+    ffi::OsStr,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -72,20 +73,34 @@ impl AgentDetector {
 
     /// Detect a single agent by its command name.
     pub fn detect_by_command(command: &str) -> Option<DetectedAgent> {
+        Self::detect_by_command_in_env(command, &[])
+    }
+
+    /// Detect a single agent by its command name with `env` layered over the
+    /// host environment for executable lookup and the version probe child.
+    ///
+    /// The process environment is never touched: `PATH` is process-global and
+    /// mutating it from one test thread makes every parallel `sh` / `git`
+    /// spawn fail (Issue #3895), so fixtures pass their `PATH` here instead.
+    pub(crate) fn detect_by_command_in_env(
+        command: &str,
+        env: &[(&str, &OsStr)],
+    ) -> Option<DetectedAgent> {
         let descriptor = builtin_agent_descriptor_for_command(command);
         let (version, resolved_path) = match descriptor {
             Some(descriptor) => Self::fetch_version(
                 command,
                 descriptor.version_flag,
                 descriptor.version_prefix_args,
+                env,
             ),
-            None => Self::fetch_version(command, "--version", &[]),
+            None => Self::fetch_version(command, "--version", &[], env),
         }
         .ok()?;
         let path = if cfg!(windows) {
             resolved_path
         } else {
-            which::which(command).ok()?
+            which_in_env(command, env).ok()?
         };
         // Map known commands to AgentIds, fall back to Custom
         let agent_id = descriptor
@@ -100,7 +115,7 @@ impl AgentDetector {
 
     fn detect_one(probe: &AgentProbe) -> Option<DetectedAgent> {
         let (version, resolved_path) =
-            Self::fetch_version(probe.command, probe.version_flag, probe.prefix_args).ok()?;
+            Self::fetch_version(probe.command, probe.version_flag, probe.prefix_args, &[]).ok()?;
         let path = if cfg!(windows) {
             resolved_path
         } else {
@@ -122,10 +137,14 @@ impl AgentDetector {
         command: &str,
         version_flag: &str,
         prefix_args: &[&str],
+        env: &[(&str, &OsStr)],
     ) -> Result<(Option<String>, PathBuf), String> {
-        let request = gwt_core::process::ProcessPlanRequest::new(command)
-            .args(prefix_args)
-            .arg(version_flag);
+        let request = env.iter().fold(
+            gwt_core::process::ProcessPlanRequest::new(command)
+                .args(prefix_args)
+                .arg(version_flag),
+            |request, (key, value)| request.env(key, value),
+        );
         let mut cmd = gwt_core::process::resolved_command(request).map_err(|error| {
             debug!(command, error = %error, "Agent version probe resolution failed");
             error.to_string()
@@ -195,6 +214,22 @@ impl AgentDetector {
     }
 }
 
+/// `which` lookup honoring a `PATH` override from `env` (last one wins) and
+/// falling back to the process `PATH` when `env` carries none.
+fn which_in_env(command: &str, env: &[(&str, &OsStr)]) -> which::Result<PathBuf> {
+    match env
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+    {
+        Some((_, path)) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+            which::which_in(command, Some(path), cwd)
+        }
+        None => which::which(command),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,19 +252,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn detector_resolves_real_bun_global_placeholder_fixture() {
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture =
             gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
                 .expect("create real Windows Bun fixture");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
-        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
 
-        let detected = AgentDetector::detect_by_command("claude")
-            .expect("safe fixture must be detected as Claude Code");
+        let detected =
+            AgentDetector::detect_by_command_in_env("claude", &windows_fixture_env(&fixture))
+                .expect("safe fixture must be detected as Claude Code");
 
         assert_eq!(detected.agent_id, AgentId::ClaudeCode);
         assert_eq!(detected.version.as_deref(), Some("2.1.210 (Claude Code)"));
@@ -239,9 +269,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn detector_rejects_real_bun_global_placeholder_fixture_without_safe_target() {
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture =
             gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
@@ -249,11 +276,24 @@ mod tests {
         fixture
             .remove_safe_targets()
             .expect("remove safe redirect targets");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
-        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
 
-        assert!(AgentDetector::detect_by_command("claude").is_none());
+        assert!(
+            AgentDetector::detect_by_command_in_env("claude", &windows_fixture_env(&fixture))
+                .is_none()
+        );
+    }
+
+    /// Probe environment for the real Windows Bun fixture, layered over the
+    /// host environment for the probe only (Issue #3895).
+    #[cfg(windows)]
+    fn windows_fixture_env(
+        fixture: &gwt_core::test_support::WindowsBunClaudeFixture,
+    ) -> [(&'static str, &OsStr); 3] {
+        [
+            ("PATH", fixture.bun_bin.as_os_str()),
+            ("PATHEXT", OsStr::new(".COM;.EXE;.BAT;.CMD")),
+            ("USERPROFILE", fixture.profile.as_os_str()),
+        ]
     }
 
     #[test]
@@ -269,9 +309,6 @@ mod tests {
     fn detect_by_command_maps_grok_build_and_version() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp.path().join("grok");
         std::fs::write(&executable, "#!/bin/sh\nprintf '1.0.3\\n'\n")
@@ -282,22 +319,13 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .expect("make Grok Build fixture executable");
-        // Prepend the fixture dir instead of replacing PATH: sibling tests
-        // that spawn `sh` / `git` without the env lock keep resolving them
-        // while this test holds the scoped PATH, and the fixture still wins
-        // the `grok` lookup because it comes first.
-        let scoped_path = std::env::join_paths(
-            std::iter::once(temp.path().to_path_buf()).chain(
-                std::env::var_os("PATH")
-                    .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            ),
-        )
-        .expect("join PATH");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &scoped_path);
 
+        // The fixture PATH is injected into the probe only; the process PATH
+        // stays untouched so parallel `sh` / `git` spawns keep resolving
+        // (Issue #3895).
         let detected =
-            AgentDetector::detect_by_command("grok").expect("Grok Build fixture must be detected");
+            AgentDetector::detect_by_command_in_env("grok", &[("PATH", temp.path().as_os_str())])
+                .expect("Grok Build fixture must be detected");
 
         assert_eq!(detected.agent_id, AgentId::GrokBuild);
         assert_eq!(detected.version.as_deref(), Some("1.0.3"));

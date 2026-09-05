@@ -109,6 +109,59 @@ pub struct ProcessLaunch {
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
+    /// SPEC #1921 Phase 86 (#3813): resource policy applied to the PTY tree
+    /// through the start gate before the target runs. `None` keeps the direct
+    /// spawn route (Shell panes, or isolation disabled).
+    pub(crate) resource_policy: Option<gwt_terminal::pty::ProcessPolicy>,
+}
+
+/// SPEC #1921 Phase 86 (#3813): resolve the AgentBootstrap resource policy
+/// for a launch whose repository is `repo_path`, handing the build
+/// parallelism to build tools through `env` where it is not already pinned. Settings come from
+/// the global profile config; `max_active` from the repository's persisted
+/// Issue Monitor preferences (missing preferences count as one agent).
+fn resolve_agent_resource_launch(
+    profile_config_path: &Path,
+    repo_path: &Path,
+    env: &mut HashMap<String, String>,
+) -> Result<Option<gwt_terminal::pty::ProcessPolicy>, String> {
+    let settings = if profile_config_path.exists() {
+        gwt_config::Settings::load_from_path(profile_config_path).map_err(|error| {
+            format!(
+                "load agent resource policy from {}: {error}",
+                profile_config_path.display()
+            )
+        })?
+    } else {
+        gwt_config::Settings::default()
+    };
+    let max_active =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
+            .map_or(1, |prefs| prefs.max_active_agents);
+    let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
+        &settings.agent.resource,
+        max_active,
+        logical_cores,
+    )
+    .map_err(|error| format!("agent resource policy: {error}"))?;
+    gwt::agent_resource_policy::inject_build_parallelism_env(env, resolved.build_jobs);
+    Ok(resolved.process_policy)
+}
+
+/// Resolve the trusted PTY start-gate program and its hidden entry arguments.
+fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
+    let gate_program = bound_pty_gate_program()
+        .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
+    #[cfg(not(test))]
+    let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
+    #[cfg(test)]
+    let gate_args = vec![
+        "app_runtime::tests::pty_start_gate_helper".to_string(),
+        "--exact".to_string(),
+        "--nocapture".to_string(),
+    ];
+    Ok((gate_program, gate_args))
 }
 
 #[derive(Debug, Clone)]
@@ -812,7 +865,8 @@ fn existing_generation_conflict_detail(
         format!(" held by Session {session_id} ({session_state})")
     });
     format!(
-        "an execution generation already exists for {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
         owner.kind.as_str(),
         owner.number,
         status,
@@ -3659,7 +3713,7 @@ impl AppRuntime {
             }
         }
         .with_project_root(&project_root);
-        let (env, remove_env) = effective_env.into_parts();
+        let (mut env, remove_env) = effective_env.into_parts();
 
         // SPEC-2809 (revised) — Surface the launch pipeline for AI
         // agent presets (Codex / Claude / Gemini / Agent) so the Console
@@ -3670,6 +3724,22 @@ impl AppRuntime {
             preset,
             WindowPreset::Claude | WindowPreset::Codex | WindowPreset::Agent
         );
+        // SPEC #1921 Phase 86 (#3813): agent presets carry the resource
+        // policy and cargo budget; Shell panes keep the direct spawn path.
+        let resource_policy = if is_agent_preset {
+            match self.profile_config_path().and_then(|config_path| {
+                resolve_agent_resource_launch(&config_path, &project_root, &mut env)
+            }) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                    self.window_details.insert(window_id.clone(), error.clone());
+                    return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                }
+            }
+        } else {
+            None
+        };
         let console_kind =
             is_agent_preset.then_some(gwt_core::process_console::ProcessKind::AgentBootstrap);
         let stage_id =
@@ -3697,6 +3767,7 @@ impl AppRuntime {
                 remove_env,
                 cwd: Some(project_root),
                 pending_tool_runtime_migration: None,
+                resource_policy,
             },
             console_kind,
         ) {
@@ -3728,19 +3799,37 @@ impl AppRuntime {
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let pane = Pane::new_with_spawn_config(
-            id.to_string(),
-            gwt_terminal::pty::SpawnConfig {
-                command: launch.command,
-                args: launch.args,
-                cols,
-                rows,
-                env: launch.env,
-                remove_env: launch.remove_env,
-                cwd: launch.cwd,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let resource_policy = launch.resource_policy;
+        let spawn_config = gwt_terminal::pty::SpawnConfig {
+            command: launch.command,
+            args: launch.args,
+            cols,
+            rows,
+            env: launch.env,
+            remove_env: launch.remove_env,
+            cwd: launch.cwd,
+        };
+        // SPEC #1921 Phase 86 (#3813): a policy-bearing AgentBootstrap launch
+        // goes through the start gate so priority / Job limits exist before
+        // the target can create its first descendant. Shell panes stay direct.
+        let pane = if let Some(policy) = resource_policy {
+            let (gate_program, gate_args) = pty_gate_launch_parts()?;
+            let pending = Pane::new_pending_with_spawn_config(
+                id.to_string(),
+                spawn_config,
+                gate_program,
+                gate_args,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+            pending
+                .apply_policy(policy)
+                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            pending.release().map_err(|error| error.to_string())?
+        } else {
+            Pane::new_with_spawn_config(id.to_string(), spawn_config)
+                .map_err(|error| error.to_string())?
+        };
         let incarnation = next_window_runtime_incarnation();
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
@@ -3756,16 +3845,8 @@ impl AppRuntime {
         handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let gate_program = bound_pty_gate_program()
-            .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
-        #[cfg(not(test))]
-        let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
-        #[cfg(test)]
-        let gate_args = vec![
-            "app_runtime::tests::pty_start_gate_helper".to_string(),
-            "--exact".to_string(),
-            "--nocapture".to_string(),
-        ];
+        let (gate_program, gate_args) = pty_gate_launch_parts()?;
+        let resource_policy = launch.resource_policy;
         let pending = Pane::new_pending_with_spawn_config(
             id.to_string(),
             gwt_terminal::pty::SpawnConfig {
@@ -3828,6 +3909,14 @@ impl AppRuntime {
             );
         }
 
+        // SPEC #1921 Phase 86 (#3813): the policy lands on the gated tree
+        // after identity proof and before release, so the target never runs
+        // ungoverned.
+        if let Some(policy) = resource_policy {
+            pending
+                .apply_policy(policy)
+                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+        }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
@@ -4477,6 +4566,14 @@ impl AppRuntime {
                 );
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
+            // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
+            // build parallelism before Docker materializes the exec environment
+            // so container agents receive the same budget variables.
+            let resource_policy = resolve_agent_resource_launch(
+                &profile_config_path,
+                Path::new(&project_root),
+                &mut config.env_vars,
+            )?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
             // launch argv BEFORE the Windows host shell wrapper rewrites it
             // (the `$gwt-*` prompt token moves into an env var / embedded
@@ -4797,6 +4894,7 @@ impl AppRuntime {
                 remove_env: config.remove_env.clone(),
                 cwd: config.working_dir.clone(),
                 pending_tool_runtime_migration,
+                resource_policy,
             };
             Ok((
                 process_launch,
@@ -5490,6 +5588,7 @@ mod docker_session_persistence_tests {
             remove_env: config.remove_env,
             cwd: config.working_dir,
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         };
         assert_eq!(process_launch.command, runtime.binary());
         let workdir_index = process_launch

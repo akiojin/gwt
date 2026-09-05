@@ -136,6 +136,20 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3923 AC-5: switch the saved launch profile's agent.
+        launch_agent: Option<String>,
+    },
+    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
+    /// the usage threshold.
+    MonitorProfiles {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
+    /// and optionally the usage threshold.
+    MonitorProfilesSet {
+        project_root: Option<std::path::PathBuf>,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        usage_threshold_percent: Option<u8>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.
@@ -181,6 +195,29 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+    },
+    /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
+    /// evidence it was formed from.
+    MonitorQuotaHoldList {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3923 AC-1: release one provider's quota hold on the operator's
+    /// authority. The release is a durable fence, so a process that still
+    /// holds the hold in memory cannot re-stamp it.
+    MonitorQuotaHoldClear {
+        project_root: Option<std::path::PathBuf>,
+        provider: String,
+        reason: String,
+    },
+    /// Issue #3844: a launched agent declares (or clears) that it is waiting,
+    /// so the Issue Monitor does not mistake the silence for a stall. `number`
+    /// defaults to the launch context's owner Issue.
+    MonitorWait {
+        project_root: Option<std::path::PathBuf>,
+        number: Option<u64>,
+        reason: Option<String>,
+        resume_condition: Option<String>,
+        clear: bool,
     },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.

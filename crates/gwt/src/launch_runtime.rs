@@ -559,6 +559,8 @@ pub fn build_shell_process_launch(
             remove_env,
             cwd: Some(worktree),
             pending_tool_runtime_migration: None,
+            // Shell panes keep the direct spawn route (SPEC #1921 FR-237).
+            resource_policy: None,
         });
     }
 
@@ -593,6 +595,7 @@ pub fn build_shell_process_launch(
         remove_env: Vec::new(),
         cwd: Some(worktree),
         pending_tool_runtime_migration: None,
+        resource_policy: None,
     })
 }
 
@@ -2244,6 +2247,16 @@ mod tests {
         config
             .env_vars
             .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
+        // Issue #3941: pin the package caches to this fixture so a version
+        // cached on the developer machine cannot turn the timeout into a launch.
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("npm-cache").display().to_string(),
+        );
+        config.env_vars.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            temp.path().join("bun-cache").display().to_string(),
+        );
         config.remove_env.push("REMOVE_SENTINEL".to_string());
         let original = format!("{config:?}");
         let mut probe_calls = Vec::new();

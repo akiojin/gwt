@@ -1041,7 +1041,10 @@ mod tests {
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "hermes".to_string(),
         });
-        state.set_hermes_provider_choices(vec!["zai".to_string(), "ollama-launch".to_string()]);
+        state.set_hermes_launch_choices(gwt_skills::HermesLaunchChoices {
+            providers: vec!["zai".to_string(), "ollama-launch".to_string()],
+            ..Default::default()
+        });
         state.apply(LaunchWizardAction::SetHermesOption {
             field: "provider".to_string(),
             value: "openrouter".to_string(),
@@ -1063,6 +1066,68 @@ mod tests {
             !state.view().show_hermes_options,
             "non-Hermes agents must not show the Hermes section"
         );
+    }
+
+    // Issue #3863 AC-1/AC-2/AC-3: candidates enumerated from the user's
+    // config are exposed per field, and model candidates follow the selected
+    // provider (blank provider = config default provider).
+    #[test]
+    fn hermes_choice_options_follow_selected_provider() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        state.set_hermes_launch_choices(gwt_skills::HermesLaunchChoices {
+            providers: vec!["zai".to_string(), "ollama-launch".to_string()],
+            default_provider: Some("zai".to_string()),
+            models_by_provider: [
+                ("zai".to_string(), vec!["glm-5.2".to_string()]),
+                ("ollama-launch".to_string(), vec!["qwen3.5".to_string()]),
+            ]
+            .into_iter()
+            .collect(),
+            profiles: vec!["concise".to_string(), "pirate".to_string()],
+            toolsets: vec!["terminal".to_string(), "web".to_string()],
+            skills: vec!["github".to_string()],
+        });
+
+        let view = state.view();
+        assert_eq!(view.hermes_provider, "");
+        assert_eq!(view.hermes_model_options, vec!["glm-5.2"]);
+        assert_eq!(view.hermes_profile_options, vec!["concise", "pirate"]);
+        assert_eq!(view.hermes_toolset_options, vec!["terminal", "web"]);
+        assert_eq!(view.hermes_skill_options, vec!["github"]);
+
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "ollama-launch".to_string(),
+        });
+        assert_eq!(state.view().hermes_model_options, vec!["qwen3.5"]);
+
+        // A free-text ("Other…") provider has no known models; the model
+        // field degrades to config default + Other.
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+        assert!(state.view().hermes_model_options.is_empty());
     }
 
     #[test]

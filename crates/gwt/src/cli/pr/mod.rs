@@ -1719,6 +1719,7 @@ mod tests {
                 &mut env,
                 crate::cli::verification_record::VerifyCommand::Run {
                     commands: vec!["git --version".to_string()],
+                    max_wait_secs: None,
                 },
                 &mut verify_out,
             )
@@ -1852,6 +1853,7 @@ mod tests {
                 &mut env,
                 crate::cli::verification_record::VerifyCommand::Run {
                     commands: vec!["git --version".to_string()],
+                    max_wait_secs: None,
                 },
                 &mut verify_out,
             )

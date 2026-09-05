@@ -40,8 +40,9 @@ pub use hooks::{
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
-    hermes_is_configured_global, hermes_provider_choices, hermes_provider_choices_global,
-    hermes_source_home, opencode_is_configured, opencode_is_configured_global,
+    hermes_is_configured_global, hermes_launch_choices, hermes_launch_choices_global,
+    hermes_provider_choices, hermes_source_home, opencode_is_configured,
+    opencode_is_configured_global, HermesLaunchChoices,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
@@ -740,6 +741,21 @@ mod tests {
                 issue_skill.contains("- [ ] AC-1:"),
                 "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
             );
+            // Issue #3930 AC-1: the readiness format is spelled out where
+            // Issues are authored — every heading the classifier scans, the
+            // one it does not, and the un-prefixed checkbox fallback.
+            for phrase in [
+                "`## Acceptance Criteria`, `## 受け入れ基準`,\n    `## 受け入れ条件`",
+                "`## 成功基準` is not scanned",
+                "numbered by position",
+                "Do not mix the two styles",
+                "body or comment",
+            ] {
+                assert!(
+                    issue_skill.contains(phrase),
+                    "expected the readiness format note {phrase:?} in: {relative}"
+                );
+            }
             assert!(
                 issue_skill.contains("\"labels\":[\"auto-merge\"]"),
                 "expected the auto-merge label applied by default at issue.create: {relative}"
@@ -902,6 +918,14 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
+                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
+                // the host-wide lease, and verify.run's own admission is
+                // documented where the loop is defined.
+                "verify.lease.acquire",
+                "verify.lease.release",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -912,6 +936,30 @@ mod tests {
                 !execute_skill.contains("adopt is also the repair path"),
                 "{relative} must not direct integrity-failed records to adopt"
             );
+        }
+
+        // Issue #3913 AC-2: the verification skill's serialization section
+        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let verify_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "## Heavy verification serialization",
+                "`cargo test`",
+                "`cargo clippy`",
+                "verify.lease.acquire",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
+            ] {
+                assert!(
+                    verify_skill.contains(required),
+                    "expected gwt-verify serialization guidance in {relative}: {required}"
+                );
+            }
         }
 
         let execute_command =

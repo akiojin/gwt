@@ -113,10 +113,14 @@ impl LaunchWizardState {
                 && self.agent_needs_configuration("opencode"),
             agent_setup: self.agent_setup_view(show_manual_setup),
             hermes_provider: self.hermes_provider.clone(),
-            hermes_provider_options: self.hermes_provider_choices.clone(),
+            hermes_provider_options: self.hermes_choices.providers.clone(),
+            hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
             hermes_profile: self.hermes_profile.clone(),
+            hermes_profile_options: self.hermes_choices.profiles.clone(),
             hermes_toolsets: self.hermes_toolsets.clone(),
+            hermes_toolset_options: self.hermes_choices.toolsets.clone(),
             hermes_skills: self.hermes_skills.clone(),
+            hermes_skill_options: self.hermes_choices.skills.clone(),
             hermes_max_turns: self.hermes_max_turns.clone(),
             hermes_safe_mode: self.hermes_safe_mode,
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
@@ -1656,6 +1660,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             windows_shell: None,
+            hermes: Default::default(),
         };
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260523-1406"),

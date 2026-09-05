@@ -133,7 +133,11 @@ fn needs_human_monitor(issue_number: u64) -> IssueMonitorState {
         ..IssueMonitorConfig::default()
     });
     monitor.record_candidate(issue(issue_number, &["bug"]));
-    monitor.escalate_to_needs_human(issue_number, "operator decision required");
+    monitor.escalate_to_needs_human(
+        issue_number,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "operator decision required",
+    );
     monitor
 }
 
@@ -1484,7 +1488,11 @@ fn explicit_closed_candidate_removes_all_current_needs_human_state() {
     let repo = tempfile::tempdir().expect("tempdir");
     let mut monitor = needs_human_monitor(42);
     monitor.record_candidate(issue(99, &["bug"]));
-    monitor.escalate_to_needs_human(99, "unrelated failure");
+    monitor.escalate_to_needs_human(
+        99,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "unrelated failure",
+    );
     let mut closed = issue(42, &["bug"]);
     closed.state = IssueMonitorIssueState::Closed;
     closed.updated_at = Some("2026-08-02T00:00:00Z".to_string());
@@ -2316,6 +2324,9 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         pr_number: None,
         reviewed_sha: None,
         review_passed: None,
+        wait: None,
+        needs_human_kind: None,
+        steering: None,
     });
     let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
     scan_issue_monitor_candidates(

@@ -141,6 +141,26 @@ Safely stop processing or lower/raise the positive concurrency limit:
 JSON
 ```
 
+Read the launch candidate pool (ordered providers, their rate-limit holds, and
+the usage threshold), or replace it whole. With two or more candidates the
+Monitor skips held and `limit_reached` providers, ranks the rest by
+`prefer_for` match (soft-avoiding the implementer's provider for an
+independent review), and launches the first candidate whose usage is unknown
+or below `usage_threshold_percent` (when every candidate is above it, the
+lowest known usage wins), so one rate-limited provider does not stop the
+queue. `agent_id` is the
+only required field per candidate; providers must be unique and known, and
+`prefer_for` tags use `type:<cc-type>` / `kind:spec|issue` / `label:<name>`:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.profiles","params":{}}
+JSON
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.profiles.set","params":{"profiles":[{"agent_id":"codex","prefer_for":["type:fix"]},{"agent_id":"claude"}],"usage_threshold_percent":80}}
+JSON
+```
+
 Ask the Issue Monitor to take an Issue next — move it to the priority head and
 trigger an immediate scan. The launch itself still goes through the Monitor's
 own claim/slot path, so this can never produce a duplicate agent:
@@ -154,6 +174,30 @@ JSON
 The response reports `scan_delivery`: `immediate` when a daemon accepted the
 scan request, `next-scheduled-scan` when none was reachable (the new order is
 already durable either way).
+
+List every provider-wide quota hold with the evidence it was formed from, and
+release a false one by provider (Issue #3923). The release is a durable fence,
+so no process can re-stamp the old hold from memory:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.quota_hold.list","params":{}}
+JSON
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.quota_hold.clear","params":{"provider":"codex","reason":"usage poller reads 26%; the pane notice was stale"}}
+JSON
+```
+
+Move the fleet to the other provider from the CLI (Issue #3923): `launch_agent`
+switches the saved launch profile's agent, resets model / reasoning to that
+agent's defaults, and keeps the wizard's runtime and Docker choices. It refuses
+when no profile was ever saved:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.config.set","params":{"launch_agent":"claude"}}
+JSON
+```
 
 `enabled=true` and `autonomous_mode=true` are rejected for every JSON caller,
 including the registered PM. Enabling either capability requires an explicit
