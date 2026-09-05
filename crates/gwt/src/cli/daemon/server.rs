@@ -56,6 +56,9 @@ use super::broadcast::{
 
 const ACCEPT_BACKOFF_MS: u64 = 50;
 const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
+/// Issue #3933 AC-3: the ceiling on a candidate-proportional scan budget, so a
+/// pathological in-flight count cannot let one scan run unbounded.
+const ISSUE_MONITOR_SCAN_BUDGET_CEILING: Duration = Duration::from_secs(300);
 const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -300,7 +303,15 @@ async fn run_server_with_shutdown_and_worker_config(
     // The worker owns authority revocation, durable compensations, and child
     // reaping. Do not let the server return (and drop the Tokio runtime) before
     // that shutdown protocol has had its bounded opportunity to complete.
+    // Issue #3933 (review follow-up): the grace must cover the largest scan
+    // deadline the worker can actually install, not the base timeout. A scan is
+    // sized by its readback fan-out (`issue_monitor_scan_budget`) and the
+    // shutdown path waits on that same deadline, so deriving the grace from
+    // `operation_timeout` alone would abort the worker mid-shutdown — and a
+    // started `spawn_blocking` scan cannot be cancelled, leaving authority
+    // settlement and child reaping unfinished.
     let worker_grace = operation_timeout
+        .max(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
         .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT)
         .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT);
     match tokio::time::timeout(worker_grace, &mut issue_monitor_worker).await {
@@ -1020,7 +1031,8 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                     .is_some_and(PendingIssueMonitorAuthorityControls::front_is_authorizing)
             {
                 scan_requested = false;
-                let deadline = Instant::now() + operation_timeout;
+                let deadline =
+                    Instant::now() + issue_monitor_scan_budget(&monitor, operation_timeout);
                 in_flight_scan = Some(InFlightIssueMonitorScan {
                     revision,
                     authority_epoch: monitor.effect_authority_epoch(),
@@ -1458,6 +1470,19 @@ enum IssueMonitorControl {
         issue_number: u64,
         at: String,
     },
+    /// Issue #3844 AC-1: the launched agent declared it is waiting; stuck
+    /// detection skips the issue while the declaration is within its cap.
+    WaitDeclared {
+        issue_number: u64,
+        reason: String,
+        resume_condition: String,
+        at: String,
+    },
+    /// Issue #3844: the agent resumed; ordinary stuck detection applies again.
+    WaitCleared {
+        issue_number: u64,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
@@ -1470,6 +1495,8 @@ enum IssueMonitorControl {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
+        /// Issue #3923 AC-5: switch the saved launch profile's agent.
+        launch_agent: Option<String>,
     },
     /// SPEC #3914 FR-011: replace the launch candidate pool whole.
     ProfilesSet {
@@ -1516,6 +1543,14 @@ enum IssueMonitorControl {
     WindowClosed {
         window_id: String,
         target: Option<crate::IssueMonitorStopTarget>,
+    },
+    /// Issue #3927 (SPEC #3340 Phase 10S, PM ruling `1f7fdc9e`): the GUI
+    /// runtime observed a successful exact terminal delivery and asks the
+    /// daemon to release the slot before it closes the window itself.
+    /// Internal to the gwt runtime / daemon pair — not a public JSON
+    /// operation. The exact identity is mandatory, window included.
+    TerminalDelivered {
+        target: crate::IssueMonitorStopTarget,
     },
 }
 
@@ -1801,15 +1836,24 @@ fn try_apply_issue_monitor_control(
             enabled,
             autonomous_mode,
             max_active_agents,
+            launch_agent,
         } => {
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
                 || max_active_agents == Some(0)
-                || (enabled.is_none() && autonomous_mode.is_none() && max_active_agents.is_none())
+                || (enabled.is_none()
+                    && autonomous_mode.is_none()
+                    && max_active_agents.is_none()
+                    && launch_agent.is_none())
             {
                 return None;
             }
             let mut candidate = monitor.clone();
+            if let Some(launch_agent) = launch_agent.as_deref() {
+                // Issue #3923 AC-5: a switch without a saved profile has
+                // nothing to switch; refuse the whole control unapplied.
+                candidate.switch_launch_profile_agent(launch_agent).ok()?;
+            }
             if let Some(enabled) = enabled {
                 candidate.set_enabled_with_effect_revocation(enabled)?;
             }
@@ -1914,6 +1958,7 @@ fn try_apply_typed_issue_monitor_failure(
                 Some(crate::IssueMonitorFailure::ProviderUsageLimit {
                     provider,
                     resets_at,
+                    evidence,
                 }),
         } => {
             let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
@@ -1928,6 +1973,7 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
+                    evidence,
                     &now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
@@ -2020,6 +2066,21 @@ fn apply_routine_issue_monitor_control(
             monitor.record_autonomous_heartbeat(issue_number, &at);
             false
         }
+        IssueMonitorControl::WaitDeclared {
+            issue_number,
+            reason,
+            resume_condition,
+            at,
+        } => {
+            // The driver decides whether the issue is actually launched; a
+            // declaration for anything else is dropped, not scanned.
+            let _ = monitor.declare_autonomous_wait(issue_number, &reason, &resume_condition, &at);
+            false
+        }
+        IssueMonitorControl::WaitCleared { issue_number, at } => {
+            let _ = monitor.clear_autonomous_wait(issue_number, &at);
+            false
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
             true
@@ -2093,6 +2154,7 @@ fn apply_routine_issue_monitor_control(
             Some(crate::IssueMonitorFailure::ProviderUsageLimit {
                 provider,
                 resets_at,
+                evidence,
             }) => {
                 let issue_number =
                     issue_number.or_else(|| monitor.launched_window_issue(&window_id));
@@ -2106,6 +2168,7 @@ fn apply_routine_issue_monitor_control(
                     &provider,
                     message,
                     resets_at.as_deref(),
+                    evidence,
                     &now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
@@ -2125,6 +2188,9 @@ fn apply_routine_issue_monitor_control(
             // a possibly newer same-id launch.
             None => false,
         },
+        IssueMonitorControl::TerminalDelivered { target } => {
+            monitor.settle_exact_terminal_delivery(&target).is_ok()
+        }
     }
 }
 
@@ -2137,7 +2203,10 @@ fn rebase_issue_monitor_control_candidate(
         IssueMonitorControl::WindowClosed {
             target: Some(target),
             ..
-        } => monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, target.issue_number),
+        }
+        | IssueMonitorControl::TerminalDelivered { target } => {
+            monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, target.issue_number)
+        }
         _ => monitor.rebase_daemon_driver_prefs(disk),
     }
 }
@@ -2370,12 +2439,24 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
                 };
+                // Issue #3923 AC-5: a blank agent name is a malformed control.
+                let launch_agent = match config.get("launch_agent") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => {
+                        let agent = value.as_str()?.trim();
+                        if agent.is_empty() {
+                            return None;
+                        }
+                        Some(agent.to_string())
+                    }
+                };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
                     || max_active_agents == Some(0)
                     || (enabled.is_none()
                         && autonomous_mode.is_none()
-                        && max_active_agents.is_none())
+                        && max_active_agents.is_none()
+                        && launch_agent.is_none())
                 {
                     return None;
                 }
@@ -2383,6 +2464,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     enabled,
                     autonomous_mode,
                     max_active_agents,
+                    launch_agent,
                 });
             }
             if let Some(profiles_set) = payload
@@ -2428,6 +2510,34 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
                 return Some(IssueMonitorControl::Heartbeat { issue_number, at });
+            }
+            if let Some(wait) = payload.get("wait") {
+                let issue_number = wait.get("issue_number")?.as_u64()?;
+                let at = wait
+                    .get("at")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                if wait
+                    .get("clear")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return Some(IssueMonitorControl::WaitCleared { issue_number, at });
+                }
+                let reason = wait
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                let resume_condition = wait
+                    .get("resume_condition")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                return Some(IssueMonitorControl::WaitDeclared {
+                    issue_number,
+                    reason,
+                    resume_condition,
+                    at,
+                });
             }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;
@@ -2589,6 +2699,21 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     });
                 return Some(IssueMonitorControl::WindowClosed { window_id, target });
             }
+            if let Some(delivered) = payload.get("terminal_delivered") {
+                let target = crate::IssueMonitorStopTarget {
+                    issue_number: delivered.get("issue_number")?.as_u64()?,
+                    claim_id: delivered
+                        .get("claim_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    delivery_id: delivered
+                        .get("delivery_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    window_id: Some(delivered.get("window_id")?.as_str()?.to_string()),
+                };
+                return Some(IssueMonitorControl::TerminalDelivered { target });
+            }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
                 .iter()
@@ -2640,6 +2765,20 @@ fn spawn_issue_monitor_scan(
         deadline,
         IssueMonitorWorkerTestHooks::default(),
     )
+}
+
+/// Issue #3933 AC-3: size the scan budget to the readback fan-out it has to
+/// perform. A fixed window is a per-scan budget that every candidate branch has
+/// to share, so the same 60s that is generous for one in-flight issue starves
+/// the tail once several are in flight. The per-candidate allowance matches the
+/// budget each readback is actually given.
+fn issue_monitor_scan_budget(monitor: &crate::IssueMonitorState, base: Duration) -> Duration {
+    let candidates = u32::try_from(monitor.autonomous_in_flight_issues().len()).unwrap_or(u32::MAX);
+    base.saturating_add(
+        crate::issue_monitor_worker::issue_monitor_readback_budget()
+            .saturating_mul(candidates.min(u32::MAX / 2)),
+    )
+    .min(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
 }
 
 fn spawn_issue_monitor_scan_with_deadline(
@@ -3367,9 +3506,15 @@ fn commit_issue_monitor_effect_result(
                     ),
                 ) => {
                     let _ = candidate.complete_pending_effect(&key);
+                    // Issue #3944 AC-5: the auto-merge may still be armed on
+                    // GitHub after the kill switch — an irreversible merge is
+                    // the human's call to approve or disarm by hand.
                     candidate.escalate_to_needs_human(
                         *issue_number,
-                        format!("kill-switch disarm authority failure: {reason}"),
+                        crate::NeedsHumanKind::DestructiveChangeApproval,
+                        format!(
+                            "disarm the PR auto-merge by hand or approve it: kill-switch disarm authority failure: {reason}"
+                        ),
                     );
                     settled = true;
                 }
@@ -3409,11 +3554,16 @@ fn commit_issue_monitor_effect_result(
                             ));
                     }
                     if current_authority {
-                        candidate.escalate_to_needs_human(
+                        // Issue #3944 AC-3: a moved HEAD is re-reviewed by the
+                        // next attempt (the gate's own remediation), never parked.
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        candidate.record_autonomous_failure(
                             *issue_number,
                             format!(
-                                "auto-merge authority rejected: reviewed HEAD {expected}, current HEAD {actual}"
+                                "auto-merge authority rejected: reviewed HEAD {expected}, current HEAD {actual} — re-review"
                             ),
+                            &now,
                         );
                     }
                     settled = true;
@@ -3426,7 +3576,15 @@ fn commit_issue_monitor_effect_result(
                 ) => {
                     let _ = candidate.complete_pending_effect(&key);
                     if current_authority {
-                        candidate.escalate_to_needs_human(*issue_number, reason);
+                        // Issue #3944 AC-3: an authority mismatch while arming
+                        // is mechanical — retry through the ladder, never park.
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        candidate.record_autonomous_failure(
+                            *issue_number,
+                            format!("auto-merge arm authority mismatch: {reason}"),
+                            &now,
+                        );
                     }
                     settled = true;
                 }
@@ -3527,7 +3685,7 @@ fn scan_issue_monitor_once_blocking(
     mut monitor: crate::IssueMonitorState,
     gui_connected: bool,
 ) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
-    use crate::issue_monitor_worker::{IssueMonitorScanFailure, IssueMonitorScanStage};
+    use crate::issue_monitor_worker::IssueMonitorScanStage;
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // Issue #3222: refresh the GUI-owned prefs fields (launch profile / tuning)
@@ -3547,7 +3705,7 @@ fn scan_issue_monitor_once_blocking(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
     )?;
-    let loaded = crate::issue_monitor_worker::run_scan_stage(
+    let mut loaded = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::CandidateLoad,
         || {
             crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
@@ -3557,15 +3715,27 @@ fn scan_issue_monitor_once_blocking(
             )
         },
     )?;
-    if loaded.source == crate::IssueMonitorCandidateSource::Cache {
+    let mut degradations = Vec::new();
+    // Issue #3933 AC-2: a failed live issue list used to discard the whole pass,
+    // which left free agent slots idle for as long as GitHub was unreachable.
+    // The previous scan's successful result now carries the launch stage instead.
+    // Proposals that need a *fresh* issue body — the autonomous eligibility gate
+    // and the in-flight advance below — stay gated on Live provenance, and the
+    // launch stage still runs its own live completion probe per candidate.
+    let candidates_are_from_previous_result =
+        loaded.source == crate::IssueMonitorCandidateSource::Cache;
+    if candidates_are_from_previous_result {
         let error = loaded
             .live_error
             .as_deref()
             .unwrap_or("live issue list unavailable");
-        return Err(IssueMonitorScanFailure::new(
-            IssueMonitorScanStage::CandidateLoad,
-            format!("live issue list failed; cache proposal discarded: {error}"),
-        ));
+        degradations.push(crate::issue_monitor_worker::IssueMonitorScanDegradation {
+            stage: IssueMonitorScanStage::CandidateLoad,
+            target: Some(format!("{owner}/{repo}")),
+            continuation:
+                crate::issue_monitor_worker::IssueMonitorScanContinuation::PreviousCandidates,
+            detail: error.to_string(),
+        });
     }
     let monitor_owner = format!(
         "{}:{}",
@@ -3578,6 +3748,55 @@ fn scan_issue_monitor_once_blocking(
         &scope.project_root,
         &now,
     );
+    // Issue #3933 AC-2 (review follow-up): a previous-result row carries the
+    // state GitHub reported when the list last succeeded, and the launch policy
+    // for an ordinary Issue is "terminal only when GitHub reports Closed". Read
+    // each claimable candidate authoritatively before that row reaches the
+    // inbox, so the launch stage decides on GitHub's current answer rather than
+    // a remembered one. A targeted single-issue read is far cheaper than the
+    // list whose failure put the scan on this path.
+    let confirmed_previous_candidates = if candidates_are_from_previous_result {
+        let claimable_cap = if monitor.has_launch_profile() {
+            monitor.config.max_active.max(1)
+        } else {
+            0
+        };
+        let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
+        let mut confirmed = std::collections::BTreeSet::new();
+        for issue_number in claimable
+            .into_iter()
+            .take(crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT)
+        {
+            let Some(index) = loaded
+                .issues
+                .iter()
+                .position(|issue| issue.number == issue_number)
+            else {
+                continue;
+            };
+            loaded.issues[index] =
+                crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
+                    &scope.project_root,
+                    &owner,
+                    &repo,
+                    &loaded.issues[index],
+                )?;
+            confirmed.insert(issue_number);
+        }
+        if !confirmed.is_empty() {
+            // Re-apply the canonical transition so the inbox rows the launch
+            // stage reads carry the confirmed state, not the remembered one.
+            crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                &mut monitor,
+                &loaded,
+                &scope.project_root,
+                &now,
+            );
+        }
+        confirmed
+    } else {
+        std::collections::BTreeSet::new()
+    };
     crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
@@ -3593,13 +3812,15 @@ fn scan_issue_monitor_once_blocking(
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
     if loaded.authorizes_remote_effects() {
-        crate::issue_monitor_worker::try_apply_autonomous_eligibility(
-            &mut monitor,
-            &loaded.issues,
-            &format!("{owner}/{repo}"),
-            &scope.project_root,
-            &now,
-        )?;
+        degradations.extend(
+            crate::issue_monitor_worker::try_apply_autonomous_eligibility(
+                &mut monitor,
+                &loaded.issues,
+                &format!("{owner}/{repo}"),
+                &scope.project_root,
+                &now,
+            )?,
+        );
     }
     // Issue #3478 (FR-025): drive the question handoffs the intercepting hook
     // wrote. Parking runs BEFORE the stuck sweep so a recognized question frees
@@ -3644,16 +3865,21 @@ fn scan_issue_monitor_once_blocking(
     // (PR detect → review → gate → merge → watch). No-op unless autonomous mode
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
     if loaded.authorizes_remote_effects() {
-        crate::issue_monitor_worker::try_advance_autonomous_in_flight(
-            &mut monitor,
-            &loaded.issues,
-            &format!("{owner}/{repo}"),
-            &scope.project_root,
-            daemon_run_secret(),
-            &now,
-        )?;
+        degradations.extend(
+            crate::issue_monitor_worker::try_advance_autonomous_in_flight(
+                &mut monitor,
+                &loaded.issues,
+                &format!("{owner}/{repo}"),
+                &scope.project_root,
+                daemon_run_secret(),
+                &now,
+            )?,
+        );
     }
-    if loaded.authorizes_remote_effects() && monitor.config.enabled && gui_connected {
+    if (loaded.authorizes_remote_effects() || candidates_are_from_previous_result)
+        && monitor.config.enabled
+        && gui_connected
+    {
         let active_cap = if monitor.has_launch_profile() {
             monitor.config.max_active.max(1)
         } else {
@@ -3672,12 +3898,34 @@ fn scan_issue_monitor_once_blocking(
                     else {
                         return Ok(false);
                     };
+                    // Issue #3933 AC-2 (review follow-up): only a candidate whose
+                    // state was confirmed above may authorize a claim from a
+                    // previous result. An unconfirmed one fails closed.
+                    if candidates_are_from_previous_result
+                        && !confirmed_previous_candidates.contains(&issue_number)
+                    {
+                        return Err(crate::issue_monitor_worker::IssueMonitorScanFailure::new(
+                            IssueMonitorScanStage::CandidateLoad,
+                            format!(
+                                "issue #{issue_number} state was not confirmed for a previous-result launch"
+                            ),
+                        ));
+                    }
                     crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
                         &owner, &repo, issue,
                     )
                 },
             )?;
         }
+    }
+    // Issue #3933 AC-4: a scan that survived a stage failure must say so where a
+    // reader already looks. `last_error` names the stage, the branch, and the
+    // `continued_with_*` disposition, which is what separates "degraded, launch
+    // still ran" from the aborted `scan_failure_fallback` message.
+    if let Some(summary) =
+        crate::issue_monitor_worker::issue_monitor_scan_degradation_summary(&degradations)
+    {
+        monitor.record_scan_error(&now, summary);
     }
     crate::issue_monitor_worker::ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)?;
     Ok(monitor)
@@ -4647,6 +4895,39 @@ if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
       ;;
   esac
 fi
+if [ "$GWT_FAKE_GH_MODE" = "open_pr_readback_hang" ]; then
+  case "$*" in
+    *"--head work/issue-"*)
+      # Issue #3933: one per-branch open-PR readback that outlives every
+      # plausible budget. It must degrade that branch alone, not the scan.
+      sleep 30
+      exit 0
+      ;;
+  esac
+  printf '%s\n' '[{"number":43,"title":"In-flight issue","body":"In-flight body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"},{"number":44,"title":"Queued issue","body":"Queued body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/44","updatedAt":"2026-08-15T00:00:00Z"}]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "issue_list_fail" ]; then
+  case "$*" in
+    *"issue list"*)
+      printf '%s\n' 'gh issue list failed' >&2
+      exit 1
+      ;;
+    *"issue view"*)
+      # Issue #3933: the targeted per-candidate readback the launch stage runs
+      # before it may act on a previous scan's result. Cheaper than the list
+      # whose failure put the scan on this path, and authoritative.
+      if [ "$GWT_FAKE_GH_ISSUE_VIEW_FAILS" = "1" ]; then
+        printf '%s\n' 'gh issue view failed' >&2
+        exit 1
+      fi
+      printf '{"number":44,"title":"Previously loaded issue","body":"Queued body","labels":[{"name":"bug"}],"state":"%s","updatedAt":"2026-08-15T00:00:00Z","comments":[]}\n' "${GWT_FAKE_GH_ISSUE_STATE:-OPEN}"
+      exit 0
+      ;;
+  esac
+  printf '%s\n' '[]'
+  exit 0
+fi
 if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
   printf '%s\n' '[{"number":43,"title":"Live issue","body":"## Acceptance Criteria\n- [ ] AC-1: verified by tests","labels":[{"name":"auto-improve"},{"name":"auto-merge"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
   exit 0
@@ -5276,7 +5557,11 @@ exit 0
             linked_issue_kind: crate::LinkedIssueKind::Issue,
         });
         monitor.set_autonomous_mode(true);
-        monitor.escalate_to_needs_human(43, "human decision required");
+        monitor.escalate_to_needs_human(
+            43,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "human decision required",
+        );
 
         assert!(!super::issue_monitor_gui_connected(&hub));
         super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -6415,6 +6700,71 @@ exit 0
     }
 
     #[test]
+    fn issue_monitor_wait_control_declares_and_clears_the_wait() {
+        // Issue #3844 AC-1/AC-2: the `wait` control carries the agent's
+        // declaration (reason + resume condition) into the driver, where it
+        // suspends stuck detection; `clear:true` ends it.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": {
+                    "issue_number": 42,
+                    "reason": "host 排他の順番待ち",
+                    "resume_condition": "#3791 の verify が完了する",
+                    "at": "2026-06-29T00:10:00Z",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("wait decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "a wait declaration does not request a scan"
+        );
+        let waiting = monitor.autonomous_wait(42).expect("wait recorded");
+        assert_eq!(waiting.reason, "host 排他の順番待ち");
+        assert_eq!(waiting.resume_condition, "#3791 の verify が完了する");
+        assert_eq!(waiting.since, "2026-06-29T00:10:00Z");
+        assert!(
+            monitor
+                .stuck_autonomous_issues("2026-06-29T02:00:00Z")
+                .is_empty(),
+            "declared wait suspends stuck detection"
+        );
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": { "issue_number": 42, "clear": true, "at": "2026-06-29T02:00:00Z" }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("wait clear decodes");
+        assert!(!apply_issue_monitor_control(&mut monitor, control));
+        assert!(monitor.autonomous_wait(42).is_none());
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T02:31:00Z"),
+            vec![42],
+            "ordinary detection resumes from the clearing heartbeat"
+        );
+    }
+
+    #[test]
     fn window_closed_control_requeues_only_the_exact_durable_claim() {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -6455,6 +6805,78 @@ exit 0
             .expect("current exact close decodes");
         assert!(apply_issue_monitor_control(&mut monitor, current));
         assert_eq!(monitor.active_count(), 0, "current close releases the slot");
+    }
+
+    // Issue #3927 (SPEC #3340 T-630): the internal terminal-delivery control
+    // settles only the exact live launch, releases the slot, and leaves the
+    // legacy `window_closed` requeue contract untouched.
+    #[test]
+    fn terminal_delivered_control_settles_only_the_exact_live_launch() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                launched_claims: std::collections::BTreeMap::from([(
+                    42,
+                    "claim-successor".to_string(),
+                )]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let delivered_payload = |claim_id: &str, window_id: serde_json::Value| {
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "terminal_delivered": {
+                        "issue_number": 42,
+                        "claim_id": claim_id,
+                        "delivery_id": null,
+                        "window_id": window_id,
+                    }
+                }),
+                std::process::id() + 1,
+            )
+        };
+
+        assert!(
+            decode_issue_monitor_control(delivered_payload(
+                "claim-successor",
+                serde_json::Value::Null
+            ))
+            .is_none(),
+            "a delivery without its window is not decodable"
+        );
+        let stale = decode_issue_monitor_control(delivered_payload(
+            "claim-predecessor",
+            serde_json::json!("tab-1::agent-42"),
+        ))
+        .expect("stale settlement decodes");
+        assert!(!apply_issue_monitor_control(&mut monitor, stale));
+        assert_eq!(monitor.active_count(), 1, "stale identity settles nothing");
+
+        let current = decode_issue_monitor_control(delivered_payload(
+            "claim-successor",
+            serde_json::json!("tab-1::agent-42"),
+        ))
+        .expect("current settlement decodes");
+        assert!(apply_issue_monitor_control(&mut monitor, current));
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "exact settlement releases the slot"
+        );
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-42"), None);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .map_or(0, |record| record.attempts),
+            0,
+            "settlement spends no attempt"
+        );
     }
 
     #[test]
@@ -6589,6 +7011,9 @@ exit 0
                 pr_number: None,
                 reviewed_sha: None,
                 review_passed: None,
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -6692,6 +7117,9 @@ exit 0
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
                 review_passed: None,
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -7505,6 +7933,7 @@ exit 0
                 failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit {
                     provider: "codex".to_string(),
                     resets_at: Some(resets_at.to_string()),
+                    evidence: None,
                 }),
             },
         ));
@@ -7922,6 +8351,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                launch_agent: None,
             }
         );
 
@@ -8014,6 +8444,80 @@ exit 0
         }
     }
 
+    /// Issue #3923 AC-5: the daemon applies a launch-agent switch to the
+    /// saved profile and refuses one when no profile was ever saved.
+    #[test]
+    fn issue_monitor_config_set_switches_the_launch_agent_only_with_a_saved_profile() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"config_set": {"launch_agent": "claude"}}),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("launch_agent control");
+        assert_eq!(
+            control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                launch_agent: Some("claude".to_string()),
+            }
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let unsaved = crate::IssueMonitorPrefs::default();
+        crate::save_issue_monitor_prefs(&prefs_path, &unsaved).expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            unsaved.clone(),
+        );
+        assert!(!super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control.clone(),
+        ));
+        assert_eq!(monitor.prefs().launch_profile, None);
+
+        let saved = crate::IssueMonitorPrefs {
+            launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: None,
+                session_mode: Default::default(),
+                skip_permissions: false,
+                codex_fast_mode: true,
+                runtime_target: Default::default(),
+                docker_service: None,
+                docker_lifecycle_intent: Default::default(),
+                windows_shell: None,
+                prefer_for: Vec::new(),
+            }),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &saved).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), saved);
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let profile = persisted.launch_profile.expect("profile persists");
+        assert_eq!(profile.agent_id, "claude");
+        assert_eq!(profile.model, None);
+        assert_eq!(profile.reasoning, None);
+
+        let blank = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"config_set": {"launch_agent": "  "}}),
+            std::process::id() + 1,
+        );
+        assert!(decode_issue_monitor_control(blank).is_none());
+    }
+
     #[test]
     fn issue_monitor_config_set_decoder_rejects_enabling_controls() {
         for config_set in [
@@ -8056,6 +8560,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                launch_agent: None,
             },
         ));
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
@@ -8205,8 +8710,109 @@ exit 0
         assert!(!monitor.prefs().merged_issues.contains(&43));
     }
 
+    /// Issue #3933 AC-1/AC-4/AC-5: one per-branch open-PR readback that outlives
+    /// its budget degrades that branch alone. The scan keeps every other finding,
+    /// still reaches the launch stage in the SAME pass, and says in `last_error`
+    /// which stage/branch degraded and that the scan continued — so an operator
+    /// can tell a degraded scan from a stopped one.
     #[test]
-    fn daemon_scan_preserves_branch_protection_transport_failure_stage() {
+    fn daemon_scan_continues_to_launch_when_open_pr_readback_exceeds_its_budget() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_readback_hang");
+        let _budget = ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS", "300");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let symbolic_ref = gwt_core::process::hidden_command("git")
+            .args([
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("set origin HEAD");
+        assert!(symbolic_ref.success());
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            autonomous_records: vec![crate::AutonomousIssueRecord {
+                phase: crate::AutonomousPhase::Implementing,
+                ..crate::AutonomousIssueRecord::new(43)
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+
+        // Stands in for the production scan budget the worker installs. The
+        // hanging readback must not be allowed to consume all of it.
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_secs(20),
+        );
+        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("a single degraded readback must not abort the scan");
+
+        assert!(
+            scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 44,
+                    ..
+                }
+            )),
+            "the launch stage must still run in the same scan: {:?}",
+            scanned.pending_effects()
+        );
+        assert_eq!(
+            scanned.autonomous_record(43).map(|record| record.phase),
+            Some(crate::AutonomousPhase::Implementing),
+            "an unknown readback keeps the previous phase"
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        assert!(last_error.contains("open-pr-readback"), "{last_error}");
+        assert!(last_error.contains("work/issue-43"), "{last_error}");
+        assert!(
+            last_error.contains("continued_with_stale_readback"),
+            "{last_error}"
+        );
+    }
+
+    /// Issue #3933 AC-2: a branch-protection failure no longer discards the scan.
+    /// The eligibility gate keeps whatever the previous scan decided and the free
+    /// slot is still filled in this pass.
+    #[test]
+    fn daemon_scan_continues_past_branch_protection_failure_to_launch() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -8241,30 +8847,267 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
-        let preserved = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            crate::IssueMonitorPrefs {
-                enabled: true,
-                autonomous_mode: true,
-                ..crate::IssueMonitorPrefs::default()
-            },
-        );
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 1,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
         crate::save_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
-            &preserved.prefs(),
+            &prefs,
         )
         .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
 
-        let failure = super::scan_issue_monitor_once_blocking(scope, preserved.clone(), false)
-            .expect_err("branch-protection transport failure stays typed");
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("a branch-protection failure must not discard the scan");
+
+        assert!(
+            scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "the free slot must still be filled: {:?}",
+            scanned.pending_effects()
+        );
+        assert!(
+            scanned.prefs().autonomous_records.is_empty(),
+            "an unknown protection snapshot must not invent an eligibility decision"
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        assert!(last_error.contains("branch-protection"), "{last_error}");
+        assert!(
+            last_error.contains("continued_with_previous_candidates"),
+            "{last_error}"
+        );
+    }
+
+    /// Issue #3933 AC-2: when the live issue list fails, the scan launches from
+    /// the previous successful result instead of throwing the whole pass away.
+    #[test]
+    fn daemon_scan_launches_from_previous_candidates_when_live_issue_list_fails() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed the previous successful candidate result");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("a previous candidate result must keep the launch stage alive");
+
+        assert!(
+            scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 44,
+                    ..
+                }
+            )),
+            "the free slot must be filled from the previous result: {:?}",
+            scanned.pending_effects()
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        assert!(last_error.contains("candidate-load"), "{last_error}");
+        assert!(
+            last_error.contains("continued_with_previous_candidates"),
+            "{last_error}"
+        );
+    }
+
+    /// Issue #3933 AC-2 (review follow-up): a previous scan's result may name an
+    /// issue GitHub has since closed. The completion probe decides an ordinary
+    /// Issue from the loaded row's own state, so the fallback must re-read that
+    /// state authoritatively rather than launch on a stale `Open`.
+    #[test]
+    fn a_candidate_closed_since_the_previous_scan_is_not_launched_from_the_fallback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+        // GitHub closed #44 after the scan that produced the cached result.
+        let _state = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_STATE", "CLOSED");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed a previous result that is now stale");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("the scan still completes");
+
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "a closed issue must never be claimed from a stale previous result: {:?}",
+            scanned.pending_effects()
+        );
+    }
+
+    /// Issue #3933 AC-2 (review follow-up): if the authoritative state cannot be
+    /// read either, the fallback has nothing trustworthy to launch from and the
+    /// scan fails closed rather than guessing the candidate is still open.
+    #[test]
+    fn the_fallback_fails_closed_when_the_candidate_state_cannot_be_confirmed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+        let _view = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_VIEW_FAILS", "1");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed the previous result");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let failure = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect_err("an unconfirmable candidate state must not authorize a launch");
 
         assert_eq!(
             failure.stage,
-            crate::issue_monitor_worker::IssueMonitorScanStage::BranchProtection
+            crate::issue_monitor_worker::IssueMonitorScanStage::CandidateLoad
         );
-        assert!(failure.detail.contains("deadline"), "{failure}");
-        assert!(preserved.pending_effects().is_empty());
-        assert!(preserved.prefs().autonomous_records.is_empty());
     }
 
     #[test]
@@ -8769,6 +9612,9 @@ exit 0
                     pr_number: None,
                     reviewed_sha: None,
                     review_passed: None,
+                    wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -9257,6 +10103,9 @@ exit 1
                     pr_number: Some(99),
                     reviewed_sha: Some("abc".to_string()),
                     review_passed: Some(true),
+                    wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -11006,7 +11855,6 @@ exit 1
         assert_eq!(
             scanned.record_autonomous_failure(
                 42,
-                crate::FailureClass::Transient,
                 "agent exited before review",
                 "2026-08-13T00:00:00Z",
             ),
@@ -11065,7 +11913,6 @@ exit 1
         assert!(matches!(
             stale_scan.record_autonomous_failure(
                 42,
-                crate::FailureClass::Transient,
                 "agent exited before review",
                 "2026-08-13T00:00:00Z",
             ),
@@ -11123,7 +11970,6 @@ exit 1
         assert!(matches!(
             scanned.record_autonomous_failure(
                 42,
-                crate::FailureClass::Transient,
                 "agent exited before review",
                 "2026-08-13T00:00:00Z",
             ),
@@ -11135,7 +11981,11 @@ exit 1
             .contains_key(&42));
 
         let mut terminal_writer = canonical.clone();
-        terminal_writer.escalate_to_needs_human(42, "terminal agent failure");
+        terminal_writer.escalate_to_needs_human(
+            42,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "terminal agent failure",
+        );
         crate::save_issue_monitor_prefs(&prefs_path, &terminal_writer.prefs())
             .expect("commit newer terminal state");
         assert!(
@@ -11481,6 +12331,9 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11542,6 +12395,9 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
                 review_passed: None,
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11590,6 +12446,9 @@ exit 1
                     pr_number: Some(70),
                     reviewed_sha: Some("sha-7".to_string()),
                     review_passed: None,
+                    wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -11604,6 +12463,9 @@ exit 1
                     pr_number: Some(80),
                     reviewed_sha: Some("sha-8".to_string()),
                     review_passed: None,
+                    wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -11668,6 +12530,9 @@ exit 1
                 pr_number: Some(70),
                 reviewed_sha: Some("sha-7".to_string()),
                 review_passed: None,
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12281,6 +13146,9 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("sha-a".to_string()),
                 review_passed: Some(true),
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12417,6 +13285,9 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12548,6 +13419,9 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12898,6 +13772,9 @@ exit 1
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -13119,6 +13996,9 @@ exit 1
                     pr_number: None,
                     reviewed_sha: None,
                     review_passed: None,
+                    wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14127,6 +15007,9 @@ exit 1
                     pr_number: None,
                     reviewed_sha: None,
                     review_passed: None,
+                    wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14246,7 +15129,11 @@ exit 1
             crate::IssueMonitorConfig::default(),
             legacy_failed_prefs(temp.path()),
         );
-        daemon.escalate_to_needs_human(100, "local terminal failure");
+        daemon.escalate_to_needs_human(
+            100,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "local terminal failure",
+        );
 
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
 
@@ -14411,6 +15298,9 @@ exit 1
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,

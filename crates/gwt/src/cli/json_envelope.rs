@@ -344,6 +344,41 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
         }),
+        "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
+                project_root: optional_path(params, "project_root")?,
+            })
+        }
+        "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: optional_path(params, "project_root")?,
+                provider: required_string(params, "provider")?,
+                // An unexplained release of a provider hold is not auditable.
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "issue.monitor.wait" => {
+            let clear = optional_bool(params, "clear")?.unwrap_or(false);
+            let (reason, resume_condition) = if clear {
+                (
+                    optional_string(params, "reason")?,
+                    optional_string(params, "resume_condition")?,
+                )
+            } else {
+                // An unexplained wait is exactly the state the PM cannot act on.
+                (
+                    Some(required_string(params, "reason")?),
+                    Some(required_string(params, "resume_condition")?),
+                )
+            };
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: optional_path(params, "project_root")?,
+                number: optional_u64(params, "number")?,
+                reason,
+                resume_condition,
+                clear,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -354,9 +389,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
-            if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            let launch_agent = optional_string(params, "launch_agent")?;
+            if enabled.is_none()
+                && autonomous_mode.is_none()
+                && max_active.is_none()
+                && launch_agent.is_none()
+            {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active",
+                    "enabled|autonomous_mode|max_active|launch_agent",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -372,6 +413,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                launch_agent,
             })
         }
         "issue.monitor.profiles" => CliCommand::Issue(IssueCommand::MonitorProfiles {
@@ -517,7 +559,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
+            // Issue #3913: bound on the host admission wait.
+            let max_wait_secs = optional_u64(params, "max_wait_secs")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands,
+                max_wait_secs,
+            })
         }
         "verify.adjudicate" => {
             reject_unknown_params(
@@ -592,12 +639,48 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             reason: optional_string(params, "reason")?,
         }),
         "execution.status" => {
-            if !params.is_empty() {
+            // Issue #3934: with no params this stays the caller's own
+            // diagnosis; `issue` or `spec` asks about any owner in this
+            // repository, which is how an operator finds out who holds a
+            // generation that keeps refusing the queue.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
                 return Err(CliParseError::InvalidJson(
-                    "execution.status accepts no params".to_string(),
+                    "execution.status accepts only issue or spec".to_string(),
                 ));
             }
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+            match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status owner number must be greater than zero".to_string(),
+                    ))
+                }
+                (Some(number), None) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                            number,
+                        },
+                    },
+                ),
+                (None, Some(number)) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                            number,
+                        },
+                    },
+                ),
+                (None, None) => {
+                    CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+                }
+            }
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -1657,6 +1740,36 @@ mod tests {
         }
     }
 
+    /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
+    #[test]
+    fn verify_run_parses_max_wait_secs() {
+        use crate::cli::verification_record::VerifyCommand;
+        assert_eq!(
+            ok(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": 2})
+            ),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: Some(2),
+            })
+        );
+        assert_eq!(
+            ok("verify.run", json!({"commands": ["git --version"]})),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+            })
+        );
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": "soon"})
+            ),
+            CliParseError::InvalidNumber(_)
+        ));
+    }
+
     /// Issue #3510: a failed operation used to leave stdout empty and report
     /// only a bare stderr line, so a machine caller could not tell an
     /// operation failure apart from a crashed process — let alone which stage
@@ -2297,6 +2410,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                launch_agent: None,
             })
         );
         assert_eq!(
@@ -2306,8 +2420,31 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                launch_agent: None,
             })
         );
+    }
+
+    /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
+    #[test]
+    fn issue_monitor_config_set_accepts_launch_agent_alone() {
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"launch_agent": "claude"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("claude".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({})),
+            CliParseError::MissingFlag("enabled|autonomous_mode|max_active|launch_agent")
+        ));
     }
 
     // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
@@ -2439,6 +2576,84 @@ mod tests {
     /// row it recovers has no launch left to name — that is precisely why the
     /// stop and failover operations cannot reach it. A reason stays mandatory:
     /// releasing a hold that something recorded for a cause is auditable work.
+    /// Issue #3844: an agent declares (or clears) a wait for its own launch.
+    /// `number` is optional because the launch context already names the
+    /// owner Issue; `reason` and `resume_condition` are mandatory unless the
+    /// declaration is being cleared, because an unexplained wait is exactly
+    /// the state the PM cannot act on.
+    #[test]
+    fn issue_monitor_wait_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait",
+                json!({
+                    "reason": "host 排他の順番待ち",
+                    "resume_condition": "#3791 の verify が完了する",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: None,
+                number: None,
+                reason: Some("host 排他の順番待ち".to_string()),
+                resume_condition: Some("#3791 の verify が完了する".to_string()),
+                clear: false,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait",
+                json!({ "project_root": "/tmp/project", "number": 42, "clear": true })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: Some(42),
+                reason: None,
+                resume_condition: None,
+                clear: true,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait", json!({"resume_condition": "x"})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait", json!({"reason": "x"})),
+            CliParseError::MissingFlag("resume_condition")
+        ));
+    }
+
+    /// Issue #3923 AC-1: provider quota holds are listed and cleared through
+    /// JSON operations, and a clear must name its provider and reason.
+    #[test]
+    fn issue_monitor_quota_hold_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.quota_hold.list", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex", "reason": "Codex is not rate limited"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "Codex is not rate limited".to_string(),
+            })
+        );
+        assert!(matches!(
+            err(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex"})
+            ),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.quota_hold.clear", json!({"reason": "x"})),
+            CliParseError::MissingFlag("provider")
+        ));
+    }
+
     #[test]
     fn issue_monitor_requeue_parses() {
         assert_eq!(
@@ -2602,6 +2817,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                launch_agent: None,
             })
         );
     }
@@ -2847,7 +3063,37 @@ mod tests {
         assert!(matches!(
             err("execution.status", json!({"unexpected": true})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts no params")
+                if message.contains("accepts only issue or spec")
+        ));
+        // Issue #3934: an operator must be able to ask who holds any owner's
+        // generation, not only the one their own session is bound to.
+        assert!(matches!(
+            ok("execution.status", json!({"issue": 3934})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 3934,
+                }
+        ));
+        assert!(matches!(
+            ok("execution.status", json!({"spec": 3885})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number: 3885,
+                }
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 3934, "spec": 3885})),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 0})),
+            CliParseError::InvalidJson(message) if message.contains("greater than zero")
         ));
         assert!(matches!(
             ok("execution.complete", json!({})),

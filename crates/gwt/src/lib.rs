@@ -1,5 +1,6 @@
 pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
+pub mod agent_resource_policy;
 #[doc(hidden)]
 pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod autonomous_handoff;
@@ -25,6 +26,7 @@ pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_search;
+mod index_status_projection;
 pub mod index_worker;
 pub mod issue_cache;
 pub mod issue_monitor;
@@ -139,21 +141,27 @@ pub use issue_monitor::{
     try_mutate_issue_monitor_prefs, try_mutate_issue_monitor_prefs_without_authority_fence,
     AutonomousHandoffDeliveryAttempt, AutonomousHandoffDeliveryFailureOutcome,
     AutonomousHandoffDeliveryPreparation, AutonomousHandoffResumption, AutonomousIssueRecord,
-    AutonomousPendingQuestion, AutonomousPhase, AutonomousReviewDispatch, EligibilityDecision,
-    FailureClass, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
+    AutonomousPendingQuestion, AutonomousPhase, AutonomousReviewDispatch,
+    AutonomousSteeringRequest, AutonomousWaitDeclaration, AutonomousWaitOutcome,
+    EligibilityDecision, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
     IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
     IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
     IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
     IssueMonitorFailoverOutcome, IssueMonitorFailure, IssueMonitorInboxItem, IssueMonitorIssue,
     IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
-    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest,
+    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfileSource,
+    IssueMonitorLaunchProfileSwitchError, IssueMonitorLaunchRequest,
     IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
-    IssueMonitorPrefs, IssueMonitorProviderQuotaHold, IssueMonitorProviderUsageLimitOutcome,
+    IssueMonitorPrefs, IssueMonitorProviderQuotaHold, IssueMonitorProviderQuotaHoldClearOutcome,
+    IssueMonitorProviderQuotaHoldEvidence, IssueMonitorProviderQuotaHoldRelease,
+    IssueMonitorProviderQuotaPollerWindow, IssueMonitorProviderUsageLimitOutcome,
     IssueMonitorReadiness, IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
     IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
     IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
-    IssueMonitorStopTarget, LaunchProfileSelection, LaunchProfileSkip, MonitorInboxState,
-    PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary,
+    LaunchProfileSelection, LaunchProfileSkip, MonitorInboxState, NeedsHumanKind,
+    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

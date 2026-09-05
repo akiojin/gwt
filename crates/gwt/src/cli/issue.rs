@@ -34,15 +34,17 @@ pub(crate) fn guard_autonomous_acceptance_block(
     let opted_in = labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(crate::issue_monitor::AUTO_MERGE_LABEL));
-    if !opted_in || crate::issue_monitor_gate::classify_acceptance_criteria(body).machine_checkable
-    {
+    if !opted_in {
         return Ok(());
     }
+    let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(body);
+    let Some(missing) = criteria.rejection_reason() else {
+        return Ok(());
+    };
+    // Issue #3930 AC-2: the refusal names the element that is actually missing.
     Err(SpecOpsError::Validation(format!(
-        "the `{}` label opts this Issue into autonomous execution, but the body has no \
-         machine-checkable acceptance criteria block; add a `## 受け入れ基準` (or \
-         `## Acceptance Criteria`) heading followed by `- [ ] AC-1: ...` checklist items \
-         (`## 成功基準` is not scanned), or drop the label",
+        "the `{}` label opts this Issue into autonomous execution, but {missing}; fix the \
+         body or drop the label",
         crate::issue_monitor::AUTO_MERGE_LABEL
     )))
 }
@@ -248,6 +250,29 @@ pub(super) fn run<E: CliEnv>(
             number,
             reason,
         } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, out)?,
+        IssueCommand::MonitorQuotaHoldList { project_root } => {
+            run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorQuotaHoldClear {
+            project_root,
+            provider,
+            reason,
+        } => run_monitor_quota_hold_clear(env, project_root.as_deref(), &provider, &reason, out)?,
+        IssueCommand::MonitorWait {
+            project_root,
+            number,
+            reason,
+            resume_condition,
+            clear,
+        } => run_monitor_wait(
+            env,
+            project_root.as_deref(),
+            number,
+            reason.as_deref(),
+            resume_condition.as_deref(),
+            clear,
+            out,
+        )?,
         IssueCommand::MonitorQuestions { project_root } => {
             run_monitor_questions(env, project_root.as_deref(), out)?
         }
@@ -261,12 +286,14 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            launch_agent,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
             enabled,
             autonomous_mode,
             max_active,
+            launch_agent.as_deref(),
             out,
         )?,
         IssueCommand::MonitorProfiles { project_root } => {
@@ -667,6 +694,122 @@ fn run_monitor_launch_now<E: CliEnv>(
     );
     out.push('\n');
     Ok(if delivery.scan_requested { 0 } else { 1 })
+}
+
+/// Issue #3923 AC-1: list every provider quota hold in force with the evidence
+/// it was formed from.
+///
+/// Read from the daemon's live projection when one is up (the same snapshot
+/// `issue.monitor.status` serves), otherwise from the durable prefs. Expired
+/// holds are not listed: they no longer gate anything.
+fn run_monitor_quota_hold_list<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let holds = live_provider_quota_holds(&project_root)?;
+    out.push_str(
+        &serde_json::json!({
+            "provider_quota_holds": holds,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+fn live_provider_quota_holds(
+    project_root: &std::path::Path,
+) -> Result<Vec<crate::IssueMonitorProviderQuotaHold>, SpecOpsError> {
+    #[cfg(unix)]
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    {
+        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        return Ok(status.provider_quota_holds);
+    }
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Ok(monitor.agent_status_at(&now).provider_quota_holds)
+}
+
+/// Issue #3923 AC-1: release one provider's quota hold.
+///
+/// The release is committed under the prefs lock as a durable fence, so the
+/// daemon (which joins holds by the later reset and would otherwise re-stamp
+/// the hold from memory) adopts the release on its next rebase. Every issue
+/// the hold was holding is readmitted, and one immediate scan is requested so
+/// the queue moves without waiting for the next tick.
+fn run_monitor_quota_hold_clear<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    provider: &str,
+    reason: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Millisecond precision: the fence orders holds by instant, and a hold
+    // formed right after this clear must not share its second.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.clear_provider_quota_hold(provider, reason, &now);
+        if matches!(
+            outcome,
+            crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+        ) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+        released_reset_at,
+        released_issues,
+    } = outcome
+    else {
+        out.push_str(
+            &serde_json::json!({
+                "provider": provider,
+                "status": "refused",
+                "refusal": "unknown_provider",
+                "detail": "provider must name the held agent (for example codex or claude)",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    };
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+    let remaining =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs)
+            .agent_status_at(&now)
+            .provider_quota_holds;
+    out.push_str(
+        &serde_json::json!({
+            "provider": provider,
+            "status": if released_reset_at.is_some() { "cleared" } else { "not_held" },
+            "reason": reason,
+            "released_reset_at": released_reset_at,
+            "released_issues": released_issues,
+            "provider_quota_holds": remaining,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
 }
 
 /// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
@@ -1168,8 +1311,9 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1185,6 +1329,11 @@ fn apply_monitor_config_set(
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
     }
+    if let Some(launch_agent) = launch_agent {
+        candidate
+            .switch_launch_profile_agent(launch_agent)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    }
     *prefs = candidate.prefs();
     Ok(())
 }
@@ -1193,8 +1342,19 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+    if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::IssueMonitorLaunchProfileSwitchError::InvalidAgent.to_string(),
+        ));
+    }
+    if enabled.is_none()
+        && autonomous_mode.is_none()
+        && max_active.is_none()
+        && launch_agent.is_none()
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "at least one Issue Monitor config field is required",
@@ -1223,10 +1383,27 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)
+        .map_err(io_as_api_error)?;
+    // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
+    // before publishing so the daemon never has to reject a control it
+    // cannot explain back to the caller.
+    if launch_agent.is_some() {
+        let prefs = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&project_root),
+        )
+        .map_err(io_as_api_error)?;
+        if prefs.launch_profile.is_none() {
+            return Err(io_as_api_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::IssueMonitorLaunchProfileSwitchError::NoSavedProfile.to_string(),
+            )));
+        }
+    }
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1235,6 +1412,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "launch_agent": launch_agent,
             }
         }),
         std::process::id(),
@@ -1246,7 +1424,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, launch_agent)
         })
         .map_err(io_as_api_error)?;
     }
@@ -1259,6 +1437,9 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
+            "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
+                crate::issue_monitor_launch_profile_summary(&profile.clone().into())
+            }),
         })
         .to_string(),
     );
@@ -1296,7 +1477,7 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
     serde_json::json!({
         "launch_profiles": launch_profiles,
         "launch_profile_summary": status.launch_profile_summary,
-        "provider_holds": status.provider_holds,
+        "provider_quota_holds": status.provider_quota_holds,
         "usage_threshold_percent": status.usage_threshold_percent,
     })
 }
@@ -1456,6 +1637,153 @@ fn publish_monitor_config_set(
             "Issue Monitor daemon control is unavailable on this platform".to_string(),
         ),
     )
+}
+
+/// Issue #3844: the Issue an agent's wait declaration is about. The launch
+/// context (`GWT_AUTONOMOUS_ISSUE`) names the owner, so a monitor-launched
+/// agent may omit `number`; an explicit `number` always wins.
+fn resolve_monitor_wait_issue_number(
+    explicit: Option<u64>,
+    launch_context: Option<&str>,
+) -> Option<u64> {
+    explicit.or_else(|| launch_context?.trim().parse::<u64>().ok())
+}
+
+/// Issue #3844: whether `number` has a live launch in the Issue Monitor that
+/// owns `project_root` — the daemon snapshot when one is running, the
+/// persisted prefs otherwise.
+fn monitor_launch_is_live(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Result<bool, SpecOpsError> {
+    #[cfg(unix)]
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    {
+        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        return Ok(status.active_launches.contains(&number));
+    }
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    Ok(monitor.launched_window_id(number).is_some())
+}
+
+#[cfg(unix)]
+fn publish_monitor_wait_control(
+    project_root: &std::path::Path,
+    wait: serde_json::Value,
+) -> Result<(), String> {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "wait": wait }),
+        std::process::id(),
+    );
+    crate::daemon_publisher::publish_event(
+        project_root,
+        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
+        payload,
+    )
+}
+
+#[cfg(not(unix))]
+fn publish_monitor_wait_control(
+    _project_root: &std::path::Path,
+    _wait: serde_json::Value,
+) -> Result<(), String> {
+    Err("wait declaration publish unavailable on this platform".to_string())
+}
+
+/// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
+/// waiting (`reason`, `resume_condition`) or has resumed (`clear`). The daemon
+/// records the declaration on the issue's autonomous record, where stuck
+/// detection honours it for at most [`crate::AUTONOMOUS_WAIT_MAX_SECS`] and the
+/// PM reads it back from `issue.monitor.status`.
+fn run_monitor_wait<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: Option<u64>,
+    reason: Option<&str>,
+    resume_condition: Option<&str>,
+    clear: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let launch_context = std::env::var(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV).ok();
+    let Some(number) = resolve_monitor_wait_issue_number(number, launch_context.as_deref()) else {
+        out.push_str(
+            &serde_json::json!({
+                "status": "refused",
+                "refusal": "issue_unknown",
+                "detail": "pass params.number, or run inside a monitor-launched session where GWT_AUTONOMOUS_ISSUE names the owner Issue",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    };
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    if !monitor_launch_is_live(&project_root, number)? {
+        // Fail closed: a wait only suspends stuck detection for a launch that
+        // exists, and accepting one for a queued or parked row would tell the
+        // caller it is protected when nothing is.
+        out.push_str(
+            &serde_json::json!({
+                "number": number,
+                "status": "refused",
+                "refusal": "not_launched",
+                "detail": "no live Issue Monitor launch owns this issue; only the running agent of a launched issue can declare a wait",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    }
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let wait = if clear {
+        serde_json::json!({ "issue_number": number, "clear": true, "at": now })
+    } else {
+        serde_json::json!({
+            "issue_number": number,
+            "reason": reason.unwrap_or_default(),
+            "resume_condition": resume_condition.unwrap_or_default(),
+            "at": now,
+        })
+    };
+    match publish_monitor_wait_control(&project_root, wait) {
+        Ok(()) => {
+            let mut response = serde_json::json!({
+                "number": number,
+                "status": if clear { "cleared" } else { "waiting" },
+                "at": now,
+            });
+            if !clear {
+                response["reason"] = serde_json::Value::from(reason.unwrap_or_default());
+                response["resume_condition"] =
+                    serde_json::Value::from(resume_condition.unwrap_or_default());
+                response["max_wait_secs"] =
+                    serde_json::Value::from(crate::AUTONOMOUS_WAIT_MAX_SECS);
+                response["detail"] = serde_json::Value::from(
+                    "stuck detection is suspended for this launch until the wait is cleared or max_wait_secs elapses; clear it with params.clear:true when you resume",
+                );
+            }
+            out.push_str(&response.to_string());
+            out.push('\n');
+            Ok(0)
+        }
+        Err(error) => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "failed",
+                    "detail": format!("wait declaration publish failed: {error}"),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            Ok(1)
+        }
+    }
 }
 
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
@@ -2712,7 +3040,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().expect("tempdir");
-        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let home = tmp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let runtime_path = home.join(".gwt/sessions/runtime/123/session.json");
+        std::fs::create_dir_all(runtime_path.parent().expect("runtime parent"))
+            .expect("runtime directory");
+        std::fs::write(&runtime_path, "{}").expect("runtime evidence");
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
@@ -3124,8 +3458,8 @@ mod tests {
             quota_hold: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
-            provider_holds: Vec::new(),
             usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
@@ -3148,8 +3482,8 @@ mod tests {
             quota_hold: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
-            provider_holds: Vec::new(),
             usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 issue_number: 2338,
@@ -3167,6 +3501,8 @@ mod tests {
                 retry_hold_reason: None,
                 claim_id: None,
                 delivery_id: None,
+                waiting: None,
+                steering: None,
             }],
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
@@ -3239,8 +3575,8 @@ mod tests {
                 quota_hold: None,
                 launch_profile_summary: String::new(),
                 launch_profile_candidates: Vec::new(),
-                provider_holds: Vec::new(),
                 usage_threshold_percent: 80,
+                provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     issue_number: 2338,
@@ -3258,6 +3594,8 @@ mod tests {
                     retry_hold_reason: None,
                     claim_id: None,
                     delivery_id: None,
+                    waiting: None,
+                    steering: None,
                 }],
                 last_error: None,
                 last_scan_at: None,
@@ -3304,8 +3642,8 @@ mod tests {
             quota_hold: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
-            provider_holds: Vec::new(),
             usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
@@ -3430,7 +3768,6 @@ mod tests {
                 "has_launch_profile": false,
                 "launch_profile_summary": "configure before auto start",
                 "launch_profile_candidates": [],
-                "provider_holds": [],
                 "usage_threshold_percent": 80,
                 // SPEC-3431 FR-024: the offline fallback serializes the same
                 // projection as the daemon branch, so a caller sees one shape
@@ -3865,6 +4202,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                launch_agent: None,
             },
             &mut out,
         )
@@ -3886,6 +4224,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                launch_agent: None,
             },
             &mut out,
         )
@@ -3994,7 +4333,7 @@ mod tests {
             .is_some_and(|summary| !summary.is_empty()));
         assert_eq!(payload["launch_profiles"][1]["prefer_for"][0], "kind:spec");
         assert!(payload["launch_profiles"][1].get("held_until").is_none());
-        assert_eq!(payload["provider_holds"][0]["provider"], "codex");
+        assert_eq!(payload["provider_quota_holds"][0]["provider"], "codex");
         assert!(payload["launch_profile_summary"]
             .as_str()
             .is_some_and(|summary| summary.starts_with("auto (2): ")));
@@ -4125,6 +4464,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    launch_agent: None,
                 },
                 &mut out,
             );
@@ -4338,6 +4678,69 @@ mod tests {
             prefs.failed_issues.is_empty(),
             "a failover is not a failure and must not leave a hold behind"
         );
+    }
+
+    /// Issue #3844: a wait declaration is only meaningful for a launch that is
+    /// running right now, so a row without a live launch is refused with zero
+    /// mutation instead of being silently accepted.
+    #[test]
+    fn monitor_wait_refuses_an_issue_without_a_live_launch() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWait {
+                project_root: Some(repo.clone()),
+                number: Some(42),
+                reason: Some("順番待ち".to_string()),
+                resume_condition: Some("前の agent の完了".to_string()),
+                clear: false,
+            },
+            &mut out,
+        )
+        .expect("wait runs");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("\"status\":\"refused\""), "{out}");
+        assert!(out.contains("not_launched"), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused declaration must be zero-mutation"
+        );
+    }
+
+    /// Issue #3844: the launch context names the owner Issue, so an agent may
+    /// omit `number`; an explicit `number` still wins.
+    #[test]
+    fn monitor_wait_issue_number_falls_back_to_the_launch_context() {
+        assert_eq!(
+            resolve_monitor_wait_issue_number(Some(42), Some("3844")),
+            Some(42)
+        );
+        assert_eq!(
+            resolve_monitor_wait_issue_number(None, Some("3844")),
+            Some(3844)
+        );
+        assert_eq!(resolve_monitor_wait_issue_number(None, Some(" ")), None);
+        assert_eq!(resolve_monitor_wait_issue_number(None, None), None);
     }
 
     /// Issue #3645 AC-1 / #3628 AC-2: the recovery an operator reaches for when
@@ -5095,5 +5498,234 @@ mod tests {
         )
         .expect("plain issues keep today's behaviour");
         assert_eq!(code, 0);
+    }
+
+    /// Issue #3923 AC-5: the PM switches the saved profile's agent from the
+    /// CLI; without a saved profile the switch is refused before anything is
+    /// published or written.
+    #[test]
+    fn config_set_launch_agent_switches_the_saved_profile_or_refuses_without_one() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("claude".to_string()),
+            },
+            &mut out,
+        )
+        .is_err());
+        assert!(!prefs_path.exists(), "a refused switch writes nothing");
+
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                    agent_id: "codex".to_string(),
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: None,
+                    session_mode: Default::default(),
+                    skip_permissions: true,
+                    codex_fast_mode: false,
+                    runtime_target: Default::default(),
+                    docker_service: None,
+                    docker_lifecycle_intent: Default::default(),
+                    windows_shell: None,
+                    prefer_for: Vec::new(),
+                }),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("Claude".to_string()),
+            },
+            &mut out,
+        )
+        .expect("config set");
+        assert_eq!(code, 0, "output: {out}");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let profile = prefs.launch_profile.expect("profile survives");
+        assert_eq!(profile.agent_id, "claude");
+        assert_eq!(profile.model, None);
+        assert_eq!(profile.reasoning, None);
+        assert!(
+            profile.skip_permissions,
+            "the wizard's permission choice is kept"
+        );
+    }
+
+    /// Issue #3923 AC-1 / AC-4: the PM lists a provider hold with its evidence
+    /// and clears it by provider; the release is durable and readmits the
+    /// issues the hold was holding.
+    #[test]
+    fn quota_hold_list_and_clear_roundtrip_releases_the_provider_hold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let reset_at = (chrono::Utc::now() + chrono::Duration::days(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    reset_at.clone(),
+                )]),
+                provider_quota_hold_evidence: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    crate::IssueMonitorProviderQuotaHoldEvidence {
+                        recorded_at: "2026-09-02T09:01:00Z".to_string(),
+                        source: "screen_notice".to_string(),
+                        issue_number: Some(42),
+                        window_id: Some("tab-1::agent-42".to_string()),
+                        screen_text: Some("You've hit your usage limit".to_string()),
+                        poller_state: Some("ok".to_string()),
+                        poller_limit_reached: Some(false),
+                        poller_windows: vec![crate::IssueMonitorProviderQuotaPollerWindow {
+                            kind: "weekly".to_string(),
+                            used_percent: 26,
+                        }],
+                    },
+                )]),
+                autonomous_records: vec![crate::AutonomousIssueRecord {
+                    issue_number: 42,
+                    retry_not_before: Some(reset_at.clone()),
+                    retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                    retry_hold_provider: Some("codex".to_string()),
+                    ..crate::AutonomousIssueRecord::new(42)
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldList { project_root: None },
+            &mut out,
+        )
+        .expect("list result");
+        assert_eq!(code, 0);
+        let listed: serde_json::Value = serde_json::from_str(out.trim()).expect("list JSON");
+        assert_eq!(listed["provider_quota_holds"][0]["provider"], "codex");
+        assert_eq!(listed["provider_quota_holds"][0]["reset_at"], reset_at);
+        assert_eq!(
+            listed["provider_quota_holds"][0]["evidence"]["screen_text"],
+            "You've hit your usage limit"
+        );
+        assert_eq!(
+            listed["provider_quota_holds"][0]["evidence"]["poller_windows"][0]["used_percent"],
+            26
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM: Codex is not rate limited".to_string(),
+            },
+            &mut out,
+        )
+        .expect("clear result");
+        assert_eq!(code, 0, "clear output: {out}");
+        let cleared: serde_json::Value = serde_json::from_str(out.trim()).expect("clear JSON");
+        assert_eq!(cleared["provider"], "codex");
+        assert_eq!(cleared["status"], "cleared");
+        assert_eq!(cleared["released_reset_at"], reset_at);
+        assert_eq!(cleared["released_issues"], serde_json::json!([42]));
+        assert_eq!(cleared["provider_quota_holds"], serde_json::json!([]));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.provider_quota_holds.is_empty());
+        assert!(persisted.provider_quota_hold_evidence.is_empty());
+        let release = persisted
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("release fence is durable");
+        assert_eq!(release.reason, "PM: Codex is not rate limited");
+        assert_eq!(
+            release.released_reset_at.as_deref(),
+            Some(reset_at.as_str())
+        );
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("the record survives");
+        assert_eq!(record.retry_not_before, None);
+        assert_eq!(record.retry_hold_provider, None);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldList { project_root: None },
+            &mut out,
+        )
+        .expect("list result");
+        assert_eq!(code, 0);
+        let listed: serde_json::Value = serde_json::from_str(out.trim()).expect("list JSON");
+        assert_eq!(listed["provider_quota_holds"], serde_json::json!([]));
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "again".to_string(),
+            },
+            &mut out,
+        )
+        .expect("second clear result");
+        assert_eq!(code, 0);
+        let cleared: serde_json::Value = serde_json::from_str(out.trim()).expect("clear JSON");
+        assert_eq!(cleared["status"], "not_held");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "   ".to_string(),
+                reason: "x".to_string(),
+            },
+            &mut out,
+        )
+        .expect("unknown provider result");
+        assert_eq!(code, 1);
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "unknown_provider");
     }
 }

@@ -91,6 +91,14 @@ fn normalize_provider_quota_holds(holds: &BTreeMap<String, String>) -> BTreeMap<
     normalized
 }
 
+fn normalize_provider_keyed<T: Clone>(map: &BTreeMap<String, T>) -> BTreeMap<String, T> {
+    map.iter()
+        .filter_map(|(provider, value)| {
+            normalize_issue_monitor_provider(provider).map(|provider| (provider, value.clone()))
+        })
+        .collect()
+}
+
 fn concrete_provider_quota_deadline(resets_at: Option<&str>, now: &str) -> String {
     let now = parse_rfc3339_utc(now).unwrap_or_else(chrono::Utc::now);
     let deadline = resets_at
@@ -723,6 +731,14 @@ pub struct IssueMonitorPrefs {
     /// deadlines; per-provider rebases join by the later instant.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_holds: BTreeMap<String, String>,
+    /// Issue #3923 AC-2: what each hold in `provider_quota_holds` was formed
+    /// from, keyed the same way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_quota_hold_evidence: BTreeMap<String, IssueMonitorProviderQuotaHoldEvidence>,
+    /// Issue #3923 AC-1: operator releases that fence stale holds across every
+    /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     /// Durable launch generation keyed by Issue number. Kept separate from the
@@ -845,6 +861,8 @@ impl Default for IssueMonitorPrefs {
             launch_profiles: Vec::new(),
             launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
+            provider_quota_hold_evidence: BTreeMap::new(),
+            provider_quota_hold_releases: BTreeMap::new(),
             launched_issues: Vec::new(),
             launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
@@ -1078,6 +1096,11 @@ pub enum IssueMonitorFailure {
         /// parseable one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at: Option<String>,
+        /// Issue #3923 AC-2: what the block was read from — the matched screen
+        /// text and the usage poller's reading at that moment — so a false
+        /// hold can be diagnosed from the record instead of guessed at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
     },
 }
 
@@ -1387,6 +1410,10 @@ pub struct IssueMonitorIssue {
     pub title: String,
     pub labels: Vec<String>,
     pub state: IssueMonitorIssueState,
+    /// The acceptance-criteria source text the autonomous gate classifies.
+    /// The Issue body; for a gwt-spec Issue whose `spec` section is routed to
+    /// a comment, the assembled section is appended so the block is seen
+    /// regardless of storage (Issue #3930 AC-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1472,6 +1499,26 @@ pub struct IssueMonitorStopTarget {
     pub claim_id: Option<String>,
     pub delivery_id: Option<String>,
     pub window_id: Option<String>,
+}
+
+/// Issue #3927 (SPEC #3340 FR-044): the durable Monitor facts the runtime's
+/// canonical terminal predicate reads for one Issue-linked window. Read-only;
+/// the runtime decides, the Monitor only reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IssueMonitorTerminalWindowFacts {
+    /// The Monitor durably binds this exact window to the Issue.
+    pub binds_this_window: bool,
+    /// The Monitor durably binds the Issue to a different window: this
+    /// launch was replaced (failover / relaunch).
+    pub binds_other_window: bool,
+    /// A durable closed-Issue record or validated Issue-wide completion
+    /// exists.
+    pub issue_closed: bool,
+    /// The row is parked for a human.
+    pub needs_human: bool,
+    /// A failure record (launch / agent failure or operator stop) holds the
+    /// Issue.
+    pub failure_hold: bool,
 }
 
 /// SPEC-3431 FR-033: why a stop request was refused. Every variant leaves the
@@ -1568,6 +1615,171 @@ pub struct IssueMonitorLaunchPlan {
 pub struct IssueMonitorProviderQuotaHold {
     pub provider: String,
     pub reset_at: String,
+    /// Issue #3923 AC-2: the evidence the hold was formed from, when the
+    /// process that formed it recorded any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+}
+
+/// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaPollerWindow {
+    pub kind: String,
+    /// Whole percent, `0..=100`. Rounded so the state stays `Eq`.
+    pub used_percent: u8,
+}
+
+/// Issue #3923 AC-2: what a provider quota hold was formed from.
+///
+/// The incident this records against was a hold whose only basis was a stale
+/// notice at the bottom of a pane while the poller read the account at 26%.
+/// Keeping both readings on the hold makes that contradiction visible in
+/// `issue.monitor.status` and in gwt.log instead of requiring a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaHoldEvidence {
+    /// RFC3339 instant the hold was recorded. Compared against a release's
+    /// `released_at` to decide whether that release fences this hold.
+    pub recorded_at: String,
+    /// `screen_notice` (a provider notice on the pane), `usage_poller` (the
+    /// legacy poller-driven release), or `unrecorded` for a path that gave no
+    /// detail.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    /// The screen tail the notice was matched in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_text: Option<String>,
+    /// The poller's `UsageState` for the agent's provider (`ok`, `stale`, ...),
+    /// `None` when the poller had no reading for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poller_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poller_limit_reached: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub poller_windows: Vec<IssueMonitorProviderQuotaPollerWindow>,
+}
+
+impl IssueMonitorProviderQuotaHoldEvidence {
+    /// Evidence for a hold read from a provider notice on `window_id`'s screen.
+    pub fn screen_notice(recorded_at: &str, window_id: &str, screen_text: &str) -> Self {
+        Self {
+            recorded_at: recorded_at.to_string(),
+            source: "screen_notice".to_string(),
+            issue_number: None,
+            window_id: Some(window_id.to_string()),
+            screen_text: Some(screen_text.trim().to_string()).filter(|text| !text.is_empty()),
+            poller_state: None,
+            poller_limit_reached: None,
+            poller_windows: Vec::new(),
+        }
+    }
+
+    /// Attach the usage poller's current reading for `agent_id`'s provider.
+    pub fn with_poller(
+        mut self,
+        agent_id: Option<&str>,
+        accounts: &[gwt_core::usage::ProviderUsage],
+    ) -> Self {
+        let Some(account) = agent_id.and_then(|agent_id| account_for_agent(agent_id, accounts))
+        else {
+            return self;
+        };
+        self.poller_state = Some(usage_state_label(&account.state).to_string());
+        self.poller_limit_reached = Some(account.limit_reached);
+        self.poller_windows = account
+            .windows
+            .iter()
+            .map(|window| IssueMonitorProviderQuotaPollerWindow {
+                kind: window.kind.as_str().to_string(),
+                used_percent: window.used_percent.round().clamp(0.0, 100.0) as u8,
+            })
+            .collect();
+        self
+    }
+}
+
+fn usage_state_label(state: &gwt_core::usage::UsageState) -> &'static str {
+    use gwt_core::usage::UsageState;
+    match state {
+        UsageState::Ok => "ok",
+        UsageState::Disabled => "disabled",
+        UsageState::NoData => "no_data",
+        UsageState::Unavailable { .. } => "unavailable",
+        UsageState::Stale { .. } => "stale",
+    }
+}
+
+/// Issue #3923 AC-1: an operator's explicit release of a provider quota hold.
+///
+/// Holds join by the later reset across every process, so removing one from
+/// disk says nothing to a process that still holds it in memory — it would
+/// re-stamp the hold on its next commit. A release is therefore a published
+/// fact: it voids every hold recorded at or before `released_at` and leaves a
+/// hold recorded after it untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaHoldRelease {
+    pub released_at: String,
+    pub reason: String,
+    /// The reset deadline the hold carried when it was released, for audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_reset_at: Option<String>,
+}
+
+/// Issue #3923 AC-5: why a CLI launch-profile switch was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorLaunchProfileSwitchError {
+    /// The wizard has never saved a profile: the runtime / Docker / session
+    /// choices it carries cannot be invented from an agent name alone.
+    NoSavedProfile,
+    /// The agent name is blank.
+    InvalidAgent,
+}
+
+impl std::fmt::Display for IssueMonitorLaunchProfileSwitchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSavedProfile => f.write_str(
+                "no saved Issue Monitor launch profile; configure one in the GUI before switching its agent",
+            ),
+            Self::InvalidAgent => f.write_str("launch_agent must name an agent (for example codex or claude)"),
+        }
+    }
+}
+
+/// Result of [`IssueMonitorState::clear_provider_quota_hold`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorProviderQuotaHoldClearOutcome {
+    /// `provider` is blank. Any non-blank name resolves to a builtin or
+    /// custom agent id, matching how holds themselves are keyed.
+    UnknownProvider,
+    /// The release is recorded. `released_reset_at` is `None` when nothing was
+    /// held in this snapshot; the release still fences a hold another process
+    /// has not committed yet.
+    Cleared {
+        released_reset_at: Option<String>,
+        released_issues: Vec<u64>,
+    },
+}
+
+/// Whether `release` voids a hold recorded with `evidence`. A hold with no
+/// recorded instant predates evidence recording and is voided by any release.
+///
+/// Writers record both instants with millisecond precision, so a hold formed
+/// right after a clear is ordered after it instead of sharing its second.
+fn provider_quota_hold_is_released(
+    evidence: Option<&IssueMonitorProviderQuotaHoldEvidence>,
+    release: Option<&IssueMonitorProviderQuotaHoldRelease>,
+) -> bool {
+    let Some(released_at) = release.and_then(|release| parse_rfc3339_utc(&release.released_at))
+    else {
+        return false;
+    };
+    match evidence.and_then(|evidence| parse_rfc3339_utc(&evidence.recorded_at)) {
+        Some(recorded_at) => recorded_at <= released_at,
+        None => true,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1595,9 +1807,10 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3914 FR-009: the ordered candidate pool with per-candidate holds.
     #[serde(default)]
     pub launch_profile_candidates: Vec<IssueMonitorLaunchProfileCandidate>,
-    /// SPEC #3914 FR-009: every provider hold still in force.
-    #[serde(default)]
-    pub provider_holds: Vec<IssueMonitorProviderQuotaHold>,
+    /// SPEC #3914 FR-009 / Issue #3923 AC-1: every provider hold still in
+    /// force, whether or not a candidate uses that provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
     /// SPEC #3914 FR-009: the usage demotion threshold.
     #[serde(default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
@@ -1633,10 +1846,13 @@ pub struct IssueMonitorAgentStatus {
     pub launch_profile_summary: String,
     #[serde(default)]
     pub launch_profile_candidates: Vec<IssueMonitorLaunchProfileCandidate>,
-    #[serde(default)]
-    pub provider_holds: Vec<IssueMonitorProviderQuotaHold>,
     #[serde(default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
+    /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
+    /// the PM can see a hold on a provider the profile is not using and
+    /// release it by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
     /// SPEC-3431 FR-024: issues handed back to a human. Previously reachable
     /// only through the daemon's lossy broadcast ring, which made a missed
     /// escalation unrecoverable for an unattended reader.
@@ -1676,7 +1892,8 @@ pub fn rate_limit_reset_for_agent(
     agent_id: &str,
     accounts: &[gwt_core::usage::ProviderUsage],
 ) -> Option<String> {
-    exhausted_account_for_agent(agent_id, accounts)?
+    account_for_agent(agent_id, accounts)
+        .filter(|account| account.limit_reached)?
         .windows
         .iter()
         .filter_map(|window| window.resets_at)
@@ -1694,19 +1911,38 @@ pub fn provider_limit_reached_for_agent(
     agent_id: &str,
     accounts: &[gwt_core::usage::ProviderUsage],
 ) -> bool {
-    exhausted_account_for_agent(agent_id, accounts).is_some()
+    account_for_agent(agent_id, accounts).is_some_and(|account| account.limit_reached)
 }
 
-/// The exhausted account backing `agent_id`, scoped to that agent's own
-/// provider so one drained account never stalls a fleet on another.
-fn exhausted_account_for_agent<'accounts>(
+/// Issue #3923 AC-3: whether the poller independently reports `agent_id`'s
+/// account as usable — a fresh `Ok` reading, `limit_reached` false, and no
+/// window at 100%.
+///
+/// This is the reading that contradicts a stale notice at the bottom of a
+/// pane. Anything short of a fresh reading (stale, unavailable, no data) is
+/// not a contradiction and must not suppress a hold.
+pub fn provider_reports_healthy_for_agent(
+    agent_id: &str,
+    accounts: &[gwt_core::usage::ProviderUsage],
+) -> bool {
+    account_for_agent(agent_id, accounts).is_some_and(|account| {
+        account.state == gwt_core::usage::UsageState::Ok
+            && !account.limit_reached
+            && account
+                .windows
+                .iter()
+                .all(|window| window.used_percent < 100.0)
+    })
+}
+
+/// The poller account backing `agent_id`, scoped to that agent's own provider
+/// so one drained account never stalls a fleet on another.
+fn account_for_agent<'accounts>(
     agent_id: &str,
     accounts: &'accounts [gwt_core::usage::ProviderUsage],
 ) -> Option<&'accounts gwt_core::usage::ProviderUsage> {
     let provider = usage_provider_for_agent(agent_id)?;
-    accounts
-        .iter()
-        .find(|account| account.provider == provider && account.limit_reached)
+    accounts.iter().find(|account| account.provider == provider)
 }
 
 /// The usage-telemetry account backing `agent_id`, when the poller knows one.
@@ -2062,6 +2298,14 @@ pub struct IssueMonitorInboxSummary {
     pub claim_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    /// Issue #3844 AC-2: what the launched agent declared it is waiting for,
+    /// so a silent row can be told apart from a stalled one by its reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<IssueMonitorWaitSummary>,
+    /// Issue #3944 AC-2: the Monitor's open request that the PM steer this
+    /// launch (stuck with a live window, attempts exhausted, or a held gate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<AutonomousSteeringRequest>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -2074,6 +2318,12 @@ pub struct AutonomousIssueSummary {
     /// Issue #3478 (AC-9): why the issue is parked, in operator-facing English.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_human_reason: Option<String>,
+    /// Issue #3944 AC-1: which human-answerable kind parked the issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_kind: Option<NeedsHumanKind>,
+    /// Issue #3944 AC-2: the open steering request for the PM, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<AutonomousSteeringRequest>,
     /// Issue #3478 (AC-9): the question waiting for a human, when the park was
     /// caused by a confirmation question rather than a failed gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2106,6 +2356,12 @@ pub struct IssueMonitorState {
     /// are canonicalized on restore and joined monotonically across rebases.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_holds: BTreeMap<String, String>,
+    /// Issue #3923 AC-2: evidence per held provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_quota_hold_evidence: BTreeMap<String, IssueMonitorProviderQuotaHoldEvidence>,
+    /// Issue #3923 AC-1: release fences per provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
     launched_windows: BTreeMap<u64, String>,
     /// Durable generation for each launched window binding. A successor launch
     /// receives a new claim even when its issue and window ids are reused.
@@ -2345,9 +2601,14 @@ pub enum EligibilityDecision {
     /// `auto-merge` label) — fall back to the existing SPEC #3165 human-gated
     /// flow unchanged.
     HumanGate(String),
-    /// Two-stage opt-in IS satisfied but a safety precondition failed (no
-    /// machine-checkable criteria, unverified branch protection, already
-    /// needs-human, or attempts exhausted) — hand to a human; never auto-run.
+    /// Issue #3944 AC-4: two-stage opt-in IS satisfied but a readiness
+    /// precondition failed (no machine-checkable criteria, or branch protection
+    /// not verified) — the row is `not_ready` with the named reason and is
+    /// re-evaluated on the next scan; never `needs_human`.
+    NotReady(String),
+    /// The row is already parked for a human (`NeedsHuman` phase); the
+    /// predicate never revives it. Issue #3944 AC-1: this is the only
+    /// `NeedsHuman` the predicate reports, and it creates no new park.
     NeedsHuman(String),
 }
 
@@ -2357,18 +2618,17 @@ pub enum EligibilityDecision {
 /// - missing (i) `autonomous_mode` or (ii) the `auto-merge` label ⇒ `HumanGate`
 ///   — these two-stage-opt-in negatives use the existing #3165 gate, NOT
 ///   `NeedsHuman`.
-/// - already needs-human, attempts exhausted, missing (iii) machine-checkable
-///   criteria, or (iv) verified branch protection ⇒ `NeedsHuman(reason)`.
-/// - all satisfied ⇒ `Eligible`.
-#[allow(clippy::too_many_arguments)]
+/// - already needs-human ⇒ `NeedsHuman(reason)` (stays parked).
+/// - missing (iii) machine-checkable criteria or (iv) verified branch
+///   protection ⇒ `NotReady(reason)` (Issue #3944 AC-4).
+/// - all satisfied ⇒ `Eligible`. Issue #3944 AC-2: an exhausted attempt
+///   counter no longer gates here — the capped retry backoff is the throttle.
 pub fn autonomous_eligibility(
     autonomous_mode: bool,
     has_auto_merge_label: bool,
     criteria: &crate::issue_monitor_gate::AcceptanceCriteria,
     protection: &gwt_git::branch_protection::BranchProtectionStatus,
     is_needs_human: bool,
-    attempt_count: u32,
-    max_attempts: u32,
 ) -> EligibilityDecision {
     // Stage 1 — two-stage opt-in. Either negative falls back to the existing
     // human-gated #3165 behavior, NOT to needs-human.
@@ -2378,25 +2638,22 @@ pub fn autonomous_eligibility(
     if !has_auto_merge_label {
         return EligibilityDecision::HumanGate("issue lacks the auto-merge label".to_string());
     }
-    // Stage 2 — safety preconditions. Opt-in is satisfied, so failures here are
-    // NeedsHuman (the user asked for autonomy but it cannot run safely).
     if is_needs_human {
         return EligibilityDecision::NeedsHuman("already escalated to needs-human".to_string());
     }
-    if attempt_count >= max_attempts {
-        return EligibilityDecision::NeedsHuman(format!(
-            "autonomous attempts exhausted ({attempt_count}/{max_attempts})"
-        ));
-    }
+    // Stage 2 — readiness preconditions. Opt-in is satisfied, but the Issue or
+    // the repository is not ready for an unattended run: name the cause and
+    // re-check on the next scan (Issue #3944 AC-4).
     if !criteria.machine_checkable {
-        // Issue #3873 AC-6: a body edit alone never re-evaluates a needs_human
-        // row, so the reason has to carry both the fix and the next operation.
-        return EligibilityDecision::NeedsHuman(
-            "no machine-checkable acceptance criteria block; add a `## 受け入れ基準` heading \
-             with `- [ ] AC-1: ...` items (`## 成功基準` is not scanned), then run \
-             issue.monitor.requeue to re-evaluate"
-                .to_string(),
-        );
+        // Issue #3930 AC-2: name the element that is actually missing. A
+        // `not_ready` row is re-evaluated on every scan, so fixing the body is
+        // the whole remedy.
+        let missing = criteria
+            .rejection_reason()
+            .unwrap_or_else(|| "no machine-checkable acceptance criteria".to_string());
+        return EligibilityDecision::NotReady(format!(
+            "{missing}; the row is re-evaluated on the next scan"
+        ));
     }
     if !protection.is_verified() {
         let reason = match protection {
@@ -2405,7 +2662,7 @@ pub fn autonomous_eligibility(
             }
             _ => "branch protection absent or structurally insufficient".to_string(),
         };
-        return EligibilityDecision::NeedsHuman(reason);
+        return EligibilityDecision::NotReady(reason);
     }
     EligibilityDecision::Eligible
 }
@@ -2427,8 +2684,54 @@ pub enum AutonomousPhase {
     Delivering,
     /// Work merged — terminal success for the autonomous path.
     Merged,
-    /// Escalated to a human (bounded retries exhausted / gate-unavailable).
+    /// Parked for a human decision. Issue #3944: only a destructive-change
+    /// approval or a user choice reaches this phase (see [`NeedsHumanKind`]).
     NeedsHuman,
+}
+
+/// Issue #3944 AC-1: the only two reasons an autonomous Issue may be parked in
+/// `needs_human`. Every other stop cause (stuck/idle, attempts exhausted,
+/// launch failure, readiness, CI, review, branch protection) is an automatic
+/// recovery: a steering request to the PM, a requeue, or `not_ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeedsHumanKind {
+    /// AC-5: a destructive or irreversible change needs the user's approval.
+    DestructiveChangeApproval,
+    /// A spec decision only the user can make.
+    UserChoiceRequired,
+}
+
+impl NeedsHumanKind {
+    /// Operator-facing English label used as the reason-line prefix.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DestructiveChangeApproval => "destructive change approval required",
+            Self::UserChoiceRequired => "user choice required",
+        }
+    }
+
+    /// Stable machine-readable code (matches the serialized form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DestructiveChangeApproval => "destructive_change_approval",
+            Self::UserChoiceRequired => "user_choice_required",
+        }
+    }
+}
+
+/// Issue #3944 AC-2: the Issue Monitor's request that the PM steer a launch it
+/// will not tear down (a live but silent window) or has just requeued past
+/// its attempt cap. Read from `issue.monitor.status`; cleared by the agent's
+/// next liveness signal or by the next launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousSteeringRequest {
+    pub reason: String,
+    /// RFC3339 of the latest request. Also anchors stuck detection so a live
+    /// window is re-flagged once per `stuck_timeout_secs`, not every scan.
+    pub requested_at: String,
+    /// How many times this launch has been flagged without progress.
+    pub count: u32,
 }
 
 /// SPEC #3200 T-022/T-016/T-018: the typed container for one issue's autonomous
@@ -2482,6 +2785,104 @@ pub struct AutonomousIssueRecord {
     /// `None` while review is in flight; `Some(true/false)` once it returns.
     #[serde(default)]
     pub review_passed: Option<bool>,
+    /// Issue #3844: the agent's own statement that its silence is a wait, not
+    /// a stall. While in force (see [`AUTONOMOUS_WAIT_MAX_SECS`]) stuck/idle
+    /// detection skips this record. Cleared when the launch ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<AutonomousWaitDeclaration>,
+    /// Issue #3944 AC-1: why the row is parked, when `phase` is `NeedsHuman`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_kind: Option<NeedsHumanKind>,
+    /// Issue #3944 AC-2: the open steering request for this launch, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<AutonomousSteeringRequest>,
+}
+
+/// Issue #3844: what a launched agent declared it is waiting for.
+///
+/// Waiting is not progress, but it is also not a stall: an agent parked on a
+/// host-exclusivity turn, a PM serialization ruling, or a long verify run it
+/// must not touch produces no heartbeat and is exactly as healthy as a busy
+/// one. The declaration carries the reason and the resume condition so the
+/// PM can read *what* is being waited for from `issue.monitor.status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousWaitDeclaration {
+    pub reason: String,
+    pub resume_condition: String,
+    /// RFC3339 of the first declaration of this continuous wait. Re-declaring
+    /// updates the text but never this anchor, so renewals cannot chain past
+    /// [`AUTONOMOUS_WAIT_MAX_SECS`].
+    pub since: String,
+    /// RFC3339 of the latest (re)declaration.
+    pub declared_at: String,
+}
+
+/// Issue #3844 AC-3: how long one continuous wait declaration suspends stuck
+/// detection. Sized for a serialized verification queue of a few predecessors
+/// at 30–40 minutes each; past it the ordinary `stuck_timeout_secs` rule
+/// applies to the record's heartbeat again, so a declaration can never keep a
+/// genuinely dead agent alive indefinitely.
+pub const AUTONOMOUS_WAIT_MAX_SECS: u64 = 3 * 60 * 60;
+
+/// Outcome of a wait declaration or clearing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousWaitOutcome {
+    /// The wait is recorded; `expires_at` is when it stops protecting the record.
+    Declared {
+        since: String,
+        expires_at: String,
+    },
+    Cleared,
+    /// Clearing found no declaration to clear.
+    NotWaiting,
+    /// Declaring is refused: only a launch that is running can be waiting.
+    NotLaunched,
+}
+
+/// Issue #3844 AC-2: the wait declaration as the PM reads it from an inbox row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWaitSummary {
+    pub reason: String,
+    pub resume_condition: String,
+    pub since: String,
+    /// RFC3339 after which the declaration no longer suspends stuck detection.
+    pub expires_at: String,
+}
+
+fn autonomous_wait_expires_at(since: &str) -> String {
+    rfc3339_plus_secs(since, AUTONOMOUS_WAIT_MAX_SECS).unwrap_or_else(|| since.to_string())
+}
+
+/// Whether `record`'s wait declaration still suspends stuck detection at `now`.
+/// An unparseable anchor fails closed (not in force).
+fn autonomous_wait_in_force(record: &AutonomousIssueRecord, now: &str) -> bool {
+    record
+        .wait
+        .as_ref()
+        .and_then(|wait| rfc3339_elapsed_secs(&wait.since, now))
+        .is_some_and(|elapsed| elapsed < AUTONOMOUS_WAIT_MAX_SECS as i64)
+}
+
+/// Issue #3944 AC-2: seconds since the record's latest liveness anchor — the
+/// agent's last heartbeat or the monitor's last steering request, whichever
+/// is later. `None` with no anchor at all (never judged stuck).
+fn autonomous_liveness_anchor_elapsed_secs(
+    record: &AutonomousIssueRecord,
+    now: &str,
+) -> Option<i64> {
+    let heartbeat = record
+        .last_heartbeat
+        .as_deref()
+        .and_then(|heartbeat| rfc3339_elapsed_secs(heartbeat, now));
+    let steering = record
+        .steering
+        .as_ref()
+        .and_then(|steering| rfc3339_elapsed_secs(&steering.requested_at, now));
+    match (heartbeat, steering) {
+        (Some(heartbeat), Some(steering)) => Some(heartbeat.min(steering)),
+        (Some(elapsed), None) | (None, Some(elapsed)) => Some(elapsed),
+        (None, None) => None,
+    }
 }
 
 /// SPEC #3200 T-043/FR-029: bounded exponential backoff (seconds) for the
@@ -2545,25 +2946,17 @@ pub struct AutonomousNotice {
 /// operation with no GUI connected must not grow the queue without limit.
 const AUTONOMOUS_NOTICE_CAP: usize = 100;
 
-/// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureClass {
-    /// Transient (launch failure / network / abnormal exit): retry with bounded
-    /// backoff until the per-issue attempt counter reaches `max_attempts`.
-    Transient,
-    /// Terminal for autonomous resolution (independent-review rejected, criteria
-    /// unsatisfiable, gate structurally unavailable): escalate to `NeedsHuman`
-    /// immediately — another attempt cannot fix it.
-    Terminal,
-}
-
-/// SPEC #3200 T-042: the routing outcome of dispatching an autonomous failure.
+/// SPEC #3200 T-042 / Issue #3944 AC-2: the routing outcome of dispatching an
+/// autonomous failure or stall. Neither outcome parks the Issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutonomousFailureOutcome {
-    /// Re-queued for another attempt; carries the new attempt count.
+    /// Re-queued for another attempt; carries the new attempt count. At or
+    /// past `max_attempts` the ladder continues at its capped backoff and the
+    /// record carries a steering request for the PM.
     Retry { attempt: u32 },
-    /// Escalated to `NeedsHuman`; carries the human-facing reason.
-    Escalated(String),
+    /// The launch is alive and stays in place: no slot reclaimed, no attempt
+    /// consumed; the PM is asked to steer it (`count` requests so far).
+    SteeringRequested { count: u32 },
 }
 
 impl AutonomousIssueRecord {
@@ -2582,6 +2975,9 @@ impl AutonomousIssueRecord {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         }
     }
 }
@@ -3640,6 +4036,8 @@ impl IssueMonitorState {
             launch_profiles: Vec::new(),
             launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
+            provider_quota_hold_evidence: BTreeMap::new(),
+            provider_quota_hold_releases: BTreeMap::new(),
             launched_windows: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
@@ -3681,6 +4079,11 @@ impl IssueMonitorState {
         state.priority_order = prefs.priority_order;
         state.last_scan_at = prefs.last_scan_at;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
+        state.provider_quota_hold_evidence =
+            normalize_provider_keyed(&prefs.provider_quota_hold_evidence);
+        state.provider_quota_hold_releases =
+            normalize_provider_keyed(&prefs.provider_quota_hold_releases);
+        state.enforce_provider_quota_hold_releases();
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
         // Issue #3627: restore used to re-inject every persisted launch into
@@ -3849,6 +4252,8 @@ impl IssueMonitorState {
             launch_profiles: self.launch_profiles.clone(),
             launch_usage_threshold_percent: self.launch_usage_threshold_percent,
             provider_quota_holds: self.provider_quota_holds.clone(),
+            provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
+            provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
             launched_issues: self
                 .launched_windows
                 .iter()
@@ -4628,61 +5033,102 @@ impl IssueMonitorState {
         self.autonomous_records.remove(&issue_number);
     }
 
-    /// SPEC #3200 T-042/T-033 / FR-026/FR-027: dispatch an autonomous attempt
-    /// failure. Counts the attempt, then either re-queues for a bounded retry
-    /// (transient AND still under `max_attempts`) or escalates to `NeedsHuman`
-    /// (terminal failure, OR transient with attempts exhausted). The retry path
-    /// frees the slot and returns the issue to `Queued` for resume — never a
-    /// fabricated "done" state.
+    /// SPEC #3200 T-042/T-033 / FR-026 / Issue #3944 AC-2/AC-3: dispatch an
+    /// autonomous attempt failure (launch failure, abnormal exit, lost launch,
+    /// gate remediation). Counts the attempt and re-queues for a bounded-backoff
+    /// retry: frees the slot and returns the issue to `Queued` for resume —
+    /// never a fabricated "done" state and never `NeedsHuman`. At or past
+    /// `max_attempts` the ladder keeps its capped backoff and the record carries
+    /// a steering request, so the PM looks at why the attempts keep failing
+    /// instead of the Issue silently parking.
     pub fn record_autonomous_failure(
         &mut self,
         issue_number: u64,
-        class: FailureClass,
         message: impl Into<String>,
         now: &str,
     ) -> AutonomousFailureOutcome {
         let message = message.into();
         let attempt = self.record_attempt(issue_number);
         let max = self.autonomous_tuning.max_attempts;
-        let exhausted = attempt >= max;
-        if matches!(class, FailureClass::Terminal) || exhausted {
-            let reason = if matches!(class, FailureClass::Terminal) {
-                format!("autonomous resolution failed terminally: {message}")
-            } else {
-                format!("autonomous attempts exhausted ({attempt}/{max}): {message}")
-            };
-            self.escalate_to_needs_human(issue_number, reason.clone());
-            AutonomousFailureOutcome::Escalated(reason)
-        } else {
-            let backoff = autonomous_retry_backoff_secs(
-                attempt,
-                self.autonomous_tuning.retry_backoff_base_secs,
-                self.autonomous_tuning.retry_backoff_cap_secs,
-            );
-            // FR-034: surface the transient retry (attempt + reason) so an
-            // unattended failure loop is visible to the operator.
-            self.push_autonomous_notice(
-                "warn",
+        let backoff = autonomous_retry_backoff_secs(
+            attempt,
+            self.autonomous_tuning.retry_backoff_base_secs,
+            self.autonomous_tuning.retry_backoff_cap_secs,
+        );
+        // FR-034: surface the transient retry (attempt + reason) so an
+        // unattended failure loop is visible to the operator.
+        self.push_autonomous_notice(
+            "warn",
+            issue_number,
+            format!(
+                "Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"
+            ),
+        );
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        self.set_active_launch_id(issue_number, None);
+        let record = self.autonomous_record_mut(issue_number);
+        record.retry_not_before = rfc3339_plus_secs(now, backoff);
+        // Issue #3616: this backoff is the retry ladder, not a provider
+        // hold. Leaving a stale quota reason attached would tell the PM to
+        // wait out a reset that no longer gates anything.
+        record.retry_hold_reason = None;
+        record.retry_hold_provider = None;
+        if attempt >= max {
+            self.request_autonomous_steering(
                 issue_number,
-                format!("Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"),
+                format!(
+                    "autonomous attempts exhausted ({attempt}/{max}): {message}; retrying after backoff"
+                ),
+                now,
             );
-            self.clear_active_tracking(issue_number);
-            self.require_fresh_launch_session(issue_number);
-            self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
-            self.set_active_launch_id(issue_number, None);
-            let record = self.autonomous_record_mut(issue_number);
-            record.retry_not_before = rfc3339_plus_secs(now, backoff);
-            // Issue #3616: this backoff is the retry ladder, not a provider
-            // hold. Leaving a stale quota reason attached would tell the PM to
-            // wait out a reset that no longer gates anything.
-            record.retry_hold_reason = None;
-            record.retry_hold_provider = None;
-            self.set_inbox_state(issue_number, MonitorInboxState::Queued);
-            if !self.queue.contains(&issue_number) {
-                self.queue.push_back(issue_number);
-                self.apply_priority_order_to_queue();
-            }
-            AutonomousFailureOutcome::Retry { attempt }
+        }
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
+        AutonomousFailureOutcome::Retry { attempt }
+    }
+
+    /// Issue #3941 AC-3: return a launch that transient infrastructure aborted
+    /// to the queue without spending an attempt. The reason stays on the inbox
+    /// item so an operator can see why the Issue is waiting, and the base
+    /// backoff keeps the retry off the scan that just saturated the host.
+    /// Applies in every mode: the failure is about the host, not the Issue.
+    pub fn record_transient_launch_retry(&mut self, issue_number: u64, message: String, now: &str) {
+        let backoff = autonomous_retry_backoff_secs(
+            1,
+            self.autonomous_tuning.retry_backoff_base_secs,
+            self.autonomous_tuning.retry_backoff_cap_secs,
+        );
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number} launch hit transient infrastructure (retry in {backoff}s, no attempt consumed): {message}"
+            ),
+        );
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        self.set_active_launch_id(issue_number, None);
+        let record = self.autonomous_record_mut(issue_number);
+        record.retry_not_before = rfc3339_plus_secs(now, backoff);
+        record.retry_hold_reason = None;
+        record.retry_hold_provider = None;
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = Some(message);
+        }
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
         }
     }
 
@@ -4712,6 +5158,21 @@ impl IssueMonitorState {
             .get(&issue_number)
             .and_then(|record| record.retry_hold_provider.as_deref())
             .and_then(normalize_issue_monitor_provider);
+        // Issue #3923 AC-1: the provider-wide map is the admission source of
+        // truth and the row's deadline only mirrors it. Once the provider's
+        // hold is released (or has expired) the row is admissible, whichever
+        // process recorded the mirror.
+        if let Some(held) = held_provider.as_deref() {
+            let provider_hold_active = self
+                .provider_quota_holds
+                .get(held)
+                .and_then(|reset_at| parse_rfc3339_utc(reset_at))
+                .zip(parse_rfc3339_utc(now))
+                .is_some_and(|(reset_at, now)| reset_at > now);
+            if !provider_hold_active {
+                return true;
+            }
+        }
         // SPEC #3914 FR-008: the held provider is still held, and the pool
         // offers another provider that is not — whether the operator saved a
         // different primary or a later candidate is simply available.
@@ -4737,7 +5198,64 @@ impl IssueMonitorState {
     /// SPEC #3200 T-045/FR-013: record an observed liveness signal from the
     /// launched agent for `issue_number`. Resets the stuck-detection window.
     pub fn record_autonomous_heartbeat(&mut self, issue_number: u64, now: &str) {
-        self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
+        let record = self.autonomous_record_mut(issue_number);
+        record.last_heartbeat = Some(now.to_string());
+        // Issue #3944 AC-2: progress answers the steering request.
+        record.steering = None;
+    }
+
+    /// Issue #3844 AC-1: record that the launched agent for `issue_number` is
+    /// waiting (`reason`) until `resume_condition`. Refused for anything
+    /// without a live launch. Declaring is itself a liveness signal. A
+    /// re-declaration refreshes the text but keeps the original `since`, so
+    /// the [`AUTONOMOUS_WAIT_MAX_SECS`] cap cannot be extended by renewing.
+    pub fn declare_autonomous_wait(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        resume_condition: &str,
+        now: &str,
+    ) -> AutonomousWaitOutcome {
+        if !self.active_launches.contains(&issue_number) {
+            return AutonomousWaitOutcome::NotLaunched;
+        }
+        self.record_autonomous_heartbeat(issue_number, now);
+        let record = self.autonomous_record_mut(issue_number);
+        let since = record
+            .wait
+            .as_ref()
+            .map(|wait| wait.since.clone())
+            .unwrap_or_else(|| now.to_string());
+        record.wait = Some(AutonomousWaitDeclaration {
+            reason: reason.trim().to_string(),
+            resume_condition: resume_condition.trim().to_string(),
+            since: since.clone(),
+            declared_at: now.to_string(),
+        });
+        AutonomousWaitOutcome::Declared {
+            expires_at: autonomous_wait_expires_at(&since),
+            since,
+        }
+    }
+
+    /// Issue #3844: the agent resumed; ordinary stuck detection applies again
+    /// from this (liveness) instant.
+    pub fn clear_autonomous_wait(&mut self, issue_number: u64, now: &str) -> AutonomousWaitOutcome {
+        let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
+            return AutonomousWaitOutcome::NotWaiting;
+        };
+        if record.wait.take().is_none() {
+            return AutonomousWaitOutcome::NotWaiting;
+        }
+        self.record_autonomous_heartbeat(issue_number, now);
+        AutonomousWaitOutcome::Cleared
+    }
+
+    /// Issue #3844: the current wait declaration for `issue_number`, if any.
+    pub fn autonomous_wait(&self, issue_number: u64) -> Option<&AutonomousWaitDeclaration> {
+        self.autonomous_records
+            .get(&issue_number)
+            .and_then(|record| record.wait.as_ref())
     }
 
     /// SPEC #3200 T-044/T-035/FR-013: launched autonomous issues whose agent has
@@ -4747,7 +5265,9 @@ impl IssueMonitorState {
     /// [`resume_inflight_reviews_after_restart`](Self::resume_inflight_reviews_after_restart)),
     /// and `Delivering` re-polls the persisted PR for its merge commit. Terminal
     /// phases are excluded too. Issues with no heartbeat yet are conservatively
-    /// NOT judged stuck (no liveness data).
+    /// NOT judged stuck (no liveness data). Issue #3844: a record whose agent
+    /// declared a wait (see [`Self::declare_autonomous_wait`]) is skipped
+    /// while the declaration is within [`AUTONOMOUS_WAIT_MAX_SECS`].
     pub fn stuck_autonomous_issues(&self, now: &str) -> Vec<u64> {
         let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
         self.autonomous_records
@@ -4759,21 +5279,27 @@ impl IssueMonitorState {
                     AutonomousPhase::Idle | AutonomousPhase::Implementing
                 )
             })
+            // Issue #3844 AC-1/AC-3: a declared wait is not a stall while its
+            // cap holds; past the cap the heartbeat rule below applies again.
+            .filter(|record| !autonomous_wait_in_force(record, now))
+            // Issue #3944 AC-2: a steering request re-arms the window, so a live
+            // but silent agent is flagged once per timeout, not on every scan.
             .filter(|record| {
-                record
-                    .last_heartbeat
-                    .as_deref()
-                    .and_then(|hb| rfc3339_elapsed_secs(hb, now))
+                autonomous_liveness_anchor_elapsed_secs(record, now)
                     .is_some_and(|elapsed| elapsed >= timeout)
             })
             .map(|record| record.issue_number)
             .collect()
     }
 
-    /// SPEC #3200 T-044/T-045/FR-013: reclaim every stuck autonomous slot,
-    /// dispatching each as a transient failure (retry-with-backoff, or escalate
-    /// to `NeedsHuman` when attempts are exhausted). Idempotent: a reclaimed
-    /// issue is no longer launched, so a second pass finds nothing.
+    /// SPEC #3200 T-044/T-045/FR-013 / Issue #3944 AC-2: handle every stuck
+    /// autonomous launch. A launch whose window is still tracked (alive) is
+    /// left in place and the PM is asked to steer it — tearing down a live
+    /// agent loses its work, and a stall is not a decision the user can make.
+    /// A launch with no window is lost: it is requeued as a transient failure
+    /// (fresh launch). Neither path parks the Issue. Idempotent per stuck
+    /// window: a steering request re-arms the timeout and a requeued issue is
+    /// no longer launched.
     pub fn recover_stuck_autonomous(&mut self, now: &str) -> Vec<(u64, AutonomousFailureOutcome)> {
         // Fail-closed gate: never mutate autonomous state when the mode is off
         // (default), so the SPEC #3165 path is untouched.
@@ -4783,12 +5309,20 @@ impl IssueMonitorState {
         self.stuck_autonomous_issues(now)
             .into_iter()
             .map(|issue_number| {
-                let outcome = self.record_autonomous_failure(
-                    issue_number,
-                    FailureClass::Transient,
-                    "stuck/idle timeout: agent made no progress within stuck_timeout_secs",
-                    now,
-                );
+                let outcome = if self.launched_windows.contains_key(&issue_number) {
+                    let count = self.request_autonomous_steering(
+                        issue_number,
+                        "stuck/idle timeout: the agent window is alive but made no progress within stuck_timeout_secs; send it a one-line instruction",
+                        now,
+                    );
+                    AutonomousFailureOutcome::SteeringRequested { count }
+                } else {
+                    self.record_autonomous_failure(
+                        issue_number,
+                        "stuck/idle timeout: no agent window is bound and no progress within stuck_timeout_secs",
+                        now,
+                    )
+                };
                 (issue_number, outcome)
             })
             .collect()
@@ -4871,10 +5405,56 @@ impl IssueMonitorState {
         resumed
     }
 
-    /// SPEC #3200 FR-027: escalate an issue to the terminal `NeedsHuman` state —
-    /// frees the slot, records the reason, marks the autonomous phase, and never
-    /// auto-relaunches. Reused by the strong-gate path when review rejects.
-    pub fn escalate_to_needs_human(&mut self, issue_number: u64, reason: impl Into<String>) {
+    /// Issue #3944 AC-2: ask the PM to steer `issue_number` — a live launch the
+    /// monitor will not tear down, an attempt ladder past its cap, or a gate
+    /// held by the environment. Records the request on the autonomous record
+    /// (visible in `issue.monitor.status`) and raises a warn notice. The same
+    /// reason is not re-raised within one `stuck_timeout_secs`; past it the
+    /// request is renewed with an incremented `count`. Returns the count.
+    pub fn request_autonomous_steering(
+        &mut self,
+        issue_number: u64,
+        reason: impl Into<String>,
+        now: &str,
+    ) -> u32 {
+        let reason = reason.into();
+        let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
+        let record = self.autonomous_record_mut(issue_number);
+        if let Some(existing) = record.steering.as_ref() {
+            let renewed = rfc3339_elapsed_secs(&existing.requested_at, now)
+                .is_none_or(|elapsed| elapsed >= timeout);
+            if existing.reason == reason && !renewed {
+                return existing.count;
+            }
+        }
+        let count = record
+            .steering
+            .as_ref()
+            .map_or(1, |existing| existing.count.saturating_add(1));
+        record.steering = Some(AutonomousSteeringRequest {
+            reason: reason.clone(),
+            requested_at: now.to_string(),
+            count,
+        });
+        self.push_autonomous_notice(
+            "warn",
+            issue_number,
+            format!("Issue #{issue_number} steering requested ({count}): {reason}"),
+        );
+        count
+    }
+
+    /// SPEC #3200 FR-027 / Issue #3944 AC-1: park an issue in the terminal
+    /// `NeedsHuman` state — frees the slot, records the reason and its
+    /// human-answerable `kind`, marks the autonomous phase, and never
+    /// auto-relaunches. The `kind` is mandatory so no caller can park an Issue
+    /// for a mechanical cause (stuck, exhausted, launch, readiness, CI, review).
+    pub fn escalate_to_needs_human(
+        &mut self,
+        issue_number: u64,
+        kind: NeedsHumanKind,
+        reason: impl Into<String>,
+    ) {
         if self.issue_is_closed(issue_number) {
             return;
         }
@@ -4883,12 +5463,18 @@ impl IssueMonitorState {
         self.push_autonomous_notice(
             "error",
             issue_number,
-            format!("Issue #{issue_number} needs human: {reason}"),
+            format!(
+                "Issue #{issue_number} needs human [{}]: {reason}",
+                kind.as_str()
+            ),
         );
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
         self.set_active_launch_id(issue_number, None);
+        let record = self.autonomous_record_mut(issue_number);
+        record.needs_human_kind = Some(kind);
+        record.steering = None;
         self.failed_issues.insert(issue_number, reason.clone());
         self.released_failures.remove(&issue_number);
         self.last_error = Some(format!("issue #{issue_number}: {reason}"));
@@ -4915,6 +5501,35 @@ impl IssueMonitorState {
         self.autonomous_handoffs
             .iter()
             .find(|handoff| handoff.issue_number == issue_number && handoff.is_open())
+    }
+
+    /// Issue #3944 AC-1/AC-5: the park kind and one-line reason for the
+    /// question that owns `issue_number`'s open handoff, with an optional
+    /// `detail` about why it is (re)parked. A question with no handoff on
+    /// record is a user choice by definition.
+    fn handoff_needs_human(
+        &self,
+        issue_number: u64,
+        detail: Option<&str>,
+    ) -> (NeedsHumanKind, String) {
+        match self.open_autonomous_handoff(issue_number) {
+            Some(handoff) => {
+                let reason = handoff.needs_human_reason();
+                let reason = match detail {
+                    Some(detail) => format!("{reason} [{detail}]"),
+                    None => reason,
+                };
+                (handoff.reason_code.needs_human_kind(), reason)
+            }
+            None => (
+                NeedsHumanKind::UserChoiceRequired,
+                format!(
+                    "{}: {}",
+                    NeedsHumanKind::UserChoiceRequired.label(),
+                    detail.unwrap_or("a question handoff is awaiting a human")
+                ),
+            ),
+        }
     }
 
     /// Absorb handoffs observed outside this driver (hook writes, another
@@ -5000,13 +5615,14 @@ impl IssueMonitorState {
                     );
                 }
                 AutonomousHandoffDeliveryState::Ambiguous { reason, .. } => {
-                    self.escalate_to_needs_human(issue_number, reason);
+                    let (kind, reason) = self.handoff_needs_human(issue_number, Some(&reason));
+                    self.escalate_to_needs_human(issue_number, kind, reason);
                 }
                 AutonomousHandoffDeliveryState::Exhausted { last_error, .. } => {
-                    self.escalate_to_needs_human(
-                        issue_number,
-                        format!("answered handoff delivery attempts are exhausted: {last_error}"),
-                    );
+                    let detail =
+                        format!("answered handoff delivery attempts are exhausted: {last_error}");
+                    let (kind, reason) = self.handoff_needs_human(issue_number, Some(&detail));
+                    self.escalate_to_needs_human(issue_number, kind, reason);
                 }
                 AutonomousHandoffDeliveryState::Pending
                 | AutonomousHandoffDeliveryState::Attempting { .. }
@@ -5078,11 +5694,17 @@ impl IssueMonitorState {
             .filter(|handoff| handoff.state == AutonomousHandoffState::Pending)
             .map(|handoff| {
                 handoff.state = AutonomousHandoffState::AwaitingHuman;
-                (handoff.issue_number, handoff.rationale.clone())
+                // Issue #3944 AC-1/AC-5: the park kind follows the question's
+                // boundary and the reason line says what is being decided.
+                (
+                    handoff.issue_number,
+                    handoff.reason_code.needs_human_kind(),
+                    handoff.needs_human_reason(),
+                )
             })
             .collect::<Vec<_>>();
-        for (issue_number, reason) in pending {
-            self.escalate_to_needs_human(issue_number, reason);
+        for (issue_number, kind, reason) in pending {
+            self.escalate_to_needs_human(issue_number, kind, reason);
             if !parked.contains(&issue_number) {
                 parked.push(issue_number);
             }
@@ -5218,7 +5840,8 @@ impl IssueMonitorState {
                 .get(&issue_number)
                 .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman)
             {
-                self.escalate_to_needs_human(issue_number, reason.clone());
+                let (kind, park_reason) = self.handoff_needs_human(issue_number, Some(&reason));
+                self.escalate_to_needs_human(issue_number, kind, park_reason);
             } else {
                 // Even if another process already projected NeedsHuman, an
                 // unresolved local delivery may still retain launch anchors.
@@ -5313,10 +5936,9 @@ impl IssueMonitorState {
                 last_error: message,
             };
             self.autonomous_handoffs[index].state = AutonomousHandoffState::AwaitingHuman;
-            self.escalate_to_needs_human(
-                self.autonomous_handoffs[index].issue_number,
-                reason.clone(),
-            );
+            let issue_number = self.autonomous_handoffs[index].issue_number;
+            let (kind, park_reason) = self.handoff_needs_human(issue_number, Some(&reason));
+            self.escalate_to_needs_human(issue_number, kind, park_reason);
             return AutonomousHandoffDeliveryFailureOutcome::Escalated { attempt, reason };
         }
 
@@ -5403,12 +6025,11 @@ impl IssueMonitorState {
             reason: reason.clone(),
         };
         self.autonomous_handoffs[index].state = AutonomousHandoffState::AwaitingHuman;
-        self.escalate_to_needs_human(
-            issue_number,
-            format!(
-                "answered handoff delivery attempt {attempt} has an ambiguous submit outcome: {reason}"
-            ),
+        let detail = format!(
+            "answered handoff delivery attempt {attempt} has an ambiguous submit outcome: {reason}"
         );
+        let (kind, park_reason) = self.handoff_needs_human(issue_number, Some(&detail));
+        self.escalate_to_needs_human(issue_number, kind, park_reason);
         true
     }
 
@@ -5472,7 +6093,9 @@ impl IssueMonitorState {
         self.failed_windows.remove(&issue_number);
         self.last_error = None;
         self.set_autonomous_phase(issue_number, AutonomousPhase::Implementing);
-        self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
+        let record = self.autonomous_record_mut(issue_number);
+        record.last_heartbeat = Some(now.to_string());
+        record.needs_human_kind = None;
         // A human answer belongs to the parked conversation. It overrides a
         // stale FreshRequired retry policy left by an earlier generic failure;
         // otherwise the accepted answer would be stranded while a fresh agent
@@ -5697,6 +6320,154 @@ impl IssueMonitorState {
     fn merge_provider_quota_holds_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
         for (provider, reset_at) in &disk.provider_quota_holds {
             merge_provider_quota_hold(&mut self.provider_quota_holds, provider, reset_at);
+        }
+        // A disk entry whose instant does not parse can neither be ordered
+        // nor fence anything, so it never replaces a valid local entry.
+        for (provider, evidence) in normalize_provider_keyed(&disk.provider_quota_hold_evidence) {
+            let Some(disk_at) = parse_rfc3339_utc(&evidence.recorded_at) else {
+                continue;
+            };
+            let newer = self
+                .provider_quota_hold_evidence
+                .get(&provider)
+                .and_then(|local| parse_rfc3339_utc(&local.recorded_at))
+                .is_none_or(|local| disk_at > local);
+            if newer {
+                self.provider_quota_hold_evidence.insert(provider, evidence);
+            }
+        }
+        for (provider, release) in normalize_provider_keyed(&disk.provider_quota_hold_releases) {
+            let Some(disk_at) = parse_rfc3339_utc(&release.released_at) else {
+                continue;
+            };
+            let newer = self
+                .provider_quota_hold_releases
+                .get(&provider)
+                .and_then(|local| parse_rfc3339_utc(&local.released_at))
+                .is_none_or(|local| disk_at > local);
+            if newer {
+                self.provider_quota_hold_releases.insert(provider, release);
+            }
+        }
+        // Issue #3923 AC-1: applied after the joins above, which otherwise
+        // restore the very hold the operator released.
+        self.enforce_provider_quota_hold_releases();
+    }
+
+    /// Issue #3923 AC-1: drop every hold that a recorded release fences.
+    fn enforce_provider_quota_hold_releases(&mut self) {
+        let released = self
+            .provider_quota_holds
+            .keys()
+            .filter(|provider| {
+                provider_quota_hold_is_released(
+                    self.provider_quota_hold_evidence.get(*provider),
+                    self.provider_quota_hold_releases.get(*provider),
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for provider in released {
+            self.provider_quota_holds.remove(&provider);
+            self.provider_quota_hold_evidence.remove(&provider);
+        }
+    }
+
+    /// Issue #3923 AC-5: switch the saved launch profile to `agent` from the
+    /// CLI, so a PM can move the fleet off a held provider without the GUI.
+    ///
+    /// Only the agent changes. Model, reasoning, pinned version, and fast mode
+    /// are provider-specific and are cleared so the new agent's defaults apply;
+    /// session mode, permissions, runtime target, and Docker choices are the
+    /// wizard's and are kept. Idempotent for the current agent.
+    pub fn switch_launch_profile_agent(
+        &mut self,
+        agent: &str,
+    ) -> Result<IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSwitchError> {
+        let Some(agent) = normalize_issue_monitor_provider(agent) else {
+            return Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent);
+        };
+        // SPEC #3914: the switch targets the pool head (the compatibility
+        // `launch_profile`); a later candidate for the same provider is
+        // folded away by the pool's per-provider uniqueness.
+        let Some(profile) = self.launch_profiles.first_mut() else {
+            return Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile);
+        };
+        if normalize_issue_monitor_provider(&profile.agent_id).as_deref() != Some(agent.as_str()) {
+            profile.agent_id = agent;
+            profile.model = None;
+            profile.reasoning = None;
+            profile.version = None;
+            // Fast mode is an explicit per-provider opt-in (the wizard maps it
+            // onto each CLI's own flag), so a switch must not carry it over.
+            profile.codex_fast_mode = false;
+        }
+        let profile = profile.clone();
+        self.launch_profiles =
+            dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
+        Ok(profile)
+    }
+
+    /// Issue #3923 AC-1: release `provider`'s quota hold on the operator's
+    /// authority.
+    ///
+    /// The release is recorded even when nothing is held in this snapshot, so
+    /// a hold another process formed but has not committed yet is fenced too.
+    /// Every issue the hold was holding is readmitted: the provider-wide map is
+    /// the admission source of truth, and the per-issue retry deadline only
+    /// mirrored it.
+    pub fn clear_provider_quota_hold(
+        &mut self,
+        provider: &str,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorProviderQuotaHoldClearOutcome {
+        let Some(provider) = normalize_issue_monitor_provider(provider) else {
+            return IssueMonitorProviderQuotaHoldClearOutcome::UnknownProvider;
+        };
+        // The fence is only as good as its instant: an unparsable `now`
+        // would record a release that fences nothing, so fall back to the
+        // wall clock (millisecond precision, see `provider_quota_hold_is_released`).
+        let released_at = if parse_rfc3339_utc(now).is_some() {
+            now.to_string()
+        } else {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+        let released_reset_at = self.provider_quota_holds.remove(&provider);
+        let evidence = self.provider_quota_hold_evidence.remove(&provider);
+        self.provider_quota_hold_releases.insert(
+            provider.clone(),
+            IssueMonitorProviderQuotaHoldRelease {
+                released_at,
+                reason: reason.to_string(),
+                released_reset_at: released_reset_at.clone(),
+            },
+        );
+        let mut released_issues = Vec::new();
+        for (issue_number, record) in &mut self.autonomous_records {
+            let held_by_provider = record
+                .retry_hold_provider
+                .as_deref()
+                .and_then(normalize_issue_monitor_provider)
+                .is_some_and(|held| held == provider);
+            if held_by_provider {
+                record.retry_not_before = None;
+                record.retry_hold_reason = None;
+                record.retry_hold_provider = None;
+                released_issues.push(*issue_number);
+            }
+        }
+        tracing::warn!(
+            provider = %provider,
+            released_reset_at = ?released_reset_at,
+            released_issues = ?released_issues,
+            evidence = ?evidence,
+            reason = %reason,
+            "Issue Monitor provider quota hold released by operator (Issue #3923)"
+        );
+        IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+            released_reset_at,
+            released_issues,
         }
     }
 
@@ -5938,6 +6709,9 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
         self.set_active_launch_id(issue_number, None);
+        let record = self.autonomous_record_mut(issue_number);
+        record.needs_human_kind = Some(NeedsHumanKind::UserChoiceRequired);
+        record.steering = None;
         self.failed_issues.insert(issue_number, message.clone());
         self.released_failures.remove(&issue_number);
         if let Some(item) = self
@@ -6441,30 +7215,26 @@ impl IssueMonitorState {
             }
         }
         earliest.map(|(provider, deadline)| IssueMonitorProviderQuotaHold {
+            evidence: self.provider_quota_hold_evidence.get(&provider).cloned(),
             provider,
             reset_at: format_rfc3339_utc(deadline),
         })
     }
 
-    /// SPEC #3914 FR-009: every provider hold still in force, in pool order
-    /// first and then any other held provider.
-    fn provider_holds_at(&self, now: &str) -> Vec<IssueMonitorProviderQuotaHold> {
+    /// Issue #3923 AC-1: every provider hold still in force at `now`, whether
+    /// or not it matches the saved launch profile.
+    fn active_provider_quota_holds_at(&self, now: &str) -> Vec<IssueMonitorProviderQuotaHold> {
         let Some(now) = parse_rfc3339_utc(now) else {
             return Vec::new();
         };
-        let mut providers = self.saved_launch_providers();
-        for provider in self.provider_quota_holds.keys() {
-            if !providers.contains(provider) {
-                providers.push(provider.clone());
-            }
-        }
-        providers
-            .into_iter()
-            .filter_map(|provider| {
-                let reset_at = hold_reset_after(&self.provider_quota_holds, &provider, now)?;
-                Some(IssueMonitorProviderQuotaHold {
-                    provider,
-                    reset_at: reset_at.to_string(),
+        self.provider_quota_holds
+            .iter()
+            .filter_map(|(provider, reset_at)| {
+                let deadline = parse_rfc3339_utc(reset_at)?;
+                (deadline > now).then(|| IssueMonitorProviderQuotaHold {
+                    provider: provider.clone(),
+                    reset_at: format_rfc3339_utc(deadline),
+                    evidence: self.provider_quota_hold_evidence.get(provider).cloned(),
                 })
             })
             .collect()
@@ -6556,7 +7326,7 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             quota_hold,
             launch_profile_candidates: self.launch_profile_candidates_at(now),
-            provider_holds: self.provider_holds_at(now),
+            provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
             autonomous_issues: self
                 .autonomous_records
@@ -6572,6 +7342,8 @@ impl IssueMonitorState {
                         needs_human_reason: needs_human
                             .then(|| self.failed_issues.get(&record.issue_number).cloned())
                             .flatten(),
+                        needs_human_kind: needs_human.then_some(record.needs_human_kind).flatten(),
+                        steering: record.steering.clone(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
                             question: handoff.question.clone(),
@@ -6637,8 +7409,8 @@ impl IssueMonitorState {
             quota_hold: status.quota_hold.clone(),
             launch_profile_summary: status.launch_profile_summary.clone(),
             launch_profile_candidates: status.launch_profile_candidates.clone(),
-            provider_holds: status.provider_holds.clone(),
             usage_threshold_percent: status.usage_threshold_percent,
+            provider_quota_holds: self.active_provider_quota_holds_at(now),
             needs_human: status
                 .autonomous_issues
                 .iter()
@@ -6685,6 +7457,17 @@ impl IssueMonitorState {
                         // match it enforces is unsatisfiable from the PM's side.
                         claim_id: self.live_claim_id(item.issue.number),
                         delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                        waiting: self.autonomous_wait(item.issue.number).map(|wait| {
+                            IssueMonitorWaitSummary {
+                                reason: wait.reason.clone(),
+                                resume_condition: wait.resume_condition.clone(),
+                                since: wait.since.clone(),
+                                expires_at: autonomous_wait_expires_at(&wait.since),
+                            }
+                        }),
+                        steering: self
+                            .autonomous_record(item.issue.number)
+                            .and_then(|record| record.steering.clone()),
                     }
                 })
                 .collect(),
@@ -6948,7 +7731,6 @@ impl IssueMonitorState {
         let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
             issue.body.as_deref().unwrap_or(""),
         );
-        let attempt_count = self.attempt_count(number);
         let is_needs_human = self
             .autonomous_record(number)
             .map(|record| record.phase == AutonomousPhase::NeedsHuman)
@@ -6959,8 +7741,6 @@ impl IssueMonitorState {
             &criteria,
             branch_protection,
             is_needs_human,
-            attempt_count,
-            self.autonomous_tuning.max_attempts,
         );
         match &decision {
             EligibilityDecision::Eligible => {
@@ -6972,18 +7752,43 @@ impl IssueMonitorState {
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
+                // Issue #3844: a wait belongs to one launch; never inherit it.
+                record.wait = None;
                 // SPEC #3200 T-045/FR-025: seed the liveness baseline at launch so
                 // stuck detection actually fires for an agent that hangs without
                 // producing a PR within stuck_timeout_secs. Real progress (a
                 // heartbeat, or the Implementing→Reviewing transition) resets it.
                 self.record_autonomous_heartbeat(number, now);
             }
-            EligibilityDecision::NeedsHuman(reason) => {
-                self.escalate_to_needs_human(number, reason.clone());
+            EligibilityDecision::NotReady(reason) => {
+                self.mark_autonomous_not_ready(number, reason.clone());
             }
-            EligibilityDecision::HumanGate(_) => {}
+            // Already parked: the predicate reports it and creates nothing new.
+            EligibilityDecision::NeedsHuman(_) | EligibilityDecision::HumanGate(_) => {}
         }
         decision
+    }
+
+    /// Issue #3944 AC-4: project a readiness failure as `not_ready` with its
+    /// reason — the same row state a gwt-spec Issue without plan/tasks gets —
+    /// and drop the row from the launch queue. The next scan re-evaluates it,
+    /// so fixing the Issue body or the repository settings is the whole remedy.
+    fn mark_autonomous_not_ready(&mut self, issue_number: u64, reason: String) {
+        self.queue.retain(|queued| *queued != issue_number);
+        revoke_uncommitted_claims_for_issue(
+            &mut self.pending_effects,
+            self.effect_authority_epoch,
+            issue_number,
+        );
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::NotReady;
+            item.exclusion_reason = Some(reason);
+            item.error_message = None;
+        }
     }
 
     /// SPEC #3200: autonomous issues currently in flight (phase Implementing /
@@ -7870,6 +8675,7 @@ impl IssueMonitorState {
         if disarmed {
             self.escalate_to_needs_human(
                 issue_number,
+                NeedsHumanKind::UserChoiceRequired,
                 "autonomous mode disabled — delivery halted; auto-merge disarmed",
             );
             self.push_kill_switch_notice(
@@ -8314,6 +9120,11 @@ impl IssueMonitorState {
         self.queued_launch_session_strategies.remove(&issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
+        // Issue #3844: the wait declaration is scoped to the launch that made
+        // it; every path that ends the launch funnels through here.
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.wait = None;
+        }
     }
 
     /// Reconcile persisted in-flight accounting against one complete live
@@ -8637,6 +9448,16 @@ impl IssueMonitorState {
             provider.as_deref(),
             None,
             Some(resets_at),
+            Some(IssueMonitorProviderQuotaHoldEvidence {
+                recorded_at: now.to_string(),
+                source: "usage_poller".to_string(),
+                issue_number: Some(issue_number),
+                window_id: Some(window_id.to_string()),
+                screen_text: None,
+                poller_state: None,
+                poller_limit_reached: Some(true),
+                poller_windows: Vec::new(),
+            }),
             now,
         )
         .then_some(issue_number)
@@ -8654,6 +9475,7 @@ impl IssueMonitorState {
     /// [`Self::agent_status`] can say *why* a queued issue is not launching —
     /// the failure this fixes was a quota-dead pane that read as `launched` for
     /// 23 minutes and then as terminal `AgentFailed`.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_hold_provider_usage_limit(
         &mut self,
         issue_number: u64,
@@ -8661,6 +9483,7 @@ impl IssueMonitorState {
         provider: &str,
         reason: impl Into<String>,
         resets_at: Option<&str>,
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
         now: &str,
     ) -> IssueMonitorProviderUsageLimitOutcome {
         let Some(provider) = normalize_issue_monitor_provider(provider) else {
@@ -8680,6 +9503,7 @@ impl IssueMonitorState {
             Some(&provider),
             Some(reason.into()),
             resets_at,
+            evidence,
             now,
         ) {
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -8697,6 +9521,7 @@ impl IssueMonitorState {
         provider: Option<&str>,
         reason: Option<String>,
         resets_at: Option<&str>,
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
         now: &str,
     ) -> bool {
         if self.merged_issues.contains(&issue_number) {
@@ -8720,6 +9545,40 @@ impl IssueMonitorState {
                 )
             })
             .unwrap_or(candidate_deadline);
+        if let Some(provider) = provider.as_deref() {
+            // Issue #3923 AC-2: every hold carries what it was formed from,
+            // and the same facts go to gwt.log so a false hold can be traced
+            // to its trigger.
+            let mut evidence = evidence.unwrap_or_else(|| IssueMonitorProviderQuotaHoldEvidence {
+                recorded_at: now.to_string(),
+                source: "unrecorded".to_string(),
+                issue_number: None,
+                window_id: None,
+                screen_text: None,
+                poller_state: None,
+                poller_limit_reached: None,
+                poller_windows: Vec::new(),
+            });
+            if parse_rfc3339_utc(&evidence.recorded_at).is_none() {
+                evidence.recorded_at = now.to_string();
+            }
+            evidence.issue_number.get_or_insert(issue_number);
+            tracing::warn!(
+                provider = %provider,
+                reset_at = %floor,
+                issue_number,
+                source = %evidence.source,
+                window_id = ?evidence.window_id,
+                screen_text = ?evidence.screen_text,
+                poller_state = ?evidence.poller_state,
+                poller_limit_reached = ?evidence.poller_limit_reached,
+                poller_windows = ?evidence.poller_windows,
+                reason = ?reason,
+                "Issue Monitor provider quota hold recorded (Issue #3923)"
+            );
+            self.provider_quota_hold_evidence
+                .insert(provider.to_string(), evidence);
+        }
         // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
         // pool is now held; another candidate can still honor them.
         let every_pool_provider_held =
@@ -8985,7 +9844,13 @@ impl IssueMonitorState {
         // claim authority it no longer has.
         self.advance_effect_authority_epoch();
         self.record_autonomous_heartbeat(issue_number, now);
-        self.escalate_to_needs_human(issue_number, format!("{STOP_ONLY_REASON_PREFIX}{reason}"));
+        // An operator stop is the operator's own decision; what happens next
+        // is the operator's choice, so the row parks under that kind.
+        self.escalate_to_needs_human(
+            issue_number,
+            NeedsHumanKind::UserChoiceRequired,
+            format!("{STOP_ONLY_REASON_PREFIX}{reason}"),
+        );
 
         IssueMonitorStopOutcome::Stopped {
             window_id: live_window.unwrap_or_default(),
@@ -9310,6 +10175,8 @@ impl IssueMonitorState {
             record.active_launch_id = None;
             record.last_heartbeat = None;
             record.phase = AutonomousPhase::Idle;
+            record.needs_human_kind = None;
+            record.steering = None;
         }
         if let Some(item) = self
             .inbox
@@ -9611,6 +10478,69 @@ impl IssueMonitorState {
             .filter(|issue_number| *issue_number == target.issue_number)
     }
 
+    /// Issue #3927 (SPEC #3340 FR-044): report the durable facts the runtime's
+    /// terminal predicate consumes for `window_id` linked to `issue_number`.
+    pub fn terminal_window_facts(
+        &self,
+        issue_number: u64,
+        window_id: &str,
+    ) -> IssueMonitorTerminalWindowFacts {
+        let bound_window = self.launched_window_id(issue_number);
+        let binds_this_window = bound_window
+            .as_deref()
+            .is_some_and(|bound| issue_monitor_window_ids_match(bound, window_id));
+        IssueMonitorTerminalWindowFacts {
+            binds_this_window,
+            binds_other_window: bound_window.is_some() && !binds_this_window,
+            issue_closed: self.issue_is_closed(issue_number)
+                || self.merged_issues.contains(&issue_number),
+            needs_human: self
+                .inbox_item(issue_number)
+                .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+                || self
+                    .autonomous_records
+                    .get(&issue_number)
+                    .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman),
+            failure_hold: self.failed_issues.contains_key(&issue_number),
+        }
+    }
+
+    /// Issue #3927 (SPEC #3340 Phase 10S, PM ruling `1f7fdc9e`): settle one
+    /// successful exact terminal delivery.
+    ///
+    /// The runtime observed that the launched window's Work is canonically
+    /// terminal (settled execution record or durable closed Issue) and is
+    /// about to close the window itself. Unlike [`Self::requeue_exact_window`]
+    /// — the `window_closed` contract, which says "this attempt failed, try
+    /// again" — a settled delivery is a success: the active slot is released
+    /// in this mutation, no retry attempt is spent, and the row stays
+    /// `Launched` out of the queue until the ordinary completion probe (merged
+    /// PR / closed Issue) ends it. The window is unbound so the later
+    /// vanished-window reconciliation cannot mistake the runtime's own close
+    /// for a failed attempt.
+    ///
+    /// `target` must reproduce the live identity exactly, including the
+    /// window; a `Launching` row without a window has delivered nothing.
+    pub fn settle_exact_terminal_delivery(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+    ) -> Result<u64, IssueMonitorStopMismatch> {
+        let issue_number = target.issue_number;
+        if self.resolve_exact_launch(target)?.is_none() {
+            return Err(IssueMonitorStopMismatch::WindowMismatch);
+        }
+        self.clear_active_tracking(issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        Ok(issue_number)
+    }
+
     /// [`Self::requeue_window`] with an injected clock for the backoff floor.
     ///
     /// SPEC-3431 FR-066: a close is a bounded retry, not a free one. It used to
@@ -9641,10 +10571,14 @@ impl IssueMonitorState {
         }
         let attempt = self.record_attempt(issue_number);
         let max = self.autonomous_tuning.max_attempts;
-        if attempt >= max {
+        // Issue #3944 AC-6: the human-gated flow keeps its cap-park unchanged.
+        // AC-2: under autonomous mode a closed window is a dead launch — it is
+        // requeued at the capped backoff with a steering request, never parked.
+        if attempt >= max && !self.autonomous_mode {
             self.clear_active_tracking(issue_number);
             self.escalate_to_needs_human(
                 issue_number,
+                NeedsHumanKind::UserChoiceRequired,
                 format!("closed without completing ({attempt}/{max} attempts used)"),
             );
             return Some(issue_number);
@@ -9659,6 +10593,15 @@ impl IssueMonitorState {
         record.retry_not_before = rfc3339_plus_secs(now, backoff);
         record.retry_hold_reason = None;
         record.retry_hold_provider = None;
+        if attempt >= max {
+            self.request_autonomous_steering(
+                issue_number,
+                format!(
+                    "closed without completing ({attempt}/{max} attempts used); retrying after backoff"
+                ),
+                now,
+            );
+        }
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
@@ -9674,6 +10617,15 @@ impl IssueMonitorState {
         state: MonitorInboxState,
     ) {
         let message = message.into();
+        // Issue #3941 AC-3: a launch aborted by transient infrastructure (exact
+        // package probe timeout with no cached version, a remote-tracking ref
+        // race between concurrent fetches) is neither an agent failure nor an
+        // attempt: it is requeued behind a short backoff in every mode.
+        if gwt_agent::is_transient_launch_failure(&message) {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            self.record_transient_launch_retry(issue_number, message, &now);
+            return;
+        }
         // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
         // issue (e.g. the independent review agent could not spawn, leaving the
         // record in `Reviewing`) must funnel through the autonomous
@@ -9683,7 +10635,7 @@ impl IssueMonitorState {
         // below is preserved for every non-autonomous issue.
         if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            self.record_autonomous_failure(issue_number, FailureClass::Transient, message, &now);
+            self.record_autonomous_failure(issue_number, message, &now);
             return;
         }
         self.active_launches
@@ -10100,8 +11052,8 @@ mod tests {
                 quota_hold: None,
                 launch_profile_summary: "configure before auto start".to_string(),
                 launch_profile_candidates: Vec::new(),
-                provider_holds: Vec::new(),
                 usage_threshold_percent: 80,
+                provider_quota_holds: Vec::new(),
                 needs_human: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
                     issue_number: 42,
@@ -10121,6 +11073,8 @@ mod tests {
                     retry_hold_reason: None,
                     claim_id: None,
                     delivery_id: None,
+                    waiting: None,
+                    steering: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -10152,7 +11106,11 @@ mod tests {
             &[escalated.clone(), blocked.clone()],
             "2026-08-05T00:00:00Z",
         );
-        monitor.escalate_to_needs_human(7, "review exhausted its retries");
+        monitor.escalate_to_needs_human(
+            7,
+            NeedsHumanKind::UserChoiceRequired,
+            "review exhausted its retries",
+        );
         monitor.record_blocked_by_claim(blocked, "other-agent", "2026-08-05T00:05:00Z");
 
         let status = monitor.agent_status();
@@ -10845,6 +11803,9 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         let disk = IssueMonitorPrefs {
             launch_profile: Some(profile.clone()),
@@ -10962,6 +11923,9 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         save_issue_monitor_prefs(
             &path,
@@ -11025,6 +11989,9 @@ mod tests {
                 pr_number: None,
                 reviewed_sha: None,
                 review_passed: None,
+                wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -11088,6 +12055,9 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         let older_disk = IssueMonitorPrefs {
             legacy_git_launch_failure_migration_version: 0,
@@ -11140,6 +12110,9 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         let mut stale = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
@@ -11503,6 +12476,7 @@ mod tests {
             "Codex",
             "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -11553,6 +12527,7 @@ mod tests {
                     "codex",
                     "Codex usage limit reached",
                     resets_at,
+                    None,
                     "2026-08-16T02:26:00Z",
                 ),
                 IssueMonitorProviderUsageLimitOutcome::Held,
@@ -11633,6 +12608,7 @@ mod tests {
             "codex",
             "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -11689,6 +12665,7 @@ mod tests {
                 "codex",
                 "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
                 Some("2026-08-22T03:46:00Z"),
+                None,
                 "2026-08-16T02:26:00Z",
             ),
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -11697,6 +12674,12 @@ mod tests {
         let expected_hold = serde_json::json!({
             "provider": "codex",
             "reset_at": "2026-08-22T03:46:00Z",
+            // Issue #3923 AC-2: the hold names what it was formed from.
+            "evidence": {
+                "recorded_at": "2026-08-16T02:26:00Z",
+                "source": "unrecorded",
+                "issue_number": 42,
+            },
         });
         let agent_status = serde_json::to_value(monitor.agent_status_at("2026-08-16T02:26:30Z"))
             .expect("serialize agent status");
@@ -12074,6 +13057,7 @@ mod tests {
             Some(IssueMonitorProviderQuotaHold {
                 provider: "claude".to_string(),
                 reset_at: "2026-08-22T04:00:00Z".to_string(),
+                evidence: None,
             }),
             "the pool hold reports the earliest release"
         );
@@ -12171,6 +13155,7 @@ mod tests {
                 "codex",
                 "Codex quota exhausted",
                 Some("2026-08-22T04:00:00Z"),
+                None,
                 "2026-08-22T02:01:00Z",
             ),
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -12187,6 +13172,7 @@ mod tests {
                 "claude",
                 "Claude quota exhausted",
                 Some("2026-08-22T05:00:00Z"),
+                None,
                 "2026-08-22T02:02:00Z",
             ),
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -12237,10 +13223,11 @@ mod tests {
         assert_eq!(status.launch_profile_candidates[1].held_until, None);
         assert!(!status.launch_profile_candidates[1].summary.is_empty());
         assert_eq!(
-            status.provider_holds,
+            status.provider_quota_holds,
             vec![IssueMonitorProviderQuotaHold {
                 provider: "codex".to_string(),
                 reset_at: "2026-08-22T04:00:00Z".to_string(),
+                evidence: None,
             }]
         );
 
@@ -12250,7 +13237,7 @@ mod tests {
             agent["launch_profile_candidates"].as_array().map(Vec::len),
             Some(2)
         );
-        assert_eq!(agent["provider_holds"][0]["provider"], "codex");
+        assert_eq!(agent["provider_quota_holds"][0]["provider"], "codex");
         assert!(agent["launch_profile_summary"]
             .as_str()
             .is_some_and(|summary| summary.starts_with("auto (2): ")));
@@ -12647,6 +13634,7 @@ mod tests {
                 "Codex",
                 "Codex quota exhausted",
                 Some("2026-08-22T04:00:00Z"),
+                None,
                 "2026-08-22T02:01:00Z",
             ),
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -12766,6 +13754,7 @@ mod tests {
             "codex",
             "Codex quota exhausted",
             Some("2026-08-22T04:00:00Z"),
+            None,
             "2026-08-22T02:01:00Z",
         );
 
@@ -12822,6 +13811,7 @@ mod tests {
             "codex",
             "Codex quota exhausted",
             Some("2026-08-22T04:00:00Z"),
+            None,
             "2026-08-22T02:01:00Z",
         );
 
@@ -12892,6 +13882,7 @@ mod tests {
             "codex",
             "Codex usage limit reached",
             None,
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -12915,6 +13906,7 @@ mod tests {
             "codex",
             "Codex usage limit reached",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
         assert!(!monitor.retry_ready(42, "2026-08-16T02:30:00Z"));
@@ -12952,16 +13944,12 @@ mod tests {
             "codex",
             "Codex usage limit reached",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
 
         monitor.complete_active_launch(42, "tab-1::agent-2");
-        monitor.record_autonomous_failure(
-            42,
-            FailureClass::Transient,
-            "boom",
-            "2026-08-16T03:00:00Z",
-        );
+        monitor.record_autonomous_failure(42, "boom", "2026-08-16T03:00:00Z");
 
         assert_eq!(
             monitor
@@ -14244,47 +15232,34 @@ mod tests {
     }
 
     #[test]
-    fn requeue_failed_issue_resets_exhausted_needs_human_before_next_scan() {
+    fn attempt_cap_never_derives_needs_human_on_the_next_scan() {
+        // Issue #3944 AC-1/AC-2: an exhausted counter is a throttled retry with a
+        // steering request, not a park. The next scan launches it again once the
+        // backoff elapses, and the launch clears the steering request.
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
         monitor.set_autonomous_mode(true);
         monitor.autonomous_tuning.max_attempts = 2;
         assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "first failure",
-                "2026-08-17T15:00:00Z",
-            ),
+            monitor.record_autonomous_failure(42, "first failure", "2026-08-17T15:00:00Z"),
             AutonomousFailureOutcome::Retry { attempt: 1 }
         );
         monitor.complete_active_launch(42, "tab-1::agent-2");
-        assert!(matches!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "second failure",
-                "2026-08-17T15:30:00Z",
-            ),
-            AutonomousFailureOutcome::Escalated(_)
-        ));
+        assert_eq!(
+            monitor.record_autonomous_failure(42, "second failure", "2026-08-17T15:30:00Z"),
+            AutonomousFailureOutcome::Retry { attempt: 2 }
+        );
         assert_eq!(monitor.attempt_count(42), 2);
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman)
+            Some(MonitorInboxState::Queued)
         );
-
+        assert!(monitor
+            .autonomous_record(42)
+            .is_some_and(|record| record.steering.is_some()));
         assert_eq!(
             monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
-            IssueMonitorRequeueOutcome::Requeued {
-                stale_window_id: None,
-                attempts_before: 2,
-                attempts_after: 0,
-            }
-        );
-        assert_eq!(monitor.attempt_count(42), 0);
-        assert_eq!(
-            monitor.autonomous_record(42).map(|record| record.phase),
-            Some(AutonomousPhase::Idle)
+            IssueMonitorRequeueOutcome::NotHeld,
+            "a throttled retry is not a held failure"
         );
 
         let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
@@ -14294,45 +15269,25 @@ mod tests {
             monitor.prepare_autonomous_candidate(
                 &auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: retry\n"),
                 &protection,
-                "2026-08-17T16:00:01Z",
+                "2026-08-17T17:00:01Z",
             ),
             EligibilityDecision::Eligible,
-            "the next scan must not re-derive NeedsHuman from the exhausted pre-reset count"
+            "the next scan must not derive NeedsHuman from the exhausted count"
+        );
+        assert!(
+            monitor
+                .autonomous_record(42)
+                .is_some_and(|record| record.steering.is_none()),
+            "a fresh launch supersedes the steering request"
         );
         monitor.set_gui_connected(true);
         let launch = monitor
-            .next_launch_request("2026-08-17T16:00:02Z")
-            .expect("the reset issue is launchable on the next request pass");
+            .next_launch_request("2026-08-17T17:00:02Z")
+            .expect("the throttled issue is launchable on the next request pass");
         assert_eq!(launch.issue_number, 42);
         assert_eq!(
             launch.launch_session_strategy,
             IssueMonitorLaunchSessionStrategy::FreshRequired
-        );
-
-        assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "new-cycle failure 1",
-                "2026-08-17T16:01:00Z",
-            ),
-            AutonomousFailureOutcome::Retry { attempt: 1 }
-        );
-        monitor.complete_active_launch(42, "tab-1::agent-3");
-        assert!(matches!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "new-cycle failure 2",
-                "2026-08-17T16:30:00Z",
-            ),
-            AutonomousFailureOutcome::Escalated(_)
-        ));
-        assert_eq!(monitor.attempt_count(42), 2);
-        assert_eq!(
-            monitor.autonomous_record(42).map(|record| record.phase),
-            Some(AutonomousPhase::NeedsHuman),
-            "the reset starts one new bounded cycle; it does not remove the attempt cap"
         );
     }
 
@@ -14622,12 +15577,7 @@ mod tests {
         monitor.set_autonomous_mode(true);
         monitor.autonomous_tuning.retry_backoff_base_secs = 60;
         assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "retry later",
-                "2026-08-26T00:00:00Z",
-            ),
+            monitor.record_autonomous_failure(42, "retry later", "2026-08-26T00:00:00Z",),
             AutonomousFailureOutcome::Retry { attempt: 1 }
         );
 
@@ -14687,12 +15637,7 @@ mod tests {
         monitor.record_candidate(issue(43));
         monitor.complete_active_launch(42, "tab-1::agent-42");
         assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "retry later",
-                "2026-08-26T00:00:00Z",
-            ),
+            monitor.record_autonomous_failure(42, "retry later", "2026-08-26T00:00:00Z",),
             AutonomousFailureOutcome::Retry { attempt: 1 }
         );
         monitor.queue.retain(|issue_number| *issue_number != 42);
@@ -15196,7 +16141,11 @@ mod tests {
         assert!(monitor.autonomous_record(7).is_none());
         assert!(monitor.inbox_item(7).is_none());
         assert!(monitor.agent_status().needs_human.is_empty());
-        monitor.escalate_to_needs_human(7, "late disarm result");
+        monitor.escalate_to_needs_human(
+            7,
+            NeedsHumanKind::UserChoiceRequired,
+            "late disarm result",
+        );
         assert!(monitor.autonomous_record(7).is_none());
         assert!(monitor.agent_status().needs_human.is_empty());
     }
@@ -17202,12 +18151,12 @@ mod tests {
             required_checks: vec!["ci".to_string()],
         };
         assert_eq!(
-            autonomous_eligibility(true, true, &criteria, &verified, false, 0, 3),
+            autonomous_eligibility(true, true, &criteria, &verified, false),
             EligibilityDecision::Eligible,
             "template defaults (AC block + auto-merge label) must be eligible"
         );
         assert_eq!(
-            autonomous_eligibility(true, false, &criteria, &verified, false, 0, 3),
+            autonomous_eligibility(true, false, &criteria, &verified, false),
             EligibilityDecision::HumanGate("issue lacks the auto-merge label".to_string()),
             "the explicit opt-out (label removed) must stay on the human gate"
         );
@@ -17216,18 +18165,22 @@ mod tests {
     #[test]
     fn autonomous_eligibility_truth_table() {
         // SPEC #3200 FR-003/004/005, Sc 2/3/4: two-stage-opt-in negatives →
-        // HumanGate; safety-precondition failures → NeedsHuman; all → Eligible.
+        // HumanGate; all → Eligible. Issue #3944 AC-1/AC-4: readiness-style
+        // preconditions (criteria not machine-checkable, branch protection not
+        // verified) are `NotReady` with a named reason — never NeedsHuman.
         use crate::issue_monitor_gate::AcceptanceCriteria;
         use gwt_git::branch_protection::BranchProtectionStatus;
         let ok = AcceptanceCriteria {
             ids: vec!["AC-1".to_string()],
             machine_checkable: true,
             visual_surface: false,
+            defect: None,
         };
         let no_criteria = AcceptanceCriteria {
             ids: vec![],
             machine_checkable: false,
             visual_surface: false,
+            defect: Some(crate::issue_monitor_gate::AcceptanceDefect::MissingHeading),
         };
         let verified = BranchProtectionStatus::Verified {
             required_checks: vec!["ci".to_string()],
@@ -17236,41 +18189,290 @@ mod tests {
         let unreadable = BranchProtectionStatus::Unreadable("403".to_string());
 
         assert_eq!(
-            autonomous_eligibility(true, true, &ok, &verified, false, 0, 3),
+            autonomous_eligibility(true, true, &ok, &verified, false),
             EligibilityDecision::Eligible
         );
         // (i)/(ii) opt-in negatives → HumanGate (NOT NeedsHuman).
         assert!(matches!(
-            autonomous_eligibility(false, true, &ok, &verified, false, 0, 3),
+            autonomous_eligibility(false, true, &ok, &verified, false),
             EligibilityDecision::HumanGate(_)
         ));
         assert!(matches!(
-            autonomous_eligibility(true, false, &ok, &verified, false, 0, 3),
+            autonomous_eligibility(true, false, &ok, &verified, false),
             EligibilityDecision::HumanGate(_)
         ));
-        // (iii)/(iv)/(v) safety preconditions → NeedsHuman.
-        assert!(matches!(
-            autonomous_eligibility(true, true, &no_criteria, &verified, false, 0, 3),
-            EligibilityDecision::NeedsHuman(_)
-        ));
-        assert!(matches!(
-            autonomous_eligibility(true, true, &ok, &absent, false, 0, 3),
-            EligibilityDecision::NeedsHuman(_)
-        ));
-        match autonomous_eligibility(true, true, &ok, &unreadable, false, 0, 3) {
-            EligibilityDecision::NeedsHuman(reason) => {
+        // Issue #3944 AC-4: readiness preconditions → NotReady, naming the cause.
+        match autonomous_eligibility(true, true, &no_criteria, &verified, false) {
+            EligibilityDecision::NotReady(reason) => assert!(
+                reason.contains("Acceptance Criteria"),
+                "names the missing element: {reason}"
+            ),
+            other => panic!("expected NotReady, got {other:?}"),
+        }
+        match autonomous_eligibility(true, true, &ok, &absent, false) {
+            EligibilityDecision::NotReady(reason) => assert!(
+                reason.contains("branch protection"),
+                "names branch protection: {reason}"
+            ),
+            other => panic!("expected NotReady, got {other:?}"),
+        }
+        match autonomous_eligibility(true, true, &ok, &unreadable, false) {
+            EligibilityDecision::NotReady(reason) => {
                 assert!(reason.contains("permissions"), "distinct reason: {reason}")
             }
-            other => panic!("expected NeedsHuman, got {other:?}"),
+            other => panic!("expected NotReady, got {other:?}"),
         }
+        // An already-parked row stays parked; the predicate never revives it.
         assert!(matches!(
-            autonomous_eligibility(true, true, &ok, &verified, true, 0, 3),
+            autonomous_eligibility(true, true, &ok, &verified, true),
             EligibilityDecision::NeedsHuman(_)
         ));
-        assert!(matches!(
-            autonomous_eligibility(true, true, &ok, &verified, false, 3, 3),
-            EligibilityDecision::NeedsHuman(_)
-        ));
+    }
+
+    /// Issue #3944 AC-7: the regression table. For every reason code that can
+    /// end an autonomous attempt, the resulting row state is fixed here: only
+    /// the two human-answerable kinds produce `NeedsHuman`; everything else is
+    /// an automatic recovery (steering request, requeue, or `NotReady`).
+    #[test]
+    fn autonomous_needs_human_reason_table() {
+        use crate::autonomous_handoff::{
+            AutonomousExecutionContext, AutonomousHandoffOption, AutonomousQuestionHandoff,
+            ExtractedQuestion,
+        };
+        use gwt_git::branch_protection::BranchProtectionStatus;
+
+        const NOW: &str = "2026-09-04T00:00:00Z";
+        const LATER: &str = "2026-09-04T01:00:00Z";
+        let verified = BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let ac_body = "## Acceptance Criteria\n- [ ] AC-1: green\n";
+        let question = |text: &str| {
+            let context = AutonomousExecutionContext {
+                issue_number: 42,
+                session_id: "session-42".to_string(),
+            };
+            AutonomousQuestionHandoff::new(
+                format!("handoff-{}", text.len()),
+                &context,
+                "claude-code",
+                "AskUserQuestion",
+                ExtractedQuestion {
+                    question: text.to_string(),
+                    options: vec![AutonomousHandoffOption {
+                        label: "yes".to_string(),
+                        description: String::new(),
+                    }],
+                },
+                NOW,
+            )
+        };
+
+        struct Row<'a> {
+            reason_code: &'static str,
+            drive: Box<dyn Fn() -> IssueMonitorState + 'a>,
+            expected_state: MonitorInboxState,
+            expected_kind: Option<NeedsHumanKind>,
+            steering_requested: bool,
+        }
+        let rows = vec![
+            Row {
+                reason_code: "stuck/idle timeout with a live window",
+                drive: Box::new(|| {
+                    let mut monitor = stuck_monitor(42, NOW);
+                    monitor.recover_stuck_autonomous(LATER);
+                    monitor
+                }),
+                expected_state: MonitorInboxState::Launched,
+                expected_kind: None,
+                steering_requested: true,
+            },
+            Row {
+                reason_code: "stuck/idle timeout without a window",
+                drive: Box::new(|| {
+                    let mut monitor = stuck_monitor(42, NOW);
+                    monitor.launched_windows.remove(&42);
+                    monitor.recover_stuck_autonomous(LATER);
+                    monitor
+                }),
+                expected_state: MonitorInboxState::Queued,
+                expected_kind: None,
+                steering_requested: false,
+            },
+            Row {
+                reason_code: "autonomous attempts exhausted",
+                drive: Box::new(|| {
+                    let mut monitor = launched_monitor(42, "tab-1::agent-1");
+                    monitor.set_autonomous_mode(true);
+                    monitor.autonomous_tuning.max_attempts = 1;
+                    monitor.record_autonomous_failure(42, "agent exited", NOW);
+                    monitor
+                }),
+                expected_state: MonitorInboxState::Queued,
+                expected_kind: None,
+                steering_requested: true,
+            },
+            Row {
+                reason_code: "launch failed (mechanical)",
+                drive: Box::new(|| {
+                    let mut monitor = launched_monitor(42, "tab-1::agent-1");
+                    monitor.set_autonomous_mode(true);
+                    monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+                    monitor.record_launch_failed(42, "generation conflict: probe timed out");
+                    monitor
+                }),
+                expected_state: MonitorInboxState::Queued,
+                expected_kind: None,
+                steering_requested: false,
+            },
+            Row {
+                reason_code: "acceptance criteria not machine-checkable",
+                drive: Box::new(|| {
+                    let mut monitor = autonomous_state();
+                    let issue = auto_issue(42, "## Summary\n\nno criteria block\n");
+                    scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&issue), NOW);
+                    monitor.prepare_autonomous_candidate(&issue, &verified, NOW);
+                    monitor
+                }),
+                expected_state: MonitorInboxState::NotReady,
+                expected_kind: None,
+                steering_requested: false,
+            },
+            Row {
+                reason_code: "branch protection not verified",
+                drive: Box::new(|| {
+                    let mut monitor = autonomous_state();
+                    let issue = auto_issue(42, ac_body);
+                    scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&issue), NOW);
+                    monitor.prepare_autonomous_candidate(
+                        &issue,
+                        &BranchProtectionStatus::Absent,
+                        NOW,
+                    );
+                    monitor
+                }),
+                expected_state: MonitorInboxState::NotReady,
+                expected_kind: None,
+                steering_requested: false,
+            },
+            Row {
+                reason_code: "question handoff: irreversible action",
+                drive: Box::new(|| {
+                    let mut monitor = launched_monitor(42, "tab-1::agent-1");
+                    monitor.set_autonomous_mode(true);
+                    monitor.absorb_autonomous_handoffs(vec![question(
+                        "Delete the stale branch work/issue-12 and its worktree?",
+                    )]);
+                    monitor.apply_pending_autonomous_handoffs(NOW);
+                    monitor
+                }),
+                expected_state: MonitorInboxState::NeedsHuman,
+                expected_kind: Some(NeedsHumanKind::DestructiveChangeApproval),
+                steering_requested: false,
+            },
+            Row {
+                reason_code: "question handoff: user choice",
+                drive: Box::new(|| {
+                    let mut monitor = launched_monitor(42, "tab-1::agent-1");
+                    monitor.set_autonomous_mode(true);
+                    monitor.absorb_autonomous_handoffs(vec![question(
+                        "Which layout should the settings page use?",
+                    )]);
+                    monitor.apply_pending_autonomous_handoffs(NOW);
+                    monitor
+                }),
+                expected_state: MonitorInboxState::NeedsHuman,
+                expected_kind: Some(NeedsHumanKind::UserChoiceRequired),
+                steering_requested: false,
+            },
+        ];
+
+        for row in rows {
+            let monitor = (row.drive)();
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(row.expected_state),
+                "{}: inbox state",
+                row.reason_code
+            );
+            assert_eq!(
+                monitor
+                    .autonomous_record(42)
+                    .and_then(|record| record.needs_human_kind),
+                row.expected_kind,
+                "{}: needs_human kind",
+                row.reason_code
+            );
+            assert_eq!(
+                monitor
+                    .autonomous_record(42)
+                    .is_some_and(|record| record.steering.is_some()),
+                row.steering_requested,
+                "{}: steering request",
+                row.reason_code
+            );
+            assert_eq!(
+                monitor
+                    .inbox_item(42)
+                    .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman),
+                row.expected_kind.is_some(),
+                "{}: NeedsHuman exactly when a human-answerable kind exists",
+                row.reason_code
+            );
+        }
+    }
+
+    /// Issue #3944 AC-5: a destructive-change park says what is being approved
+    /// on one line — the question itself, not only the generic rationale.
+    #[test]
+    fn destructive_handoff_park_names_the_change_on_one_line() {
+        use crate::autonomous_handoff::{
+            AutonomousExecutionContext, AutonomousQuestionHandoff, ExtractedQuestion,
+        };
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        let context = AutonomousExecutionContext {
+            issue_number: 42,
+            session_id: "session-42".to_string(),
+        };
+        monitor.absorb_autonomous_handoffs(vec![AutonomousQuestionHandoff::new(
+            "handoff-1".to_string(),
+            &context,
+            "claude-code",
+            "AskUserQuestion",
+            ExtractedQuestion {
+                question:
+                    "Force-push work/issue-42 over the remote branch?\n\nThe remote has 3 commits."
+                        .to_string(),
+                options: Vec::new(),
+            },
+            "2026-09-04T00:00:00Z",
+        )]);
+        monitor.apply_pending_autonomous_handoffs("2026-09-04T00:00:01Z");
+        let reason = monitor
+            .status_view()
+            .autonomous_issues
+            .iter()
+            .find(|summary| summary.issue_number == 42)
+            .and_then(|summary| summary.needs_human_reason.clone())
+            .expect("parked reason");
+        assert!(
+            reason.contains("Force-push work/issue-42 over the remote branch?"),
+            "the reason carries the question: {reason}"
+        );
+        assert!(
+            !reason.contains('\n') && !reason.contains("The remote has 3 commits"),
+            "one line only: {reason}"
+        );
+        assert_eq!(
+            monitor
+                .status_view()
+                .autonomous_issues
+                .iter()
+                .find(|summary| summary.issue_number == 42)
+                .and_then(|summary| summary.needs_human_kind),
+            Some(NeedsHumanKind::DestructiveChangeApproval)
+        );
     }
 
     #[test]
@@ -17848,12 +19050,7 @@ mod tests {
         monitor.set_active_launch_id(42, Some("tab-1::agent-1".to_string()));
 
         assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "network blip",
-                "2026-06-29T00:00:00Z"
-            ),
+            monitor.record_autonomous_failure(42, "network blip", "2026-06-29T00:00:00Z"),
             AutonomousFailureOutcome::Retry { attempt: 1 }
         );
         assert_eq!(
@@ -17883,73 +19080,50 @@ mod tests {
     }
 
     #[test]
-    fn transient_failure_at_cap_escalates_to_needs_human() {
-        // SPEC #3200 T-033/FR-027, Sc 12: once the attempt counter reaches
-        // max_attempts the issue escalates to NeedsHuman and is not relaunched.
+    fn transient_failure_at_cap_requeues_and_requests_steering() {
+        // Issue #3944 AC-2: reaching max_attempts is not a human decision. The
+        // retry ladder continues at its capped backoff and the PM is asked to
+        // steer; the row is Queued, not NeedsHuman.
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
         monitor.autonomous_tuning.max_attempts = 2;
         assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                FailureClass::Transient,
-                "fail 1",
-                "2026-06-29T00:00:00Z"
-            ),
+            monitor.record_autonomous_failure(42, "fail 1", "2026-06-29T00:00:00Z"),
             AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        assert!(
+            monitor
+                .autonomous_record(42)
+                .is_some_and(|record| record.steering.is_none()),
+            "under the cap the plain retry ladder needs no steering"
         );
         // Re-launch the retried attempt, then fail again at the cap.
         monitor.complete_active_launch(42, "tab-1::agent-1b");
-        match monitor.record_autonomous_failure(
-            42,
-            FailureClass::Transient,
-            "fail 2",
-            "2026-06-29T00:30:00Z",
-        ) {
-            AutonomousFailureOutcome::Escalated(reason) => {
-                assert!(
-                    reason.contains("exhausted"),
-                    "reason names exhaustion: {reason}"
-                )
-            }
-            other => panic!("expected escalation, got {other:?}"),
-        }
+        assert_eq!(
+            monitor.record_autonomous_failure(42, "fail 2", "2026-06-29T00:30:00Z"),
+            AutonomousFailureOutcome::Retry { attempt: 2 }
+        );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman)
+            Some(MonitorInboxState::Queued)
         );
         assert_eq!(
             monitor.autonomous_record(42).map(|r| r.phase),
-            Some(AutonomousPhase::NeedsHuman)
+            Some(AutonomousPhase::Idle)
         );
-        assert_eq!(monitor.active_count(), 0, "slot freed on escalation");
-        // Terminal: a window-close requeue must not revive it.
-        assert_eq!(monitor.requeue_window("tab-1::agent-1b"), None);
-    }
-
-    #[test]
-    fn terminal_failure_escalates_immediately_regardless_of_attempts() {
-        // SPEC #3200 T-042: a terminal failure (retry cannot fix) escalates on
-        // the first attempt without exhausting the counter.
-        let mut monitor = launched_monitor(42, "tab-1::agent-1");
-        match monitor.record_autonomous_failure(
-            42,
-            FailureClass::Terminal,
-            "review rejected",
-            "2026-06-29T00:00:00Z",
-        ) {
-            AutonomousFailureOutcome::Escalated(reason) => {
-                assert!(
-                    reason.contains("terminal"),
-                    "reason names terminal: {reason}"
-                )
-            }
-            other => panic!("expected escalation, got {other:?}"),
-        }
-        assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman)
+        assert_eq!(monitor.active_count(), 0, "slot freed for the retry");
+        let steering = monitor
+            .autonomous_record(42)
+            .and_then(|record| record.steering.clone())
+            .expect("exhaustion asks the PM to steer");
+        assert!(
+            steering.reason.contains("exhausted") && steering.reason.contains("fail 2"),
+            "the request names exhaustion and the last failure: {steering:?}"
         );
-        assert_eq!(monitor.attempt_count(42), 1, "the attempt is still counted");
+        assert!(
+            !monitor.retry_ready(42, "2026-06-29T00:30:01Z"),
+            "the capped backoff still throttles the next launch"
+        );
     }
 
     #[test]
@@ -17982,12 +19156,7 @@ mod tests {
         // unparseable clock fails open (never permanently blocks a retry).
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
         assert!(monitor.retry_ready(42, "2026-06-29T00:00:00Z"));
-        monitor.record_autonomous_failure(
-            42,
-            FailureClass::Transient,
-            "blip",
-            "2026-06-29T00:00:00Z",
-        );
+        monitor.record_autonomous_failure(42, "blip", "2026-06-29T00:00:00Z");
         assert!(
             monitor.retry_ready(42, "not-a-timestamp"),
             "unparseable now fails open"
@@ -18037,9 +19206,12 @@ mod tests {
 
     #[test]
     fn recover_stuck_returns_to_queued_and_is_idempotent() {
-        // SPEC #3200 T-044/T-045: recovery reclaims the stuck slot and resumes
-        // (Queued); a second pass finds nothing (idempotent).
+        // SPEC #3200 T-044/T-045: recovery of a lost launch (no window bound)
+        // reclaims the stuck slot and resumes (Queued); a second pass finds
+        // nothing (idempotent). Issue #3944 AC-2: a live window is steered
+        // instead — see `recover_stuck_with_a_live_window_requests_steering…`.
         let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.launched_windows.remove(&42);
         let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
         assert_eq!(recovered.len(), 1);
         assert!(matches!(
@@ -18060,19 +19232,248 @@ mod tests {
     }
 
     #[test]
-    fn recover_stuck_escalates_when_attempts_exhausted() {
-        // SPEC #3200 T-044: a stuck agent on the last attempt escalates to
-        // NeedsHuman rather than looping.
+    fn recover_stuck_with_a_live_window_requests_steering_instead_of_reclaiming() {
+        // Issue #3944 AC-2: a stuck agent whose window is still alive is not
+        // torn down — the PM is asked to steer it. No attempt is consumed, the
+        // slot stays occupied, and NeedsHuman is never derived from a stall.
         let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
         monitor.autonomous_tuning.max_attempts = 1;
         let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
         assert!(matches!(
             recovered.as_slice(),
-            [(42, AutonomousFailureOutcome::Escalated(_))]
+            [(42, AutonomousFailureOutcome::SteeringRequested { count: 1 })]
         ));
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman)
+            Some(MonitorInboxState::Launched)
+        );
+        assert_eq!(monitor.active_count(), 1, "the live window keeps its slot");
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "a stall is not a failed attempt"
+        );
+        let steering = monitor
+            .autonomous_record(42)
+            .and_then(|record| record.steering.clone())
+            .expect("steering request recorded");
+        assert!(
+            steering.reason.contains("stuck/idle timeout"),
+            "{steering:?}"
+        );
+        assert_eq!(steering.requested_at, "2026-06-29T01:00:00Z");
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.level == "warn" && notice.message.contains("steering")),
+            "the PM-facing notice is raised: {notices:?}"
+        );
+        // The request is re-raised only after another full stuck window.
+        assert!(
+            monitor
+                .recover_stuck_autonomous("2026-06-29T01:10:00Z")
+                .is_empty(),
+            "a fresh request suspends the stuck rule for one more window"
+        );
+        assert!(matches!(
+            monitor
+                .recover_stuck_autonomous("2026-06-29T01:31:00Z")
+                .as_slice(),
+            [(42, AutonomousFailureOutcome::SteeringRequested { count: 2 })]
+        ));
+        // Progress after steering clears the request.
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T01:32:00Z");
+        assert!(monitor
+            .autonomous_record(42)
+            .is_some_and(|record| record.steering.is_none()));
+    }
+
+    #[test]
+    fn recover_stuck_without_a_window_requeues_even_past_the_attempt_cap() {
+        // Issue #3944 AC-2: no live window ⇒ the stall is a lost launch; it is
+        // requeued (fresh launch) — never NeedsHuman, even at the attempt cap.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.launched_windows.remove(&42);
+        monitor.autonomous_tuning.max_attempts = 1;
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
+        assert!(matches!(
+            recovered.as_slice(),
+            [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert_eq!(monitor.active_count(), 0, "the lost launch frees its slot");
+    }
+
+    #[test]
+    fn wait_declaration_suspends_stuck_detection_and_preserves_attempts() {
+        // Issue #3844 AC-1/AC-4: a launched agent that declares it is waiting
+        // (host exclusivity, PM serialization, a long verify run) is not stuck
+        // while the declaration is in force, and no attempt is consumed.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        assert!(matches!(
+            monitor.declare_autonomous_wait(
+                42,
+                "host 排他の順番待ち",
+                "#3791 の verify が完了する",
+                "2026-06-29T00:10:00Z",
+            ),
+            AutonomousWaitOutcome::Declared { .. }
+        ));
+        // Two hours later the heartbeat is far past stuck_timeout_secs.
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T02:00:00Z")
+            .is_empty());
+        assert!(monitor
+            .recover_stuck_autonomous("2026-06-29T02:00:00Z")
+            .is_empty());
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "waiting never costs an attempt"
+        );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the slot stays with the waiting agent"
+        );
+    }
+
+    #[test]
+    fn wait_declaration_expires_at_the_cap_and_redeclaration_does_not_extend_it() {
+        // Issue #3844 AC-3: a declaration cannot hold stuck detection off
+        // forever. Past AUTONOMOUS_WAIT_MAX_SECS the ordinary rule applies, and
+        // re-declaring keeps the original `since` so renewals cannot chain.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "順番待ち",
+            "前の agent の完了",
+            "2026-06-29T00:10:00Z",
+        );
+        assert!(matches!(
+            monitor.declare_autonomous_wait(42, "順番待ち (更新)", "同上", "2026-06-29T02:00:00Z"),
+            AutonomousWaitOutcome::Declared { ref since, .. } if since == "2026-06-29T00:10:00Z"
+        ));
+        assert!(
+            monitor
+                .stuck_autonomous_issues("2026-06-29T03:05:00Z")
+                .is_empty(),
+            "still inside the 3h cap"
+        );
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T03:11:00Z"),
+            vec![42],
+            "past the cap the stale heartbeat counts again"
+        );
+    }
+
+    #[test]
+    fn wait_declaration_is_cleared_when_the_launch_ends() {
+        // Issue #3844: the declaration belongs to one launch. Once the launch is
+        // torn down (here: stuck recovery of a lost launch after the cap) the
+        // next launch must start without an inherited wait.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "順番待ち",
+            "前の agent の完了",
+            "2026-06-29T00:10:00Z",
+        );
+        monitor.launched_windows.remove(&42);
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T03:20:00Z");
+        assert!(matches!(
+            recovered.as_slice(),
+            [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+        ));
+        assert!(monitor.autonomous_wait(42).is_none());
+    }
+
+    #[test]
+    fn wait_declaration_requires_a_live_launch() {
+        // Issue #3844: only the agent that owns a launch can declare a wait for
+        // it; a queued or parked row has nothing to suspend.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        assert_eq!(
+            monitor.declare_autonomous_wait(42, "順番待ち", "同上", "2026-06-29T00:10:00Z"),
+            AutonomousWaitOutcome::NotLaunched
+        );
+        assert!(monitor.autonomous_wait(42).is_none());
+        assert_eq!(
+            monitor.clear_autonomous_wait(42, "2026-06-29T00:11:00Z"),
+            AutonomousWaitOutcome::NotWaiting
+        );
+    }
+
+    #[test]
+    fn agent_status_projects_the_wait_declaration() {
+        // Issue #3844 AC-2: the PM reads what the agent is waiting for, since
+        // when, and when the declaration stops protecting it, from the same
+        // `issue.monitor.status` row that carries last_activity_at.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "host 排他の順番待ち",
+            "#3791 の verify が完了する",
+            "2026-06-29T00:10:00Z",
+        );
+        let row = |monitor: &IssueMonitorState| {
+            monitor
+                .agent_status()
+                .inbox
+                .into_iter()
+                .find(|row| row.issue_number == 42)
+                .expect("row 42")
+        };
+        let waiting = row(&monitor).waiting.expect("waiting projected");
+        assert_eq!(waiting.reason, "host 排他の順番待ち");
+        assert_eq!(waiting.resume_condition, "#3791 の verify が完了する");
+        assert_eq!(waiting.since, "2026-06-29T00:10:00Z");
+        assert_eq!(waiting.expires_at, "2026-06-29T03:10:00Z");
+        assert_eq!(
+            row(&monitor).last_activity_at.as_deref(),
+            Some("2026-06-29T00:10:00Z"),
+            "declaring is itself a liveness signal"
+        );
+
+        assert_eq!(
+            monitor.clear_autonomous_wait(42, "2026-06-29T00:40:00Z"),
+            AutonomousWaitOutcome::Cleared
+        );
+        assert!(row(&monitor).waiting.is_none());
+        assert_eq!(
+            monitor.clear_autonomous_wait(42, "2026-06-29T00:41:00Z"),
+            AutonomousWaitOutcome::NotWaiting
+        );
+    }
+
+    #[test]
+    fn clearing_the_wait_restores_ordinary_stuck_detection() {
+        // Issue #3844 AC-5/AC-6: after the agent resumes, recent activity
+        // (hook heartbeats from tool calls) keeps it alive exactly as before,
+        // and genuine silence is detected again.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "順番待ち",
+            "前の agent の完了",
+            "2026-06-29T00:10:00Z",
+        );
+        monitor.clear_autonomous_wait(42, "2026-06-29T00:20:00Z");
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T00:45:00Z")
+            .is_empty());
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:45:00Z");
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T01:10:00Z")
+            .is_empty());
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T01:16:00Z"),
+            vec![42]
         );
     }
 
@@ -18089,7 +19490,7 @@ mod tests {
         );
         monitor.record_attempt(42);
         monitor.set_autonomous_phase(42, AutonomousPhase::Reviewing);
-        monitor.escalate_to_needs_human(43, "gate unavailable");
+        monitor.escalate_to_needs_human(43, NeedsHumanKind::UserChoiceRequired, "gate unavailable");
 
         let view = monitor.status_view();
         assert!(view.autonomous_mode, "autonomous_mode surfaced");
@@ -18135,6 +19536,123 @@ mod tests {
         assert!(
             !off.is_autonomous_two_stage_candidate(&unlabelled),
             "mode on but no label ⇒ not a candidate"
+        );
+    }
+
+    // Issue #3927 (SPEC #3340 T-630, PM ruling 1f7fdc9e): a successful exact
+    // terminal delivery releases the active slot in the same mutation, unbinds
+    // the window so the later vanished-window reconciliation has nothing to
+    // requeue, and spends no retry attempt. The row stays out of the queue
+    // until the ordinary completion probe (merged PR / closed Issue) ends it.
+    #[test]
+    fn settle_exact_terminal_delivery_releases_slot_without_requeue_or_attempt() {
+        let window_id = "tab-1::agent-42";
+        let mut monitor = launched_monitor(42, window_id);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: Some(window_id.to_string()),
+        };
+        let attempts_before = monitor.autonomous_record(42).map_or(0, |r| r.attempts);
+
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+        assert_eq!(monitor.active_count(), 0, "the slot is released");
+        assert_eq!(monitor.launched_window_issue(window_id), None);
+        assert!(
+            monitor
+                .vanished_launched_windows("tab-1", &BTreeSet::new())
+                .is_empty(),
+            "a settled window is not a vanished launch"
+        );
+        assert_eq!(
+            monitor.requeue_exact_window(&target),
+            None,
+            "the legacy window_closed path is a no-op after settlement"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map_or(0, |r| r.attempts),
+            attempts_before,
+            "settlement consumes no retry attempt"
+        );
+        let item = monitor.inbox_item(42).expect("row survives settlement");
+        assert_eq!(item.state, MonitorInboxState::Launched);
+        assert_eq!(item.launched_window_id, None);
+        assert_eq!(monitor.queue_len(), 0, "not relaunched");
+
+        // Durable roundtrip keeps the settlement.
+        let mut reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(reloaded.active_count(), 0);
+        assert_eq!(reloaded.launched_window_issue(window_id), None);
+        assert!(
+            reloaded.settle_exact_terminal_delivery(&target).is_err(),
+            "a second settlement of the same launch is refused"
+        );
+    }
+
+    #[test]
+    fn settle_exact_terminal_delivery_refuses_stale_identity() {
+        let window_id = "tab-1::agent-42";
+        let mut monitor = launched_monitor(42, window_id);
+        let live_claim = monitor.live_claim_id(42);
+        let stale_claim = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: Some("claim-predecessor".to_string()),
+            delivery_id: None,
+            window_id: Some(window_id.to_string()),
+        };
+        assert_eq!(
+            monitor.settle_exact_terminal_delivery(&stale_claim),
+            Err(IssueMonitorStopMismatch::ClaimMismatch)
+        );
+        let stale_window = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: live_claim.clone(),
+            delivery_id: None,
+            window_id: Some("tab-1::agent-99".to_string()),
+        };
+        assert_eq!(
+            monitor.settle_exact_terminal_delivery(&stale_window),
+            Err(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        let no_window = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: live_claim,
+            delivery_id: None,
+            window_id: None,
+        };
+        assert_eq!(
+            monitor.settle_exact_terminal_delivery(&no_window),
+            Err(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "a refused settlement mutates nothing"
+        );
+        assert_eq!(monitor.launched_window_issue(window_id), Some(42));
+    }
+
+    #[test]
+    fn window_closed_after_settlement_keeps_the_legacy_unsuccessful_contract() {
+        // The paired regression: an unsuccessful/manual close still requeues
+        // and consumes an attempt; the new exact settlement does not change it.
+        let window_id = "tab-1::agent-42";
+        let mut monitor = launched_monitor(42, window_id);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: Some(window_id.to_string()),
+        };
+        assert_eq!(monitor.requeue_exact_window(&target), Some(42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.autonomous_record(42).map_or(0, |r| r.attempts), 1);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
         );
     }
 
@@ -18356,63 +19874,87 @@ mod tests {
     }
 
     #[test]
-    fn prepare_autonomous_candidate_unverified_protection_escalates() {
+    fn prepare_autonomous_candidate_unverified_protection_is_not_ready() {
+        // Issue #3944 AC-4: unverified branch protection is a readiness gap,
+        // named on the row and re-checked next scan — not a park.
         let mut monitor = autonomous_state();
-        let bp = gwt_git::branch_protection::BranchProtectionStatus::Absent;
-        let decision = monitor.prepare_autonomous_candidate(
-            &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
-            &bp,
+        let issue = auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&issue),
             "2026-06-29T00:00:00Z",
         );
-        assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
-        assert_eq!(
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Absent;
+        let decision = monitor.prepare_autonomous_candidate(&issue, &bp, "2026-06-29T00:00:00Z");
+        assert!(matches!(decision, EligibilityDecision::NotReady(_)));
+        assert_ne!(
             monitor.autonomous_record(50).map(|record| record.phase),
             Some(AutonomousPhase::NeedsHuman),
-            "ineligible candidate is escalated, not launched",
+            "a readiness gap never parks the candidate",
+        );
+        assert_eq!(
+            monitor.inbox_item(50).map(|item| item.state),
+            Some(MonitorInboxState::NotReady)
+        );
+        assert!(monitor
+            .inbox_item(50)
+            .and_then(|item| item.exclusion_reason.as_deref())
+            .is_some_and(|reason| reason.contains("branch protection")));
+        assert!(
+            !monitor.queued_issue_numbers().contains(&50),
+            "not launchable until the repository is ready"
         );
     }
 
     #[test]
-    fn prepare_autonomous_candidate_without_criteria_escalates() {
-        // SPEC #3200 FR-014: no machine-checkable acceptance criteria ⇒ NeedsHuman.
+    fn prepare_autonomous_candidate_without_criteria_is_not_ready() {
+        // SPEC #3200 FR-014 as re-scoped by Issue #3944 AC-4: no
+        // machine-checkable acceptance criteria ⇒ `not_ready`, naming the gap.
         let mut monitor = autonomous_state();
         let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
             required_checks: vec!["ci".to_string()],
         };
-        let decision = monitor.prepare_autonomous_candidate(
-            &auto_issue(50, "free text, no criteria"),
-            &bp,
+        let issue = auto_issue(50, "free text, no criteria");
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&issue),
             "2026-06-29T00:00:00Z",
         );
-        let EligibilityDecision::NeedsHuman(reason) = decision else {
-            panic!("expected NeedsHuman, got {decision:?}");
+        let decision = monitor.prepare_autonomous_candidate(&issue, &bp, "2026-06-29T00:00:00Z");
+        let EligibilityDecision::NotReady(reason) = decision else {
+            panic!("expected NotReady, got {decision:?}");
         };
-        assert_eq!(
+        assert_ne!(
             monitor.autonomous_record(50).map(|record| record.phase),
             Some(AutonomousPhase::NeedsHuman),
         );
-        // Issue #3873 AC-6: the reason names the fix and the operation that
-        // re-evaluates the Issue, because a body edit alone never does.
+        // Issue #3930 AC-2: it names the element that is actually missing
+        // (here: no recognized heading at all) instead of a vague "no block".
+        // Issue #3944: a `not_ready` row is re-evaluated by the next scan, so
+        // fixing the body is the whole remedy — no requeue operation needed.
         assert!(
-            reason.contains("no machine-checkable acceptance criteria block"),
+            reason.contains("no acceptance criteria heading"),
             "reason = {reason}"
         );
         assert!(
-            reason.contains("受け入れ基準") && reason.contains("issue.monitor.requeue"),
-            "reason must carry the next action, got: {reason}"
+            reason.contains("受け入れ基準")
+                && reason.contains("受け入れ条件")
+                && reason.contains("re-evaluated on the next scan"),
+            "reason must carry the fix and the re-evaluation rule, got: {reason}"
         );
-        // Issue #3873 AC-7: both status projections carry the row and its
-        // reason, so the backlog can be enumerated in one call.
+        // Issue #3873 AC-7 as re-scoped by Issue #3944 AC-4: the backlog does
+        // not list the row under `needs_human`; the inbox row is `not_ready`
+        // and carries the same reason, so it is still enumerable in one call.
         let agent_status = monitor.agent_status_at("2026-06-29T00:01:00Z");
-        assert_eq!(agent_status.needs_human, vec![50]);
-        let row = monitor
+        assert!(agent_status.needs_human.is_empty());
+        assert!(!monitor
             .status_view()
             .autonomous_issues
-            .into_iter()
-            .find(|row| row.issue_number == 50)
-            .expect("needs_human row is projected");
-        assert!(row.needs_human);
-        assert_eq!(row.needs_human_reason.as_deref(), Some(reason.as_str()));
+            .iter()
+            .any(|row| row.issue_number == 50 && row.needs_human));
+        let row = monitor.inbox_item(50).expect("row is projected");
+        assert_eq!(row.state, MonitorInboxState::NotReady);
+        assert_eq!(row.exclusion_reason.as_deref(), Some(reason.as_str()));
     }
 
     #[test]
@@ -18426,12 +19968,7 @@ mod tests {
         };
         // Schedule a backoff: a transient failure sets retry_not_before.
         monitor.record_attempt(50); // ensure a record exists
-        monitor.record_autonomous_failure(
-            50,
-            FailureClass::Transient,
-            "blip",
-            "2026-06-29T00:00:00Z",
-        );
+        monitor.record_autonomous_failure(50, "blip", "2026-06-29T00:00:00Z");
         // Still inside the backoff window ⇒ skipped (HumanGate, not captured).
         let blocked = monitor.prepare_autonomous_candidate(
             &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
@@ -18616,12 +20153,7 @@ mod tests {
         monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
 
         // Transient retry → warn notice naming the attempt.
-        monitor.record_autonomous_failure(
-            7,
-            FailureClass::Transient,
-            "review spawn blip",
-            "2026-07-02T00:10:00Z",
-        );
+        monitor.record_autonomous_failure(7, "review spawn blip", "2026-07-02T00:10:00Z");
         // Gate pass → Delivering; the info notice fires only once the arm
         // actually SUCCEEDS (codex #3217: no success toast for a failed arm).
         monitor.set_autonomous_phase(7, AutonomousPhase::Reviewing);
@@ -18632,7 +20164,7 @@ mod tests {
         // A second issue escalates → error notice.
         scan_issue_monitor_candidates(&mut monitor, &[issue(8)], "2026-07-02T00:20:00Z");
         monitor.record_attempt(8);
-        monitor.escalate_to_needs_human(8, "review rejected");
+        monitor.escalate_to_needs_human(8, NeedsHumanKind::UserChoiceRequired, "review rejected");
 
         let notices = monitor.take_autonomous_notices();
         let summary: Vec<(String, u64)> = notices
@@ -18756,7 +20288,7 @@ mod tests {
         let mut monitor = autonomous_state();
         for n in 0..200u64 {
             monitor.record_attempt(n);
-            monitor.escalate_to_needs_human(n, "boom");
+            monitor.escalate_to_needs_human(n, NeedsHumanKind::UserChoiceRequired, "boom");
         }
         let notices = monitor.take_autonomous_notices();
         assert!(
@@ -18888,10 +20420,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_failure_at_cap_escalates_inflight_autonomous_issue_to_needs_human() {
-        // SPEC #3200 (review follow-up): once the in-flight autonomous issue's
-        // attempts are exhausted, a further launch failure escalates to
-        // NeedsHuman through the same routing rather than silently retrying.
+    fn launch_failure_at_cap_requeues_inflight_autonomous_issue_with_steering() {
+        // SPEC #3200 (review follow-up) as re-scoped by Issue #3944 AC-3: a
+        // launch failure for an in-flight autonomous issue still funnels through
+        // the autonomous routing (never strands in `Reviewing`), and at the cap
+        // it requeues with a steering request instead of parking the Issue.
         let mut monitor = autonomous_state();
         monitor.autonomous_tuning.max_attempts = 1;
         scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
@@ -18903,15 +20436,20 @@ mod tests {
 
         assert_eq!(
             monitor.autonomous_record(7).map(|r| r.phase),
-            Some(AutonomousPhase::NeedsHuman),
-            "attempts exhausted ⇒ escalated, not retried"
+            Some(AutonomousPhase::Idle),
+            "attempts exhausted ⇒ retried through the ladder, not parked"
         );
         assert_eq!(
             monitor.inbox_item(7).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman)
+            Some(MonitorInboxState::Queued)
         );
-
-        assert_manual_relaunch_accepts_fresh_lifecycle_failures(&monitor);
+        assert!(
+            monitor
+                .autonomous_record(7)
+                .and_then(|r| r.steering.as_ref())
+                .is_some_and(|steering| steering.reason.contains("review spawn failed at cap")),
+            "the PM is asked to look at the failing launch"
+        );
     }
 
     #[test]
@@ -19190,6 +20728,436 @@ mod tests {
         assert_eq!(
             monitor, before,
             "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
+        );
+    }
+
+    fn quota_hold_evidence_fixture() -> IssueMonitorProviderQuotaHoldEvidence {
+        IssueMonitorProviderQuotaHoldEvidence {
+            recorded_at: "2026-09-02T09:01:00Z".to_string(),
+            source: "screen_notice".to_string(),
+            issue_number: None,
+            window_id: Some("tab-1::agent-42".to_string()),
+            screen_text: Some(
+                "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
+                 to purchase more credits or try again at Sep 7th, 2026 12:58 PM."
+                    .to_string(),
+            ),
+            poller_state: Some("ok".to_string()),
+            poller_limit_reached: Some(false),
+            poller_windows: vec![
+                IssueMonitorProviderQuotaPollerWindow {
+                    kind: "five_hour".to_string(),
+                    used_percent: 26,
+                },
+                IssueMonitorProviderQuotaPollerWindow {
+                    kind: "weekly".to_string(),
+                    used_percent: 26,
+                },
+            ],
+        }
+    }
+
+    /// Issue #3923 AC-1 / AC-2 / AC-4: a hold is listed with the evidence it
+    /// was formed from, and an explicit operator release removes the
+    /// provider-wide hold and readmits every issue it was holding.
+    #[test]
+    fn clearing_a_provider_quota_hold_readmits_the_issues_it_held() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        let evidence = quota_hold_evidence_fixture();
+
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-07T03:58:00Z"),
+                Some(evidence.clone()),
+                "2026-09-02T09:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+
+        let status = monitor.agent_status_at("2026-09-02T09:02:00Z");
+        assert_eq!(
+            status.provider_quota_holds.len(),
+            1,
+            "AC-1: every provider hold is listed"
+        );
+        let hold = &status.provider_quota_holds[0];
+        assert_eq!(hold.provider, "codex");
+        assert_eq!(hold.reset_at, "2026-09-07T03:58:00Z");
+        let recorded = hold
+            .evidence
+            .as_ref()
+            .expect("AC-2: the hold carries the evidence it was formed from");
+        assert_eq!(recorded.issue_number, Some(42));
+        assert_eq!(recorded.recorded_at, "2026-09-02T09:01:00Z");
+        assert_eq!(recorded.screen_text, evidence.screen_text);
+        assert_eq!(recorded.poller_windows, evidence.poller_windows);
+        assert_eq!(
+            monitor.prefs().provider_quota_hold_evidence.get("codex"),
+            Some(recorded),
+            "the evidence is durable alongside the hold"
+        );
+        assert!(!monitor.retry_ready_for_saved_profile(42, "2026-09-02T09:02:00Z"));
+
+        assert_eq!(
+            monitor.clear_provider_quota_hold(
+                "codex",
+                "PM: Codex is not rate limited",
+                "2026-09-02T09:11:00Z",
+            ),
+            IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+                released_reset_at: Some("2026-09-07T03:58:00Z".to_string()),
+                released_issues: vec![42],
+            }
+        );
+
+        let status = monitor.agent_status_at("2026-09-02T09:12:00Z");
+        assert!(status.provider_quota_holds.is_empty());
+        assert_eq!(status.quota_hold, None);
+        assert!(
+            monitor.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"),
+            "the issues the hold was holding are admitted again"
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.clone()),
+            None
+        );
+        let prefs = monitor.prefs();
+        assert!(prefs.provider_quota_holds.is_empty());
+        assert!(prefs.provider_quota_hold_evidence.is_empty());
+        let release = prefs
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("the release is a durable fact, not the absence of one");
+        assert_eq!(release.released_at, "2026-09-02T09:11:00Z");
+        assert_eq!(release.reason, "PM: Codex is not rate limited");
+        assert_eq!(
+            release.released_reset_at.as_deref(),
+            Some("2026-09-07T03:58:00Z")
+        );
+
+        assert_eq!(
+            monitor.clear_provider_quota_hold("codex", "again", "2026-09-02T09:13:00Z"),
+            IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+                released_reset_at: None,
+                released_issues: Vec::new(),
+            },
+            "clearing an unheld provider is idempotent and still fences in-memory holds elsewhere"
+        );
+        assert_eq!(
+            monitor.clear_provider_quota_hold("   ", "x", "2026-09-02T09:13:00Z"),
+            IssueMonitorProviderQuotaHoldClearOutcome::UnknownProvider,
+            "a custom agent id is a valid provider, so only a blank name is unknown"
+        );
+    }
+
+    /// Issue #3923 AC-1: removing the hold from disk says nothing to a process
+    /// that still holds it in memory (holds join by the later reset), so the
+    /// release must be a published fence — and it must not erase a hold that
+    /// was formed after it.
+    #[test]
+    fn a_provider_quota_hold_release_fences_the_stale_hold_but_not_a_newer_one() {
+        let mut daemon = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        daemon.set_gui_connected(true);
+        daemon.record_candidate(issue(42));
+        daemon.complete_active_launch(42, "tab-1::agent-42");
+        assert_eq!(
+            daemon.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-07T03:58:00Z"),
+                None,
+                "2026-09-02T09:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+
+        let mut operator =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        assert!(matches!(
+            operator.clear_provider_quota_hold("codex", "PM ruling", "2026-09-02T09:11:00Z"),
+            IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+        ));
+        let disk = operator.prefs();
+        assert!(disk.provider_quota_holds.is_empty());
+
+        daemon.rebase_daemon_driver_prefs(&disk);
+        assert!(
+            daemon.prefs().provider_quota_holds.is_empty(),
+            "a hold released on disk must not be re-stamped by a process that still holds it"
+        );
+        assert!(daemon.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"));
+
+        daemon.complete_active_launch(42, "tab-1::agent-43");
+        assert_eq!(
+            daemon.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-43",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-07T03:58:00Z"),
+                None,
+                "2026-09-02T09:30:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        daemon.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            daemon
+                .prefs()
+                .provider_quota_holds
+                .get("codex")
+                .map(String::as_str),
+            Some("2026-09-07T03:58:00Z"),
+            "a hold recorded after the release is new evidence and survives the same fence"
+        );
+
+        let mut garbage = disk.clone();
+        garbage.provider_quota_hold_releases.insert(
+            "codex".to_string(),
+            IssueMonitorProviderQuotaHoldRelease {
+                released_at: "not-a-timestamp".to_string(),
+                reason: "corrupt".to_string(),
+                released_reset_at: None,
+            },
+        );
+        daemon.rebase_daemon_driver_prefs(&garbage);
+        assert_eq!(
+            daemon
+                .prefs()
+                .provider_quota_hold_releases
+                .get("codex")
+                .map(|release| release.released_at.as_str()),
+            Some("2026-09-02T09:11:00Z"),
+            "an unparsable disk instant cannot replace a valid local fence"
+        );
+
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-07T03:58:00Z".to_string(),
+                )]),
+                provider_quota_hold_evidence: BTreeMap::from([(
+                    "codex".to_string(),
+                    quota_hold_evidence_fixture(),
+                )]),
+                provider_quota_hold_releases: BTreeMap::from([(
+                    "codex".to_string(),
+                    IssueMonitorProviderQuotaHoldRelease {
+                        released_at: "2026-09-02T09:11:00Z".to_string(),
+                        reason: "PM ruling".to_string(),
+                        released_reset_at: Some("2026-09-07T03:58:00Z".to_string()),
+                    },
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(
+            restored.prefs().provider_quota_holds.is_empty(),
+            "restore applies the same fence as a rebase"
+        );
+    }
+
+    /// Issue #3923 AC-5: the PM can move the fleet off a held provider from
+    /// the CLI. Provider-specific model choices reset; the wizard's runtime
+    /// choices survive; a profile that was never saved cannot be invented.
+    #[test]
+    fn switching_the_launch_profile_agent_keeps_runtime_choices_and_lifts_the_hold() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(IssueMonitorLaunchProfile {
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: Some("0.153.2".to_string()),
+                    skip_permissions: true,
+                    codex_fast_mode: true,
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                    docker_service: Some("dev".to_string()),
+                    ..test_launch_profile("codex")
+                }),
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-07T03:58:00Z".to_string(),
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(monitor
+            .provider_quota_hold_at("2026-09-02T09:00:00Z")
+            .is_some());
+
+        let switched = monitor
+            .switch_launch_profile_agent("Claude")
+            .expect("switch to a healthy provider");
+        assert_eq!(switched.agent_id, "claude");
+        assert_eq!(
+            switched.model, None,
+            "a Codex model does not apply to Claude"
+        );
+        assert_eq!(switched.reasoning, None);
+        assert_eq!(switched.version, None);
+        assert!(
+            !switched.codex_fast_mode,
+            "fast mode is a per-provider opt-in and must not carry over"
+        );
+        assert!(switched.skip_permissions);
+        assert_eq!(
+            switched.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(switched.docker_service.as_deref(), Some("dev"));
+        assert_eq!(monitor.prefs().launch_profile, Some(switched.clone()));
+        assert_eq!(
+            monitor.provider_quota_hold_at("2026-09-02T09:00:00Z"),
+            None,
+            "the queue is gated by the saved profile's provider, which is no longer held"
+        );
+
+        let again = monitor
+            .switch_launch_profile_agent("claude")
+            .expect("idempotent");
+        assert_eq!(again, switched);
+        assert_eq!(
+            monitor.switch_launch_profile_agent("  "),
+            Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent)
+        );
+
+        let mut unsaved = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(
+            unsaved.switch_launch_profile_agent("claude"),
+            Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile),
+            "runtime and Docker choices cannot be invented from an agent name"
+        );
+        assert!(!unsaved.has_launch_profile());
+    }
+
+    /// Issue #3923 AC-3: the poller reading that says "this account is fine"
+    /// is scoped to the agent's own provider and requires fresh data.
+    #[test]
+    fn a_healthy_poller_reading_is_recognized_only_for_a_fresh_ok_account() {
+        use gwt_core::usage::{ProviderUsage, UsageProvider, UsageState, UsageWindow, WindowKind};
+
+        let healthy = ProviderUsage {
+            provider: UsageProvider::Codex,
+            account_label: None,
+            plan: None,
+            windows: vec![
+                UsageWindow::new(WindowKind::FiveHour, 26.0, None),
+                UsageWindow::new(WindowKind::Weekly, 26.0, None),
+            ],
+            limit_reached: false,
+            state: UsageState::Ok,
+            fetched_at: None,
+        };
+        assert!(provider_reports_healthy_for_agent(
+            "codex",
+            std::slice::from_ref(&healthy)
+        ));
+        assert!(
+            !provider_reports_healthy_for_agent("claude", std::slice::from_ref(&healthy)),
+            "a Codex reading says nothing about Claude"
+        );
+        let stale = ProviderUsage {
+            state: UsageState::Stale { age_secs: 900 },
+            ..healthy.clone()
+        };
+        assert!(!provider_reports_healthy_for_agent("codex", &[stale]));
+        let full = ProviderUsage {
+            windows: vec![UsageWindow::new(WindowKind::Weekly, 100.0, None)],
+            ..healthy.clone()
+        };
+        assert!(!provider_reports_healthy_for_agent("codex", &[full]));
+        let reached = ProviderUsage {
+            limit_reached: true,
+            ..healthy
+        };
+        assert!(!provider_reports_healthy_for_agent("codex", &[reached]));
+    }
+
+    #[test]
+    fn transient_launch_failure_requeues_without_consuming_an_attempt() {
+        // Issue #3941 AC-3: a launch aborted by transient infrastructure (probe
+        // timeout with no cached version, concurrent fetch ref race) is not an
+        // agent failure. It goes back to the queue behind a backoff, keeps its
+        // reason visible, and spends no attempt — no PM requeue needed.
+        let now = "2026-09-04T00:39:39Z";
+        let message = "exact npx package probe timed out for @openai/codex@0.153.2 after 120 seconds and the requested version is not in the local package cache; launch was aborted before spawn. Next: warm the cache; gwt retries this launch automatically without spending an attempt.";
+        for autonomous in [true, false] {
+            let mut monitor = if autonomous {
+                autonomous_state()
+            } else {
+                IssueMonitorState::new(IssueMonitorConfig::default())
+            };
+            scan_issue_monitor_candidates(
+                &mut monitor,
+                &[auto_issue(3928, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+                now,
+            );
+            monitor.complete_active_launch(3928, "agent-93");
+            assert_eq!(monitor.active_count(), 1, "autonomous={autonomous}");
+
+            monitor.record_agent_issue_failed(3928, message);
+
+            assert_eq!(monitor.attempt_count(3928), 0, "autonomous={autonomous}");
+            assert_eq!(monitor.active_count(), 0, "autonomous={autonomous}");
+            assert!(monitor.queue.contains(&3928), "autonomous={autonomous}");
+            assert!(
+                !monitor.failed_issues.contains_key(&3928),
+                "autonomous={autonomous}: transient failures are not parked"
+            );
+            let item = monitor.inbox_item(3928).expect("inbox item");
+            assert_eq!(
+                item.state,
+                MonitorInboxState::Queued,
+                "autonomous={autonomous}"
+            );
+            assert_eq!(item.error_message.as_deref(), Some(message));
+            assert!(item.launched_window_id.is_none());
+            // The funnel stamps the backoff from the wall clock.
+            let wall_now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            assert!(
+                !monitor.retry_ready(3928, &wall_now),
+                "autonomous={autonomous}: a backoff is scheduled"
+            );
+            assert!(monitor.retry_ready(3928, "2099-01-01T00:00:00Z"));
+        }
+
+        // A non-transient failure keeps the human-gated terminal path.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[auto_issue(3928, "b")], now);
+        monitor.complete_active_launch(3928, "agent-93");
+        monitor.record_agent_issue_failed(3928, "boom");
+        assert_eq!(
+            monitor.inbox_item(3928).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
         );
     }
 }

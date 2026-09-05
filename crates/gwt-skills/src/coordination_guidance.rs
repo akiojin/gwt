@@ -122,6 +122,33 @@ posting output and every PM-facing surface repeat back to you:
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### Waiting is not a stall: declare it
+
+The Issue Monitor judges a launched agent stuck when it sees no activity
+for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
+costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
+serialization ruling, or on a long verification run you must not touch
+produces no activity either, so before you go quiet for that long,
+declare the wait:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` defaults to the owner Issue of this launch. While the
+declaration is in force stuck detection skips your issue and the PM reads
+`reason` / `resume_condition` / `expires_at` from the `waiting` field of
+your row in `issue.monitor.status`. It is capped (`max_wait_secs` in the
+response, 3 hours): re-declaring refreshes the text but never the cap, and
+past it the ordinary rule applies again. Clear it the moment you resume:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+Do not fake activity instead (periodic `workspace.update` or Board posts
+to look alive) - a declared wait is the honest signal.
+
 ### Proposing new Issues to the PM
 
 Do not call `issue.create`. When you find something that deserves its own
@@ -220,6 +247,28 @@ gwtd binary:
     JSON
 
 There is no standalone `gwt-search` executable.
+
+## Heavy commands
+
+`cargo test`, `cargo clippy`, `cargo build`, coverage, and headed browser
+runs compile on a host shared with every other agent worktree. Take the
+host-wide lease before any of them, even a single focused test, and
+release it afterwards:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
+    JSON
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
+    JSON
+
+A refused acquire names the current holder; declare the wait with
+`issue.monitor.wait` (see "Waiting is not a stall") and retry on the
+cadence the gwt-verify skill defines instead of running without it.
+`verify.run` admits itself: it honors a lease this worktree holds,
+otherwise claims one and waits for other worktrees' heavy processes to
+drain, and answers `deferred` when its bounded wait runs out — rerun it.
 
 ## Persisted Work files
 
@@ -367,6 +416,31 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### 待機は停滞ではない: 申告する
+
+Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
+排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
+の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` は省略するとこの launch の担当 Issue になります。申告が有効な間は
+stuck 判定が自分の Issue をスキップし、PM は `issue.monitor.status` の自分の
+行の `waiting` フィールドから `reason` / `resume_condition` / `expires_at` を
+読めます。申告には上限があります（応答の `max_wait_secs`、3 時間）。再申告は
+本文を更新しますが上限は延びず、超過後は通常の判定に戻ります。再開したら
+すぐ解除します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
+でください。待機の申告が正直なシグナルです。
+
 ### Issue 化は PM へ提案する
 
 `issue.create` を直接呼ばないでください。Issue 化すべき事象を見つけたら
@@ -460,6 +534,27 @@ binary の `search` JSON operation で実行します:
     JSON
 
 `gwt-search` という単体の実行ファイルは存在しません。
+
+## Heavy commands
+
+`cargo test`、`cargo clippy`、`cargo build`、coverage、headed browser 実行は、
+他のすべての agent worktree と共有する host 上でコンパイルします。単発の
+focused test でも、開始前に host 全体の lease を取り、終わったら解放します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
+    JSON
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
+    JSON
+
+拒否された acquire は現在の保持者を返します。lease 無しで実行せず、
+`issue.monitor.wait` で待機を申告して（「待機は停滞ではない」参照）、
+gwt-verify skill が定める間隔で再試行してください。`verify.run` は
+自分で admission を取ります: この worktree が保持する lease はそのまま使い、
+無ければ取得して他 worktree の heavy プロセスが捌けるまで待ち、bounded な
+待機を使い切ると `deferred` を返します。その場合は再実行してください。
 
 ## Persisted Work files
 
@@ -635,6 +730,33 @@ mod tests {
             "params.resolves",
             "needs_human",
             "issue.comment",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3913 AC-2: the hook-delivered guidance tells every agent that
+    /// raw `cargo test` / `cargo clippy` runs take the host-wide lease, in
+    /// both languages and in the generated file.
+    #[test]
+    fn heavy_command_serialization_is_in_both_bodies_and_the_generated_file() {
+        for phrase in [
+            "## Heavy commands",
+            "verify.lease.acquire",
+            "verify.lease.release",
+            "`cargo test`",
+            "`cargo clippy`",
+            "verify.run",
+            "deferred",
+            "issue.monitor.wait",
         ] {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(

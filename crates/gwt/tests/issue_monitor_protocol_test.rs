@@ -163,7 +163,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             quota_hold: None,
             autonomous_issues: Vec::new(),
             launch_profile_candidates: Vec::new(),
-            provider_holds: Vec::new(),
+            provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
         },
     };
@@ -176,7 +176,6 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         value["status"]["launch_profile_candidates"],
         serde_json::json!([])
     );
-    assert_eq!(value["status"]["provider_holds"], serde_json::json!([]));
     assert_eq!(value["status"]["usage_threshold_percent"], 80);
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);

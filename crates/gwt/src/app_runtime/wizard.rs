@@ -3507,7 +3507,9 @@ impl AppRuntime {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
                 Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
             }
-            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
+            // Issue #3934: a dead Host leaves no fenced proof to carry.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead
+            | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
         let intent = super::ManualLaunchHolderIntent {
@@ -3525,9 +3527,8 @@ impl AppRuntime {
                 super::ManualLaunchGenerationDisposition::ConfirmLive(intent),
             ),
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(_) => {
-                if !matches!(
+                if !gwt::cli::execution_state::holder_status_permits_generation_reclaim(
                     holder.status,
-                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
                 ) {
                     return Ok(super::ManualLaunchGenerationDisposition::Unknown(
                         "The exact runtime is terminal but the holder Session is not durably stopped"
@@ -3549,6 +3550,14 @@ impl AppRuntime {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
                 super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
             ),
+            // Issue #3934: every Host that wrote a sidecar for the holder is
+            // gone, but this route needs a proof to hand the successor. The
+            // scan reaper terminalizes such a generation under its own leases.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead => {
+                Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                    "The holder's Hosts are all gone but left no runtime exit proof".to_string(),
+                ))
+            }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {
                 Ok(super::ManualLaunchGenerationDisposition::Unknown(
                     "The holder has no exact runtime exit proof or liveness proof".to_string(),

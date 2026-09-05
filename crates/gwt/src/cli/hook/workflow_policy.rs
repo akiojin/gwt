@@ -1185,6 +1185,8 @@ mod tests {
             "issue.monitor.failover",
             // Issue #3645 / #3628: requeue releases a dead failure hold.
             "issue.monitor.requeue",
+            // Issue #3844: a wait declaration mutates the driver's liveness view.
+            "issue.monitor.wait",
         ] {
             assert!(!is_read_only_json_envelope_operation(operation));
         }

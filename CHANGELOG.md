@@ -1,6 +1,199 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.89.0] - 2026-09-04
+
+### Bug Fixes
+
+- **issue-monitor:** Provider quota hold の誤検知を防ぎ一覧と解除の operation を追加する
+- **issue-monitor:** CI の clippy 引数数 lint と gwt-agent skill asset parity を修正する
+- **issue-monitor:** テストの clone slice を slice::from_ref に置き換え clippy を通す
+- **issue-monitor:** CodeRabbit 指摘に沿って quota hold fence と launch_agent の境界条件を締める
+
+### Features
+
+- **issue-monitor:** Config.set に launch_agent を追加し CLI から launch profile の agent を切り替える
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3923 の Work events shard を追加
+
+## [9.88.0] - 2026-09-04
+
+### Bug Fixes
+
+- **index:** File index v2の世代契約をSPECへ整合する
+- **index:** File index v2 の生成処理を有界化する
+- **index:** Bare repository と Chroma client を fail-closed 化する
+- **index:** Legacy fallback の v2 reader が leases/ を作らないようにする
+- **index:** Windows で v2 生成物の fsync が EBADF になる回帰と reader pin の gate を直す
+- **issue-monitor:** Scan の段階失敗で launch 段階が失われないようにする (#3933)
+- **issue-monitor:** 前回結果からの launch を live 状態確認で fail-closed にする (#3933)
+- **gui:** エラーは通知センター 1 箇所に集約し通知対象を agent pane に限定する
+- **launch:** Dead host の holder generation を回収し scan ごとに reaper を実行する (#3934)
+- **runtime:** Terminal convergence のレビュー指摘を反映 (#3927)
+- **git:** Git 2.50 の batched ref update 拒否を fetch 競合として再試行する (#3941 AC-4)
+- **launch:** Exact 版 npx probe の timeout をローカルキャッシュで補い probe を同時起動間で共有する (#3941)
+- **issue-monitor:** Transient な起動失敗を attempt 消費なしで自動 requeue する (#3941 AC-3)
+
+### Features
+
+- **index:** File index v2 の共有基盤を実装する
+- **index:** Worktree viewを原子的に公開する
+- **index:** Base Overlay検索をViewに統合する
+- **index:** V2移行と復旧経路を有効化する
+- **index:** 到達可能性GCとleaseを実装する
+- **index:** Host-wide Refresh Broker で startup/status を intent 化する (#3909)
+- **gui:** 通知センターの履歴 sink と toast-host の dismissOnActivate を追加する
+- **gui:** Operator rail に通知ベルと未読バッジを追加し通知センタードロワーを結線する
+- **gui:** 全通知種別を通知センター履歴に記録する
+- **gui:** Issue ウィンドウのエラー表示を通知センターの error 行と compact インジケータに集約する
+- **gui:** 右上の autonomous-notifications region を廃止し通知センターへ一本化する
+- **issue-monitor:** Autonomous mode の needs_human を破壊的変更承認とユーザー選択に限定する
+- **runtime:** 終了した agent window を runtime が自動で閉じる (#3927)
+
+### Miscellaneous Tasks
+
+- **work:** #3909 の Work event shard を追加する
+- **ci:** Rerun after flaky lease admission test (#3937)
+- **work:** Issue #3206 の Work event shard を追跡に含める
+- **work:** Issue #3206 の verify 完了 Work event shard を記録する
+- **work:** Issue #3206 の develop 取り込み後 Work event shard を記録する
+- **work:** Issue #3206 の browser-check 完了 Work event shard を記録する
+- **work:** Issue #3934 の Work event shard を追跡に含める
+- **work:** Issue #3944 の Work event shard を追跡に含める
+- **work:** Issue #3944 の Work event shard を追跡に含める
+- **work:** Issue #3927 の Work event shard を追跡に含める
+- **work:** Issue #3927 の Work event shard を追跡に含める（レビュー対応後）
+- **work:** Issue #3941 セッションの events shard を追加
+
+### Testing
+
+- **index:** File index v2 の共有 CAS 契約を RED にする
+- **index:** Cover atomic worktree view publication
+- **index:** Base Overlay検索マージ契約を固定する
+- **index:** 移行リカバリ契約を固定する
+- **index:** V2 repair配線契約を固定する
+- **index:** Reachability GC契約を固定する
+- **index:** Refresh BrokerのRED契約を固定する
+- **gwt:** PTY 終了と Windows パス検証を安定化する
+
+## [9.87.0] - 2026-09-04
+
+### Bug Fixes
+
+- **issue-monitor:** 待機申告 issue.monitor.wait で正当な待機を stuck と誤判定しない (#3844)
+- **test:** Gwt-agent のテストからプロセス全体の PATH 差し替えを排除
+- **test:** Process resolver contract を detect_claude_version_raw_in_env に追従
+- **test:** PATH 書き換え lint の照合を大文字小文字非区別にする
+- **verify:** Verify.run が host 排他を取り他 worktree の heavy を待ってから開始する (#3913)
+- **verify:** Lease 待機を issue.monitor.wait の待機申告と整合させる (#3913)
+- **verify:** Admission モジュールの intra-doc link を外し rustdoc --document-private-items を通す (#3913)
+- Scope pane operations to the current gwt home
+- Remove needless pane scope borrow
+- **issue-monitor:** AC 判定が spec section と未 prefix の checkbox を読み、失敗理由に欠落要素を名指しする (#3930)
+
+### Documentation
+
+- **skills:** AC ブロックで明示 id と未 prefix を混在させない旨を明記 (#3930)
+
+### Features
+
+- **gui:** Issue 行を主バッジ 1・副情報 2・操作 2 に整理し inline terminal を拡大可能にする
+- **gui:** Usage popover にセッション別トークン/context を表示する
+- **pm:** 稼働中 launch への steering を gwt-pm 契約と wake/tick/Stop prompt に組み込む
+- **pm:** Wake prompt の steering 義務を PTY 予算内の短縮 clause で運ぶ
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3885 の Work event shard を記録
+- **work:** Issue #3844 の Work event shard を追跡に含める
+- **work:** Issue #3862 の Work event shard を記録する
+- **work:** Issue #3862 の終端 Work event shard を記録する
+- **work:** Issue #3862 の verify 完了 Work event shard を記録する
+- **work:** Settle issue 3895 delivery
+- **work:** Issue #3878 の Work event shard を記録する
+- **work:** 二重起動 window の Work event shard を記録する
+- **work:** Issue #3878 の settle 前 Work event shard を記録する
+- **work:** Issue #3913 の Work event shard を追跡に含める
+- **work:** Issue #3913 の Work event shard を追跡に含める（develop 取り込み後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（admission 移動後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（develop 再取り込み後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（rustdoc 修正後）
+- **work:** Issue #3930 の Work event shard を追跡に含める
+- **work:** Issue #3930 の verify.run 後の Work event shard を追跡に含める
+- **work:** Issue #3930 の develop 取り込み後の Work event shard を追跡に含める
+- **work:** Issue #3930 の Done receipt に伴う Work event shard を追跡に含める
+- **work:** Issue 3767 の完了状態を記録
+- **work:** Issue #3937 の verify.run 後の Work event shard を追跡に含める
+
+### Refactor
+
+- **gui:** SPEC #3885 改訂に合わせて行内 terminal の拡大トグルを撤去する
+- **verify:** Admission モジュールを verification_lease 配下へ移し cli.rs の行数予算を守る (#3913)
+
+### Testing
+
+- **gwt:** Durable delivery の fallback commit 予算を test runtime の明示依存にする
+- **verification-lease:** Admission の解放判定を有界待ちにし holder と lease パスを診断に出す (#3937)
+- Seed pane runtime in windows launch mock
+
+## [9.86.0] - 2026-09-02
+
+### Bug Fixes
+
+- **terminal:** Start gate が存在しない target を release 前の spawn 失敗として報告する
+- **terminal:** Unix の agent 優先度を PRIO_PGRP でプロセスグループ全体に適用する
+- **terminal:** Start gate の accept 済み socket を blocking に戻してから handshake を読む
+- Preserve live agent from stale launch failure
+- **issue-monitor:** Auto-merge Issue の AC ブロック形式を作成時に検証する
+- **usage:** Codex の rate-limit ウィンドウを window_minutes の実値で分類する
+- **test:** Fake gh の atomic owner readiness を待機する
+- **gwtd:** Issue.edit を単一 PATCH に統合し labels null を省略扱いにする
+- **launch:** Owner ledger 確立後の worktree pointer 欠落を起動時に self-heal する
+- **pm:** Wake prompt を PTY canonical queue の 1024 バイト以下に保つ (#3868)
+- **core:** 担当が自力で解消できる拒否を自動起票の対象から外す (#3868)
+- **terminal:** Unix 専用テストの Instant import を cfg で制限する
+- **hook:** Normalize PM worktree path comparison
+- **gui:** Issue 行に inline terminal を常設しプレビュー配置をミニマップから外す
+- **gui:** Issue 行の agent 表示を読み取り専用 status row に縮退する
+- **gui:** Agent status row の活動行を 2 行目に回しタイトルの切れを防ぐ
+- **gui:** Agent status row の Windowize を活動行より前に配置する
+
+### Features
+
+- **agent:** エージェントプロセスツリーを低優先度で隔離し cargo 並列度を制限する
+- **agent:** 資源分離にプリセットを追加しビルド並列度を汎用化する
+- **gwtd:** Plain Issue を更新する issue.edit を追加し gwt-spec 判定基準を明文化する
+- **gwtd:** Issue.edit に auto-merge の受け入れ基準ガードを適用する
+- **pm:** Open PR の駆動フォールバック・滞留時限・quota 契約を定義 (#3868)
+- **launch:** Hermes の Model / Profile / Toolsets / Skills を config 実読みの選択式にし前回設定を復元する
+- **gh:** GitHub API 予算に供給側キャッシュと需要側の間引きを導入 (#3891)
+
+### Miscellaneous Tasks
+
+- **work:** #3813 の Work event shard を取り込む
+- Satisfy stable clippy for provider hold
+- **work:** Issue #3865 の Work event shard を追加
+- **work:** Issue #3865 の検証 Work event shard を追加
+- **work:** Issue #3873 の Work event shard を記録
+- **work:** Issue #3860 の Work event shard を記録
+- **work:** Issue #3860 の Work event shard を記録（Done 終端）
+- **work:** Issue #3865 の終端 Work event shard を追加
+- **work:** Record issue 3759 delivery state
+- **work:** Record issue 3759 verification state
+- **work:** #3868 の Work event shard を追跡（develop 取り込み後）
+- **work:** #3868 の終端 Work event shard を追跡
+- **work:** Settle issue 3759 delivery
+- **work:** Record issue 3863 work events
+- **work:** Issue #3874 の backfill event を記録
+- **work:** Settle issue 3863 delivery
+- **work:** Issue #3884 の Work event shard を記録
+
+### Refactor
+
+- **cli:** Github.budget の command model を tuple variant にして cli.rs の行数予算を守る (#3891)
+
 ## [9.85.0] - 2026-09-01
 
 ### Bug Fixes

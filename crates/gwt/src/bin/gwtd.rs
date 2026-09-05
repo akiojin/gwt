@@ -224,6 +224,8 @@ fn format_issue_help() -> String {
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
+        "  issue.monitor.wait",
+        "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -236,9 +238,17 @@ fn format_issue_help() -> String {
         "  number, reason                        issue.monitor.requeue releases a dead",
         "                                        agent_failed / launch_failed hold, or a",
         "                                        daemon-reported blocked_by_claim hold",
+        "  reason, resume_condition, clear       issue.monitor.wait declares that the",
+        "                                        current launch is waiting (stuck detection",
+        "                                        pauses, max 3h); clear=true when resumed",
+        "  provider, reason                      issue.monitor.quota_hold.clear releases a",
+        "                                        provider-wide quota hold (e.g. codex / claude;",
+        "                                        any agent id the hold is keyed by)",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
+        "  launch_agent                          Switch the saved launch profile's agent",
+        "                                        (codex / claude); model resets to default",
         "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
@@ -1061,6 +1071,14 @@ mod tests {
             // launch. If it is not discoverable here, the operator falls back
             // to hand-editing the state file, which is the bug.
             "issue.monitor.requeue",
+            // Issue #3844: the only way a waiting agent can tell the monitor it
+            // is waiting rather than stuck.
+            "issue.monitor.wait",
+            // Issue #3923: the only release for a provider-wide quota hold.
+            "issue.monitor.quota_hold.list",
+            "issue.monitor.quota_hold.clear",
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            "launch_agent",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",

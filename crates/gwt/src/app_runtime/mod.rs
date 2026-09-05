@@ -195,6 +195,7 @@ mod pty_io;
 mod runtime_events;
 mod settings_update;
 mod startup;
+pub(crate) mod terminal_convergence;
 mod title_sync;
 mod ui_trace;
 mod window;
@@ -1021,6 +1022,10 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_materializer_id: String,
+    /// Issue #3878: budget for one local fallback commit of the Issue Monitor
+    /// prefs. Injected at construction so a test runtime owns its budget
+    /// instead of inheriting the GUI-thread one through process state.
+    pub(crate) issue_monitor_fallback_commit_timeout: std::time::Duration,
     /// Issue #3676 AC-2: credential preflight consulted before any Issue
     /// Monitor launch spawns a terminal. Injected at construction so tests
     /// control ambient credential facts without mutating process state; only
@@ -1091,6 +1096,15 @@ pub struct AppRuntime {
         HashMap<String, launch::PendingToolRuntimeMigration>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
+    /// terminal close, keyed by combined window id. Process-local only.
+    pub(crate) terminal_close_candidates:
+        HashMap<String, terminal_convergence::TerminalCloseCandidate>,
+    /// One background terminal-convergence scan at a time.
+    pub(crate) terminal_convergence_scan_in_flight: bool,
+    /// Grace applied to terminal close candidates; refreshed from Agent
+    /// settings by every observer scan.
+    pub(crate) terminal_close_grace: std::time::Duration,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -1312,16 +1326,24 @@ fn local_issue_monitor_fallback_projection_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(1)
 }
 
-fn local_issue_monitor_fallback_commit_timeout() -> std::time::Duration {
-    #[cfg(test)]
-    if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT_MS")
-        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
-        .filter(|timeout| *timeout <= 60_000)
-    {
-        return std::time::Duration::from_millis(timeout);
-    }
-    std::time::Duration::from_millis(250)
-}
+/// Wall-clock budget for one GUI-thread local fallback commit of the Issue
+/// Monitor prefs: lock wait, authority fence check, read, mutate and the
+/// durable (fsync + rename) write. The daemon is the primary control
+/// transport; this bounds how long the GUI thread blocks when that transport
+/// is unavailable and the prefs lock is held elsewhere. Expiry surfaces as
+/// `Rejected`, which delivery claim/mark callers treat as "not the owner".
+pub(crate) const ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+/// Issue #3878: the fallback commit budget a test runtime owns explicitly.
+/// A durable delivery spends several commits, each with two fsyncs, inside
+/// [`ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT`]; under CI parallel load that
+/// budget expires and the delivery silently stays unmaterialized. Tests that
+/// assert the production budget itself set
+/// [`ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT`] on their runtime instead.
+#[cfg(test)]
+pub(crate) const TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 thread_local! {
@@ -1959,6 +1981,46 @@ const ISSUE_MONITOR_SCAN_BUDGET: std::time::Duration = std::time::Duration::from
 /// everything it had just learned and the monitor never advanced.
 const ISSUE_MONITOR_COMMIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Issue #3934: run the generation reaper on the Issue Monitor scan cadence.
+///
+/// The scan worker has no `AppRuntime`, so it protects nothing by identity;
+/// it does not need to. Startup's protection list exists only for sessions it
+/// is about to restore, and every window this process already owns publishes a
+/// live runtime sidecar that the exact revalidation reads as `Live`.
+fn reap_scan_defunct_active_generations(project_root: &Path) {
+    let worktrees = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                %error,
+                "scan generation reaper worktree inventory failed; falling back to the project root"
+            );
+            vec![project_root.to_path_buf()]
+        }
+    };
+    let summary = startup::reap_defunct_active_generations(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &worktrees,
+        &[],
+        &std::collections::HashSet::new(),
+    );
+    if summary.reaped > 0 || summary.replayed > 0 || summary.failures > 0 {
+        tracing::info!(
+            project_root = %project_root.display(),
+            inspected = summary.inspected,
+            reaped = summary.reaped,
+            replayed = summary.replayed,
+            protected = summary.protected,
+            failures = summary.failures,
+            "scan Active generation reaper completed"
+        );
+    }
+}
+
 fn run_scheduled_issue_monitor_scan_with_budgets(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
@@ -1993,6 +2055,15 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     if !prefs.enabled && !cleanup_only {
         return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
     }
+    // Issue #3934: reclaim the execution generations of holders that are gone
+    // before this tick decides what it may launch. The startup reaper used to
+    // be the only one, so a holder Session that died between GUI restarts kept
+    // its owner permanently unlaunchable and the only recovery left was
+    // registering the same work under a fresh Issue number.
+    if !cleanup_only {
+        reap_scan_defunct_active_generations(project_root);
+    }
+
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
@@ -2274,6 +2345,7 @@ impl AppRuntime {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
+            issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
@@ -2285,6 +2357,11 @@ impl AppRuntime {
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            terminal_close_candidates: HashMap::new(),
+            terminal_convergence_scan_in_flight: false,
+            terminal_close_grace: std::time::Duration::from_secs(
+                gwt_config::agent_config::DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
+            ),
             work_merged_branches: HashMap::new(),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
@@ -3277,6 +3354,29 @@ impl AppRuntime {
         delivery_id: Option<&str>,
         session_mode: gwt_agent::SessionMode,
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_launch_failed_delivery_committed_events_with_mode(
+            project_root,
+            issue_number,
+            message,
+            delivery_id,
+            session_mode,
+        )
+        .0
+    }
+
+    /// Issue #3927 (SPEC #3340 FR-048): like
+    /// [`Self::issue_monitor_launch_failed_delivery_events_with_mode`], and
+    /// also reports whether the `LaunchFailed` transition was durably
+    /// committed (daemon ACK or local exact commit). Only a committed failure
+    /// may be followed by the automatic close of the failed pane.
+    pub(crate) fn issue_monitor_launch_failed_delivery_committed_events_with_mode(
+        &mut self,
+        project_root: Option<&Path>,
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
+    ) -> (Vec<OutboundEvent>, bool) {
         let message = if gwt::issue_monitor::is_git_https_auth_error(message) {
             gwt::issue_monitor::git_https_auth_setup_message(message)
         } else {
@@ -3313,7 +3413,7 @@ impl AppRuntime {
                 )
             },
         );
-        self.issue_monitor_launch_failed_result_events_with_delivery(
+        self.issue_monitor_launch_failed_result_with_delivery(
             project_root,
             issue_number,
             &message,
@@ -3366,6 +3466,7 @@ impl AppRuntime {
         )
     }
 
+    #[cfg(test)]
     fn issue_monitor_launch_failed_result_events_with_delivery(
         &mut self,
         project_root: Option<&Path>,
@@ -3375,6 +3476,26 @@ impl AppRuntime {
         session_mode: gwt_agent::SessionMode,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_launch_failed_result_with_delivery(
+            project_root,
+            issue_number,
+            message,
+            delivery_id,
+            session_mode,
+            publication,
+        )
+        .0
+    }
+
+    fn issue_monitor_launch_failed_result_with_delivery(
+        &mut self,
+        project_root: Option<&Path>,
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+    ) -> (Vec<OutboundEvent>, bool) {
         let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
         let (mut events, committed, retain_delivery) = match publication {
             Ok(()) => (
@@ -3500,7 +3621,43 @@ impl AppRuntime {
                 self.issue_monitor_launch_deliveries.remove(delivery_id);
             }
         }
-        events
+        (events, committed)
+    }
+
+    /// Issue #3927 (SPEC #3340 AS-44): the Issue a restored window belongs
+    /// to when the Issue Monitor durably owns that launch. A restore carries
+    /// no launch feedback context, so the link is read from the window's
+    /// Session and confirmed against the repository-scoped Monitor prefs,
+    /// which must bind this exact window to that Issue. Manual windows (no
+    /// linked Issue, or a window the Monitor never bound — even when the
+    /// Monitor launched the same Issue elsewhere) answer `None` and keep
+    /// their diagnostic pane.
+    pub(crate) fn issue_monitor_owned_restore_issue(
+        &self,
+        window_id: &str,
+        project_root: Option<&Path>,
+    ) -> Option<u64> {
+        let project_root = project_root?;
+        let active = self.active_agent_sessions.get(window_id)?;
+        let linked_issue = self
+            .launch_wizard_cache
+            .session_by_id(&active.session_id)
+            .and_then(|session| session.linked_issue_number)
+            .or_else(|| {
+                gwt_agent::Session::load_and_migrate(
+                    &self
+                        .sessions_dir
+                        .join(format!("{}.toml", active.session_id)),
+                )
+                .ok()
+                .and_then(|session| session.linked_issue_number)
+            })?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .ok()?;
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        (monitor.launched_window_issue(window_id) == Some(linked_issue)).then_some(linked_issue)
     }
 
     fn issue_monitor_launch_failure_committed(
@@ -3913,6 +4070,7 @@ impl AppRuntime {
                             Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
                                 provider,
                                 resets_at,
+                                evidence,
                             }) => {
                                 let issue_number = issue_number_hint
                                     .or_else(|| monitor.launched_window_issue(window_id));
@@ -3925,6 +4083,7 @@ impl AppRuntime {
                                     provider,
                                     message.to_string(),
                                     resets_at.as_deref(),
+                                    evidence.clone(),
                                     &now,
                                 ) {
                                     gwt::IssueMonitorProviderUsageLimitOutcome::Held => {
@@ -4179,6 +4338,7 @@ impl AppRuntime {
     pub(crate) fn finalize_issue_monitor_window_close_in_background(
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
+        commit_timeout: std::time::Duration,
     ) -> WindowCloseMonitorResult {
         #[cfg_attr(not(unix), allow(unused_variables))]
         let window_id = target.window_id.as_deref().unwrap_or_default();
@@ -4209,7 +4369,11 @@ impl AppRuntime {
         match publication {
             Ok(()) => WindowCloseMonitorResult::Published,
             Err(error) if error.allows_local_fallback() => {
-                match Self::commit_local_issue_monitor_window_close(project_root, target) {
+                match Self::commit_local_issue_monitor_window_close(
+                    project_root,
+                    target,
+                    commit_timeout,
+                ) {
                     Ok(Some(monitor)) => WindowCloseMonitorResult::LocalFallback(Box::new(monitor)),
                     Ok(None) => WindowCloseMonitorResult::Noop,
                     Err(local_error) => WindowCloseMonitorResult::Failed(local_error),
@@ -4225,6 +4389,7 @@ impl AppRuntime {
     fn finalize_issue_monitor_vanished_windows_in_background(
         project_root: &Path,
         live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
+        commit_timeout: std::time::Duration,
     ) -> Vec<String> {
         if live_windows_per_tab.is_empty() {
             return Vec::new();
@@ -4266,8 +4431,11 @@ impl AppRuntime {
         targets
             .iter()
             .filter_map(|target| {
-                match Self::finalize_issue_monitor_window_close_in_background(project_root, target)
-                {
+                match Self::finalize_issue_monitor_window_close_in_background(
+                    project_root,
+                    target,
+                    commit_timeout,
+                ) {
                     WindowCloseMonitorResult::Failed(error) => Some(error.to_string()),
                     WindowCloseMonitorResult::Noop
                     | WindowCloseMonitorResult::Published
@@ -4280,6 +4448,7 @@ impl AppRuntime {
     fn commit_local_issue_monitor_window_close(
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
+        commit_timeout: std::time::Duration,
     ) -> Result<
         Option<gwt::IssueMonitorState>,
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
@@ -4288,7 +4457,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
+            std::time::Instant::now() + commit_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -4620,7 +4789,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
+            std::time::Instant::now() + self.issue_monitor_fallback_commit_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -4666,7 +4835,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
+            std::time::Instant::now() + self.issue_monitor_fallback_commit_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -5330,12 +5499,14 @@ impl AppRuntime {
         let worker_expected_project_tab_id = expected_project_tab_id.to_string();
         let worker_now = now.to_string();
         let issue_client_factory = self.issue_client_factory.clone();
+        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let vanished_window_failures =
                     Self::finalize_issue_monitor_vanished_windows_in_background(
                         &worker_project_root,
                         &live_windows_per_tab,
+                        fallback_commit_timeout,
                     );
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
@@ -6450,11 +6621,13 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {

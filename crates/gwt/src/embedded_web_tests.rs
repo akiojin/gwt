@@ -4247,3 +4247,63 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
         "the shipped Related Work refresh scheduler must stay cache-first",
     );
 }
+
+#[test]
+fn embedded_web_retires_the_autonomous_notifications_log_region() {
+    // SPEC #3206 v2 FR-012 (Sc 6): the top-right floating "autonomous
+    // notifications" log region is replaced by the notification center (bell +
+    // unread badge + history drawer). Nothing of the retired surface may ship:
+    // no module registration, no import / mount / fan-out in app.js, no CSS.
+    // Precedent: SPEC-1939 Phase 13 (project-bar Index badge withdrawal).
+    let html = frontend_styles_bundle();
+    let js = app_js();
+    let module_graph: String = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.source)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/autonomous-notifications.js"),
+        "SPEC #3206 FR-012: autonomous-notifications.js must not be registered",
+    );
+    assert!(
+        !js.contains("autonomous-notifications")
+            && !js.contains("createAutonomousNotifications")
+            && !js.contains("autonomousNotifications"),
+        "SPEC #3206 FR-012: app.js must not import, mount or fan out to the retired log region",
+    );
+    assert!(
+        !module_graph.contains("createAutonomousNotifications"),
+        "SPEC #3206 FR-012: no embedded module may still define the retired region",
+    );
+    assert!(
+        !html.contains(".autonomous-notifications"),
+        "SPEC #3206 FR-012: retired region CSS must not ship",
+    );
+
+    // The replacement is wired: registered + imported, bell in the rail, and
+    // the autonomous fan-out records into the notification center history.
+    assert!(
+        root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/notification-center.js"),
+        "SPEC #3206 v2: notification-center.js must be registered",
+    );
+    assert!(
+        js.contains("from \"/notification-center.js\"")
+            && js.contains("notificationCenter.mount(document.body)"),
+        "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
+    );
+    assert!(
+        html.contains("id=\"op-notifications-button\"")
+            && html.contains("data-cmd=\"toggle-notifications\""),
+        "SPEC #3206 FR-009: the rail must carry the notification bell",
+    );
+    assert!(
+        js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),
+        "SPEC #3206 FR-011: issue_monitor_toast must record into the notification center",
+    );
+}
