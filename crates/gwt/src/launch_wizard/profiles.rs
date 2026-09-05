@@ -438,7 +438,7 @@ mod tests {
             None,
         );
         lower_id.id = "session-a".to_string();
-        lower_id.model = Some("gpt-5.4".to_string());
+        lower_id.model = Some("gpt-5.6-luna".to_string());
         let mut higher_id = sample_session_record(
             "feature/higher",
             &worktree,
@@ -473,7 +473,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.4".to_string());
+        codex.model = Some("gpt-5.5".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -512,7 +512,7 @@ mod tests {
 
         assert_eq!(view.branch_name, "feature/current");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
@@ -555,7 +555,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.4".to_string());
+        codex.model = Some("gpt-5.5".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -575,7 +575,7 @@ mod tests {
         let view = state.view();
 
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
         // Issue #3462: the restored preference is advertised on Continue.
