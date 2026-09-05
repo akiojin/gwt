@@ -722,13 +722,20 @@ const groups = hookConfig.hooks && hookConfig.hooks.SessionStart;\n\
 const hookCommand = groups && groups[0] && groups[0].hooks && groups[0].hooks[0] && groups[0].hooks[0].command;\n\
 if (!hookCommand) {{ console.error('generated SessionStart hook is missing'); process.exit(3); }}\n\
 const providerSessionId = process.env.GWT_PHASE75_PROVIDER_SESSION_ID || 'phase75-provider-session';\n\
-const hook = childProcess.spawnSync(hookCommand, [], {{\n\
+const hookSpawnOptions = {{\n\
   cwd: process.cwd(),\n\
   env: process.env,\n\
   input: JSON.stringify({{ session_id: providerSessionId, cwd: process.cwd() }}),\n\
-  encoding: 'utf8',\n\
-  shell: true\n\
-}});\n\
+  encoding: 'utf8'\n\
+}};\n\
+// Issue #3966: model each provider's real hook runner, not Node's default.\n\
+// Claude Code runs every hook command through a POSIX shell (Git Bash on\n\
+// Windows) — running it through cmd.exe here is what let a Windows-only\n\
+// PowerShell hook command pass this boundary while it was silently dead in\n\
+// production. Codex keeps the native shell (Issue #3810).\n\
+const hook = packageName === '@anthropic-ai/claude-code'\n\
+  ? childProcess.spawnSync('bash', ['-c', hookCommand], hookSpawnOptions)\n\
+  : childProcess.spawnSync(hookCommand, [], Object.assign({{ shell: true }}, hookSpawnOptions));\n\
 const receipt = {{\n\
   argv: process.argv.slice(2),\n\
   package: packageName,\n\
