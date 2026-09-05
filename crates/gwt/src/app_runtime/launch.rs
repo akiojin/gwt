@@ -2619,14 +2619,17 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                 .map(|home| home.join("config.toml"))
                 .or_else(|| codex_config_path_for_profile_config(profile_config_path))
             else {
-                // Issue #3967 AC-4: without a Codex config there is nowhere to
-                // pre-trust the hooks, so the agent would open on the
-                // human-only `Hooks need review` prompt and hold its Issue
-                // Monitor slot in silence. Fail the launch instead.
-                return Err(format!(
-                    "Codex hook trust could not be prepared: no Codex config path could be derived from {}",
-                    profile_config_path.display()
-                ));
+                // Not a registration failure: gwt simply cannot locate this
+                // profile's Codex config, which says nothing about whether the
+                // hooks are trusted. Blocking the launch here would strand
+                // every Codex launch under a non-standard profile layout, so
+                // keep it a warning — Issue #3967 AC-4 covers registrations
+                // that actually fail.
+                tracing::warn!(
+                    profile_config = %profile_config_path.display(),
+                    "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
+                );
+                return Ok(None);
             };
             // Issue #3967 AC-1: trust every managed hooks file that can exist
             // on disk, not just the one this launch would generate. The
