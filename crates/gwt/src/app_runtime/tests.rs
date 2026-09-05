@@ -1354,6 +1354,22 @@ fn write_fixture_package_runners(temp_root: &Path) -> PathBuf {
     write_fixture_runners(temp_root, &["npx", "bunx"])
 }
 
+/// The fixture `npx` / `bunx` shared by the whole test binary.
+///
+/// Every runtime fixture pins its launch `PATH` at these, so they are written
+/// once per process rather than once per test — creating executables is the
+/// expensive part on Windows, and hundreds of tests build a runtime fixture
+/// without ever launching anything.
+fn shared_fixture_package_runner_bin() -> &'static Path {
+    static SHARED: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    let (_dir, bin) = SHARED.get_or_init(|| {
+        let dir = tempdir().expect("shared fixture runner tempdir");
+        let bin = write_fixture_package_runners(dir.path());
+        (dir, bin)
+    });
+    bin
+}
+
 /// Fixture runners named `names`, each answering `--version` with a semver.
 fn write_fixture_runners(temp_root: &Path, names: &[&str]) -> PathBuf {
     let bin = temp_root.join("fixture-runner-bin");
@@ -1442,9 +1458,23 @@ fn pin_monitor_fixture_package_runners(
     temp_root: &Path,
     extra_env: &[(&str, &str)],
 ) {
-    let runner_bin = write_fixture_package_runners(temp_root);
+    pin_runtime_package_runners(&fixture.runtime, temp_root, extra_env);
+}
+
+/// Write the profile config one runtime's launches read, with fixture package
+/// runners pinned (Issue #3972) plus any per-test environment.
+///
+/// Call this from every test that drives a real launch. Without it the launch
+/// health-checks whatever `npx` / `bunx` the machine happens to have, which is
+/// invisible on a developer box with the provider CLI installed (the direct
+/// probe succeeds and returns early) and fails on CI, where the fallback runs.
+fn pin_runtime_package_runners(
+    runtime: &AppRuntime,
+    _temp_root: &Path,
+    extra_env: &[(&str, &str)],
+) {
     let mut settings = Settings::default();
-    pin_launch_package_runners(&mut settings, &runner_bin);
+    pin_launch_package_runners(&mut settings, shared_fixture_package_runner_bin());
     for (key, value) in extra_env {
         settings
             .profiles
@@ -1452,8 +1482,7 @@ fn pin_monitor_fixture_package_runners(
             .expect("set fixture profile env var");
     }
     write_profile_config(
-        fixture
-            .runtime
+        runtime
             .profile_config_path
             .as_deref()
             .expect("fixture profile config path"),
@@ -3777,13 +3806,13 @@ fn sample_runtime_with_events(
     // Issue #3972: any test that drives a real launch from this runtime
     // health-checks the host package runner before spawning a provider, and on
     // a loaded host that check misses its five-second budget. Pin the launch
-    // PATH to fixture runners here so the whole class is hermetic rather than
-    // depending on which CLIs happen to be installed on the machine running the
-    // suite. Tests that pre-write their own profile config keep it.
+    // PATH to the shared fixture runners so the whole class is hermetic instead
+    // of depending on which provider CLIs happen to be installed on the machine
+    // running the suite. Tests that pre-write their own profile config keep it.
     let profile_config_path = temp_root.join("profile-config.toml");
     if !profile_config_path.exists() {
         let mut settings = Settings::default();
-        pin_launch_package_runners(&mut settings, &write_fixture_package_runners(temp_root));
+        pin_launch_package_runners(&mut settings, shared_fixture_package_runner_bin());
         write_profile_config(&profile_config_path, &settings);
     }
     let launch_wizard_cache =
