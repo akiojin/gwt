@@ -2018,6 +2018,36 @@ pub struct IssueMonitorLaunchProfileCandidate {
     pub held_until: Option<String>,
 }
 
+/// What a pre-claim completion readback concluded about one candidate.
+///
+/// Issue #3928 AC-2: the readback is a live GitHub call for a gwt-spec Issue,
+/// so GitHub's rate limit can refuse it mid-scan. A refusal is neither "already
+/// delivered" nor "safe to claim" — collapsing it onto either would launch on an
+/// unread state or mint a false completion — and propagating it as an error
+/// aborted the whole pass, leaving free slots idle for as long as the window
+/// lasted. [`Self::Deferred`] is the third answer: leave this candidate for a
+/// later scan and keep planning the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimProbeOutcome {
+    /// GitHub answered: the issue's work is already delivered.
+    Completed,
+    /// GitHub answered: the issue is still open work.
+    Claimable,
+    /// The readback could not be made right now.
+    Deferred,
+}
+
+impl ClaimProbeOutcome {
+    /// The outcome for a probe that answered with a plain completed flag.
+    pub fn from_completed(completed: bool) -> Self {
+        if completed {
+            Self::Completed
+        } else {
+            Self::Claimable
+        }
+    }
+}
+
 /// Atomic agent-facing projection of the live Issue Monitor driver state.
 /// Unlike [`IssueMonitorStatusView`], this includes the ordered queue itself so
 /// callers never have to reconstruct transient claim outcomes from cache.
@@ -2066,6 +2096,13 @@ pub struct IssueMonitorAgentStatus {
     /// a monitor that has stopped while every field still reads healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_stall: Option<String>,
+    /// Issue #3928 AC-4: the GitHub API budget per resource — whether it is
+    /// throttled, until when the persisted backoff runs, and who spent the
+    /// last minute — so the PM can tell a quiet queue from a rate-limited one
+    /// and find the caller behind a burst. Filled in by the `issue.monitor.status`
+    /// surface from the machine-local ledger; `None` in daemon projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_budget: Option<BTreeMap<String, gwt_core::github_budget::ResourceBudgetStatus>>,
     /// Issue #3964 AC-4: the last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
@@ -7727,6 +7764,7 @@ impl IssueMonitorState {
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             scan_stall: None,
+            github_budget: None,
             generation_reclaim: self.generation_reclaim.clone(),
         }
     }
@@ -8842,6 +8880,40 @@ impl IssueMonitorState {
         active_cap: usize,
         mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
     ) -> Result<usize, E> {
+        self.try_prepare_claim_effects_with_probe_confirmed(
+            owner,
+            now,
+            active_cap,
+            None,
+            |issue_number| completed_probe(issue_number).map(ClaimProbeOutcome::from_completed),
+        )
+    }
+
+    /// [`Self::try_prepare_claim_effects_with_probe`] restricted to the
+    /// candidates whose GitHub state this scan actually confirmed.
+    ///
+    /// `confirmed` is `None` when the live issue list succeeded: every queued
+    /// candidate carries fresh state and may be claimed. It is `Some(set)` when
+    /// the pass is running on a previous scan's result (Issue #3933), where only
+    /// a candidate re-read authoritatively this pass may authorize a claim.
+    ///
+    /// The set is an allowlist rather than a list of exclusions on purpose
+    /// (Issue #3928 AC-2). A scan only ever re-reads the first
+    /// `ISSUE_MONITOR_TARGETED_REFRESH_LIMIT` claimable candidates, so with the
+    /// 184-issue queue from the incident every candidate past that limit is
+    /// unconfirmed for an ordinary, non-exceptional reason. Treating those as an
+    /// error aborted the whole pass — the launch stage never ran, which is the
+    /// stall this Issue is about. Skipping them keeps #3933's fail-closed
+    /// contract (an unconfirmed candidate is never launched) while the pass
+    /// completes and the candidate stays queued for the next scan.
+    pub fn try_prepare_claim_effects_with_probe_confirmed<E>(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        confirmed: Option<&BTreeSet<u64>>,
+        mut completed_probe: impl FnMut(u64) -> Result<ClaimProbeOutcome, E>,
+    ) -> Result<usize, E> {
         // Issue #3683: expired claim blocks re-enter the queue before slots
         // are planned, so a lapsed claim can never starve its issue.
         self.requeue_expired_claim_blocks(now);
@@ -8858,14 +8930,23 @@ impl IssueMonitorState {
             if available == 0 {
                 break;
             }
+            if confirmed.is_some_and(|confirmed| !confirmed.contains(&issue_number)) {
+                continue;
+            }
             if !self.retry_ready_for_saved_profile(issue_number, now) {
                 continue;
             }
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
                 continue;
             };
-            if completed_probe(issue_number)? && self.record_linked_pr_completion(issue_number) {
-                continue;
+            match completed_probe(issue_number)? {
+                // Issue #3928 AC-2: an unread candidate keeps its queue slot for
+                // the scan after the window instead of taking the pass down.
+                ClaimProbeOutcome::Deferred => continue,
+                ClaimProbeOutcome::Completed if self.record_linked_pr_completion(issue_number) => {
+                    continue
+                }
+                _ => {}
             }
             let kind = issue_monitor_linked_issue_kind(&issue);
             let launched_work_id = knowledge_launch_target_branch_name(kind, issue_number);
@@ -11730,6 +11811,7 @@ mod tests {
                 // `agent_status` reports the queue; the scan-cadence check is
                 // applied by `agent_status_at`, which needs a clock.
                 scan_stall: None,
+                github_budget: None,
                 generation_reclaim: None,
             }
         );
