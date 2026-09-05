@@ -1342,6 +1342,125 @@ fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
     prepend_tool_parent_to_path(fake_gh)
 }
 
+/// Issue #3972: fixture `npx` / `bunx` that answer `--version` instantly.
+///
+/// A `version = "latest"` launch rewrites the command to the host package
+/// runner and health-checks it under a five-second budget before spawning the
+/// provider. Left unpinned, a test spawns whatever `npx` is on the host `PATH`;
+/// on a loaded machine that misses the budget, aborts the launch with `npx
+/// package-runner probe timed out`, and fails a test that was asserting
+/// something else entirely.
+fn write_fixture_package_runners(temp_root: &Path) -> PathBuf {
+    write_fixture_runners(temp_root, &["npx", "bunx"])
+}
+
+/// Fixture runners named `names`, each answering `--version` with a semver.
+fn write_fixture_runners(temp_root: &Path, names: &[&str]) -> PathBuf {
+    let bin = temp_root.join("fixture-runner-bin");
+    fs::create_dir_all(&bin).expect("create fixture runner bin");
+    for name in names {
+        #[cfg(windows)]
+        {
+            let runner = bin.join(format!("{name}.cmd"));
+            fs::write(&runner, "@echo off\r\necho 1.2.3\r\nexit /b 0\r\n")
+                .expect("write fixture package runner");
+        }
+        #[cfg(not(windows))]
+        {
+            let runner = bin.join(name);
+            fs::write(&runner, "#!/bin/sh\nprintf '1.2.3\\n'\nexit 0\n")
+                .expect("write fixture package runner");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
+                .expect("chmod fixture package runner");
+        }
+    }
+    bin
+}
+
+/// Declare that this launch's `PATH` is already pinned to fixture executables,
+/// so the Issue #3972 guard lets its package-runner health probe run.
+fn mark_fixture_package_runner_sandbox(config: &mut gwt_agent::LaunchConfig) {
+    config.env_vars.insert(
+        gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+        "1".to_string(),
+    );
+}
+
+/// Prepend fixture runners named `names` to one launch config's `PATH` and
+/// declare the Issue #3972 sandbox, so its runner health check answers from the
+/// fixture instead of whatever is installed on the host.
+fn pin_config_fixture_runners(
+    config: &mut gwt_agent::LaunchConfig,
+    temp_root: &Path,
+    names: &[&str],
+) {
+    let bin = write_fixture_runners(temp_root, names);
+    let mut paths = vec![bin];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let joined = std::env::join_paths(paths).expect("join launch PATH");
+    config.env_vars.insert(
+        "PATH".to_string(),
+        joined.to_str().expect("UTF-8 launch PATH").to_string(),
+    );
+    mark_fixture_package_runner_sandbox(config);
+}
+
+/// Point one launch's `PATH` at fixture package runners and declare the
+/// Issue #3972 sandbox. Scoped to the profile config rather than the process
+/// environment, so parallel tests keep their own `PATH` (Issue #3895).
+fn pin_launch_package_runners(settings: &mut Settings, runner_bin: &Path) {
+    let mut paths = vec![runner_bin.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let joined = std::env::join_paths(paths).expect("join launch PATH");
+    settings
+        .profiles
+        .set_env_var(
+            "default",
+            "PATH",
+            joined.to_str().expect("UTF-8 launch PATH"),
+        )
+        .expect("pin launch PATH to fixture package runners");
+    settings
+        .profiles
+        .set_env_var(
+            "default",
+            gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER,
+            "1",
+        )
+        .expect("declare the fixture package-runner sandbox");
+}
+
+/// Write the profile config a monitor-fixture launch reads, with fixture
+/// package runners pinned (Issue #3972) plus any per-test environment.
+fn pin_monitor_fixture_package_runners(
+    fixture: &MonitorRelaunchFixture,
+    temp_root: &Path,
+    extra_env: &[(&str, &str)],
+) {
+    let runner_bin = write_fixture_package_runners(temp_root);
+    let mut settings = Settings::default();
+    pin_launch_package_runners(&mut settings, &runner_bin);
+    for (key, value) in extra_env {
+        settings
+            .profiles
+            .set_env_var("default", key, value)
+            .expect("set fixture profile env var");
+    }
+    write_profile_config(
+        fixture
+            .runtime
+            .profile_config_path
+            .as_deref()
+            .expect("fixture profile config path"),
+        &settings,
+    );
+}
+
 fn canvas_bounds() -> WindowGeometry {
     WindowGeometry {
         x: 0.0,
@@ -15938,6 +16057,9 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
     config.command = missing_npx.display().to_string();
     config.args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
     config.tool_version = Some("latest".to_string());
+    // The runner is pinned to a fixture path that does not exist, so no host
+    // runner is reachable from this launch (Issue #3972).
+    mark_fixture_package_runner_sandbox(&mut config);
     let initial_events = runtime
         .spawn_agent_window_with_feedback(
             "tab-1",
@@ -21812,6 +21934,7 @@ fn production_host_launch_persists_and_dispatches_checked_latest_runner_fallback
     config
         .env_vars
         .insert("HOME".to_string(), temp.path().display().to_string());
+    mark_fixture_package_runner_sandbox(&mut config);
     let original_args = config.args.clone();
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:45155/internal/hook-live",
@@ -22188,6 +22311,7 @@ fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispat
     config
         .env_vars
         .insert("HOME".to_string(), temp.path().display().to_string());
+    mark_fixture_package_runner_sandbox(&mut config);
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:45155/internal/hook-live",
         "ws://127.0.0.1:46255/ws",
@@ -22264,6 +22388,7 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
         ("PATH".to_string(), bin.display().to_string()),
         ("HOME".to_string(), temp.path().display().to_string()),
     ]);
+    mark_fixture_package_runner_sandbox(&mut config);
     let (proxy, events) = AppEventProxy::stub();
 
     let started = std::time::Instant::now();
@@ -22350,12 +22475,13 @@ fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
     .expect("import Blocked predecessor");
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&repo)
         .branch("work/issue-2359")
         .linked_issue_number(owner.number)
         .extra_arg("$gwt-execute #2359")
         .build();
+    pin_config_fixture_runners(&mut config, temp.path(), &["codex", "npx", "bunx"]);
     let (proxy, events) = AppEventProxy::stub();
 
     AppRuntime::spawn_agent_window_async(
@@ -22414,12 +22540,13 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::write(sessions_dir.join("runtime"), "not-a-directory")
         .expect("block runtime sidecar directory creation");
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&repo)
         .branch("work/issue-2359")
         .linked_issue_number(owner.number)
         .extra_arg("$gwt-execute #2359")
         .build();
+    pin_config_fixture_runners(&mut config, temp.path(), &["codex", "npx", "bunx"]);
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:45155/internal/hook-live",
         "ws://127.0.0.1:46255/ws",
@@ -45648,7 +45775,7 @@ fn monitor_relaunch_fixture(
         }
     }
 
-    MonitorRelaunchFixture {
+    let fixture = MonitorRelaunchFixture {
         runtime,
         recorded_events,
         sessions_dir,
@@ -45661,7 +45788,15 @@ fn monitor_relaunch_fixture(
         predecessor_execution_binding,
         holder_window_id,
         delivery_id,
-    }
+    };
+    // Issue #3972: these sessions carry `tool_version = "latest"`, so every
+    // launch they drive health-checks the host package runner before spawning.
+    // Pin it to a fixture `npx` / `bunx` here so no monitor test — present or
+    // future — can fail on the real runner missing its five-second budget. A
+    // test that rewrites this profile config must go through
+    // `pin_monitor_fixture_package_runners` to keep the pin.
+    pin_monitor_fixture_package_runners(&fixture, &case_root, &[]);
+    fixture
 }
 
 fn convert_monitor_relaunch_fixture_to_grok(
@@ -46195,22 +46330,10 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         true,
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
-    let mut settings = Settings::default();
-    settings
-        .profiles
-        .set_env_var(
-            "default",
-            "GROK_HOME",
-            grok_home.to_str().expect("UTF-8 Grok home"),
-        )
-        .expect("set profile Grok home");
-    write_profile_config(
-        fixture
-            .runtime
-            .profile_config_path
-            .as_deref()
-            .expect("fixture profile config path"),
-        &settings,
+    pin_monitor_fixture_package_runners(
+        &fixture,
+        temp.path(),
+        &[("GROK_HOME", grok_home.to_str().expect("UTF-8 Grok home"))],
     );
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
     let holder_window_id = fixture
@@ -46697,6 +46820,54 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
         awaiting_receipt.autonomous_handoffs[0].delivery,
         gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { .. }
     ));
+}
+
+/// Issue #3972 AC-1/AC-4: this launch path really does health-check the host
+/// package runner before spawning a provider, which is why every monitor
+/// fixture pins one. Drop the pin and the guard refuses the probe by name
+/// instead of spawning the host `npx` under a five-second budget — the failure
+/// mode that turned unrelated `app_runtime` tests red on a loaded CI runner.
+#[test]
+fn monitor_launch_without_pinned_package_runners_is_refused() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _sandbox = ScopedEnvVar::unset(gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER);
+    let _live = ScopedEnvVar::unset(gwt_core::process_console::ALLOW_REAL_RUNNER_PROBE_MARKER);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "unpinned-package-runner",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    write_profile_config(
+        fixture
+            .runtime
+            .profile_config_path
+            .as_deref()
+            .expect("fixture profile config path"),
+        &Settings::default(),
+    );
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let (_window_id, result) =
+        take_monitor_launch_complete_event("unpinned-package-runner", &fixture.recorded_events);
+
+    let error = result.expect_err("an unpinned package runner must not launch");
+    assert!(
+        error.contains(gwt_core::process_console::REAL_RUNNER_PROBE_BLOCKED_ERROR_CODE),
+        "the refusal must name the guard, not look like a runner timeout: {error}"
+    );
 }
 
 /// Issue #3716 AC-2: an exact Resume preparation failure occurs before the
