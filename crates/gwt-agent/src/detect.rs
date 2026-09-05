@@ -366,9 +366,6 @@ mod tests {
     fn detect_by_command_bounds_a_hanging_version_probe() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp.path().join("agy");
         std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").expect("write hanging fixture");
@@ -377,19 +374,14 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions).expect("chmod fixture");
-        let scoped_path = std::env::join_paths(
-            std::iter::once(temp.path().to_path_buf()).chain(
-                std::env::var_os("PATH")
-                    .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            ),
-        )
-        .expect("join PATH");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &scoped_path);
 
+        // The fixture PATH is injected into the probe only; the process PATH
+        // stays untouched so parallel `sh` / `git` spawns keep resolving
+        // (Issue #3895).
         let started = std::time::Instant::now();
-        let detected = AgentDetector::detect_by_command("agy")
-            .expect("resolvable executable stays detected when its probe hangs");
+        let detected =
+            AgentDetector::detect_by_command_in_env("agy", &[("PATH", temp.path().as_os_str())])
+                .expect("resolvable executable stays detected when its probe hangs");
         let elapsed = started.elapsed();
 
         assert_eq!(detected.agent_id, AgentId::Antigravity);
