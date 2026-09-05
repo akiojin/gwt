@@ -164,6 +164,27 @@ fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
     Ok((gate_program, gate_args))
 }
 
+/// Record a rejected agent resource policy without failing the launch.
+///
+/// Issue #3942: the tree-wide priority of SPEC #1921 Phase 86 (#3813) is an
+/// optimization for GUI responsiveness, not a precondition for running an
+/// agent. `setpriority` returns EPERM on every host where the launcher may not
+/// renice the target's process group, and propagating that turned an ordinary
+/// launch into a user-facing `PTY creation failed: setpriority permission
+/// denied`. Warn instead and let the target run at the inherited priority.
+pub(crate) fn apply_best_effort_agent_resource_policy(
+    window_id: &str,
+    outcome: Result<(), gwt_terminal::TerminalError>,
+) {
+    if let Err(error) = outcome {
+        tracing::warn!(
+            window_id,
+            error = %error,
+            "agent resource policy was not applied; continuing launch at the inherited priority"
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingToolRuntimeMigration {
     source: gwt_agent::Session,
@@ -3781,9 +3802,7 @@ impl AppRuntime {
                 uuid::Uuid::new_v4().to_string(),
             )
             .map_err(|error| error.to_string())?;
-            pending
-                .apply_policy(policy)
-                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            apply_best_effort_agent_resource_policy(id, pending.apply_policy(policy));
             pending.release().map_err(|error| error.to_string())?
         } else {
             Pane::new_with_spawn_config(id.to_string(), spawn_config)
@@ -3872,9 +3891,7 @@ impl AppRuntime {
         // after identity proof and before release, so the target never runs
         // ungoverned.
         if let Some(policy) = resource_policy {
-            pending
-                .apply_policy(policy)
-                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            apply_best_effort_agent_resource_policy(id, pending.apply_policy(policy));
         }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);
