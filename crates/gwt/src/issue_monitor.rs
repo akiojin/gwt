@@ -1550,6 +1550,26 @@ pub fn is_legacy_git_launch_failure_for_project(message: &str, project_root: &Pa
         == gwt_core::paths::normalize_windows_child_process_path(project_root)
 }
 
+/// Issue #3959 AC-5: the acceptance-criteria verdict literal written by
+/// releases before #3930, which no current code path can produce.
+const LEGACY_ACCEPTANCE_FAILURE_PREFIX: &str = "no machine-checkable acceptance criteria block";
+
+/// Whether a persisted failure message is a pre-#3930 acceptance-criteria
+/// verdict.
+///
+/// Those releases parked the Issue in `NeedsHuman`, and a park is never
+/// re-evaluated — so a row stamped by that classifier outlived the classifier
+/// itself, and #3864 plus 33 companions stayed quarantined right across the
+/// release that fixed the parser. Matched as a prefix because the later legacy
+/// variant appended remediation advice to the same sentence; every current
+/// reason opens with different text (`no acceptance criteria heading found`,
+/// ``acceptance criteria heading `## ...` found``), so no live verdict matches.
+pub fn is_legacy_acceptance_failure(message: &str) -> bool {
+    message
+        .trim_start()
+        .starts_with(LEGACY_ACCEPTANCE_FAILURE_PREFIX)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueMonitorReadiness {
@@ -10746,6 +10766,52 @@ impl IssueMonitorState {
         summary
     }
 
+    /// Issue #3959 AC-5: return every row still held by a pre-#3930
+    /// acceptance-criteria verdict to the queue, so the current gate classifies
+    /// it again instead of inheriting a dead classifier's answer.
+    ///
+    /// Unlike [`Self::release_stranded_generation_failures`] this deliberately
+    /// releases `NeedsHuman` rows: the park *is* the legacy artifact. No current
+    /// path parks an Issue for unreadable criteria — #3944 AC-4 routes that to
+    /// `NotReady`, which every scan re-evaluates — so a row carrying the old
+    /// verdict is holding a decision the current code would never make, and
+    /// releasing it can never re-create one. A row a launch still owns is left
+    /// alone, exactly like an operator requeue.
+    pub fn release_legacy_acceptance_failures(&mut self, now: &str) -> Vec<u64> {
+        let held = self
+            .failed_issues
+            .iter()
+            .filter(|(_, message)| is_legacy_acceptance_failure(message))
+            .map(|(issue_number, _)| *issue_number)
+            .collect::<Vec<_>>();
+        let mut released = Vec::new();
+        for issue_number in held {
+            if self.active_launches.contains(&issue_number)
+                || self.launched_windows.contains_key(&issue_number)
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == issue_number)
+            {
+                continue;
+            }
+            let reason = "acceptance-criteria verdict from a superseded release; returned to the \
+                          queue for classification by the current gate";
+            if matches!(
+                self.release_failed_issue_hold(issue_number, reason, now),
+                IssueMonitorRequeueOutcome::Requeued { .. }
+            ) {
+                self.push_autonomous_notice(
+                    "info",
+                    issue_number,
+                    format!("Issue #{issue_number} requeued: {reason}"),
+                );
+                released.push(issue_number);
+            }
+        }
+        released
+    }
+
     /// Issue #3683 (AC-3): release a `BlockedByClaim` hold an operator decided
     /// is wrong, e.g. one anchored to a stale claim from a pre-identity-
     /// migration owner.
@@ -11446,6 +11512,12 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
         monitor.apply_legacy_git_launch_failure_migration(project_root);
     }
     if source == IssueMonitorCandidateSource::Live {
+        // Issue #3959 AC-5: drop verdicts a superseded classifier wrote before
+        // this scan reaches the shared loop, so the released rows are queued
+        // and re-classified by the current gate on this same pass. Only a
+        // complete live snapshot may do it, like every other reconciliation
+        // here.
+        monitor.release_legacy_acceptance_failures(now);
         let mut tracked_issue_numbers = monitor.current_action_issue_numbers();
         tracked_issue_numbers.extend(monitor.closure_records.keys().copied());
         let observed_issue_numbers = issues
@@ -21553,6 +21625,116 @@ mod tests {
             "merge clears the autonomous record",
         );
         assert_eq!(monitor.attempt_count(42), 0);
+    }
+
+    /// Issue #3959 AC-5: a `needs_human` park stamped by the pre-#3930
+    /// classifier outlives the classifier — nothing re-evaluates a park, so
+    /// #3864 and 33 companions stayed quarantined across the very release that
+    /// fixed the parser. The legacy verdict is released; a verdict the current
+    /// classifier wrote is not.
+    #[test]
+    fn legacy_acceptance_failures_are_released_for_reclassification() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43), issue(44)],
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.escalate_to_needs_human(
+            42,
+            NeedsHumanKind::UserChoiceRequired,
+            "no machine-checkable acceptance criteria block",
+        );
+        monitor.escalate_to_needs_human(
+            43,
+            NeedsHumanKind::UserChoiceRequired,
+            "no machine-checkable acceptance criteria block; add a `## 受け入れ基準` heading \
+             followed by `- [ ] AC-1: ...` items",
+        );
+        let current = crate::issue_monitor_gate::classify_acceptance_criteria("free text only")
+            .rejection_reason()
+            .expect("an unclassifiable body carries a reason");
+        assert!(
+            !is_legacy_acceptance_failure(&current),
+            "the current classifier's own verdict must never look legacy: {current}"
+        );
+        monitor.escalate_to_needs_human(44, NeedsHumanKind::UserChoiceRequired, current);
+
+        let released = monitor.release_legacy_acceptance_failures("2026-09-05T00:05:00Z");
+
+        assert_eq!(released, vec![42, 43]);
+        for number in [42, 43] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "#{number} must be launchable again"
+            );
+            assert!(monitor.queued_issue_numbers().contains(&number));
+            assert_eq!(
+                monitor.autonomous_record(number).map(|record| record.phase),
+                Some(AutonomousPhase::Idle),
+                "#{number} must leave the needs-human park"
+            );
+            assert!(
+                !monitor
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == number),
+                "the persisted hold must be gone, not just the in-memory row"
+            );
+        }
+        assert_eq!(
+            monitor.inbox_item(44).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "a verdict the current classifier wrote stays parked"
+        );
+        assert!(
+            monitor
+                .release_legacy_acceptance_failures("2026-09-05T00:10:00Z")
+                .is_empty(),
+            "nothing re-creates the legacy verdict, so the release converges"
+        );
+    }
+
+    /// Issue #3959 AC-5: the release runs inside the full scan, not only when
+    /// an operator calls it by hand — the production rows sat behind exactly
+    /// this missing call site.
+    #[test]
+    fn full_scan_releases_legacy_acceptance_failures() {
+        let project_root = tempfile::tempdir().expect("tempdir");
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(42)],
+            IssueMonitorCandidateSource::Live,
+            project_root.path(),
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.escalate_to_needs_human(
+            42,
+            NeedsHumanKind::UserChoiceRequired,
+            "no machine-checkable acceptance criteria block",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(42)],
+            IssueMonitorCandidateSource::Live,
+            project_root.path(),
+            "2026-09-05T00:05:00Z",
+        );
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the next full scan must hand the row back to the current gate"
+        );
+        assert!(monitor.queued_issue_numbers().contains(&42));
     }
 
     #[test]

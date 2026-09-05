@@ -2637,10 +2637,11 @@ impl AppRuntime {
         // SPEC-3248 P8a: the independent review agent is subordinate to the
         // implementing session's execution — it must not take over (or be
         // gated by) the Execution Control Record for the linked owner.
+        // Issue #3984: the same decision is published into the review agent's
+        // environment so its hooks apply the review contract instead of the
+        // producing-session gates it can never satisfy.
         if review_prompt.is_some() {
-            if let LaunchWizardLaunchRequest::Agent(config) = &mut launch_request {
-                config.suppress_execution_control = true;
-            }
+            launch_request.set_review_dispatch_context();
         }
         let launch_index = self
             .tab(&session.tab_id)
