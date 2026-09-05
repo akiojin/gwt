@@ -1798,6 +1798,17 @@ pub(super) fn launch_config_from_persisted_session(
     }
     builder = builder.tool_runtime_source_session_id(session.id.clone());
 
+    // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
+    // any structured `Session` field, so rebuilding a config here used to drop
+    // it and restore the PM as a plain agent under no PM contract. Re-apply it
+    // from the same PM detection that already restores the scratch dir below —
+    // unconditionally, because a persisted `launch_args` that still records the
+    // prompt is not consulted by the builder and would otherwise lose it too.
+    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
+    if pm_scratch.is_some() {
+        builder = builder.extra_arg(super::pm::PM_BOOTSTRAP_PROMPT);
+    }
+
     if let Some(resume_id) = session.exact_resume_session_id() {
         builder = builder
             .session_mode(gwt_agent::SessionMode::Resume)
@@ -1814,8 +1825,7 @@ pub(super) fn launch_config_from_persisted_session(
     if !session.display_name.is_empty() {
         config.display_name = session.display_name.clone();
     }
-    if let Some(scratch) = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path)
-    {
+    if let Some(scratch) = pm_scratch {
         config.env_vars.insert(
             "GWT_PM_SCRATCH_DIR".to_string(),
             scratch.to_string_lossy().into_owned(),
