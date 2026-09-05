@@ -2811,11 +2811,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let fake_git = temp.path().join("git");
-        std::fs::write(
+        // Issue #3521: written by a child shell so no fork in a sibling test
+        // can inherit a writable descriptor and turn the exec into ETXTBSY.
+        gwt_core::test_support::write_executable_script(
             &fake_git,
             r#"#!/bin/sh
 if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ]; then
@@ -2827,8 +2827,6 @@ exit 1
 "#,
         )
         .expect("write fake git");
-        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake git executable");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo path");
         let started = std::time::Instant::now();
