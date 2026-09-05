@@ -3986,7 +3986,14 @@ fn scan_issue_monitor_once_blocking(
             // one the rate limit deferred — into an abort of the whole pass.
             let claimable_candidates =
                 candidates_are_from_previous_result.then_some(&confirmed_previous_candidates);
-            monitor.try_prepare_claim_effects_with_probe_confirmed(
+            // Issue #3928 AC-2: the completion readback below is a live GitHub
+            // call for a gwt-spec candidate, so the rate limit can refuse it
+            // after the pass already started. Collect those candidates instead
+            // of letting one refusal abort the pass.
+            let mut probe_deferred = std::collections::BTreeSet::new();
+            let mut probe_deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> =
+                None;
+            let prepared = monitor.try_prepare_claim_effects_with_probe_confirmed(
                 &monitor_owner,
                 &now,
                 active_cap,
@@ -3997,13 +4004,41 @@ fn scan_issue_monitor_once_blocking(
                         .iter()
                         .find(|issue| issue.number == issue_number)
                     else {
-                        return Ok(false);
+                        return Ok(crate::issue_monitor::ClaimProbeOutcome::Claimable);
                     };
-                    crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
+                    match crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
                         &owner, &repo, issue,
-                    )
+                    ) {
+                        Ok(completed) => Ok(
+                            crate::issue_monitor::ClaimProbeOutcome::from_completed(completed),
+                        ),
+                        Err(failure)
+                            if crate::issue_monitor_worker::is_rate_limit_failure(
+                                &failure.detail,
+                            ) =>
+                        {
+                            probe_deferred.insert(issue_number);
+                            probe_deferral.get_or_insert(failure);
+                            Ok(crate::issue_monitor::ClaimProbeOutcome::Deferred)
+                        }
+                        Err(failure) => Err(failure),
+                    }
                 },
             )?;
+            let _ = prepared;
+            if let Some(failure) = probe_deferral {
+                degradations.push(crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
+                    failure,
+                    Some(
+                        probe_deferred
+                            .iter()
+                            .map(|issue_number| format!("#{issue_number}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    crate::issue_monitor_worker::IssueMonitorScanContinuation::DeferredCandidates,
+                ));
+            }
         }
     }
     // Issue #3933 AC-4: a scan that survived a stage failure must say so where a
@@ -4986,6 +5021,16 @@ if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
       ;;
   esac
 fi
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_rate_limited" ]; then
+  case "$*" in
+    *"timelineItems"*)
+      # Issue #3928: GitHub refuses the pre-claim readback mid-pass. That is a
+      # wait for this candidate, not a fault that may discard the scan.
+      printf '%s\n' 'GraphQL: API rate limit already exceeded for user ID 965624.' >&2
+      exit 1
+      ;;
+  esac
+fi
 if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   # Issue #3963: every gh call is journaled so a test can prove the open-PR
   # readback is ONE inventory call per scan, not one call per candidate branch.
@@ -5038,7 +5083,7 @@ if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
   printf '%s\n' '[{"number":43,"title":"Live issue","body":"## Acceptance Criteria\n- [ ] AC-1: verified by tests","labels":[{"name":"auto-improve"},{"name":"auto-merge"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
   exit 0
 fi
-if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ] || [ "$GWT_FAKE_GH_MODE" = "claim_probe_rate_limited" ]; then
   printf '%s\n' '[{"number":43,"title":"Live SPEC","body":"Live body","labels":[{"name":"auto-improve"},{"name":"gwt-spec"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
@@ -9715,6 +9760,102 @@ exit 0
         );
         gwt_core::github_budget::BudgetLedger::global()
             .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
+    /// Issue #3928 AC-2: the pre-claim completion readback is a live GitHub call
+    /// for a gwt-spec candidate, so the rate limit can refuse it after the pass
+    /// has already loaded its candidates. Propagating that refusal aborted the
+    /// whole pass — the same stall as the candidate-load path, on the stage that
+    /// runs last. The refused candidate must be deferred, the pass must finish,
+    /// and the throttle must be reported. A non-rate-limit failure on the same
+    /// stage still fails closed, which the sibling test below pins.
+    #[test]
+    fn a_rate_limited_claim_completion_readback_defers_its_candidate_and_completes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "claim_probe_rate_limited");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(43),
+                title: "Live SPEC".to_string(),
+                body: "<!-- gwt-spec id=43 version=1 -->\n\
+                       <!-- sections:\n\
+                       spec=body\n\
+                       plan=body\n\
+                       tasks=body\n\
+                       -->\n\n\
+                       <!-- artifact:spec BEGIN -->\nSpec\n<!-- artifact:spec END -->\n\n\
+                       <!-- artifact:plan BEGIN -->\nPlan\n<!-- artifact:plan END -->\n\n\
+                       <!-- artifact:tasks BEGIN -->\n- [x] Complete\n<!-- artifact:tasks END -->"
+                    .to_string(),
+                labels: vec!["gwt-spec".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed completed SPEC cache generation");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let mut preserved = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 1,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        preserved.set_gui_connected(true);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &preserved.prefs(),
+        )
+        .expect("seed issue monitor prefs");
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("a rate-limited completion readback must not discard the scan");
+
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "a candidate whose completion state could not be read must not be claimed: {:?}",
+            scanned.pending_effects()
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        for expected in [
+            "claim-completion-readback",
+            "continued_with_deferred_candidates",
+            "#43",
+            "rate limit",
+        ] {
+            assert!(last_error.contains(expected), "{expected}: {last_error}");
+        }
     }
 
     #[test]
