@@ -57643,6 +57643,136 @@ fn persisted_pm_resume_config_reinjects_project_state_scratch_dir() {
     );
 }
 
+/// SPEC-3966 AC-3: the restore branch `ensure_pm_agent_events` takes
+/// (`spawn_restored_agent_session` -> `launch_config_from_persisted_session`)
+/// must hand the agent CLI `--resume <handle>` whenever the PM Session carries
+/// one, or the resident PM starts every restart as a blank conversation.
+#[test]
+fn restored_pm_session_with_a_resume_handle_launches_with_resume() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+    session.agent_session_id = Some("pm-conversation-3966".to_string());
+
+    let config = super::launch_config_from_persisted_session(&session);
+
+    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(
+        config.resume_session_id.as_deref(),
+        Some("pm-conversation-3966")
+    );
+    assert_eq!(
+        config.predecessor_session_id.as_deref(),
+        Some(session.id.as_str())
+    );
+    assert!(
+        config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--resume" && pair[1] == "pm-conversation-3966"),
+        "restored PM launch must carry --resume <handle>: {:?}",
+        config.args
+    );
+    assert_eq!(
+        super::launch::resume_handle_unavailable_reason(&session),
+        None
+    );
+}
+
+/// SPEC-3966 AC-4: falling back to a new conversation must state why. The
+/// silent fallback is exactly what hid the Windows managed-hook failure for
+/// weeks.
+#[test]
+fn restored_session_without_a_resume_handle_logs_the_reason() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+    assert!(session.agent_session_id.is_none());
+
+    let mut config = None;
+    let events = capture_tracing_events(|| {
+        config = Some(super::launch_config_from_persisted_session(&session));
+    });
+
+    let config = config.expect("launch config");
+    assert_eq!(config.session_mode, gwt_agent::SessionMode::Normal);
+    assert!(!config.args.iter().any(|arg| arg == "--resume"));
+    let reason = super::launch::resume_handle_unavailable_reason(&session)
+        .expect("a stated fallback reason");
+    assert!(
+        reason.contains("no agent_session_id was ever persisted"),
+        "unexpected reason: {reason}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.level == Level::WARN
+                && event
+                    .fields
+                    .get("message")
+                    .is_some_and(|message| message.contains("no resume handle"))
+                && event
+                    .fields
+                    .get("reason")
+                    .is_some_and(|logged| logged.contains("no agent_session_id was ever persisted"))
+        }),
+        "the resume fallback must be observable: {events:?}"
+    );
+}
+
+/// SPEC-3966 AC-5: each restart writes a successor Session record. If the
+/// successor is written without the handle, every restart leaves one more
+/// unresumable Session behind and the next restore has nothing to resume.
+#[test]
+fn repeated_restores_never_accumulate_sessions_without_a_resume_handle() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let mut restored = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+    restored.agent_session_id = Some("pm-conversation-3966".to_string());
+
+    for restart in 0..3 {
+        let config = super::launch_config_from_persisted_session(&restored);
+        assert_eq!(
+            config.session_mode,
+            gwt_agent::SessionMode::Resume,
+            "restart {restart} lost the resume handle"
+        );
+        let mut successor =
+            gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+        successor.session_mode = config.session_mode;
+        super::launch::apply_resume_identity_to_session(&mut successor, &config);
+        assert_eq!(
+            successor.exact_resume_session_id(),
+            Some("pm-conversation-3966"),
+            "restart {restart} wrote a successor Session with no resume handle"
+        );
+        restored = successor;
+    }
+}
+
 #[test]
 fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
     let _env_lock = env_test_lock()
