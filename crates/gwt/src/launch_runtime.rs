@@ -2312,7 +2312,13 @@ mod tests {
         write_executable(&bunx);
         let mut config = sample_versioned_launch_config();
         config.command = bunx.display().to_string();
-        config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        config.env_vars = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            (
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            ),
+        ]);
         config.working_dir = Some(temp.path().to_path_buf());
 
         let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
@@ -2330,7 +2336,13 @@ mod tests {
         write_executable(&temp.path().join("npx"));
         let mut config = sample_versioned_launch_config();
         config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
-        config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        config.env_vars = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            (
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            ),
+        ]);
         config.working_dir = Some(temp.path().to_path_buf());
 
         let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
