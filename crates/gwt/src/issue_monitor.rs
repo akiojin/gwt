@@ -739,6 +739,11 @@ pub struct IssueMonitorPrefs {
     /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #3964 AC-4: the last stranded-generation reclaim result, kept
+    /// durable so a reader that rebuilds the monitor from prefs (no live
+    /// daemon) still sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     /// Durable launch generation keyed by Issue number. Kept separate from the
@@ -863,6 +868,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            generation_reclaim: None,
             launched_issues: Vec::new(),
             launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
@@ -1188,6 +1194,36 @@ pub struct IssueMonitorFailedIssue {
 }
 
 /// Issue #3645 / #3628: one operator recovery, published so every process
+/// Issue #3964 AC-4: what the last scan found among the rows that failed on a
+/// held execution generation, so an operator sees the reclaim result in
+/// `issue.monitor.status` instead of collecting the inbox by hand.
+///
+/// `stranded` is the current picture — rows still refused because their
+/// generation is Active — and is rewritten by every scan. `released` is the
+/// most recent batch the monitor returned to the queue and is carried forward
+/// unchanged by scans that release nothing, so a reader polling every few
+/// minutes cannot miss it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorGenerationReclaimSummary {
+    /// When the scan that produced `stranded` ran.
+    pub recorded_at: String,
+    /// Issues whose generation-conflict hold is still in force.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stranded: Vec<u64>,
+    /// `stranded` broken down by the holder Session's durable state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stranded_by_holder_state: BTreeMap<String, usize>,
+    /// Issues returned to the queue by the most recent releasing scan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub released: Vec<u64>,
+    /// `released` broken down by the holder Session's durable state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub released_by_holder_state: BTreeMap<String, usize>,
+    /// When that releasing scan ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<String>,
+}
+
 /// converges on it. Kept until the same issue fails again, at which point the
 /// newer failure supersedes the release and the entry is dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1913,6 +1949,9 @@ pub struct IssueMonitorAgentStatus {
     /// surface from the machine-local ledger; `None` in daemon projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_budget: Option<BTreeMap<String, gwt_core::github_budget::ResourceBudgetStatus>>,
+    /// Issue #3964 AC-4: the last stranded-generation reclaim result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -2399,6 +2438,9 @@ pub struct IssueMonitorState {
     /// Issue #3923 AC-1: release fences per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #3964 AC-4: last stranded-generation reclaim result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
     launched_windows: BTreeMap<u64, String>,
     /// Durable generation for each launched window binding. A successor launch
     /// receives a new claim even when its issue and window ids are reused.
@@ -4075,6 +4117,7 @@ impl IssueMonitorState {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            generation_reclaim: None,
             launched_windows: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
@@ -4121,6 +4164,7 @@ impl IssueMonitorState {
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
         state.enforce_provider_quota_hold_releases();
+        state.generation_reclaim = prefs.generation_reclaim;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
         // Issue #3627: restore used to re-inject every persisted launch into
@@ -4291,6 +4335,7 @@ impl IssueMonitorState {
             provider_quota_holds: self.provider_quota_holds.clone(),
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
+            generation_reclaim: self.generation_reclaim.clone(),
             launched_issues: self
                 .launched_windows
                 .iter()
@@ -6349,6 +6394,20 @@ impl IssueMonitorState {
         self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
+        // Issue #3964 AC-4: whichever process ran the newer reclaim owns the
+        // summary; an older in-memory copy must not re-stamp over it.
+        if let Some(from_disk) = disk.generation_reclaim.as_ref() {
+            if let Some(disk_at) = parse_rfc3339_utc(&from_disk.recorded_at) {
+                let newer = self
+                    .generation_reclaim
+                    .as_ref()
+                    .and_then(|local| parse_rfc3339_utc(&local.recorded_at))
+                    .is_none_or(|local_at| disk_at > local_at);
+                if newer {
+                    self.generation_reclaim = Some(from_disk.clone());
+                }
+            }
+        }
         // Issue #3478: the hook (and the answer operation) write handoffs from
         // outside this process, so disk is the inbound source for them.
         self.absorb_autonomous_handoffs(disk.autonomous_handoffs.iter().cloned());
@@ -7512,6 +7571,7 @@ impl IssueMonitorState {
             last_scan_at: status.last_scan_at,
             scan_stall: None,
             github_budget: None,
+            generation_reclaim: self.generation_reclaim.clone(),
         }
     }
 
@@ -10143,6 +10203,23 @@ impl IssueMonitorState {
             return IssueMonitorRequeueOutcome::NotHeld;
         }
 
+        let outcome = self.release_failed_issue_hold(issue_number, reason, now);
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} requeued by operator: {reason}"),
+        );
+        outcome
+    }
+
+    /// Publish the release of a held failure and return the issue to the
+    /// queue. Callers have already refused live launches and unheld rows.
+    fn release_failed_issue_hold(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorRequeueOutcome {
         let stale_window_id = self.failed_windows.get(&issue_number).cloned();
         let attempts_before = self.attempt_count(issue_number);
         self.failure_release_version += 1;
@@ -10157,16 +10234,118 @@ impl IssueMonitorState {
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number, true);
-        self.push_autonomous_notice(
-            "info",
-            issue_number,
-            format!("Issue #{issue_number} requeued by operator: {reason}"),
-        );
         IssueMonitorRequeueOutcome::Requeued {
             stale_window_id,
             attempts_before,
             attempts_after: self.attempt_count(issue_number),
         }
+    }
+
+    /// Issue #3964 AC-1 / AC-4: return every `agent_failed` row that failed on
+    /// a held execution generation to the queue once that generation is no
+    /// longer Active, and report what is still held.
+    ///
+    /// The generation reaper releases generations; it does not know about
+    /// Monitor rows, and the row's hold used to outlive the generation until
+    /// an operator ran `issue.monitor.requeue` — 29 of the 45 stranded
+    /// production rows were exactly that. `probe` answers from the owner
+    /// ledger; an unanswerable owner is reported as stranded under `unknown`
+    /// and left alone, and a row a human parked (`NeedsHuman`) is never
+    /// touched. A launch on a Blocked or Completed predecessor takes the
+    /// successor route, so releasing cannot loop: a row refused again on an
+    /// Active generation stays held until that generation is released.
+    pub fn release_stranded_generation_failures(
+        &mut self,
+        now: &str,
+        mut probe: impl FnMut(u64) -> Option<crate::cli::execution_state::OwnerGenerationHold>,
+    ) -> IssueMonitorGenerationReclaimSummary {
+        use crate::cli::execution_state::ExecutionControlStatus;
+
+        let held = self
+            .failed_issues
+            .iter()
+            .filter(|(_, message)| {
+                crate::cli::execution_state::is_execution_generation_conflict(message)
+            })
+            .map(|(issue_number, _)| *issue_number)
+            .filter(|issue_number| {
+                !self
+                    .autonomous_records
+                    .get(issue_number)
+                    .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+                    && !self
+                        .inbox_item(*issue_number)
+                        .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+            })
+            .collect::<Vec<_>>();
+        let mut summary = IssueMonitorGenerationReclaimSummary {
+            recorded_at: now.to_string(),
+            ..IssueMonitorGenerationReclaimSummary::default()
+        };
+        if let Some(previous) = &self.generation_reclaim {
+            summary.released = previous.released.clone();
+            summary.released_by_holder_state = previous.released_by_holder_state.clone();
+            summary.released_at = previous.released_at.clone();
+        }
+        let mut released = Vec::new();
+        let mut released_by_holder_state = BTreeMap::<String, usize>::new();
+        for issue_number in held {
+            let hold = probe(issue_number);
+            let holder_state = hold.as_ref().map_or_else(
+                || "unknown".to_string(),
+                |hold| hold.holder_session_state.clone(),
+            );
+            // Same guard as `requeue_failed_issue`: a row a launch still owns
+            // is never released here, because clearing its tracking would
+            // strand the running agent's slot. It stays reported instead.
+            let launch_live = self.active_launches.contains(&issue_number)
+                || self.launched_windows.contains_key(&issue_number)
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == issue_number);
+            match hold.map(|hold| hold.status) {
+                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed)
+                    if !launch_live =>
+                {
+                    let reason = format!(
+                        "stranded execution generation released (holder Session {holder_state}); returned to the queue by the Issue Monitor"
+                    );
+                    if matches!(
+                        self.release_failed_issue_hold(issue_number, &reason, now),
+                        IssueMonitorRequeueOutcome::Requeued { .. }
+                    ) {
+                        self.push_autonomous_notice(
+                            "info",
+                            issue_number,
+                            format!("Issue #{issue_number} requeued: {reason}"),
+                        );
+                        released.push(issue_number);
+                        *released_by_holder_state.entry(holder_state).or_default() += 1;
+                    }
+                }
+                Some(_) | None => {
+                    summary.stranded.push(issue_number);
+                    *summary
+                        .stranded_by_holder_state
+                        .entry(holder_state)
+                        .or_default() += 1;
+                }
+            }
+        }
+        if !released.is_empty() {
+            summary.released = released;
+            summary.released_by_holder_state = released_by_holder_state;
+            summary.released_at = Some(now.to_string());
+        }
+        if summary.stranded.is_empty()
+            && summary.released.is_empty()
+            && self.generation_reclaim.is_none()
+        {
+            return summary;
+        }
+        self.generation_reclaim = Some(summary.clone());
+        summary
     }
 
     /// Issue #3683 (AC-3): release a `BlockedByClaim` hold an operator decided
@@ -11163,6 +11342,7 @@ mod tests {
                 // applied by `agent_status_at`, which needs a clock.
                 scan_stall: None,
                 github_budget: None,
+                generation_reclaim: None,
             }
         );
     }
@@ -15406,6 +15586,282 @@ mod tests {
             IssueMonitorRequeueOutcome::NotHeld
         );
         assert_eq!(monitor.prefs(), before);
+    }
+
+    fn generation_conflict_message(issue_number: u64, holder_state: &str) -> String {
+        format!(
+            "{} issue #{issue_number} (active generation held by Session holder-{issue_number} ({holder_state})); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+            crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
+        )
+    }
+
+    /// Issue #3964 AC-1: the generation reaper releases the owner's
+    /// generation, but the Monitor row that failed on that generation stayed
+    /// `agent_failed` until a human ran `issue.monitor.requeue` — 29 of the 45
+    /// stranded production rows were exactly this. Once the generation is no
+    /// longer Active, the hold has nothing left to protect.
+    #[test]
+    fn release_stranded_generation_failures_requeues_rows_whose_generation_is_no_longer_active() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43), issue(44)],
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Interrupted"));
+        monitor.record_agent_issue_failed(43, "attempts exhausted");
+        monitor.record_agent_issue_failed(44, generation_conflict_message(44, "Idle"));
+        for number in [42, 43, 44] {
+            monitor.record_attempt(number);
+        }
+
+        let summary =
+            monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
+                match issue_number {
+                    42 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                        holder_session_state: "Interrupted".to_string(),
+                    }),
+                    43 => panic!("a row that did not fail on a generation is never probed"),
+                    44 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        status: crate::cli::execution_state::ExecutionControlStatus::Completed,
+                        holder_session_state: "Idle".to_string(),
+                    }),
+                    _ => None,
+                }
+            });
+
+        assert_eq!(summary.released, vec![42, 44]);
+        assert_eq!(
+            summary.released_by_holder_state,
+            BTreeMap::from([("Idle".to_string(), 1), ("Interrupted".to_string(), 1)])
+        );
+        assert!(summary.stranded.is_empty());
+        assert_eq!(summary.released_at.as_deref(), Some("2026-09-05T00:05:00Z"));
+        for number in [42, 44] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "#{number} must be launchable again"
+            );
+            assert!(monitor.queued_issue_numbers().contains(&number));
+            assert_eq!(monitor.attempt_count(number), 0);
+            assert!(
+                !monitor
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == number),
+                "the persisted hold must be gone, not just the in-memory row"
+            );
+        }
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed),
+            "an unrelated failure keeps its hold"
+        );
+        assert!(
+            monitor
+                .prefs()
+                .requeue_audit
+                .iter()
+                .any(|entry| entry.issue_number == 42 && entry.reason.contains("generation")),
+            "the release is audited like an operator requeue"
+        );
+        assert_eq!(
+            monitor
+                .agent_status_at("2026-09-05T00:06:00Z")
+                .generation_reclaim,
+            Some(summary.clone()),
+            "issue.monitor.status must show the reclaim result"
+        );
+        assert_eq!(
+            monitor.prefs().generation_reclaim,
+            Some(summary),
+            "the summary must survive a process that rebuilds the monitor from prefs"
+        );
+    }
+
+    /// Issue #3964 AC-2 / AC-4: a row whose generation is still Active stays
+    /// held, and the reader can see who is holding it without collecting the
+    /// inbox by hand.
+    #[test]
+    fn release_stranded_generation_failures_reports_rows_whose_generation_is_still_active() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        monitor.record_agent_issue_failed(43, generation_conflict_message(43, "Interrupted"));
+
+        let first =
+            monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                    holder_session_state: if issue_number == 42 {
+                        "Running".to_string()
+                    } else {
+                        "Interrupted".to_string()
+                    },
+                })
+            });
+
+        assert!(first.released.is_empty());
+        assert_eq!(first.released_at, None);
+        assert_eq!(first.stranded, vec![42, 43]);
+        assert_eq!(
+            first.stranded_by_holder_state,
+            BTreeMap::from([("Interrupted".to_string(), 1), ("Running".to_string(), 1)])
+        );
+        for number in [42, 43] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::AgentFailed)
+            );
+        }
+
+        // The next scan releases #43 and must keep #42 visible as stranded
+        // while remembering what it released.
+        let second =
+            monitor.release_stranded_generation_failures("2026-09-05T00:10:00Z", |issue_number| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: if issue_number == 43 {
+                        crate::cli::execution_state::ExecutionControlStatus::Blocked
+                    } else {
+                        crate::cli::execution_state::ExecutionControlStatus::Active
+                    },
+                    holder_session_state: if issue_number == 42 {
+                        "Running".to_string()
+                    } else {
+                        "Interrupted".to_string()
+                    },
+                })
+            });
+        assert_eq!(second.released, vec![43]);
+        assert_eq!(second.released_at.as_deref(), Some("2026-09-05T00:10:00Z"));
+        assert_eq!(second.stranded, vec![42]);
+
+        // A quiet scan keeps the last release visible instead of blanking it.
+        let third = monitor.release_stranded_generation_failures("2026-09-05T00:15:00Z", |_| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                holder_session_state: "Running".to_string(),
+            })
+        });
+        assert_eq!(third.recorded_at, "2026-09-05T00:15:00Z");
+        assert_eq!(third.released, vec![43]);
+        assert_eq!(third.released_at.as_deref(), Some("2026-09-05T00:10:00Z"));
+        assert_eq!(third.stranded, vec![42]);
+    }
+
+    /// Issue #3964 (review follow-up): the automatic release applies the same
+    /// live-launch guard as `requeue_failed_issue`. A hold that still has a
+    /// launch in flight — a stale failure row racing a fresh launch — is not
+    /// released, because clearing its tracking would strand the running
+    /// agent's slot; it stays reported instead.
+    #[test]
+    fn release_stranded_generation_failures_never_touches_a_row_with_a_live_launch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-05T00:00:00Z");
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Interrupted"));
+        // A fresh launch of the same Issue is in flight while the failure row
+        // from the previous attempt is still persisted.
+        monitor.active_launches.push(42);
+        monitor
+            .launched_windows
+            .insert(42, "tab-1::agent-9".to_string());
+        let before = monitor.prefs();
+
+        let summary = monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |_| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                holder_session_state: "Interrupted".to_string(),
+            })
+        });
+
+        assert!(
+            summary.released.is_empty(),
+            "a live launch is never released"
+        );
+        assert_eq!(summary.stranded, vec![42]);
+        // Reporting the row is the only change: the hold, the launch tracking
+        // and the release audit are exactly as they were.
+        let mut after = monitor.prefs();
+        assert_eq!(after.generation_reclaim, Some(summary.clone()));
+        after.generation_reclaim = None;
+        assert_eq!(
+            after, before,
+            "the row and its launch tracking stay untouched"
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(monitor
+            .prefs()
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 42));
+    }
+
+    /// Issue #3964 AC-3: an `agent_failed` row at the head of the priority
+    /// order must not stop the launch pass. The queued row behind it is the
+    /// one the free slot goes to, in both launch planners.
+    #[test]
+    fn queued_rows_launch_past_an_agent_failed_row_at_the_head_of_the_priority_order() {
+        let build = || {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            scan_issue_monitor_candidates(
+                &mut monitor,
+                &[issue(41), issue(42)],
+                "2026-09-05T02:26:00Z",
+            );
+            monitor.record_agent_issue_failed(41, generation_conflict_message(41, "Idle"));
+            monitor.set_priority_order(vec![41, 42]);
+            assert_eq!(
+                monitor
+                    .inbox
+                    .iter()
+                    .map(|item| (item.issue.number, item.state))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (41, MonitorInboxState::AgentFailed),
+                    (42, MonitorInboxState::Queued)
+                ],
+                "fixture: the refused row sits ahead of the queued row"
+            );
+            monitor
+        };
+
+        let mut gui = build();
+        let request = gui
+            .next_launch_request("2026-09-05T02:26:35Z")
+            .expect("the queued row behind the failed row launches");
+        assert_eq!(request.issue_number, 42);
+        assert_eq!(
+            gui.inbox_item(41).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed),
+            "the refused row is left alone"
+        );
+
+        let mut daemon = build();
+        assert_eq!(
+            daemon.prepare_claim_effects_with_probe("host:1", "2026-09-05T02:26:35Z", 1, |_| false),
+            1
+        );
+        assert!(
+            daemon.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    ..
+                }
+            )),
+            "the claim proposal targets the queued row, not the refused one"
+        );
     }
 
     /// Issue #3645: the manual recovery that produced this Issue was undone

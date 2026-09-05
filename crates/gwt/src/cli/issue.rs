@@ -3597,6 +3597,7 @@ mod tests {
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
             github_budget: None,
+            generation_reclaim: None,
         };
         merge_board_escalations_into_needs_human(&repo, &mut published);
         assert!(published.queue.is_empty());
@@ -3640,6 +3641,7 @@ mod tests {
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
             github_budget: None,
+            generation_reclaim: None,
         };
         merge_board_escalations_into_needs_human(&repo, &mut live_open);
         assert_eq!(live_open.queue, vec![2338]);
@@ -3734,6 +3736,7 @@ mod tests {
                 last_scan_at: None,
                 scan_stall: None,
                 github_budget: None,
+                generation_reclaim: None,
             };
             merge_board_escalations_into_needs_human(&repo, &mut status);
             assert_eq!(
@@ -3784,6 +3787,7 @@ mod tests {
             last_scan_at: None,
             scan_stall: None,
             github_budget: None,
+            generation_reclaim: None,
         };
 
         merge_board_escalations_into_needs_human(&repo, &mut published);

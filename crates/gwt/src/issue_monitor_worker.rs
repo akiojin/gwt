@@ -752,6 +752,26 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             expected_project_tab_id,
             now,
         );
+    // Issue #3964 AC-1: every scan — daemon or GUI fallback — asks the owner
+    // ledger whether a generation-conflict hold still protects anything. The
+    // reaper released 29 of the 45 stranded production generations and their
+    // rows stayed `agent_failed` regardless, because nothing told the monitor.
+    monitor.release_stranded_generation_failures(now, |issue_number| {
+        match crate::cli::execution_state::owner_generation_hold_for_project(
+            repo_path,
+            issue_number,
+        ) {
+            Ok(hold) => hold,
+            Err(error) => {
+                tracing::debug!(
+                    issue = issue_number,
+                    %error,
+                    "owner generation ledger could not be read; the hold stays in place"
+                );
+                None
+            }
+        }
+    });
     if let Some(error) = &loaded.live_error {
         let message = if loaded.source == IssueMonitorCandidateSource::Cache {
             format!("issue list failed; using cache fallback: {error}")
@@ -2387,6 +2407,150 @@ mod tests {
         );
     }
 
+    /// Issue #3964 AC-1: the shared scan transition — the one path both the
+    /// daemon scan and the GUI fallback scan run — asks the owner ledger
+    /// whether a generation-conflict hold still protects anything, so a
+    /// reaped generation returns its Issue to the queue on the next scan
+    /// without an operator.
+    #[test]
+    fn scan_transition_releases_generation_conflict_holds_from_the_owner_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let session_id = "scan-transition-reaped-holder";
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding =
+            crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
+                .unwrap()
+                .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session =
+            gwt_agent::Session::new(worktree.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.linked_issue_number = Some(owner.number);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        session.save(&sessions_dir).unwrap();
+
+        let conflict = format!(
+            "{} issue #42 (active generation held by Session {session_id} (Interrupted))",
+            crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
+        );
+        let loaded = LoadedIssueMonitorCandidates {
+            issues: vec![issue(42)],
+            source: IssueMonitorCandidateSource::Live,
+            live_error: None,
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            worktree.path(),
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(42, conflict);
+
+        // Still Active: the scan leaves the hold in place and reports it.
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            worktree.path(),
+            "2026-09-05T00:01:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+        let reported = monitor
+            .agent_status_at("2026-09-05T00:01:30Z")
+            .generation_reclaim
+            .expect("a held generation is reported");
+        assert_eq!(reported.stranded, vec![42]);
+        assert_eq!(
+            reported.stranded_by_holder_state,
+            std::collections::BTreeMap::from([("Interrupted".to_string(), 1)])
+        );
+
+        // The reaper releases the generation; the next scan releases the row.
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let candidate =
+            crate::cli::execution_state::inspect_startup_active_generation_ledgers(&[worktree
+                .path()
+                .to_path_buf()])
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.owner == owner)
+            .expect("active candidate");
+        assert_eq!(
+            crate::cli::execution_state::reap_startup_defunct_active_generation(
+                &candidate,
+                &sessions_dir,
+                &identity,
+                &[],
+            )
+            .unwrap(),
+            crate::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped
+        );
+
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            worktree.path(),
+            "2026-09-05T00:02:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "a released generation returns its Issue to the queue"
+        );
+        let released = monitor
+            .agent_status_at("2026-09-05T00:02:30Z")
+            .generation_reclaim
+            .expect("the release is reported");
+        assert_eq!(released.released, vec![42]);
+        assert!(released.stranded.is_empty());
+    }
+
     #[test]
     fn synchronous_claim_path_honors_autonomous_retry_backoff() {
         let client = FakeIssueClient::new();
@@ -2898,11 +3062,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let fake_git = temp.path().join("git");
-        std::fs::write(
+        // Issue #3521: written by a child shell so no fork in a sibling test
+        // can inherit a writable descriptor and turn the exec into ETXTBSY.
+        gwt_core::test_support::write_executable_script(
             &fake_git,
             r#"#!/bin/sh
 if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ]; then
@@ -2914,8 +3078,6 @@ exit 1
 "#,
         )
         .expect("write fake git");
-        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake git executable");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo path");
         let started = std::time::Instant::now();
