@@ -217,6 +217,15 @@ fn evaluate_review_dispatch_guard(
     if !review_dispatch_session {
         return Ok(HookOutput::Silent);
     }
+    // The title gate used to stop file edits in a review window as a side
+    // effect of denying everything. Lifting it must not open that door: the
+    // file tools are the most direct way to rewrite the very diff under review.
+    if matches!(
+        event.tool_name.as_deref(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch")
+    ) {
+        return Ok(review_dispatch_denial("editing files"));
+    }
     if event.tool_name.as_deref() != Some("Bash") {
         return Ok(HookOutput::Silent);
     }
@@ -229,25 +238,35 @@ fn evaluate_review_dispatch_guard(
     if !is_review_dispatch_denied_operation(&operation) {
         return Ok(HookOutput::Silent);
     }
-    Ok(HookOutput::pre_tool_use_permission(
-        format!("`{operation}` is outside the independent review contract"),
+    Ok(review_dispatch_denial(&format!("`{operation}`")))
+}
+
+fn review_dispatch_denial(subject: &str) -> HookOutput {
+    HookOutput::pre_tool_use_permission(
+        format!("{subject} is outside the independent review contract"),
         "This window is an independent-review dispatch session (SPEC #3200): it judges the implementation, it never produces or settles it. \
-Operations that rewrite the implementer's artifacts or authority — `pr.*`, `issue.spec.edit`, `execution.*`, `workspace.*`, `build.*` — belong to the implementing session and are refused here.\n\n\
+Editing files, and the operations that rewrite the implementer's artifacts or authority — `pr.*`, `issue.spec.*`, `execution.*`, `workspace.*`, `build.*`, `verify.*` — belong to the implementing session and are refused here.\n\n\
 Publish the verdict instead, then report it on the Board:\n\
   gwtd <<'JSON'\n\
   {\"schema_version\":1,\"operation\":\"issue.monitor.review_verdict\",\"params\":{\"issue_number\":<n>,\"reviewed_sha\":\"<sha>\",\"verdict\":\"<verdict json>\"}}\n\
   JSON\n\n\
-Read-only inspection (`git log`, `git diff`, the target test run, `issue.view`, `pr.view`) stays available.",
-    ))
+Read-only inspection (`git log`, `git diff`, the target test run, `issue.view`, `pr.view`, `execution.status`, `verify.lease.status`) stays available.",
+    )
 }
 
 /// The envelope operations a review dispatch session must not run. Read-only
 /// operations inside the same families (`execution.status`, `pr.view`,
-/// `workspace.candidates`, ...) stay available: refusing them would blind the
-/// reviewer without protecting anything, and AC-4 requires the review to be
-/// able to inspect the state it is judging.
+/// `workspace.candidates`, `verify.lease.status`, ...) stay available:
+/// refusing them would blind the reviewer without protecting anything, and
+/// AC-4 requires the review to be able to inspect the state it is judging.
+///
+/// `verify.*` is denied for a stronger reason than the rest: `verify.run`
+/// executes arbitrary commands and persists verification evidence, and its
+/// caller-authority check returns empty authority precisely because a review
+/// window has no Execution Control Record — so only this hook stands between a
+/// reviewer and the implementer's evidence bundle.
 fn is_review_dispatch_denied_operation(operation: &str) -> bool {
-    if is_read_only_json_envelope_operation(operation) {
+    if is_read_only_json_envelope_operation(operation) || is_read_only_verify_operation(operation) {
         return false;
     }
     operation.starts_with("execution.")
@@ -255,6 +274,11 @@ fn is_review_dispatch_denied_operation(operation: &str) -> bool {
         || operation.starts_with("build.")
         || operation.starts_with("pr.")
         || operation.starts_with("issue.spec.")
+        || operation.starts_with("verify.")
+}
+
+fn is_read_only_verify_operation(operation: &str) -> bool {
+    matches!(operation, "verify.lease.status" | "verify.lease-status")
 }
 
 fn evaluate_pending_discussion_goal_guard(
@@ -1076,6 +1100,12 @@ mod tests {
                 "workspace.update",
                 r#"{"purpose":"review","current_focus":"review"}"#,
             ),
+            // `verify.run` executes arbitrary commands and writes the
+            // implementer's evidence bundle; its own caller-authority check is
+            // empty for a session with no Execution Control Record, so this
+            // hook is the only thing denying it.
+            ("verify.run", r#"{"commands":["cargo test -p gwt"]}"#),
+            ("verify.plan", r#"{"derive":true}"#),
         ] {
             let command = envelope_command(operation, params);
             let output = evaluate_with_context(&bash_event(&command), worktree, &review_context())
@@ -1090,6 +1120,61 @@ mod tests {
             assert!(
                 detail.contains("issue.monitor.review_verdict"),
                 "the denial must route to the verdict publish: {detail}"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-2: lifting the title gate must not open the file tools.
+    /// Before this change they were denied only as a side effect of that gate,
+    /// and they are the most direct way to rewrite the diff under review.
+    #[test]
+    fn review_dispatch_session_cannot_edit_files() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for tool in ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"] {
+            let event = HookEvent {
+                tool_name: Some(tool.to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("crates/gwt/src/lib.rs").to_string_lossy()
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+            let output =
+                evaluate_with_context(&event, worktree, &review_context()).expect("guard output");
+            assert!(
+                matches!(output, HookOutput::PreToolUsePermission { .. }),
+                "{tool} must be denied in a review window, got {output:?}"
+            );
+        }
+    }
+
+    /// The read-only half of the denied families stays available — refusing it
+    /// would blind the reviewer without protecting anything (AC-4).
+    #[test]
+    fn review_dispatch_session_keeps_the_read_only_half_of_denied_families() {
+        for operation in [
+            "execution.status",
+            "pr.view",
+            "pr.checks",
+            "workspace.candidates",
+            "verify.lease.status",
+        ] {
+            assert!(
+                !is_review_dispatch_denied_operation(operation),
+                "{operation} is read-only and must stay available"
+            );
+        }
+        for operation in [
+            "verify.run",
+            "verify.plan",
+            "verify.adjudicate",
+            "verify.lease.acquire",
+            "build.complete",
+        ] {
+            assert!(
+                is_review_dispatch_denied_operation(operation),
+                "{operation} must be denied"
             );
         }
     }

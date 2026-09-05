@@ -80,7 +80,29 @@ pub fn handle_with_input(
     input: &str,
     current_session: Option<&str>,
 ) -> HookOutput {
+    handle_with_input_with_context(
+        worktree,
+        input,
+        current_session,
+        crate::issue_monitor_review::review_dispatch_session_active(),
+    )
+}
+
+pub(crate) fn handle_with_input_with_context(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+    review_dispatch_session: bool,
+) -> HookOutput {
     if stop_hook_active_from(input) {
+        return HookOutput::Silent;
+    }
+    // Issue #3984 (AC-3): not arming is the primary fix, but an obligation
+    // already on record for this session id (state written before this gate
+    // existed, or a session id reused after a crash) must not strand a
+    // finished verdict at Stop either — the review window has no settlement
+    // path other than a false `execution.blocked`.
+    if review_dispatch_session {
         return HookOutput::Silent;
     }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
@@ -207,9 +229,26 @@ mod tests {
 
         handle_user_prompt_submit_with_context(dir.path(), &prompt, true);
         assert_eq!(
-            handle_with_input(dir.path(), "{}", Some("review-sess")),
+            handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), true),
             HookOutput::Silent,
             "the review window must not arm an obligation it cannot settle"
+        );
+
+        // An obligation already persisted for this session id — state written
+        // before this gate existed, or a reused id — must not strand the
+        // verdict at Stop either.
+        action_obligation::mark_from_prompt(dir.path(), "review-sess", "実装して").unwrap();
+        assert_eq!(
+            handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), true),
+            HookOutput::Silent,
+            "a persisted obligation must not gate a review window's Stop"
+        );
+        assert!(
+            matches!(
+                handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), false),
+                HookOutput::StopBlock { .. }
+            ),
+            "the same persisted obligation still gates a producing session"
         );
 
         // Non-regression: the exemption is keyed on the review marker alone —
@@ -217,7 +256,7 @@ mod tests {
         handle_user_prompt_submit_with_context(dir.path(), &prompt, false);
         assert!(
             matches!(
-                handle_with_input(dir.path(), "{}", Some("review-sess")),
+                handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), false),
                 HookOutput::StopBlock { .. }
             ),
             "a producing session keeps the prompt-to-action gate"
