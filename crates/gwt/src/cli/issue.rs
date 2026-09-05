@@ -34,15 +34,17 @@ pub(crate) fn guard_autonomous_acceptance_block(
     let opted_in = labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(crate::issue_monitor::AUTO_MERGE_LABEL));
-    if !opted_in || crate::issue_monitor_gate::classify_acceptance_criteria(body).machine_checkable
-    {
+    if !opted_in {
         return Ok(());
     }
+    let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(body);
+    let Some(missing) = criteria.rejection_reason() else {
+        return Ok(());
+    };
+    // Issue #3930 AC-2: the refusal names the element that is actually missing.
     Err(SpecOpsError::Validation(format!(
-        "the `{}` label opts this Issue into autonomous execution, but the body has no \
-         machine-checkable acceptance criteria block; add a `## 受け入れ基準` (or \
-         `## Acceptance Criteria`) heading followed by `- [ ] AC-1: ...` checklist items \
-         (`## 成功基準` is not scanned), or drop the label",
+        "the `{}` label opts this Issue into autonomous execution, but {missing}; fix the \
+         body or drop the label",
         crate::issue_monitor::AUTO_MERGE_LABEL
     )))
 }
@@ -248,6 +250,14 @@ pub(super) fn run<E: CliEnv>(
             number,
             reason,
         } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, out)?,
+        IssueCommand::MonitorQuotaHoldList { project_root } => {
+            run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorQuotaHoldClear {
+            project_root,
+            provider,
+            reason,
+        } => run_monitor_quota_hold_clear(env, project_root.as_deref(), &provider, &reason, out)?,
         IssueCommand::MonitorWait {
             project_root,
             number,
@@ -277,6 +287,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            launch_agent,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
@@ -284,6 +295,21 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            launch_agent.as_deref(),
+            out,
+        )?,
+        IssueCommand::MonitorProfiles { project_root } => {
+            run_monitor_profiles(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorProfilesSet {
+            project_root,
+            profiles,
+            usage_threshold_percent,
+        } => run_monitor_profiles_set(
+            env,
+            project_root.as_deref(),
+            profiles,
+            usage_threshold_percent,
             out,
         )?,
         _ => unreachable!("issue::run called with non-issue command"),
@@ -670,6 +696,237 @@ fn run_monitor_launch_now<E: CliEnv>(
     );
     out.push('\n');
     Ok(if delivery.scan_requested { 0 } else { 1 })
+}
+
+/// Issue #3923 AC-1 / Issue #3961 AC-3: list every provider quota hold in
+/// force with the evidence it was formed from.
+///
+/// Read from the durable prefs — the store every Issue Monitor process
+/// persists to and the file the PM inspects — so the list can never disagree
+/// with that file the way a live projection served by a daemon that predates
+/// the hold fields did (it answered `[]` while the file held two providers).
+/// Expired and released holds are not listed: they no longer gate anything.
+fn run_monitor_quota_hold_list<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    out.push_str(
+        &serde_json::json!({
+            "provider_quota_holds": monitor.agent_status_at(&now).provider_quota_holds,
+            "source": "durable_prefs",
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3923 AC-1 / Issue #3961 AC-4: release one provider's quota
+/// hold on the operator's authority.
+///
+/// The release is applied to the authoritative state. When a daemon owns the
+/// control lane, the control lands in its in-memory state inside the same
+/// lock-protected commit that persists it — a release that only reached disk
+/// was joined away again by the daemon's own rebase, or dropped outright by a
+/// daemon that predates the fence. Only when no daemon transport exists (and
+/// no authority fence is held) are the durable prefs the authority and
+/// written directly. Either way the durable prefs are read back and must
+/// carry this release's fence with the provider no longer held; otherwise the
+/// operation refuses instead of reporting a release nobody adopted. Every
+/// issue the hold was holding is readmitted, and one immediate scan is
+/// requested so the queue moves without waiting for the next tick.
+fn run_monitor_quota_hold_clear<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    provider: &str,
+    reason: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Refuse before publishing so the daemon never has to reject a control it
+    // cannot explain back to the caller.
+    let Some(provider) = crate::issue_monitor::normalize_issue_monitor_provider(provider) else {
+        return refuse_quota_hold_clear(
+            out,
+            provider,
+            "unknown_provider",
+            "provider must name the held agent (for example codex or claude)",
+        );
+    };
+    // Millisecond precision: the fence orders holds by instant, and a hold
+    // formed right after this clear must not share its second.
+    let released_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let before = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let held_before = issues_held_by_provider(&before, &provider);
+
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "quota_hold_clear": {
+                "provider": provider,
+                "reason": reason,
+                "released_at": released_at,
+            }
+        }),
+        std::process::id(),
+    );
+    let delivery = match publish_monitor_config_set(&project_root, payload) {
+        Ok(()) => "daemon",
+        Err(error) if error.allows_local_fallback() => {
+            // No daemon transport: the durable prefs are the authority — unless
+            // a fence says a daemon still owns them, in which case the write
+            // is refused rather than forked.
+            let written = crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                &prefs_path,
+                |prefs| {
+                    let mut monitor = crate::IssueMonitorState::with_prefs(
+                        crate::IssueMonitorConfig::default(),
+                        prefs.clone(),
+                    );
+                    if matches!(
+                        monitor.clear_provider_quota_hold(&provider, reason, &released_at),
+                        crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+                    ) {
+                        *prefs = monitor.prefs();
+                    }
+                    Ok(())
+                },
+            );
+            if let Err(error) = written {
+                return refuse_quota_hold_clear(
+                    out,
+                    &provider,
+                    "durable_write_refused",
+                    &format!(
+                        "no daemon transport and the durable prefs refused the release: {error}"
+                    ),
+                );
+            }
+            "durable_prefs"
+        }
+        Err(error) => {
+            return refuse_quota_hold_clear(
+                out,
+                &provider,
+                quota_hold_clear_publish_refusal(&error),
+                &format!(
+                    "the live Issue Monitor daemon did not adopt the release ({error}); \
+                     a daemon that predates this control rejects it — restart the GWT app and retry"
+                ),
+            );
+        }
+    };
+
+    // Adoption proof: the durable prefs must carry this release's fence and
+    // must no longer hold the provider. An acknowledgment alone is not it.
+    let after = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let release = after
+        .provider_quota_hold_releases
+        .get(&provider)
+        .filter(|release| release.released_at == released_at)
+        .cloned();
+    let remaining =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), after.clone())
+            .agent_status_at(&released_at)
+            .provider_quota_holds;
+    let still_held = remaining.iter().any(|hold| hold.provider == provider);
+    let Some(release) = release.filter(|_| !still_held) else {
+        return refuse_quota_hold_clear(
+            out,
+            &provider,
+            "not_adopted",
+            &format!(
+                "{delivery} accepted the release but the durable prefs do not carry it \
+                 (fence recorded: {}, provider still held: {still_held}); the process owning \
+                 the Issue Monitor state may predate this operation — restart the GWT app and retry",
+                after.provider_quota_hold_releases.contains_key(&provider)
+            ),
+        );
+    };
+    let held_after = issues_held_by_provider(&after, &provider);
+    let released_issues = held_before
+        .difference(&held_after)
+        .copied()
+        .collect::<Vec<_>>();
+    let scan = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+    out.push_str(
+        &serde_json::json!({
+            "provider": provider,
+            "status": if release.released_reset_at.is_some() { "cleared" } else { "not_held" },
+            "reason": reason,
+            "released_at": released_at,
+            "released_reset_at": release.released_reset_at,
+            "released_issues": released_issues,
+            "provider_quota_holds": remaining,
+            "delivery": delivery,
+            "scan_requested": scan.scan_requested,
+            "scan_delivery": scan.scan_delivery,
+            "scan_error": scan.scan_error,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3961 AC-4: a stable, greppable name for each way the release can
+/// fail to reach the authoritative state.
+fn quota_hold_clear_publish_refusal(
+    error: &crate::runtime_daemon_events::IssueMonitorControlPublishError,
+) -> &'static str {
+    use crate::runtime_daemon_events::IssueMonitorControlPublishError as PublishError;
+    match error {
+        PublishError::Rejected(_) => "daemon_rejected",
+        PublishError::OutcomeUnknown(_) => "daemon_outcome_unknown",
+        PublishError::Busy(_) => "daemon_busy",
+        PublishError::RecoveryBlocked => "authority_recovery_blocked",
+        PublishError::TransportUnavailable(_) => "daemon_unavailable",
+    }
+}
+
+fn refuse_quota_hold_clear(
+    out: &mut String,
+    provider: &str,
+    refusal: &str,
+    detail: &str,
+) -> Result<i32, SpecOpsError> {
+    out.push_str(
+        &serde_json::json!({
+            "provider": provider,
+            "status": "refused",
+            "refusal": refusal,
+            "detail": detail,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(1)
+}
+
+/// Issues whose retry hold mirrors `provider`'s quota hold.
+fn issues_held_by_provider(
+    prefs: &crate::IssueMonitorPrefs,
+    provider: &str,
+) -> std::collections::BTreeSet<u64> {
+    prefs
+        .autonomous_records
+        .iter()
+        .filter(|record| {
+            record
+                .retry_hold_provider
+                .as_deref()
+                .and_then(crate::issue_monitor::normalize_issue_monitor_provider)
+                .is_some_and(|held| held == provider)
+        })
+        .map(|record| record.issue_number)
+        .collect()
 }
 
 /// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
@@ -1172,12 +1429,14 @@ fn apply_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        launch_agent,
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -1199,6 +1458,11 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
+    if let Some(launch_agent) = launch_agent {
+        candidate
+            .switch_launch_profile_agent(launch_agent)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    }
     *prefs = candidate.prefs();
     Ok(())
 }
@@ -1208,11 +1472,19 @@ fn validate_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
+    if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::IssueMonitorLaunchProfileSwitchError::InvalidAgent.to_string(),
+        ));
+    }
     if enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
+        && launch_agent.is_none()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1236,6 +1508,10 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
+// One optional parameter per settable config field: the arity tracks the
+// wire schema of `issue.monitor.config.set`, so bundling them into a struct
+// would only move the same list one indirection away.
+#[allow(clippy::too_many_arguments)]
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -1243,6 +1519,7 @@ fn run_monitor_config_set<E: CliEnv>(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    launch_agent: Option<&str>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -1251,8 +1528,24 @@ fn run_monitor_config_set<E: CliEnv>(
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        launch_agent,
     )
     .map_err(io_as_api_error)?;
+    // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
+    // before publishing so the daemon never has to reject a control it
+    // cannot explain back to the caller.
+    if launch_agent.is_some() {
+        let prefs = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&project_root),
+        )
+        .map_err(io_as_api_error)?;
+        if prefs.launch_profile.is_none() {
+            return Err(io_as_api_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::IssueMonitorLaunchProfileSwitchError::NoSavedProfile.to_string(),
+            )));
+        }
+    }
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1262,6 +1555,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
                 "auto_close_merged_issues": auto_close_merged_issues,
+                "launch_agent": launch_agent,
             }
         }),
         std::process::id(),
@@ -1279,6 +1573,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                launch_agent,
             )
         })
         .map_err(io_as_api_error)?;
@@ -1296,9 +1591,184 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
                 .unwrap_or(prefs.autonomous_mode),
+            "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
+                crate::issue_monitor_launch_profile_summary(&profile.clone().into())
+            }),
         })
         .to_string(),
     );
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC #3914 FR-011: the pool projection shared by `issue.monitor.profiles`
+/// and the `profiles.set` reply: every candidate with its pool index, summary
+/// and current hold, plus the provider holds and the usage threshold.
+fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::Value {
+    let monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    let status = monitor.status_view();
+    let launch_profiles = prefs
+        .launch_profile_pool()
+        .iter()
+        .zip(status.launch_profile_candidates.iter())
+        .map(|(profile, candidate)| {
+            let mut value = serde_json::to_value(profile).unwrap_or_default();
+            if let Some(object) = value.as_object_mut() {
+                object.insert("index".to_string(), serde_json::json!(candidate.index));
+                object.insert("summary".to_string(), serde_json::json!(candidate.summary));
+                object.insert(
+                    "prefer_for".to_string(),
+                    serde_json::json!(candidate.prefer_for),
+                );
+                if let Some(held_until) = &candidate.held_until {
+                    object.insert("held_until".to_string(), serde_json::json!(held_until));
+                }
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "launch_profiles": launch_profiles,
+        "launch_profile_summary": status.launch_profile_summary,
+        "provider_quota_holds": status.provider_quota_holds,
+        "usage_threshold_percent": status.usage_threshold_percent,
+    })
+}
+
+fn run_monitor_profiles<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
+    .map_err(io_as_api_error)?;
+    out.push_str(&monitor_profiles_projection(&prefs).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC #3914 FR-011: `prefer_for` entries are `type:` / `kind:` / `label:`
+/// followed by a lowercase token (`^(type|kind|label):[a-z0-9_.-]+$`).
+fn is_valid_prefer_for_tag(tag: &str) -> bool {
+    let Some((prefix, value)) = tag.split_once(':') else {
+        return false;
+    };
+    matches!(prefix, "type" | "kind" | "label")
+        && !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(&byte)
+        })
+}
+
+/// SPEC #3914 FR-011 / AC-8: the pool must be non-empty, unique per provider,
+/// limited to known agents, carry well-formed routing tags, and the threshold
+/// must be within 1..=100. Shared by the daemon control and the local
+/// fallback so the two can never accept different pools.
+pub(crate) fn validate_monitor_profiles_set(
+    profiles: &[crate::IssueMonitorLaunchProfile],
+    usage_threshold_percent: Option<u8>,
+) -> io::Result<()> {
+    if profiles.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "profiles must contain at least one launch candidate",
+        ));
+    }
+    let mut providers = std::collections::BTreeSet::new();
+    for profile in profiles {
+        let provider = match gwt_agent::resolve_agent_id(&profile.agent_id) {
+            Some(gwt_agent::AgentId::Custom(_)) | None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown agent_id {:?}", profile.agent_id),
+                ));
+            }
+            Some(agent_id) => agent_id.command().to_ascii_lowercase(),
+        };
+        if !providers.insert(provider.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("duplicate launch candidate for provider {provider}"),
+            ));
+        }
+        if let Some(tag) = profile
+            .prefer_for
+            .iter()
+            .find(|tag| !is_valid_prefer_for_tag(tag))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("prefer_for entry {tag:?} must match ^(type|kind|label):[a-z0-9_.-]+$"),
+            ));
+        }
+    }
+    if usage_threshold_percent.is_some_and(|percent| !(1..=100).contains(&percent)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage_threshold_percent must be between 1 and 100",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_monitor_profiles_set(
+    prefs: &mut crate::IssueMonitorPrefs,
+    profiles: &[crate::IssueMonitorLaunchProfile],
+    usage_threshold_percent: Option<u8>,
+) -> io::Result<()> {
+    validate_monitor_profiles_set(profiles, usage_threshold_percent)?;
+    // Same revocation the GUI save performs: proposals prepared against the
+    // previous pool must not commit under the new one.
+    prefs
+        .advance_effect_authority_epoch()
+        .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+    prefs.set_launch_profile_pool(profiles.to_vec());
+    if let Some(percent) = usage_threshold_percent {
+        prefs.launch_usage_threshold_percent = percent;
+    }
+    Ok(())
+}
+
+fn run_monitor_profiles_set<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    profiles: Vec<crate::IssueMonitorLaunchProfile>,
+    usage_threshold_percent: Option<u8>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    validate_monitor_profiles_set(&profiles, usage_threshold_percent).map_err(io_as_api_error)?;
+
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "profiles_set": {
+                "profiles": profiles,
+                "usage_threshold_percent": usage_threshold_percent,
+            }
+        }),
+        std::process::id(),
+    );
+    let publication = publish_monitor_config_set(&project_root, payload);
+    if let Err(error) = publication {
+        if !error.allows_local_fallback() {
+            return Err(io_as_api_error(io::Error::other(error.to_string())));
+        }
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+            apply_monitor_profiles_set(prefs, &profiles, usage_threshold_percent)
+        })
+        .map_err(io_as_api_error)?;
+    }
+    let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
+    .map_err(io_as_api_error)?;
+    out.push_str(&monitor_profiles_projection(&prefs).to_string());
     out.push('\n');
     Ok(0)
 }
@@ -3140,11 +3610,16 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
+            generation_reclaim: None,
         };
         merge_board_escalations_into_needs_human(&repo, &mut published);
         assert!(published.queue.is_empty());
@@ -3160,6 +3635,10 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 issue_number: 2338,
@@ -3178,10 +3657,12 @@ mod tests {
                 claim_id: None,
                 delivery_id: None,
                 waiting: None,
+                steering: None,
             }],
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
+            generation_reclaim: None,
         };
         merge_board_escalations_into_needs_human(&repo, &mut live_open);
         assert_eq!(live_open.queue, vec![2338]);
@@ -3248,6 +3729,10 @@ mod tests {
                 autonomous_mode: true,
                 has_launch_profile: true,
                 quota_hold: None,
+                launch_profile_summary: String::new(),
+                launch_profile_candidates: Vec::new(),
+                usage_threshold_percent: 80,
+                provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     issue_number: 2338,
@@ -3266,10 +3751,12 @@ mod tests {
                     claim_id: None,
                     delivery_id: None,
                     waiting: None,
+                    steering: None,
                 }],
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
+                generation_reclaim: None,
             };
             merge_board_escalations_into_needs_human(&repo, &mut status);
             assert_eq!(
@@ -3310,11 +3797,16 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
+            generation_reclaim: None,
         };
 
         merge_board_escalations_into_needs_human(&repo, &mut published);
@@ -3432,6 +3924,9 @@ mod tests {
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
+                "launch_profile_summary": "configure before auto start",
+                "launch_profile_candidates": [],
+                "usage_threshold_percent": 80,
                 // SPEC-3431 FR-024: the offline fallback serializes the same
                 // projection as the daemon branch, so a caller sees one shape
                 // regardless of whether the daemon happens to be publishing.
@@ -3866,6 +4361,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                launch_agent: None,
             },
             &mut out,
         )
@@ -3888,11 +4384,188 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                launch_agent: None,
             },
             &mut out,
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
+        crate::IssueMonitorLaunchProfile {
+            agent_id: agent_id.to_string(),
+            model: None,
+            reasoning: None,
+            version: None,
+            session_mode: Default::default(),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+            prefer_for: prefer_for.iter().map(|tag| tag.to_string()).collect(),
+        }
+    }
+
+    /// SPEC #3914 FR-011 / AC-8 / SC-6: the pool is written whole, mirrored
+    /// into `launch_profile`, and read back with holds and the threshold.
+    #[test]
+    fn issue_monitor_profiles_set_replaces_the_pool_and_profiles_reads_it_back() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launch_profile: Some(pool_profile("claude", &[])),
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    "2999-01-01T04:00:00Z".to_string(),
+                )]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorProfilesSet {
+                project_root: Some(repo.clone()),
+                profiles: vec![
+                    pool_profile("codex", &[]),
+                    pool_profile("claude", &["kind:spec"]),
+                ],
+                usage_threshold_percent: Some(70),
+            },
+            &mut out,
+        )
+        .expect("profiles set");
+        assert_eq!(code, 0);
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let pool = prefs.launch_profile_pool();
+        assert_eq!(
+            pool.iter()
+                .map(|profile| profile.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "claude"]
+        );
+        assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(pool[1].prefer_for, vec!["kind:spec".to_string()]);
+        assert_eq!(prefs.launch_usage_threshold_percent, 70);
+        assert_eq!(
+            prefs.effect_authority_epoch, 1,
+            "a pool change revokes prepared effects like the GUI save does"
+        );
+        assert_eq!(
+            prefs.provider_quota_holds.get("codex").map(String::as_str),
+            Some("2999-01-01T04:00:00Z"),
+            "the write leaves holds untouched"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorProfiles {
+                project_root: Some(repo),
+            },
+            &mut out,
+        )
+        .expect("profiles read");
+        assert_eq!(code, 0);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("profiles json");
+        assert_eq!(payload["usage_threshold_percent"], 70);
+        assert_eq!(payload["launch_profiles"].as_array().map(Vec::len), Some(2));
+        assert_eq!(payload["launch_profiles"][0]["index"], 0);
+        assert_eq!(payload["launch_profiles"][0]["agent_id"], "codex");
+        assert_eq!(
+            payload["launch_profiles"][0]["held_until"],
+            "2999-01-01T04:00:00Z"
+        );
+        assert!(payload["launch_profiles"][0]["summary"]
+            .as_str()
+            .is_some_and(|summary| !summary.is_empty()));
+        assert_eq!(payload["launch_profiles"][1]["prefer_for"][0], "kind:spec");
+        assert!(payload["launch_profiles"][1].get("held_until").is_none());
+        assert_eq!(payload["provider_quota_holds"][0]["provider"], "codex");
+        assert!(payload["launch_profile_summary"]
+            .as_str()
+            .is_some_and(|summary| summary.starts_with("auto (2): ")));
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_rejects_invalid_pools_without_writing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launch_profile: Some(pool_profile("claude", &[])),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let rejected: Vec<(&str, Vec<crate::IssueMonitorLaunchProfile>, Option<u8>)> = vec![
+            ("empty pool", Vec::new(), None),
+            (
+                "duplicate provider",
+                vec![pool_profile("codex", &[]), pool_profile("Codex", &[])],
+                None,
+            ),
+            ("unknown agent", vec![pool_profile("nope", &[])], None),
+            ("blank agent", vec![pool_profile("  ", &[])], None),
+            (
+                "tag without prefix",
+                vec![pool_profile("codex", &["perf"])],
+                None,
+            ),
+            (
+                "uppercase tag",
+                vec![pool_profile("codex", &["type:Perf"])],
+                None,
+            ),
+            (
+                "unknown tag prefix",
+                vec![pool_profile("codex", &["repo:gwt"])],
+                None,
+            ),
+            ("threshold zero", vec![pool_profile("codex", &[])], Some(0)),
+            (
+                "threshold over 100",
+                vec![pool_profile("codex", &[])],
+                Some(101),
+            ),
+        ];
+        for (case, profiles, usage_threshold_percent) in rejected {
+            let mut out = String::new();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorProfilesSet {
+                    project_root: Some(repo.clone()),
+                    profiles,
+                    usage_threshold_percent,
+                },
+                &mut out,
+            );
+            assert!(result.is_err(), "{case} must be rejected");
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs bytes"),
+                before,
+                "{case} must not touch prefs"
+            );
+        }
     }
 
     /// Issue #3814 AC-2/AC-3: registered PM identity must not open a hidden
@@ -3952,6 +4625,7 @@ mod tests {
                     autonomous_mode,
                     max_active: None,
                     auto_close_merged_issues: None,
+                    launch_agent: None,
                 },
                 &mut out,
             );
@@ -4985,5 +5659,442 @@ mod tests {
         )
         .expect("plain issues keep today's behaviour");
         assert_eq!(code, 0);
+    }
+
+    /// Issue #3923 AC-5: the PM switches the saved profile's agent from the
+    /// CLI; without a saved profile the switch is refused before anything is
+    /// published or written.
+    #[test]
+    fn config_set_launch_agent_switches_the_saved_profile_or_refuses_without_one() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: Some("claude".to_string()),
+            },
+            &mut out,
+        )
+        .is_err());
+        assert!(!prefs_path.exists(), "a refused switch writes nothing");
+
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                    agent_id: "codex".to_string(),
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: None,
+                    session_mode: Default::default(),
+                    skip_permissions: true,
+                    codex_fast_mode: false,
+                    runtime_target: Default::default(),
+                    docker_service: None,
+                    docker_lifecycle_intent: Default::default(),
+                    windows_shell: None,
+                    prefer_for: Vec::new(),
+                }),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: Some("Claude".to_string()),
+            },
+            &mut out,
+        )
+        .expect("config set");
+        assert_eq!(code, 0, "output: {out}");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let profile = prefs.launch_profile.expect("profile survives");
+        assert_eq!(profile.agent_id, "claude");
+        assert_eq!(profile.model, None);
+        assert_eq!(profile.reasoning, None);
+        assert!(
+            profile.skip_permissions,
+            "the wizard's permission choice is kept"
+        );
+    }
+
+    /// Issue #3923 AC-1 / AC-4: the PM lists a provider hold with its evidence
+    /// and clears it by provider; the release is durable and readmits the
+    /// issues the hold was holding.
+    #[test]
+    fn quota_hold_list_and_clear_roundtrip_releases_the_provider_hold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let reset_at = (chrono::Utc::now() + chrono::Duration::days(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    reset_at.clone(),
+                )]),
+                provider_quota_hold_evidence: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    crate::IssueMonitorProviderQuotaHoldEvidence {
+                        recorded_at: "2026-09-02T09:01:00Z".to_string(),
+                        source: "screen_notice".to_string(),
+                        issue_number: Some(42),
+                        window_id: Some("tab-1::agent-42".to_string()),
+                        screen_text: Some("You've hit your usage limit".to_string()),
+                        poller_state: Some("ok".to_string()),
+                        poller_limit_reached: Some(false),
+                        poller_windows: vec![crate::IssueMonitorProviderQuotaPollerWindow {
+                            kind: "weekly".to_string(),
+                            used_percent: 26,
+                        }],
+                    },
+                )]),
+                autonomous_records: vec![crate::AutonomousIssueRecord {
+                    issue_number: 42,
+                    retry_not_before: Some(reset_at.clone()),
+                    retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                    retry_hold_provider: Some("codex".to_string()),
+                    ..crate::AutonomousIssueRecord::new(42)
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldList { project_root: None },
+            &mut out,
+        )
+        .expect("list result");
+        assert_eq!(code, 0);
+        let listed: serde_json::Value = serde_json::from_str(out.trim()).expect("list JSON");
+        assert_eq!(listed["provider_quota_holds"][0]["provider"], "codex");
+        assert_eq!(listed["provider_quota_holds"][0]["reset_at"], reset_at);
+        assert_eq!(
+            listed["provider_quota_holds"][0]["evidence"]["screen_text"],
+            "You've hit your usage limit"
+        );
+        assert_eq!(
+            listed["provider_quota_holds"][0]["evidence"]["poller_windows"][0]["used_percent"],
+            26
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM: Codex is not rate limited".to_string(),
+            },
+            &mut out,
+        )
+        .expect("clear result");
+        assert_eq!(code, 0, "clear output: {out}");
+        let cleared: serde_json::Value = serde_json::from_str(out.trim()).expect("clear JSON");
+        assert_eq!(cleared["provider"], "codex");
+        assert_eq!(cleared["status"], "cleared");
+        assert_eq!(cleared["released_reset_at"], reset_at);
+        assert_eq!(cleared["released_issues"], serde_json::json!([42]));
+        assert_eq!(cleared["provider_quota_holds"], serde_json::json!([]));
+        // Issue #3961: no daemon owns the state here, so the durable prefs
+        // are the authority and the response says which path was taken.
+        assert_eq!(cleared["delivery"], "durable_prefs");
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.provider_quota_holds.is_empty());
+        assert!(persisted.provider_quota_hold_evidence.is_empty());
+        let release = persisted
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("release fence is durable");
+        assert_eq!(release.reason, "PM: Codex is not rate limited");
+        assert_eq!(
+            release.released_reset_at.as_deref(),
+            Some(reset_at.as_str())
+        );
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("the record survives");
+        assert_eq!(record.retry_not_before, None);
+        assert_eq!(record.retry_hold_provider, None);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldList { project_root: None },
+            &mut out,
+        )
+        .expect("list result");
+        assert_eq!(code, 0);
+        let listed: serde_json::Value = serde_json::from_str(out.trim()).expect("list JSON");
+        assert_eq!(listed["provider_quota_holds"], serde_json::json!([]));
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "again".to_string(),
+            },
+            &mut out,
+        )
+        .expect("second clear result");
+        assert_eq!(code, 0);
+        let cleared: serde_json::Value = serde_json::from_str(out.trim()).expect("clear JSON");
+        assert_eq!(cleared["status"], "not_held");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "   ".to_string(),
+                reason: "x".to_string(),
+            },
+            &mut out,
+        )
+        .expect("unknown provider result");
+        assert_eq!(code, 1);
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "unknown_provider");
+    }
+
+    /// Issue #3961: one prefs file holding a live `codex` quota hold, as the
+    /// PM sees it before a release.
+    #[cfg(unix)]
+    fn seed_codex_quota_hold(prefs_path: &Path) -> crate::IssueMonitorPrefs {
+        let reset_at = (chrono::Utc::now() + chrono::Duration::days(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let seed = crate::IssueMonitorPrefs {
+            enabled: true,
+            provider_quota_holds: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                reset_at,
+            )]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(prefs_path, &seed).expect("seed prefs");
+        seed
+    }
+
+    /// Issue #3961: a fake daemon that owns the control lane and answers one
+    /// `quota_hold_clear` publish with `reply` without touching the prefs —
+    /// the shape of a daemon that predates the control (rejects) and of one
+    /// that acknowledges without adopting the release.
+    #[cfg(unix)]
+    fn spawn_quota_hold_clear_daemon(
+        tmp: &Path,
+        repo: &Path,
+        reply: gwt_core::daemon::DaemonFrame,
+    ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            repo,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .expect("runtime scope");
+        let socket_path = tmp.join("quota-hold.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind live daemon");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking live daemon");
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.to_string_lossy().to_string(),
+            "quota-hold-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .expect("persist live daemon endpoint");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !server_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                let (stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("accept control client: {error}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking control client stream");
+                let mut reader =
+                    std::io::BufReader::new(stream.try_clone().expect("clone control stream"));
+                let mut writer = stream;
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read control handshake");
+                let request: gwt_core::daemon::IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end()).expect("parse control handshake");
+                assert_eq!(request.scope, scope);
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                        protocol_version: gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                        daemon_version: "test-daemon".to_string(),
+                        accepted: true,
+                        rejection_reason: None,
+                    })
+                    .expect("serialize control handshake")
+                )
+                .expect("write control handshake");
+                line.clear();
+                reader.read_line(&mut line).expect("read control publish");
+                let gwt_core::daemon::ClientFrame::Publish { channel, payload } =
+                    serde_json::from_str::<gwt_core::daemon::ClientFrame>(line.trim_end())
+                        .expect("parse control publish")
+                else {
+                    panic!("expected a control publish, got {line}");
+                };
+                assert_eq!(
+                    channel,
+                    crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                );
+                assert_eq!(payload["payload"]["quota_hold_clear"]["provider"], "codex");
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&reply).expect("serialize control reply")
+                )
+                .expect("write control reply");
+                return;
+            }
+        });
+        (stop, server)
+    }
+
+    /// Issue #3961 AC-4: the live daemon owns the authoritative hold
+    /// state. When it rejects the release — a daemon that predates the control
+    /// does exactly this — the CLI must neither fall back to a disk write the
+    /// daemon would overwrite nor report `cleared`.
+    #[test]
+    #[cfg(unix)]
+    fn quota_hold_clear_fails_closed_when_the_live_daemon_rejects_the_release() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let seed = seed_codex_quota_hold(&prefs_path);
+        let (stop, server) = spawn_quota_hold_clear_daemon(
+            tmp.path(),
+            &repo,
+            gwt_core::daemon::DaemonFrame::Error {
+                message: "unknown issue monitor control".to_string(),
+            },
+        );
+
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM ruling".to_string(),
+            },
+            &mut out,
+        );
+        stop.store(true, Ordering::Release);
+        server.join().expect("live daemon joins");
+        let code = result.expect("clear result");
+        assert_eq!(code, 1, "clear output: {out}");
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "daemon_rejected");
+        assert!(
+            refused["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown issue monitor control"),
+            "the daemon's reason reaches the caller: {refused}"
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs");
+        assert_eq!(
+            persisted.provider_quota_holds, seed.provider_quota_holds,
+            "a refused release must leave the durable hold untouched"
+        );
+        assert!(persisted.provider_quota_hold_releases.is_empty());
+    }
+
+    /// Issue #3961 AC-4: an acknowledgment is not adoption. When the daemon
+    /// acks but the durable prefs still hold the provider and carry no release
+    /// fence, `cleared` would be exactly the silent no-op this Issue is about.
+    #[test]
+    #[cfg(unix)]
+    fn quota_hold_clear_refuses_when_an_acking_daemon_does_not_adopt_the_release() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let seed = seed_codex_quota_hold(&prefs_path);
+        let (stop, server) =
+            spawn_quota_hold_clear_daemon(tmp.path(), &repo, gwt_core::daemon::DaemonFrame::Ack);
+
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM ruling".to_string(),
+            },
+            &mut out,
+        );
+        stop.store(true, Ordering::Release);
+        server.join().expect("live daemon joins");
+        let code = result.expect("clear result");
+        assert_eq!(code, 1, "clear output: {out}");
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "not_adopted");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs");
+        assert_eq!(persisted.provider_quota_holds, seed.provider_quota_holds);
+        assert!(persisted.provider_quota_hold_releases.is_empty());
     }
 }

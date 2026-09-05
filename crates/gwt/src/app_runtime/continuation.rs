@@ -3848,6 +3848,12 @@ impl AppRuntime {
         classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
     }
 
+    /// Issue #3934: the batch prefilter moved to the free
+    /// [`classify_nonlocal_active_owner_liveness_batch_at`] so the Issue
+    /// Monitor scan worker can run the reaper without an `AppRuntime`. The
+    /// method survives as the test-facing wrapper over the runtime's own
+    /// sessions directory.
+    #[cfg(test)]
     pub(super) fn classify_nonlocal_active_owner_liveness_batch<'a>(
         &self,
         session_ids: impl IntoIterator<Item = &'a str>,

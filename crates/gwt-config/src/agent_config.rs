@@ -4,8 +4,13 @@ use std::{collections::HashMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Default grace, in seconds, between an Issue-linked Agent window's canonical
+/// terminal settlement and its automatic close (Issue #3927 / SPEC #3340
+/// FR-045).
+pub const DEFAULT_TERMINAL_CLOSE_GRACE_SECS: u64 = 60;
+
 /// Agent runtime configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
     /// Default agent identifier (e.g. "claude", "codex", "gemini").
@@ -21,6 +26,24 @@ pub struct AgentConfig {
     /// applied to every AgentBootstrap process tree. Missing in older config
     /// files, which therefore load the enabled default.
     pub resource: AgentResourceConfig,
+    /// Issue #3927 (SPEC #3340 FR-045): seconds the runtime waits after an
+    /// Issue-linked Agent window becomes canonically terminal (settled
+    /// execution, closed Issue, or revoked Monitor launch) before closing it.
+    /// Missing in older config files, which load the 60-second default.
+    pub terminal_close_grace_secs: u64,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            default_agent: None,
+            agent_paths: HashMap::new(),
+            auto_install_deps: false,
+            codex_trust_managed_hooks: None,
+            resource: AgentResourceConfig::default(),
+            terminal_close_grace_secs: DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
+        }
+    }
 }
 
 /// Scheduling priority applied to an agent process tree relative to gwt.
@@ -197,6 +220,7 @@ mod tests {
             auto_install_deps: true,
             codex_trust_managed_hooks: Some(true),
             resource: AgentResourceConfig::default(),
+            terminal_close_grace_secs: DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let loaded: AgentConfig = toml::from_str(&toml_str).unwrap();
@@ -216,6 +240,25 @@ mod tests {
 
         let enabled: AgentConfig = toml::from_str("codex_trust_managed_hooks = true").unwrap();
         assert_eq!(enabled.codex_trust_managed_hooks, Some(true));
+    }
+
+    // Issue #3927 (SPEC #3340 T-623 / FR-045): the terminal close grace is
+    // configurable in Agent settings, defaults to 60 seconds, and older config
+    // files without the field load that default.
+    #[test]
+    fn terminal_close_grace_defaults_to_sixty_seconds() {
+        assert_eq!(AgentConfig::default().terminal_close_grace_secs, 60);
+        let missing: AgentConfig = toml::from_str("auto_install_deps = false").unwrap();
+        assert_eq!(missing.terminal_close_grace_secs, 60);
+    }
+
+    #[test]
+    fn terminal_close_grace_override_roundtrips() {
+        let overridden: AgentConfig = toml::from_str("terminal_close_grace_secs = 5").unwrap();
+        assert_eq!(overridden.terminal_close_grace_secs, 5);
+        let rendered = toml::to_string_pretty(&overridden).unwrap();
+        let reloaded: AgentConfig = toml::from_str(&rendered).unwrap();
+        assert_eq!(reloaded.terminal_close_grace_secs, 5);
     }
 
     #[test]

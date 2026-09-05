@@ -344,6 +344,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
         }),
+        "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
+                project_root: optional_path(params, "project_root")?,
+            })
+        }
+        "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: optional_path(params, "project_root")?,
+                provider: required_string(params, "provider")?,
+                // An unexplained release of a provider hold is not auditable.
+                reason: required_string(params, "reason")?,
+            })
+        }
         "issue.monitor.wait" => {
             let clear = optional_bool(params, "clear")?.unwrap_or(false);
             let (reason, resume_condition) = if clear {
@@ -377,13 +390,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            let launch_agent = optional_string(params, "launch_agent")?;
             if enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
                 && auto_close_merged_issues.is_none()
+                && launch_agent.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active|auto_close_merged_issues",
+                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -400,6 +416,36 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                launch_agent,
+            })
+        }
+        "issue.monitor.profiles" => CliCommand::Issue(IssueCommand::MonitorProfiles {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            let Some(profiles) = params.get("profiles") else {
+                return Err(CliParseError::MissingFlag("profiles"));
+            };
+            let profiles =
+                serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfile>>(profiles.clone())
+                    .map_err(|error| {
+                    CliParseError::InvalidJson(format!(
+                        "profiles must be an array of launch profiles with agent_id: {error}"
+                    ))
+                })?;
+            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
+                .map(|value| {
+                    u8::try_from(value).map_err(|_| {
+                        CliParseError::InvalidJson(
+                            "usage_threshold_percent must be between 1 and 100".to_string(),
+                        )
+                    })
+                })
+                .transpose()?;
+            CliCommand::Issue(IssueCommand::MonitorProfilesSet {
+                project_root: optional_path(params, "project_root")?,
+                profiles,
+                usage_threshold_percent,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -596,12 +642,48 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             reason: optional_string(params, "reason")?,
         }),
         "execution.status" => {
-            if !params.is_empty() {
+            // Issue #3934: with no params this stays the caller's own
+            // diagnosis; `issue` or `spec` asks about any owner in this
+            // repository, which is how an operator finds out who holds a
+            // generation that keeps refusing the queue.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
                 return Err(CliParseError::InvalidJson(
-                    "execution.status accepts no params".to_string(),
+                    "execution.status accepts only issue or spec".to_string(),
                 ));
             }
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+            match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status owner number must be greater than zero".to_string(),
+                    ))
+                }
+                (Some(number), None) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                            number,
+                        },
+                    },
+                ),
+                (None, Some(number)) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                            number,
+                        },
+                    },
+                ),
+                (None, None) => {
+                    CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+                }
+            }
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -2260,6 +2342,63 @@ mod tests {
         ));
     }
 
+    // SPEC #3914 FR-011 / AC-8: the pool operations accept the shorthand
+    // `{"agent_id": ...}` profile; semantic validation (empty / duplicate /
+    // unknown agent / tag format / threshold range) lives in the handler.
+    #[test]
+    fn issue_monitor_profiles_operations_parse_shorthand_profiles() {
+        assert_eq!(
+            ok("issue.monitor.profiles", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorProfiles { project_root: None })
+        );
+        let parsed = ok(
+            "issue.monitor.profiles.set",
+            json!({
+                "profiles": [
+                    {"agent_id": "codex"},
+                    {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
+                ],
+                "usage_threshold_percent": 70,
+            }),
+        );
+        let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
+            project_root,
+            profiles,
+            usage_threshold_percent,
+        }) = parsed
+        else {
+            panic!("expected MonitorProfilesSet, got {parsed:?}");
+        };
+        assert_eq!(project_root, None);
+        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].agent_id, "codex");
+        assert_eq!(profiles[0].model, None);
+        assert!(profiles[0].prefer_for.is_empty());
+        assert_eq!(profiles[1].agent_id, "claude");
+        assert_eq!(profiles[1].model.as_deref(), Some("opus"));
+        assert_eq!(profiles[1].prefer_for, vec!["kind:spec".to_string()]);
+
+        assert!(matches!(
+            err("issue.monitor.profiles.set", json!({})),
+            CliParseError::MissingFlag(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.profiles.set",
+                json!({"profiles": [{"model": "opus"}]})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.profiles.set",
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
+            ),
+            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
+        ));
+    }
+
     // Issue #3814 AC-2: semantic policy belongs to the handler so dispatch can
     // report a structured operation refusal instead of a parse-only stderr.
     #[test]
@@ -2275,6 +2414,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: Some(7),
                 auto_close_merged_issues: None,
+                launch_agent: None,
             })
         );
         assert_eq!(
@@ -2285,6 +2425,7 @@ mod tests {
                 autonomous_mode: Some(true),
                 max_active: None,
                 auto_close_merged_issues: None,
+                launch_agent: None,
             })
         );
         assert_eq!(
@@ -2298,9 +2439,35 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: Some(false),
+                launch_agent: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
+    }
+
+    /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
+    #[test]
+    fn issue_monitor_config_set_accepts_launch_agent_alone() {
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"launch_agent": "claude"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: Some("claude".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({})),
+            CliParseError::MissingFlag(
+                "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent"
+            )
+        ));
     }
 
     // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
@@ -2478,6 +2645,38 @@ mod tests {
         ));
     }
 
+    /// Issue #3923 AC-1: provider quota holds are listed and cleared through
+    /// JSON operations, and a clear must name its provider and reason.
+    #[test]
+    fn issue_monitor_quota_hold_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.quota_hold.list", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex", "reason": "Codex is not rate limited"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "Codex is not rate limited".to_string(),
+            })
+        );
+        assert!(matches!(
+            err(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex"})
+            ),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.quota_hold.clear", json!({"reason": "x"})),
+            CliParseError::MissingFlag("provider")
+        ));
+    }
+
     #[test]
     fn issue_monitor_requeue_parses() {
         assert_eq!(
@@ -2642,6 +2841,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                launch_agent: None,
             })
         );
     }
@@ -2887,7 +3087,37 @@ mod tests {
         assert!(matches!(
             err("execution.status", json!({"unexpected": true})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts no params")
+                if message.contains("accepts only issue or spec")
+        ));
+        // Issue #3934: an operator must be able to ask who holds any owner's
+        // generation, not only the one their own session is bound to.
+        assert!(matches!(
+            ok("execution.status", json!({"issue": 3934})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 3934,
+                }
+        ));
+        assert!(matches!(
+            ok("execution.status", json!({"spec": 3885})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number: 3885,
+                }
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 3934, "spec": 3885})),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 0})),
+            CliParseError::InvalidJson(message) if message.contains("greater than zero")
         ));
         assert!(matches!(
             ok("execution.complete", json!({})),

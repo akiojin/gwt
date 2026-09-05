@@ -139,6 +139,20 @@ pub enum IssueCommand {
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,
+        /// Issue #3923 AC-5: switch the saved launch profile's agent.
+        launch_agent: Option<String>,
+    },
+    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
+    /// the usage threshold.
+    MonitorProfiles {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
+    /// and optionally the usage threshold.
+    MonitorProfilesSet {
+        project_root: Option<std::path::PathBuf>,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        usage_threshold_percent: Option<u8>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.
@@ -183,6 +197,19 @@ pub enum IssueCommand {
     MonitorRequeue {
         project_root: Option<std::path::PathBuf>,
         number: u64,
+        reason: String,
+    },
+    /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
+    /// evidence it was formed from.
+    MonitorQuotaHoldList {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3923 AC-1: release one provider's quota hold on the operator's
+    /// authority. The release is a durable fence, so a process that still
+    /// holds the hold in memory cannot re-stamp it.
+    MonitorQuotaHoldClear {
+        project_root: Option<std::path::PathBuf>,
+        provider: String,
         reason: String,
     },
     /// Issue #3844: a launched agent declares (or clears) that it is waiting,
