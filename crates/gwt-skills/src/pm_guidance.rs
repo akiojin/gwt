@@ -591,7 +591,15 @@ quota:
 - `github.budget` shows the primary budgets, the local estimate of the
   secondary limit, the newest refusal, and the throttle decision a
   periodic read would get right now. Read it when `throttled` appears
-  or before a burst of live reads; it is free.
+  or before a burst of live reads; it is free. `issue.monitor.status`
+  carries the same state under `github_budget` (per resource:
+  `throttled`, `backoff_until`, `retry_after_secs`,
+  `consecutive_refusals`, `calls_last_minute`, `sources_last_minute`),
+  so a rate-limited queue and the caller behind a burst are visible from
+  the snapshot you already read. A refusal window grows with every
+  refusal in a row (1 → 2 → 4 → 8 minutes, capped at 15) and no gwt
+  process issues GraphQL calls inside it; wait for `backoff_until`
+  instead of retrying.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -1513,6 +1521,22 @@ mod tests {
             "Do not pass `refresh:true` on the periodic inventory",
             "`github.budget`",
             "counts as zero live reads",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3928 AC-4: the budget state the queue is running on is part of
+    /// the status snapshot, so the PM can attribute a burst without a second
+    /// read.
+    #[test]
+    fn contract_points_the_pm_at_the_budget_block_in_monitor_status() {
+        let body = body();
+        for phrase in [
+            "`github_budget`",
+            "`backoff_until`",
+            "`sources_last_minute`",
+            "capped at 15",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
