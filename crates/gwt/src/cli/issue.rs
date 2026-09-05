@@ -296,6 +296,20 @@ pub(super) fn run<E: CliEnv>(
             launch_agent.as_deref(),
             out,
         )?,
+        IssueCommand::MonitorProfiles { project_root } => {
+            run_monitor_profiles(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorProfilesSet {
+            project_root,
+            profiles,
+            usage_threshold_percent,
+        } => run_monitor_profiles_set(
+            env,
+            project_root.as_deref(),
+            profiles,
+            usage_threshold_percent,
+            out,
+        )?,
         _ => unreachable!("issue::run called with non-issue command"),
     };
     Ok(code)
@@ -1560,6 +1574,178 @@ fn run_monitor_config_set<E: CliEnv>(
         })
         .to_string(),
     );
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC #3914 FR-011: the pool projection shared by `issue.monitor.profiles`
+/// and the `profiles.set` reply: every candidate with its pool index, summary
+/// and current hold, plus the provider holds and the usage threshold.
+fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::Value {
+    let monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    let status = monitor.status_view();
+    let launch_profiles = prefs
+        .launch_profile_pool()
+        .iter()
+        .zip(status.launch_profile_candidates.iter())
+        .map(|(profile, candidate)| {
+            let mut value = serde_json::to_value(profile).unwrap_or_default();
+            if let Some(object) = value.as_object_mut() {
+                object.insert("index".to_string(), serde_json::json!(candidate.index));
+                object.insert("summary".to_string(), serde_json::json!(candidate.summary));
+                object.insert(
+                    "prefer_for".to_string(),
+                    serde_json::json!(candidate.prefer_for),
+                );
+                if let Some(held_until) = &candidate.held_until {
+                    object.insert("held_until".to_string(), serde_json::json!(held_until));
+                }
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "launch_profiles": launch_profiles,
+        "launch_profile_summary": status.launch_profile_summary,
+        "provider_quota_holds": status.provider_quota_holds,
+        "usage_threshold_percent": status.usage_threshold_percent,
+    })
+}
+
+fn run_monitor_profiles<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
+    .map_err(io_as_api_error)?;
+    out.push_str(&monitor_profiles_projection(&prefs).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC #3914 FR-011: `prefer_for` entries are `type:` / `kind:` / `label:`
+/// followed by a lowercase token (`^(type|kind|label):[a-z0-9_.-]+$`).
+fn is_valid_prefer_for_tag(tag: &str) -> bool {
+    let Some((prefix, value)) = tag.split_once(':') else {
+        return false;
+    };
+    matches!(prefix, "type" | "kind" | "label")
+        && !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(&byte)
+        })
+}
+
+/// SPEC #3914 FR-011 / AC-8: the pool must be non-empty, unique per provider,
+/// limited to known agents, carry well-formed routing tags, and the threshold
+/// must be within 1..=100. Shared by the daemon control and the local
+/// fallback so the two can never accept different pools.
+pub(crate) fn validate_monitor_profiles_set(
+    profiles: &[crate::IssueMonitorLaunchProfile],
+    usage_threshold_percent: Option<u8>,
+) -> io::Result<()> {
+    if profiles.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "profiles must contain at least one launch candidate",
+        ));
+    }
+    let mut providers = std::collections::BTreeSet::new();
+    for profile in profiles {
+        let provider = match gwt_agent::resolve_agent_id(&profile.agent_id) {
+            Some(gwt_agent::AgentId::Custom(_)) | None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown agent_id {:?}", profile.agent_id),
+                ));
+            }
+            Some(agent_id) => agent_id.command().to_ascii_lowercase(),
+        };
+        if !providers.insert(provider.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("duplicate launch candidate for provider {provider}"),
+            ));
+        }
+        if let Some(tag) = profile
+            .prefer_for
+            .iter()
+            .find(|tag| !is_valid_prefer_for_tag(tag))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("prefer_for entry {tag:?} must match ^(type|kind|label):[a-z0-9_.-]+$"),
+            ));
+        }
+    }
+    if usage_threshold_percent.is_some_and(|percent| !(1..=100).contains(&percent)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage_threshold_percent must be between 1 and 100",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_monitor_profiles_set(
+    prefs: &mut crate::IssueMonitorPrefs,
+    profiles: &[crate::IssueMonitorLaunchProfile],
+    usage_threshold_percent: Option<u8>,
+) -> io::Result<()> {
+    validate_monitor_profiles_set(profiles, usage_threshold_percent)?;
+    // Same revocation the GUI save performs: proposals prepared against the
+    // previous pool must not commit under the new one.
+    prefs
+        .advance_effect_authority_epoch()
+        .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+    prefs.set_launch_profile_pool(profiles.to_vec());
+    if let Some(percent) = usage_threshold_percent {
+        prefs.launch_usage_threshold_percent = percent;
+    }
+    Ok(())
+}
+
+fn run_monitor_profiles_set<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    profiles: Vec<crate::IssueMonitorLaunchProfile>,
+    usage_threshold_percent: Option<u8>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    validate_monitor_profiles_set(&profiles, usage_threshold_percent).map_err(io_as_api_error)?;
+
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "profiles_set": {
+                "profiles": profiles,
+                "usage_threshold_percent": usage_threshold_percent,
+            }
+        }),
+        std::process::id(),
+    );
+    let publication = publish_monitor_config_set(&project_root, payload);
+    if let Err(error) = publication {
+        if !error.allows_local_fallback() {
+            return Err(io_as_api_error(io::Error::other(error.to_string())));
+        }
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+            apply_monitor_profiles_set(prefs, &profiles, usage_threshold_percent)
+        })
+        .map_err(io_as_api_error)?;
+    }
+    let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
+    .map_err(io_as_api_error)?;
+    out.push_str(&monitor_profiles_projection(&prefs).to_string());
     out.push('\n');
     Ok(0)
 }
@@ -3401,6 +3587,9 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
@@ -3423,6 +3612,9 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
@@ -3514,6 +3706,9 @@ mod tests {
                 autonomous_mode: true,
                 has_launch_profile: true,
                 quota_hold: None,
+                launch_profile_summary: String::new(),
+                launch_profile_candidates: Vec::new(),
+                usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
@@ -3579,6 +3774,9 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
@@ -3716,6 +3914,9 @@ mod tests {
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
+                "launch_profile_summary": "configure before auto start",
+                "launch_profile_candidates": [],
+                "usage_threshold_percent": 80,
                 // SPEC-3431 FR-024: the offline fallback serializes the same
                 // projection as the daemon branch, so a caller sees one shape
                 // regardless of whether the daemon happens to be publishing.
@@ -4256,6 +4457,182 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
+        crate::IssueMonitorLaunchProfile {
+            agent_id: agent_id.to_string(),
+            model: None,
+            reasoning: None,
+            version: None,
+            session_mode: Default::default(),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+            prefer_for: prefer_for.iter().map(|tag| tag.to_string()).collect(),
+        }
+    }
+
+    /// SPEC #3914 FR-011 / AC-8 / SC-6: the pool is written whole, mirrored
+    /// into `launch_profile`, and read back with holds and the threshold.
+    #[test]
+    fn issue_monitor_profiles_set_replaces_the_pool_and_profiles_reads_it_back() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launch_profile: Some(pool_profile("claude", &[])),
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    "2999-01-01T04:00:00Z".to_string(),
+                )]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorProfilesSet {
+                project_root: Some(repo.clone()),
+                profiles: vec![
+                    pool_profile("codex", &[]),
+                    pool_profile("claude", &["kind:spec"]),
+                ],
+                usage_threshold_percent: Some(70),
+            },
+            &mut out,
+        )
+        .expect("profiles set");
+        assert_eq!(code, 0);
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let pool = prefs.launch_profile_pool();
+        assert_eq!(
+            pool.iter()
+                .map(|profile| profile.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "claude"]
+        );
+        assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(pool[1].prefer_for, vec!["kind:spec".to_string()]);
+        assert_eq!(prefs.launch_usage_threshold_percent, 70);
+        assert_eq!(
+            prefs.effect_authority_epoch, 1,
+            "a pool change revokes prepared effects like the GUI save does"
+        );
+        assert_eq!(
+            prefs.provider_quota_holds.get("codex").map(String::as_str),
+            Some("2999-01-01T04:00:00Z"),
+            "the write leaves holds untouched"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorProfiles {
+                project_root: Some(repo),
+            },
+            &mut out,
+        )
+        .expect("profiles read");
+        assert_eq!(code, 0);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("profiles json");
+        assert_eq!(payload["usage_threshold_percent"], 70);
+        assert_eq!(payload["launch_profiles"].as_array().map(Vec::len), Some(2));
+        assert_eq!(payload["launch_profiles"][0]["index"], 0);
+        assert_eq!(payload["launch_profiles"][0]["agent_id"], "codex");
+        assert_eq!(
+            payload["launch_profiles"][0]["held_until"],
+            "2999-01-01T04:00:00Z"
+        );
+        assert!(payload["launch_profiles"][0]["summary"]
+            .as_str()
+            .is_some_and(|summary| !summary.is_empty()));
+        assert_eq!(payload["launch_profiles"][1]["prefer_for"][0], "kind:spec");
+        assert!(payload["launch_profiles"][1].get("held_until").is_none());
+        assert_eq!(payload["provider_quota_holds"][0]["provider"], "codex");
+        assert!(payload["launch_profile_summary"]
+            .as_str()
+            .is_some_and(|summary| summary.starts_with("auto (2): ")));
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_rejects_invalid_pools_without_writing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launch_profile: Some(pool_profile("claude", &[])),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let rejected: Vec<(&str, Vec<crate::IssueMonitorLaunchProfile>, Option<u8>)> = vec![
+            ("empty pool", Vec::new(), None),
+            (
+                "duplicate provider",
+                vec![pool_profile("codex", &[]), pool_profile("Codex", &[])],
+                None,
+            ),
+            ("unknown agent", vec![pool_profile("nope", &[])], None),
+            ("blank agent", vec![pool_profile("  ", &[])], None),
+            (
+                "tag without prefix",
+                vec![pool_profile("codex", &["perf"])],
+                None,
+            ),
+            (
+                "uppercase tag",
+                vec![pool_profile("codex", &["type:Perf"])],
+                None,
+            ),
+            (
+                "unknown tag prefix",
+                vec![pool_profile("codex", &["repo:gwt"])],
+                None,
+            ),
+            ("threshold zero", vec![pool_profile("codex", &[])], Some(0)),
+            (
+                "threshold over 100",
+                vec![pool_profile("codex", &[])],
+                Some(101),
+            ),
+        ];
+        for (case, profiles, usage_threshold_percent) in rejected {
+            let mut out = String::new();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorProfilesSet {
+                    project_root: Some(repo.clone()),
+                    profiles,
+                    usage_threshold_percent,
+                },
+                &mut out,
+            );
+            assert!(result.is_err(), "{case} must be rejected");
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs bytes"),
+                before,
+                "{case} must not touch prefs"
+            );
+        }
     }
 
     /// Issue #3814 AC-2/AC-3: registered PM identity must not open a hidden
@@ -5393,6 +5770,7 @@ mod tests {
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),
                     windows_shell: None,
+                    prefer_for: Vec::new(),
                 }),
                 ..crate::IssueMonitorPrefs::default()
             },

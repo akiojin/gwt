@@ -169,6 +169,17 @@ body cannot hold `plan` / `tasks` sections.
   without admitting work to the exhausted account. Never pair the switch
   with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
   for a false hold only.
+- Provider switching is automatic. `issue.monitor.profiles` returns the launch
+  candidate pool (ordered providers with their holds) and the usage threshold;
+  `issue.monitor.profiles.set` replaces the whole pool with
+  `params.profiles` (`[{"agent_id":"codex"},{"agent_id":"claude"}]`, unique
+  per provider, known agents only, optional `prefer_for` tags such as
+  `type:fix` / `kind:spec` / `label:bug`) and optionally
+  `params.usage_threshold_percent` (1-100). The Monitor skips held providers
+  and launches the first eligible candidate (`prefer_for` routing and the
+  usage threshold apply), so a held provider never stalls the queue while
+  another candidate exists. Prefer adding a candidate over stopping the
+  Monitor when one provider hits its limit.
 
 ## Observing the running agents
 
