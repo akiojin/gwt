@@ -110,6 +110,10 @@ impl std::error::Error for IssueMonitorScanFailure {}
 /// took the launch stage down with it and free agent slots sat idle. These
 /// dispositions name what the scan fell back on instead, so a reader can tell a
 /// degraded scan (launch still ran) from a stopped one (launch never ran).
+///
+/// The `last_error` vocabulary is fixed (Issue #3963 AC-4): a line carrying one
+/// of these `continued_with_*` tokens means the launch stage still ran, and a
+/// line carrying `launch_suppressed` means the scan aborted before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueMonitorScanContinuation {
     /// A per-candidate readback exceeded its own budget. That candidate keeps
@@ -733,6 +737,26 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             expected_project_tab_id,
             now,
         );
+    // Issue #3964 AC-1: every scan — daemon or GUI fallback — asks the owner
+    // ledger whether a generation-conflict hold still protects anything. The
+    // reaper released 29 of the 45 stranded production generations and their
+    // rows stayed `agent_failed` regardless, because nothing told the monitor.
+    monitor.release_stranded_generation_failures(now, |issue_number| {
+        match crate::cli::execution_state::owner_generation_hold_for_project(
+            repo_path,
+            issue_number,
+        ) {
+            Ok(hold) => hold,
+            Err(error) => {
+                tracing::debug!(
+                    issue = issue_number,
+                    %error,
+                    "owner generation ledger could not be read; the hold stays in place"
+                );
+                None
+            }
+        }
+    });
     if let Some(error) = &loaded.live_error {
         let message = if loaded.source == IssueMonitorCandidateSource::Cache {
             format!("issue list failed; using cache fallback: {error}")
@@ -1101,7 +1125,14 @@ pub fn try_advance_autonomous_in_flight(
     }
     let base_branch = try_resolve_default_base_branch(repo_path)?;
     let mut degradations = Vec::new();
-    for issue_number in monitor.autonomous_in_flight_issues() {
+    let in_flight = monitor.autonomous_in_flight_issues();
+    // Issue #3963 AC-2: the open-PR readback is ONE inventory per scan. The
+    // eligibility gate marks every eligible queued candidate Implementing before
+    // it is launched, so the in-flight set is queue-sized, not slot-sized, and a
+    // `gh pr list --head` per candidate grew with the queue until the fan-out
+    // could not finish inside any scan budget.
+    let open_prs = read_open_pr_inventory(monitor, &in_flight, repo_path, &mut degradations);
+    for issue_number in in_flight {
         // The branch this candidate's readbacks are about, named up front so a
         // failure can say which one went unknown even when it failed before the
         // phase arm resolved it (Issue #3933 AC-4).
@@ -1128,6 +1159,7 @@ pub fn try_advance_autonomous_in_flight(
             repo_slug,
             repo_path,
             &base_branch,
+            open_prs.as_ref(),
             daemon_secret,
             issue_number,
             now,
@@ -1160,9 +1192,69 @@ fn autonomous_readback_target(monitor: &IssueMonitorState, issue_number: u64) ->
     )
 }
 
+/// Issue #3963 AC-2/AC-3: the one open-PR inventory a scan reads for its
+/// Implementing candidates, keyed by head branch.
+///
+/// `None` when no candidate needs it or the readback degraded. A degraded
+/// inventory is recorded once, naming how many candidates it left unknown; the
+/// Implementing arm then leaves every one of them on the phase the last
+/// successful scan gave it, and the launch stage still runs.
+fn read_open_pr_inventory(
+    monitor: &IssueMonitorState,
+    in_flight: &[u64],
+    repo_path: &Path,
+    degradations: &mut Vec<IssueMonitorScanDegradation>,
+) -> Option<std::collections::HashMap<String, u64>> {
+    let implementing = in_flight
+        .iter()
+        .filter(|issue_number| {
+            monitor
+                .autonomous_record(**issue_number)
+                .is_some_and(|record| record.phase == crate::AutonomousPhase::Implementing)
+        })
+        .count();
+    if implementing == 0 {
+        return None;
+    }
+    let target = Some(if implementing == 1 {
+        "1 implementing candidate".to_string()
+    } else {
+        format!("{implementing} implementing candidates")
+    });
+    if !readback_fan_out_has_budget() {
+        degradations.push(IssueMonitorScanDegradation {
+            stage: IssueMonitorScanStage::OpenPrReadback,
+            target,
+            continuation: IssueMonitorScanContinuation::StaleReadback,
+            detail: "scan budget reserved for the launch stage".to_string(),
+        });
+        return None;
+    }
+    match run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch(repo_path)
+    }) {
+        Ok(index) => Some(index),
+        Err(failure) => {
+            tracing::warn!(
+                stage = %failure.stage,
+                error = %failure.detail,
+                implementing,
+                "issue monitor open-PR inventory degraded; keeping the previous phases"
+            );
+            degradations.push(IssueMonitorScanDegradation::new(
+                failure,
+                target,
+                IssueMonitorScanContinuation::StaleReadback,
+            ));
+            None
+        }
+    }
+}
+
 /// Advance one in-flight autonomous issue by a single step. Every remote
 /// readback here runs under its own budget ([`run_budgeted_readback_stage`]), so
-/// a slow candidate cannot spend the budget the next candidate needs.
+/// a slow candidate cannot spend the budget the next candidate needs. The
+/// open-PR lookup itself is served from `open_prs`, the scan's one inventory.
 #[allow(clippy::too_many_arguments)]
 fn advance_one_autonomous_issue(
     monitor: &mut IssueMonitorState,
@@ -1170,6 +1262,7 @@ fn advance_one_autonomous_issue(
     repo_slug: &str,
     repo_path: &Path,
     base_branch: &str,
+    open_prs: Option<&std::collections::HashMap<String, u64>>,
     daemon_secret: &[u8],
     issue_number: u64,
     now: &str,
@@ -1186,11 +1279,10 @@ fn advance_one_autonomous_issue(
             else {
                 return Ok(());
             };
-            if let Some(pr) =
-                run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-                    gwt_git::pr_status::try_fetch_open_pr_number_for_branch(repo_path, &branch)
-                })?
-            {
+            // Issue #3963 AC-2/AC-3: resolved from the scan's one inventory. No
+            // inventory (the readback degraded) and no row (no open PR) both
+            // leave the phase where the last successful readback put it.
+            if let Some(pr) = open_prs.and_then(|index| index.get(&branch).copied()) {
                 if let Some(sha) =
                     run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
                         gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
@@ -2300,6 +2392,150 @@ mod tests {
         );
     }
 
+    /// Issue #3964 AC-1: the shared scan transition — the one path both the
+    /// daemon scan and the GUI fallback scan run — asks the owner ledger
+    /// whether a generation-conflict hold still protects anything, so a
+    /// reaped generation returns its Issue to the queue on the next scan
+    /// without an operator.
+    #[test]
+    fn scan_transition_releases_generation_conflict_holds_from_the_owner_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let session_id = "scan-transition-reaped-holder";
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding =
+            crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
+                .unwrap()
+                .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session =
+            gwt_agent::Session::new(worktree.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.linked_issue_number = Some(owner.number);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        session.save(&sessions_dir).unwrap();
+
+        let conflict = format!(
+            "{} issue #42 (active generation held by Session {session_id} (Interrupted))",
+            crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
+        );
+        let loaded = LoadedIssueMonitorCandidates {
+            issues: vec![issue(42)],
+            source: IssueMonitorCandidateSource::Live,
+            live_error: None,
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            worktree.path(),
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(42, conflict);
+
+        // Still Active: the scan leaves the hold in place and reports it.
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            worktree.path(),
+            "2026-09-05T00:01:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+        let reported = monitor
+            .agent_status_at("2026-09-05T00:01:30Z")
+            .generation_reclaim
+            .expect("a held generation is reported");
+        assert_eq!(reported.stranded, vec![42]);
+        assert_eq!(
+            reported.stranded_by_holder_state,
+            std::collections::BTreeMap::from([("Interrupted".to_string(), 1)])
+        );
+
+        // The reaper releases the generation; the next scan releases the row.
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let candidate =
+            crate::cli::execution_state::inspect_startup_active_generation_ledgers(&[worktree
+                .path()
+                .to_path_buf()])
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.owner == owner)
+            .expect("active candidate");
+        assert_eq!(
+            crate::cli::execution_state::reap_startup_defunct_active_generation(
+                &candidate,
+                &sessions_dir,
+                &identity,
+                &[],
+            )
+            .unwrap(),
+            crate::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped
+        );
+
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            worktree.path(),
+            "2026-09-05T00:02:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "a released generation returns its Issue to the queue"
+        );
+        let released = monitor
+            .agent_status_at("2026-09-05T00:02:30Z")
+            .generation_reclaim
+            .expect("the release is reported");
+        assert_eq!(released.released, vec![42]);
+        assert!(released.stranded.is_empty());
+    }
+
     #[test]
     fn synchronous_claim_path_honors_autonomous_retry_backoff() {
         let client = FakeIssueClient::new();
@@ -2811,11 +3047,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let fake_git = temp.path().join("git");
-        std::fs::write(
+        // Issue #3521: written by a child shell so no fork in a sibling test
+        // can inherit a writable descriptor and turn the exec into ETXTBSY.
+        gwt_core::test_support::write_executable_script(
             &fake_git,
             r#"#!/bin/sh
 if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ]; then
@@ -2827,8 +3063,6 @@ exit 1
 "#,
         )
         .expect("write fake git");
-        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake git executable");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo path");
         let started = std::time::Instant::now();

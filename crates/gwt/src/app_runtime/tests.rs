@@ -7492,6 +7492,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     }
 }
 
@@ -33135,6 +33136,138 @@ fn startup_reaper_reclaims_a_durably_idle_holder_the_prefilter_calls_unknown() {
     );
 }
 
+/// Issue #3964 AC-2: a launch that died before its agent ever ran leaves the
+/// Session durably `Running` with no runtime sidecar anywhere (four of the
+/// production rows: #3619 / #3620 / #3623 / #3807). The prefilter reads a
+/// Running holder as "cannot tell" and the durable state does not permit
+/// reclaim on its own, so the exact stage — which would have found no runtime
+/// at all — was never consulted.
+#[test]
+fn startup_reaper_reclaims_a_durably_running_holder_with_no_runtime() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("running-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/running-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3964,
+    };
+    let session_id = "startup-running-holder-without-runtime";
+    let worktrees = seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/running-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+    );
+
+    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+
+    assert_eq!(
+        summary.reaped, 1,
+        "a Running holder with no runtime anywhere is not running: {summary:?}"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
+}
+
+/// Issue #3964 AC-1: a refused relaunch materializes the worktree again but
+/// publishes nothing into it, so the owner ledger is Active while the
+/// worktree's trusted pointer/projection pair is missing (production rows
+/// #3465 / #3481 / #3567 / #3624 ...). The holder identity used to be read
+/// from that missing publication, which silently counted the owner as
+/// unchanged on every startup and every scan.
+#[test]
+fn startup_reaper_heals_a_lost_worktree_publication_before_judging_the_holder() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("unpublished-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/unpublished-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3465,
+    };
+    let session_id = "startup-unpublished-holder";
+    let worktrees = seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/unpublished-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let trusted_dir =
+        gwt::cli::trusted_store::trusted_dir_for_worktree(&worktree).expect("trusted worktree dir");
+    fs::remove_file(trusted_dir.join("execution-generation-pointer.json")).expect("drop pointer");
+    fs::remove_file(trusted_dir.join("execution-control.json")).expect("drop projection");
+
+    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+
+    assert_eq!(
+        summary.reaped, 1,
+        "the owner ledger is the authority; a lost publication is republished, not skipped: {summary:?}"
+    );
+    assert!(
+        trusted_dir
+            .join("execution-generation-pointer.json")
+            .is_file(),
+        "the reaper republishes the worktree pointer before judging the holder"
+    );
+    assert!(
+        trusted_dir.join("execution-control.json").is_file(),
+        "the reaper republishes the worktree projection before judging the holder"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
+}
+
 /// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
 /// generation reaper. The selected exact holder remains Active while another
 /// stale owner in the same repository is audited Blocked in the same batch.
@@ -43065,8 +43198,6 @@ fn app_runtime_recovery_blocked_control_never_recovers_or_mutates_corrupt_prefs(
 #[cfg(unix)]
 #[test]
 fn app_runtime_issue_monitor_cache_only_control_bounds_origin_probe() {
-    use std::os::unix::fs::PermissionsExt;
-
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -43088,7 +43219,9 @@ fn app_runtime_issue_monitor_cache_only_control_bounds_origin_probe() {
     let fake_bin = temp.path().join("fake-bin");
     fs::create_dir_all(&fake_bin).expect("create fake bin");
     let fake_git = fake_bin.join("git");
-    fs::write(
+    // Issue #3521: written by a child shell so no fork in a sibling test can
+    // inherit a writable descriptor and turn the exec into ETXTBSY.
+    gwt_core::test_support::write_executable_script(
         &fake_git,
         r#"#!/bin/sh
 if [ "$1" = "rev-parse" ] && [ "$2" = "--path-format=absolute" ]; then
@@ -43104,7 +43237,6 @@ exit 1
 "#,
     )
     .expect("write fake git");
-    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).expect("chmod fake git");
     let _path = prepend_tool_parent_to_path(&fake_git);
 
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
@@ -45166,6 +45298,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     }
 }
 
@@ -45182,6 +45315,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     }
 }
 
@@ -45597,6 +45731,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     });
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save Grok Monitor profile");
 
@@ -47766,6 +47901,211 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
             .values()
             .any(|context| context.issue_monitor_issue_number == Some(3165)),
         "saved-profile auto launch errors must be wired back to Issue Monitor"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why() {
+    // SPEC #3914 AC-4 / US-1: pool [codex, claude] with codex held launches
+    // claude and surfaces the skip reason as a toast.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let mut prefs = gwt::IssueMonitorPrefs {
+        provider_quota_holds: std::collections::BTreeMap::from([(
+            "codex".to_string(),
+            "2999-01-01T04:00:00Z".to_string(),
+        )]),
+        ..Default::default()
+    };
+    prefs.set_launch_profile_pool(vec![
+        codex_issue_monitor_launch_profile(),
+        claude_issue_monitor_launch_profile(),
+    ]);
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("save issue monitor prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut agent_options = sample_agent_options();
+    agent_options.push(gwt::AgentOption {
+        id: "claude".to_string(),
+        name: "Claude Code".to_string(),
+        available: true,
+        installed_version: Some("latest".to_string()),
+        versions: vec!["latest".to_string()],
+        custom_agent: None,
+    });
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load_with_agent_options(
+        &temp.path().join("sessions"),
+        agent_options,
+    );
+
+    let events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3914,
+        LinkedIssueKind::Spec,
+    );
+
+    assert!(
+        runtime.launch_wizard.is_none(),
+        "pool launch must stay silent"
+    );
+    let agent_window = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window");
+    assert_eq!(
+        agent_window.agent_id.as_deref(),
+        Some("claude"),
+        "the held head candidate yields to the next one"
+    );
+    let toast = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast {
+                level,
+                message,
+                issue_number: Some(3914),
+            } if message.contains("Held codex") => Some((level.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("skip reason toast");
+    assert_eq!(toast.0, "info");
+    assert!(toast.1.contains("claude"), "{}", toast.1);
+    assert!(toast.1.contains("04:00"), "{}", toast.1);
+}
+
+/// SPEC #3914 FR-007 (PR #3968 review): a non-head selection is reported on
+/// the exact-Resume path too, not only when a fresh session is spawned.
+#[test]
+fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "resume-skip-reason",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    // Pool [claude, codex] with claude held: codex is the non-head selection
+    // and owns the stored resumable conversation.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Monitor prefs");
+    prefs.set_launch_profile_pool(vec![
+        claude_issue_monitor_launch_profile(),
+        codex_issue_monitor_launch_profile(),
+    ]);
+    prefs
+        .provider_quota_holds
+        .insert("claude".to_string(), "2999-01-01T04:00:00Z".to_string());
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save pooled Monitor prefs");
+
+    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result =
+        take_monitor_launch_complete("resume with a skipped head", &fixture.recorded_events);
+    assert_monitor_exact_resume(result, &fixture);
+    let toast = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast {
+                level,
+                message,
+                issue_number: Some(3165),
+            } if message.contains("Held claude") => Some((level.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("skip reason toast on the resume path");
+    assert_eq!(toast.0, "info");
+    assert!(toast.1.contains("codex"), "{}", toast.1);
+    assert!(toast.1.contains("04:00"), "{}", toast.1);
+}
+
+#[test]
+fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
+    // SPEC #3914 FR-003 / US-7: saving a second provider from Agent settings
+    // appends it to the pool instead of replacing the saved profile.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![claude_issue_monitor_launch_profile()]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+    let request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("develop")
+            .build(),
+    ));
+
+    let events = runtime.save_issue_monitor_profile_from_launch_request(
+        session,
+        IssueMonitorProfileSaveContext {
+            client_id: "client-1".to_string(),
+            issue_number: None,
+        },
+        request,
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message == "Issue Monitor settings saved"
+    )));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let pool = persisted.launch_profile_pool();
+    assert_eq!(
+        pool.iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude", "codex"]
+    );
+    assert_eq!(
+        persisted
+            .launch_profile
+            .as_ref()
+            .map(|profile| profile.agent_id.as_str()),
+        Some("claude"),
+        "the compatibility mirror keeps the pool head"
     );
 }
 
@@ -60822,6 +61162,85 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
         "the scan must release a generation whose holder is gone"
+    );
+}
+
+/// Issue #3964 AC-1: in production a live daemon owns the scan, so the GUI
+/// worker answered `DeferredToLiveDaemon` before it ever reached the reaper —
+/// and the daemon has no reaper. The scan-cadence recovery therefore never ran
+/// after startup; 38 stranded generations survived every scan. The reaper is
+/// local recovery, not a scan effect, and must run on every tick regardless of
+/// who holds scan authority.
+#[test]
+fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the_scan() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3964,
+    };
+    let session_id = "deferred-scan-defunct-holder";
+    seed_defunct_active_owner(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &repo,
+        &repo,
+        "work/deferred-scan-defunct-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Interrupted,
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    let daemon = gwt::IssueMonitorAuthorityFence::current_process();
+    let (_, _daemon_lease) =
+        gwt::establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+            .expect("live daemon authority");
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        "2026-09-05T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan runs");
+
+    assert!(
+        matches!(
+            outcome,
+            ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon
+        ),
+        "scan authority still belongs to the daemon"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the reaper must run before the scan defers to the daemon"
     );
 }
 

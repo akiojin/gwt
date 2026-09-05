@@ -53,7 +53,7 @@ const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
 
-fn normalize_issue_monitor_provider(raw: &str) -> Option<String> {
+pub(crate) fn normalize_issue_monitor_provider(raw: &str) -> Option<String> {
     gwt_agent::resolve_agent_id(raw).map(|id| id.command().to_ascii_lowercase())
 }
 
@@ -711,8 +711,21 @@ pub struct IssueMonitorPrefs {
     /// [`Default`] uses the current version for genuinely fresh projects.
     #[serde(default)]
     pub legacy_git_launch_failure_migration_version: u32,
+    /// SPEC #3914 FR-001: compatibility mirror of `launch_profiles[0]`. Old
+    /// readers keep working; new readers go through
+    /// [`Self::launch_profile_pool`].
     #[serde(default)]
     pub launch_profile: Option<IssueMonitorLaunchProfile>,
+    /// SPEC #3914 FR-001: ordered launch candidate pool, unique per provider.
+    /// Empty means "use `launch_profile`", so pre-#3914 JSON reads as a
+    /// one-element pool. Read and written only through
+    /// [`Self::launch_profile_pool`] / [`Self::set_launch_profile_pool`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_profiles: Vec<IssueMonitorLaunchProfile>,
+    /// SPEC #3914 FR-002: a candidate whose known usage is at or above this
+    /// percentage yields to the next candidate. Unknown usage never blocks.
+    #[serde(default = "default_launch_usage_threshold_percent")]
+    pub launch_usage_threshold_percent: u8,
     /// Issue #3785 / SPEC #3165: provider-wide launch admission holds keyed by
     /// the canonical agent command. Values are concrete RFC3339 reset
     /// deadlines; per-provider rebases join by the later instant.
@@ -726,6 +739,11 @@ pub struct IssueMonitorPrefs {
     /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #3964 AC-4: the last stranded-generation reclaim result, kept
+    /// durable so a reader that rebuilds the monitor from prefs (no live
+    /// daemon) still sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     /// Durable launch generation keyed by Issue number. Kept separate from the
@@ -845,9 +863,12 @@ impl Default for IssueMonitorPrefs {
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
+            launch_profiles: Vec::new(),
+            launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            generation_reclaim: None,
             launched_issues: Vec::new(),
             launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
@@ -873,7 +894,68 @@ impl Default for IssueMonitorPrefs {
     }
 }
 
+/// SPEC #3914 FR-002: default usage threshold for candidate demotion.
+pub const DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT: u8 = 80;
+
+fn default_launch_usage_threshold_percent() -> u8 {
+    DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT
+}
+
+/// Drop later candidates that resolve to a provider an earlier one already
+/// covers. The pool is unique per provider (FR-003) and the first mention wins.
+fn dedupe_launch_profile_pool(
+    pool: Vec<IssueMonitorLaunchProfile>,
+) -> Vec<IssueMonitorLaunchProfile> {
+    let mut seen = BTreeSet::new();
+    pool.into_iter()
+        .filter(|profile| {
+            let key = normalize_issue_monitor_provider(&profile.agent_id)
+                .unwrap_or_else(|| profile.agent_id.trim().to_ascii_lowercase());
+            seen.insert(key)
+        })
+        .collect()
+}
+
 impl IssueMonitorPrefs {
+    /// SPEC #3914 FR-001: the ordered launch candidate pool. A pre-#3914 file
+    /// carrying only `launch_profile` reads as a one-element pool.
+    pub fn launch_profile_pool(&self) -> Vec<IssueMonitorLaunchProfile> {
+        if !self.launch_profiles.is_empty() {
+            return dedupe_launch_profile_pool(self.launch_profiles.clone());
+        }
+        self.launch_profile.clone().into_iter().collect()
+    }
+
+    /// SPEC #3914 FR-001: replace the pool and keep `launch_profile` in sync
+    /// with its head so pre-#3914 readers see the primary candidate.
+    pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
+        let pool = dedupe_launch_profile_pool(pool);
+        self.launch_profile = pool.first().cloned();
+        self.launch_profiles = pool;
+    }
+
+    /// SPEC #3914 FR-003: GUI / CLI save semantics. A candidate for a provider
+    /// already in the pool replaces that entry in place (keeping its routing
+    /// tags when the incoming profile carries none, because the settings form
+    /// has no tag input); a new provider appends at the end.
+    pub fn upsert_launch_profile(&mut self, mut profile: IssueMonitorLaunchProfile) {
+        let mut pool = self.launch_profile_pool();
+        let key = normalize_issue_monitor_provider(&profile.agent_id);
+        let existing = pool.iter().position(|candidate| {
+            key.is_some() && normalize_issue_monitor_provider(&candidate.agent_id) == key
+        });
+        match existing {
+            Some(index) => {
+                if profile.prefer_for.is_empty() {
+                    profile.prefer_for = std::mem::take(&mut pool[index].prefer_for);
+                }
+                pool[index] = profile;
+            }
+            None => pool.push(profile),
+        }
+        self.set_launch_profile_pool(pool);
+    }
+
     /// Fallback for an existing prefs file that could not be decoded and for
     /// which the caller has no valid in-memory snapshot. Unlike [`Default`],
     /// the compatibility migration remains unapplied until a complete live
@@ -1112,6 +1194,36 @@ pub struct IssueMonitorFailedIssue {
 }
 
 /// Issue #3645 / #3628: one operator recovery, published so every process
+/// Issue #3964 AC-4: what the last scan found among the rows that failed on a
+/// held execution generation, so an operator sees the reclaim result in
+/// `issue.monitor.status` instead of collecting the inbox by hand.
+///
+/// `stranded` is the current picture — rows still refused because their
+/// generation is Active — and is rewritten by every scan. `released` is the
+/// most recent batch the monitor returned to the queue and is carried forward
+/// unchanged by scans that release nothing, so a reader polling every few
+/// minutes cannot miss it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorGenerationReclaimSummary {
+    /// When the scan that produced `stranded` ran.
+    pub recorded_at: String,
+    /// Issues whose generation-conflict hold is still in force.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stranded: Vec<u64>,
+    /// `stranded` broken down by the holder Session's durable state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stranded_by_holder_state: BTreeMap<String, usize>,
+    /// Issues returned to the queue by the most recent releasing scan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub released: Vec<u64>,
+    /// `released` broken down by the holder Session's durable state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub released_by_holder_state: BTreeMap<String, usize>,
+    /// When that releasing scan ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<String>,
+}
+
 /// converges on it. Kept until the same issue fails again, at which point the
 /// newer failure supersedes the release and the entry is dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1159,6 +1271,10 @@ pub struct IssueMonitorLaunchProfile {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     #[serde(default)]
     pub windows_shell: Option<gwt_agent::WindowsShellKind>,
+    /// SPEC #3914 FR-002: work kinds this candidate prefers (`type:<cc>`,
+    /// `kind:spec` / `kind:issue`, `label:<lowercase>`). Empty is general.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer_for: Vec<String>,
 }
 
 impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
@@ -1175,6 +1291,7 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
             windows_shell: config.windows_shell,
+            prefer_for: Vec::new(),
         }
     }
 }
@@ -1226,6 +1343,24 @@ pub fn issue_monitor_launch_profile_summary(profile: &LaunchWizardPreviousProfil
         reasoning,
         issue_monitor_runtime_label(profile.runtime_target)
     )
+}
+
+/// SPEC #3914 FR-009: one-line summary of the candidate pool. One candidate
+/// reads exactly as before; two or more read `auto (N): a | b`.
+pub fn issue_monitor_launch_profile_pool_summary(pool: &[IssueMonitorLaunchProfile]) -> String {
+    let summaries = pool
+        .iter()
+        .map(|profile| {
+            issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
+                profile.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    match summaries.as_slice() {
+        [] => "configure before auto start".to_string(),
+        [single] => single.clone(),
+        many => format!("auto ({}): {}", many.len(), many.join(" | ")),
+    }
 }
 
 fn issue_monitor_runtime_label(target: gwt_agent::LaunchRuntimeTarget) -> &'static str {
@@ -1705,6 +1840,28 @@ pub struct IssueMonitorStatusView {
     /// decision boundary (phase, attempts, needs-human) is observable.
     #[serde(default)]
     pub autonomous_issues: Vec<AutonomousIssueSummary>,
+    /// SPEC #3914 FR-009: the ordered candidate pool with per-candidate holds.
+    #[serde(default)]
+    pub launch_profile_candidates: Vec<IssueMonitorLaunchProfileCandidate>,
+    /// SPEC #3914 FR-009 / Issue #3923 AC-1: every provider hold still in
+    /// force, whether or not a candidate uses that provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
+    /// SPEC #3914 FR-009: the usage demotion threshold.
+    #[serde(default = "default_launch_usage_threshold_percent")]
+    pub usage_threshold_percent: u8,
+}
+
+/// SPEC #3914 FR-009: one launch candidate as projected to the GUI and agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchProfileCandidate {
+    pub index: usize,
+    pub agent_id: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_until: Option<String>,
 }
 
 /// Atomic agent-facing projection of the live Issue Monitor driver state.
@@ -1720,6 +1877,13 @@ pub struct IssueMonitorAgentStatus {
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// SPEC #3914 FR-009: pool summary (`auto (N): …` for two or more).
+    #[serde(default)]
+    pub launch_profile_summary: String,
+    #[serde(default)]
+    pub launch_profile_candidates: Vec<IssueMonitorLaunchProfileCandidate>,
+    #[serde(default = "default_launch_usage_threshold_percent")]
+    pub usage_threshold_percent: u8,
     /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
     /// the PM can see a hold on a provider the profile is not using and
     /// release it by name.
@@ -1748,6 +1912,9 @@ pub struct IssueMonitorAgentStatus {
     /// a monitor that has stopped while every field still reads healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_stall: Option<String>,
+    /// Issue #3964 AC-4: the last stranded-generation reclaim result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -1813,14 +1980,185 @@ fn account_for_agent<'accounts>(
     agent_id: &str,
     accounts: &'accounts [gwt_core::usage::ProviderUsage],
 ) -> Option<&'accounts gwt_core::usage::ProviderUsage> {
+    let provider = usage_provider_for_agent(agent_id)?;
+    accounts.iter().find(|account| account.provider == provider)
+}
+
+/// The usage-telemetry account backing `agent_id`, when the poller knows one.
+/// Providers without telemetry (Grok, custom commands) are `None`.
+pub fn usage_provider_for_agent(agent_id: &str) -> Option<gwt_core::usage::UsageProvider> {
     use gwt_core::usage::UsageProvider;
 
-    let provider = match agent_id.trim().to_ascii_lowercase().as_str() {
-        "codex" => UsageProvider::Codex,
-        "claude" | "claude-code" => UsageProvider::ClaudeCode,
-        _ => return None,
+    match normalize_issue_monitor_provider(agent_id)?.as_str() {
+        "codex" => Some(UsageProvider::Codex),
+        "claude" => Some(UsageProvider::ClaudeCode),
+        _ => None,
+    }
+}
+
+/// SPEC #3914 FR-005: the highest known utilization of the windows that bound
+/// `profile`. Only an `Ok` account counts; `Disabled` / `NoData` /
+/// `Unavailable` / `Stale` and providers without telemetry are unknown
+/// (`None`), and unknown never holds a launch back.
+pub fn candidate_used_percent(
+    profile: &IssueMonitorLaunchProfile,
+    accounts: &[gwt_core::usage::ProviderUsage],
+) -> Option<f32> {
+    use gwt_core::usage::{UsageState, WindowKind};
+
+    let provider = usage_provider_for_agent(&profile.agent_id)?;
+    let account = accounts
+        .iter()
+        .find(|account| account.provider == provider && account.state == UsageState::Ok)?;
+    let model = profile
+        .model
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    account
+        .windows
+        .iter()
+        .filter(|window| match window.kind {
+            WindowKind::FiveHour | WindowKind::Weekly => true,
+            WindowKind::OpusWeekly => model.contains("opus"),
+            WindowKind::SonnetWeekly => model.contains("sonnet"),
+            WindowKind::CodeReviewWeekly | WindowKind::Unknown => false,
+        })
+        .map(|window| window.used_percent)
+        .fold(None, |max: Option<f32>, used| {
+            Some(max.map_or(used, |max| max.max(used)))
+        })
+}
+
+/// SPEC #3914 FR-004: why a candidate was passed over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchProfileSkip {
+    pub index: usize,
+    pub agent_id: String,
+    pub reason: String,
+}
+
+/// SPEC #3914 FR-004: the outcome of [`select_launch_profile`]. `selected` is
+/// an index into the pool; `skipped` lists every candidate ranked ahead of it
+/// (or every candidate, when nothing is selectable) with its reason.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LaunchProfileSelection {
+    pub selected: Option<usize>,
+    pub skipped: Vec<LaunchProfileSkip>,
+}
+
+fn hold_reset_after<'holds>(
+    holds: &'holds BTreeMap<String, String>,
+    provider: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<&'holds str> {
+    let reset_at = holds.get(provider)?;
+    (parse_rfc3339_utc(reset_at)? > now).then_some(reset_at.as_str())
+}
+
+fn hold_clock_label(reset_at: &str) -> String {
+    parse_rfc3339_utc(reset_at)
+        .map(|reset| reset.format("%H:%M").to_string())
+        .unwrap_or_else(|| reset_at.to_string())
+}
+
+/// SPEC #3914 FR-004: pick the launch candidate for one Issue.
+///
+/// Pure, so the decision can be tested without a poller or a clock. Steps:
+/// held (`reset_at > now`) and `limit_reached` candidates are excluded; the
+/// rest are ranked by work-kind routing (`prefer_for` ∩ `work_tags` → general
+/// → mismatch, each in pool order; no tags means no routing); `avoid_provider`
+/// is a soft demotion; the first candidate with unknown or under-threshold
+/// usage wins; when every candidate is at or over the threshold, the lowest
+/// known usage wins and ties keep pool order.
+pub fn select_launch_profile(
+    pool: &[IssueMonitorLaunchProfile],
+    holds: &BTreeMap<String, String>,
+    usage: &[gwt_core::usage::ProviderUsage],
+    threshold_percent: u8,
+    work_tags: &[String],
+    avoid_provider: Option<&str>,
+    now: &str,
+) -> LaunchProfileSelection {
+    let now = parse_rfc3339_utc(now).unwrap_or_else(chrono::Utc::now);
+    let avoid_provider = avoid_provider.and_then(normalize_issue_monitor_provider);
+    let mut selection = LaunchProfileSelection::default();
+    let mut eligible = Vec::new();
+    for (index, profile) in pool.iter().enumerate() {
+        let provider = normalize_issue_monitor_provider(&profile.agent_id);
+        if let Some(reset_at) = provider
+            .as_deref()
+            .and_then(|provider| hold_reset_after(holds, provider, now))
+        {
+            selection.skipped.push(LaunchProfileSkip {
+                index,
+                agent_id: profile.agent_id.clone(),
+                reason: format!("Held {} → {}", profile.agent_id, hold_clock_label(reset_at)),
+            });
+            continue;
+        }
+        if provider_limit_reached_for_agent(&profile.agent_id, usage) {
+            selection.skipped.push(LaunchProfileSkip {
+                index,
+                agent_id: profile.agent_id.clone(),
+                reason: format!("{} reports its usage limit reached", profile.agent_id),
+            });
+            continue;
+        }
+        eligible.push((index, profile, provider));
+    }
+    // Rank: routing group, then avoid demotion, then pool order.
+    let routing_rank = |profile: &IssueMonitorLaunchProfile| -> u8 {
+        if work_tags.is_empty() {
+            0
+        } else if profile.prefer_for.is_empty() {
+            1
+        } else if profile.prefer_for.iter().any(|tag| work_tags.contains(tag)) {
+            0
+        } else {
+            2
+        }
     };
-    accounts.iter().find(|account| account.provider == provider)
+    eligible.sort_by_key(|(index, profile, provider)| {
+        (
+            routing_rank(profile),
+            u8::from(avoid_provider.is_some() && *provider == avoid_provider),
+            *index,
+        )
+    });
+    let mut over_threshold = Vec::new();
+    for (index, profile, _) in &eligible {
+        match candidate_used_percent(profile, usage) {
+            Some(used) if used >= f32::from(threshold_percent) => {
+                selection.skipped.push(LaunchProfileSkip {
+                    index: *index,
+                    agent_id: profile.agent_id.clone(),
+                    reason: format!(
+                        "{} usage {used:.0}% is at or above the {threshold_percent}% threshold",
+                        profile.agent_id
+                    ),
+                });
+                over_threshold.push((*index, used));
+            }
+            _ => {
+                selection.selected = Some(*index);
+                selection.skipped.retain(|skip| skip.index != *index);
+                return selection;
+            }
+        }
+    }
+    // Every eligible candidate is over the threshold: least-used wins, ties
+    // keep pool order (the smaller index).
+    selection.selected = over_threshold
+        .into_iter()
+        .min_by(|(left_index, left), (right_index, right)| {
+            left.total_cmp(right).then(left_index.cmp(right_index))
+        })
+        .map(|(index, _)| index);
+    if let Some(index) = selection.selected {
+        selection.skipped.retain(|skip| skip.index != index);
+    }
+    selection
 }
 
 /// Issue #3676 AC-2: whether the CLI backing an agent holds usable
@@ -2047,7 +2385,12 @@ pub struct IssueMonitorState {
     launch_auth_required: bool,
     active_launches: Vec<u64>,
     priority_order: Vec<u64>,
-    launch_profile: Option<IssueMonitorLaunchProfile>,
+    /// SPEC #3914 FR-001: the ordered launch candidate pool (see
+    /// [`IssueMonitorPrefs::launch_profile_pool`]).
+    #[serde(default)]
+    launch_profiles: Vec<IssueMonitorLaunchProfile>,
+    #[serde(default = "default_launch_usage_threshold_percent")]
+    launch_usage_threshold_percent: u8,
     /// Durable provider-wide launch admission source of truth. Keys and values
     /// are canonicalized on restore and joined monotonically across rebases.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2058,6 +2401,9 @@ pub struct IssueMonitorState {
     /// Issue #3923 AC-1: release fences per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #3964 AC-4: last stranded-generation reclaim result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
     launched_windows: BTreeMap<u64, String>,
     /// Durable generation for each launched window binding. A successor launch
     /// receives a new claim even when its issue and window ids are reused.
@@ -3729,10 +4075,12 @@ impl IssueMonitorState {
             launch_auth_required: false,
             active_launches: Vec::new(),
             priority_order: Vec::new(),
-            launch_profile: None,
+            launch_profiles: Vec::new(),
+            launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            generation_reclaim: None,
             launched_windows: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
@@ -3769,15 +4117,17 @@ impl IssueMonitorState {
         let mut state = Self::new(config);
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
+        state.launch_profiles = prefs.launch_profile_pool();
+        state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.priority_order = prefs.priority_order;
         state.last_scan_at = prefs.last_scan_at;
-        state.launch_profile = prefs.launch_profile;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
         state.provider_quota_hold_evidence =
             normalize_provider_keyed(&prefs.provider_quota_hold_evidence);
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
         state.enforce_provider_quota_hold_releases();
+        state.generation_reclaim = prefs.generation_reclaim;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
         // Issue #3627: restore used to re-inject every persisted launch into
@@ -3942,10 +4292,13 @@ impl IssueMonitorState {
             priority_order: self.priority_order.clone(),
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
-            launch_profile: self.launch_profile.clone(),
+            launch_profile: self.launch_profiles.first().cloned(),
+            launch_profiles: self.launch_profiles.clone(),
+            launch_usage_threshold_percent: self.launch_usage_threshold_percent,
             provider_quota_holds: self.provider_quota_holds.clone(),
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
+            generation_reclaim: self.generation_reclaim.clone(),
             launched_issues: self
                 .launched_windows
                 .iter()
@@ -4865,26 +5218,21 @@ impl IssueMonitorState {
                 return true;
             }
         }
-        let switched_to_healthy_provider = held_provider
-            .zip(self.saved_launch_provider())
-            .is_some_and(|(held, saved)| {
-                let Some(now) = parse_rfc3339_utc(now) else {
-                    return false;
-                };
-                held != saved
-                    && self
-                        .provider_quota_holds
-                        .get(&held)
-                        .and_then(|reset_at| parse_rfc3339_utc(reset_at))
-                        .is_some_and(|reset_at| reset_at > now)
-                    && self
-                        .provider_quota_holds
-                        .get(&saved)
-                        .and_then(|reset_at| parse_rfc3339_utc(reset_at))
-                        .is_none_or(|reset_at| reset_at <= now)
-            });
+        // SPEC #3914 FR-008: the held provider is still held, and the pool
+        // offers another provider that is not — whether the operator saved a
+        // different primary or a later candidate is simply available.
+        let switched_to_healthy_provider = held_provider.is_some_and(|held| {
+            let Some(now) = parse_rfc3339_utc(now) else {
+                return false;
+            };
+            hold_reset_after(&self.provider_quota_holds, &held, now).is_some()
+                && self.saved_launch_providers().iter().any(|saved| {
+                    *saved != held
+                        && hold_reset_after(&self.provider_quota_holds, saved, now).is_none()
+                })
+        });
         if switched_to_healthy_provider {
-            // The operator explicitly selected a healthy provider. The
+            // A healthy provider is available for the relaunch. The
             // provider-wide SOT now authorizes admission even though this row
             // retains the old provider's audit/retry deadline.
             return true;
@@ -5967,7 +6315,26 @@ impl IssueMonitorState {
     }
 
     pub fn has_launch_profile(&self) -> bool {
-        self.launch_profile.is_some()
+        !self.launch_profiles.is_empty()
+    }
+
+    /// SPEC #3914 FR-001: the ordered launch candidate pool.
+    pub fn launch_profile_pool(&self) -> &[IssueMonitorLaunchProfile] {
+        &self.launch_profiles
+    }
+
+    /// SPEC #3914 FR-011: replace the pool (see
+    /// [`IssueMonitorPrefs::set_launch_profile_pool`]).
+    pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
+        self.launch_profiles = dedupe_launch_profile_pool(pool);
+    }
+
+    pub fn launch_usage_threshold_percent(&self) -> u8 {
+        self.launch_usage_threshold_percent
+    }
+
+    pub fn set_launch_usage_threshold_percent(&mut self, percent: u8) {
+        self.launch_usage_threshold_percent = percent.clamp(1, 100);
     }
 
     /// Refresh the user-configured fields from the latest committed snapshot.
@@ -5979,7 +6346,10 @@ impl IssueMonitorState {
         self.priority_order = disk.priority_order.clone();
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
-        self.launch_profile = disk.launch_profile.clone();
+        // SPEC #3914 FR-012: the pool has no daemon control of its own for
+        // GUI saves, so disk owns it; a stale in-memory copy must not shrink it.
+        self.launch_profiles = disk.launch_profile_pool();
+        self.launch_usage_threshold_percent = disk.launch_usage_threshold_percent;
         self.autonomous_mode = disk.autonomous_mode;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
@@ -5987,6 +6357,20 @@ impl IssueMonitorState {
         self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
+        // Issue #3964 AC-4: whichever process ran the newer reclaim owns the
+        // summary; an older in-memory copy must not re-stamp over it.
+        if let Some(from_disk) = disk.generation_reclaim.as_ref() {
+            if let Some(disk_at) = parse_rfc3339_utc(&from_disk.recorded_at) {
+                let newer = self
+                    .generation_reclaim
+                    .as_ref()
+                    .and_then(|local| parse_rfc3339_utc(&local.recorded_at))
+                    .is_none_or(|local_at| disk_at > local_at);
+                if newer {
+                    self.generation_reclaim = Some(from_disk.clone());
+                }
+            }
+        }
         // Issue #3478: the hook (and the answer operation) write handoffs from
         // outside this process, so disk is the inbound source for them.
         self.absorb_autonomous_handoffs(disk.autonomous_handoffs.iter().cloned());
@@ -6062,7 +6446,10 @@ impl IssueMonitorState {
         let Some(agent) = normalize_issue_monitor_provider(agent) else {
             return Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent);
         };
-        let Some(profile) = self.launch_profile.as_mut() else {
+        // SPEC #3914: the switch targets the pool head (the compatibility
+        // `launch_profile`); a later candidate for the same provider is
+        // folded away by the pool's per-provider uniqueness.
+        let Some(profile) = self.launch_profiles.first_mut() else {
             return Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile);
         };
         if normalize_issue_monitor_provider(&profile.agent_id).as_deref() != Some(agent.as_str()) {
@@ -6074,7 +6461,10 @@ impl IssueMonitorState {
             // onto each CLI's own flag), so a switch must not carry it over.
             profile.codex_fast_mode = false;
         }
-        Ok(profile.clone())
+        let profile = profile.clone();
+        self.launch_profiles =
+            dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
+        Ok(profile)
     }
 
     /// Issue #3923 AC-1: release `provider`'s quota hold on the operator's
@@ -6841,18 +7231,49 @@ impl IssueMonitorState {
         expired
     }
 
+    /// The primary candidate's provider (pool head). Retained for the
+    /// single-provider audit paths that predate the pool.
     fn saved_launch_provider(&self) -> Option<String> {
-        self.launch_profile
-            .as_ref()
-            .and_then(|profile| normalize_issue_monitor_provider(&profile.agent_id))
+        self.saved_launch_providers().into_iter().next()
     }
 
+    /// SPEC #3914 FR-008: every distinct provider in the candidate pool, in
+    /// pool order.
+    fn saved_launch_providers(&self) -> Vec<String> {
+        let mut providers = Vec::new();
+        for profile in &self.launch_profiles {
+            if let Some(provider) = normalize_issue_monitor_provider(&profile.agent_id) {
+                if !providers.contains(&provider) {
+                    providers.push(provider);
+                }
+            }
+        }
+        providers
+    }
+
+    /// SPEC #3914 FR-008: the queue-wide hold. Only when every provider in
+    /// the pool is held is the queue held, and then until the earliest reset.
     fn provider_quota_hold_at(&self, now: &str) -> Option<IssueMonitorProviderQuotaHold> {
-        let provider = self.saved_launch_provider()?;
-        let reset_at = self.provider_quota_holds.get(&provider)?;
-        let deadline = parse_rfc3339_utc(reset_at)?;
         let now = parse_rfc3339_utc(now)?;
-        (deadline > now).then(|| IssueMonitorProviderQuotaHold {
+        let providers = self.saved_launch_providers();
+        if providers.is_empty() {
+            return None;
+        }
+        let mut earliest: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
+        for provider in providers {
+            let deadline = self
+                .provider_quota_holds
+                .get(&provider)
+                .and_then(|reset_at| parse_rfc3339_utc(reset_at))
+                .filter(|deadline| *deadline > now)?;
+            if earliest
+                .as_ref()
+                .is_none_or(|(_, current)| deadline < *current)
+            {
+                earliest = Some((provider, deadline));
+            }
+        }
+        earliest.map(|(provider, deadline)| IssueMonitorProviderQuotaHold {
             evidence: self.provider_quota_hold_evidence.get(&provider).cloned(),
             provider,
             reset_at: format_rfc3339_utc(deadline),
@@ -6878,17 +7299,38 @@ impl IssueMonitorState {
             .collect()
     }
 
+    fn launch_profile_candidates_at(&self, now: &str) -> Vec<IssueMonitorLaunchProfileCandidate> {
+        let now = parse_rfc3339_utc(now);
+        self.launch_profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| IssueMonitorLaunchProfileCandidate {
+                index,
+                agent_id: profile.agent_id.clone(),
+                summary: issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
+                    profile.clone(),
+                )),
+                prefer_for: profile.prefer_for.clone(),
+                held_until: now.and_then(|now| {
+                    let provider = normalize_issue_monitor_provider(&profile.agent_id)?;
+                    hold_reset_after(&self.provider_quota_holds, &provider, now).map(str::to_string)
+                }),
+            })
+            .collect()
+    }
+
     fn saved_profile_provider_is_held_at(&self, now: &str) -> bool {
         self.provider_quota_hold_at(now).is_some()
     }
 
     pub fn status_view(&self) -> IssueMonitorStatusView {
         let now = format_rfc3339_utc(chrono::Utc::now());
-        self.status_view_with_quota_hold(self.provider_quota_hold_at(&now))
+        self.status_view_with_quota_hold(&now, self.provider_quota_hold_at(&now))
     }
 
     fn status_view_with_quota_hold(
         &self,
+        now: &str,
         quota_hold: Option<IssueMonitorProviderQuotaHold>,
     ) -> IssueMonitorStatusView {
         let last_error = self.last_error.clone().or_else(|| {
@@ -6917,7 +7359,7 @@ impl IssueMonitorState {
                 } else {
                     "launching".to_string()
                 }
-            } else if self.launch_profile.is_none()
+            } else if self.launch_profiles.is_empty()
                 && !self.queue.is_empty()
                 && self.active_launches.is_empty()
             {
@@ -6932,20 +7374,19 @@ impl IssueMonitorState {
             active_issue_number: self.active_issue_number(),
             last_scan_at: self.last_scan_at.clone(),
             last_error,
-            launch_profile_source: self
-                .launch_profile
-                .as_ref()
-                .map(|_| IssueMonitorLaunchProfileSource::Saved)
-                .unwrap_or(IssueMonitorLaunchProfileSource::Default),
-            launch_profile_summary: self
-                .launch_profile
-                .clone()
-                .map(LaunchWizardPreviousProfile::from)
-                .as_ref()
-                .map(issue_monitor_launch_profile_summary)
-                .unwrap_or_else(|| "configure before auto start".to_string()),
+            launch_profile_source: if self.launch_profiles.is_empty() {
+                IssueMonitorLaunchProfileSource::Default
+            } else {
+                IssueMonitorLaunchProfileSource::Saved
+            },
+            launch_profile_summary: issue_monitor_launch_profile_pool_summary(
+                &self.launch_profiles,
+            ),
             autonomous_mode: self.autonomous_mode,
             quota_hold,
+            launch_profile_candidates: self.launch_profile_candidates_at(now),
+            provider_quota_holds: self.active_provider_quota_holds_at(now),
+            usage_threshold_percent: self.launch_usage_threshold_percent,
             autonomous_issues: self
                 .autonomous_records
                 .values()
@@ -7016,7 +7457,7 @@ impl IssueMonitorState {
     }
 
     fn agent_status_without_scan_at(&self, now: &str) -> IssueMonitorAgentStatus {
-        let status = self.status_view_with_quota_hold(self.provider_quota_hold_at(now));
+        let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         IssueMonitorAgentStatus {
             queue: self.queued_issue_numbers(),
             active_launches: self.active_issue_numbers(),
@@ -7025,6 +7466,9 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
+            launch_profile_summary: status.launch_profile_summary.clone(),
+            launch_profile_candidates: status.launch_profile_candidates.clone(),
+            usage_threshold_percent: status.usage_threshold_percent,
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             needs_human: status
                 .autonomous_issues
@@ -7089,6 +7533,7 @@ impl IssueMonitorState {
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             scan_stall: None,
+            generation_reclaim: self.generation_reclaim.clone(),
         }
     }
 
@@ -7136,7 +7581,7 @@ impl IssueMonitorState {
     /// Project scan staleness onto the existing status error surface using a
     /// caller-supplied clock so daemon publication and tests stay deterministic.
     pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
-        let mut status = self.status_view_with_quota_hold(self.provider_quota_hold_at(now));
+        let mut status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         if !status.enabled || status.last_error.is_some() {
             return status;
         }
@@ -9194,12 +9639,12 @@ impl IssueMonitorState {
             self.provider_quota_hold_evidence
                 .insert(provider.to_string(), evidence);
         }
-        let held_provider_matches_profile = provider
-            .clone()
-            .zip(self.saved_launch_provider())
-            .is_some_and(|(held, saved)| held == saved);
+        // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
+        // pool is now held; another candidate can still honor them.
+        let every_pool_provider_held =
+            provider.is_some() && self.provider_quota_hold_at(now).is_some();
         self.release_provider_limited_source_tracking(issue_number);
-        if held_provider_matches_profile {
+        if every_pool_provider_held {
             self.compensate_uncommitted_provider_claims();
         }
         let record = self.autonomous_record_mut(issue_number);
@@ -9562,13 +10007,14 @@ impl IssueMonitorState {
     }
 
     /// SPEC-3431 FR-029〜031: stop one launch and put its issue back in line for
-    /// the currently saved launch profile.
+    /// the current launch candidate pool.
     ///
     /// The other half of the Monitor-owned lifecycle. Where `stop_only` holds
     /// the issue, this one releases it back to the queue head so the ordinary
     /// claim/slot path relaunches it — which is what makes it a *provider
-    /// failover*: the profile the next launch reads is whatever is saved now,
-    /// so switching provider is a profile edit followed by this call.
+    /// failover*: the next launch selects from whatever pool is saved now
+    /// (SPEC #3914 skips held providers on its own), so switching provider is
+    /// a pool edit followed by this call.
     ///
     /// It consumes no retry attempt, deliberately. The work did not fail; an
     /// operator (or a rate limit) decided a different provider should run it,
@@ -9676,6 +10122,23 @@ impl IssueMonitorState {
             return IssueMonitorRequeueOutcome::NotHeld;
         }
 
+        let outcome = self.release_failed_issue_hold(issue_number, reason, now);
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} requeued by operator: {reason}"),
+        );
+        outcome
+    }
+
+    /// Publish the release of a held failure and return the issue to the
+    /// queue. Callers have already refused live launches and unheld rows.
+    fn release_failed_issue_hold(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorRequeueOutcome {
         let stale_window_id = self.failed_windows.get(&issue_number).cloned();
         let attempts_before = self.attempt_count(issue_number);
         self.failure_release_version += 1;
@@ -9690,16 +10153,118 @@ impl IssueMonitorState {
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number, true);
-        self.push_autonomous_notice(
-            "info",
-            issue_number,
-            format!("Issue #{issue_number} requeued by operator: {reason}"),
-        );
         IssueMonitorRequeueOutcome::Requeued {
             stale_window_id,
             attempts_before,
             attempts_after: self.attempt_count(issue_number),
         }
+    }
+
+    /// Issue #3964 AC-1 / AC-4: return every `agent_failed` row that failed on
+    /// a held execution generation to the queue once that generation is no
+    /// longer Active, and report what is still held.
+    ///
+    /// The generation reaper releases generations; it does not know about
+    /// Monitor rows, and the row's hold used to outlive the generation until
+    /// an operator ran `issue.monitor.requeue` — 29 of the 45 stranded
+    /// production rows were exactly that. `probe` answers from the owner
+    /// ledger; an unanswerable owner is reported as stranded under `unknown`
+    /// and left alone, and a row a human parked (`NeedsHuman`) is never
+    /// touched. A launch on a Blocked or Completed predecessor takes the
+    /// successor route, so releasing cannot loop: a row refused again on an
+    /// Active generation stays held until that generation is released.
+    pub fn release_stranded_generation_failures(
+        &mut self,
+        now: &str,
+        mut probe: impl FnMut(u64) -> Option<crate::cli::execution_state::OwnerGenerationHold>,
+    ) -> IssueMonitorGenerationReclaimSummary {
+        use crate::cli::execution_state::ExecutionControlStatus;
+
+        let held = self
+            .failed_issues
+            .iter()
+            .filter(|(_, message)| {
+                crate::cli::execution_state::is_execution_generation_conflict(message)
+            })
+            .map(|(issue_number, _)| *issue_number)
+            .filter(|issue_number| {
+                !self
+                    .autonomous_records
+                    .get(issue_number)
+                    .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+                    && !self
+                        .inbox_item(*issue_number)
+                        .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+            })
+            .collect::<Vec<_>>();
+        let mut summary = IssueMonitorGenerationReclaimSummary {
+            recorded_at: now.to_string(),
+            ..IssueMonitorGenerationReclaimSummary::default()
+        };
+        if let Some(previous) = &self.generation_reclaim {
+            summary.released = previous.released.clone();
+            summary.released_by_holder_state = previous.released_by_holder_state.clone();
+            summary.released_at = previous.released_at.clone();
+        }
+        let mut released = Vec::new();
+        let mut released_by_holder_state = BTreeMap::<String, usize>::new();
+        for issue_number in held {
+            let hold = probe(issue_number);
+            let holder_state = hold.as_ref().map_or_else(
+                || "unknown".to_string(),
+                |hold| hold.holder_session_state.clone(),
+            );
+            // Same guard as `requeue_failed_issue`: a row a launch still owns
+            // is never released here, because clearing its tracking would
+            // strand the running agent's slot. It stays reported instead.
+            let launch_live = self.active_launches.contains(&issue_number)
+                || self.launched_windows.contains_key(&issue_number)
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == issue_number);
+            match hold.map(|hold| hold.status) {
+                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed)
+                    if !launch_live =>
+                {
+                    let reason = format!(
+                        "stranded execution generation released (holder Session {holder_state}); returned to the queue by the Issue Monitor"
+                    );
+                    if matches!(
+                        self.release_failed_issue_hold(issue_number, &reason, now),
+                        IssueMonitorRequeueOutcome::Requeued { .. }
+                    ) {
+                        self.push_autonomous_notice(
+                            "info",
+                            issue_number,
+                            format!("Issue #{issue_number} requeued: {reason}"),
+                        );
+                        released.push(issue_number);
+                        *released_by_holder_state.entry(holder_state).or_default() += 1;
+                    }
+                }
+                Some(_) | None => {
+                    summary.stranded.push(issue_number);
+                    *summary
+                        .stranded_by_holder_state
+                        .entry(holder_state)
+                        .or_default() += 1;
+                }
+            }
+        }
+        if !released.is_empty() {
+            summary.released = released;
+            summary.released_by_holder_state = released_by_holder_state;
+            summary.released_at = Some(now.to_string());
+        }
+        if summary.stranded.is_empty()
+            && summary.released.is_empty()
+            && self.generation_reclaim.is_none()
+        {
+            return summary;
+        }
+        self.generation_reclaim = Some(summary.clone());
+        summary
     }
 
     /// Issue #3683 (AC-3): release a `BlockedByClaim` hold an operator decided
@@ -10664,6 +11229,9 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
                 quota_hold: None,
+                launch_profile_summary: "configure before auto start".to_string(),
+                launch_profile_candidates: Vec::new(),
+                usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
@@ -10692,6 +11260,7 @@ mod tests {
                 // `agent_status` reports the queue; the scan-cadence check is
                 // applied by `agent_status_at`, which needs a clock.
                 scan_stall: None,
+                generation_reclaim: None,
             }
         );
     }
@@ -10919,6 +11488,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
             windows_shell: None,
+            prefer_for: Vec::new(),
         }
     }
 
@@ -11398,6 +11968,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
             windows_shell: None,
+            prefer_for: Vec::new(),
         };
         let autonomous_record = |issue_number, phase| AutonomousIssueRecord {
             issue_number,
@@ -11869,6 +12440,7 @@ mod tests {
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
                 windows_shell: None,
+                prefer_for: Vec::new(),
             }),
             autonomous_tuning: AutonomousTuning {
                 max_attempts: 9,
@@ -12329,6 +12901,540 @@ mod tests {
                 .get("provider_quota_holds")
                 .is_none(),
             "the additive empty map stays absent from compact prefs"
+        );
+    }
+
+    #[test]
+    fn legacy_prefs_without_launch_profiles_read_as_a_single_candidate_pool() {
+        let prefs: IssueMonitorPrefs = serde_json::from_str(
+            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"}}"#,
+        )
+        .expect("legacy prefs with one saved profile");
+
+        assert!(prefs.launch_profiles.is_empty());
+        assert_eq!(prefs.launch_usage_threshold_percent, 80);
+        let pool = prefs.launch_profile_pool();
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].agent_id, "codex");
+        assert!(pool[0].prefer_for.is_empty());
+        assert_eq!(
+            IssueMonitorPrefs::default().launch_profile_pool(),
+            Vec::new(),
+            "no saved profile means an empty pool"
+        );
+    }
+
+    #[test]
+    fn launch_profile_pool_roundtrips_two_candidates_and_mirrors_the_head() {
+        let mut prefs = IssueMonitorPrefs::default();
+        let mut codex = test_launch_profile("codex");
+        codex.prefer_for = vec!["type:perf".to_string()];
+        let claude = test_launch_profile("claude");
+        prefs.set_launch_profile_pool(vec![codex.clone(), claude.clone()]);
+
+        assert_eq!(prefs.launch_profile.as_ref(), Some(&codex));
+        assert_eq!(prefs.launch_profiles, vec![codex.clone(), claude.clone()]);
+
+        let json = serde_json::to_string(&prefs).expect("serialize pool prefs");
+        let reloaded: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload pool prefs");
+        assert_eq!(reloaded.launch_profile_pool(), vec![codex.clone(), claude]);
+        assert_eq!(
+            reloaded.launch_profile_pool()[0].prefer_for,
+            vec!["type:perf".to_string()]
+        );
+        assert_eq!(reloaded.launch_usage_threshold_percent, 80);
+
+        prefs.set_launch_profile_pool(Vec::new());
+        assert!(prefs.launch_profile.is_none());
+        assert!(prefs.launch_profiles.is_empty());
+    }
+
+    #[test]
+    fn upsert_launch_profile_replaces_the_same_agent_and_appends_new_ones() {
+        let mut prefs = IssueMonitorPrefs::default();
+        let mut claude = test_launch_profile("claude");
+        claude.prefer_for = vec!["kind:spec".to_string()];
+        prefs.upsert_launch_profile(claude.clone());
+        prefs.upsert_launch_profile(test_launch_profile("codex"));
+        let mut claude_again = test_launch_profile("Claude Code");
+        claude_again.model = Some("opus".to_string());
+        prefs.upsert_launch_profile(claude_again);
+
+        let pool = prefs.launch_profile_pool();
+        assert_eq!(
+            pool.iter()
+                .map(|profile| profile.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Claude Code", "codex"],
+            "same provider replaces in place, new provider appends"
+        );
+        assert_eq!(pool[0].model.as_deref(), Some("opus"));
+        assert_eq!(
+            pool[0].prefer_for,
+            vec!["kind:spec".to_string()],
+            "a GUI re-save without routing tags keeps the existing tags"
+        );
+        assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+    }
+
+    fn usage_account(
+        provider: gwt_core::usage::UsageProvider,
+        windows: &[(gwt_core::usage::WindowKind, f32)],
+        limit_reached: bool,
+        state: gwt_core::usage::UsageState,
+    ) -> gwt_core::usage::ProviderUsage {
+        gwt_core::usage::ProviderUsage {
+            provider,
+            account_label: None,
+            plan: None,
+            windows: windows
+                .iter()
+                .map(|(kind, used)| gwt_core::usage::UsageWindow::new(*kind, *used, None))
+                .collect(),
+            limit_reached,
+            state,
+            fetched_at: None,
+        }
+    }
+
+    fn codex_usage(five_hour: f32) -> gwt_core::usage::ProviderUsage {
+        usage_account(
+            gwt_core::usage::UsageProvider::Codex,
+            &[(gwt_core::usage::WindowKind::FiveHour, five_hour)],
+            false,
+            gwt_core::usage::UsageState::Ok,
+        )
+    }
+
+    fn claude_usage(five_hour: f32) -> gwt_core::usage::ProviderUsage {
+        usage_account(
+            gwt_core::usage::UsageProvider::ClaudeCode,
+            &[(gwt_core::usage::WindowKind::FiveHour, five_hour)],
+            false,
+            gwt_core::usage::UsageState::Ok,
+        )
+    }
+
+    fn selected_agent(
+        pool: &[IssueMonitorLaunchProfile],
+        selection: &LaunchProfileSelection,
+    ) -> Option<String> {
+        selection.selected.map(|index| pool[index].agent_id.clone())
+    }
+
+    #[test]
+    fn select_launch_profile_skips_held_and_limit_reached_candidates() {
+        let pool = vec![test_launch_profile("codex"), test_launch_profile("claude")];
+        let now = "2026-08-22T03:00:00Z";
+        let held = BTreeMap::from([("codex".to_string(), "2026-08-22T04:00:00Z".to_string())]);
+
+        let selection = select_launch_profile(&pool, &held, &[], 80, &[], None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("claude"));
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(selection.skipped[0].index, 0);
+        assert_eq!(selection.skipped[0].agent_id, "codex");
+        assert!(selection.skipped[0].reason.contains("04:00"));
+
+        let expired = BTreeMap::from([("codex".to_string(), "2026-08-22T02:00:00Z".to_string())]);
+        let selection = select_launch_profile(&pool, &expired, &[], 80, &[], None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("codex"));
+        assert!(selection.skipped.is_empty());
+
+        let exhausted = [usage_account(
+            gwt_core::usage::UsageProvider::Codex,
+            &[],
+            true,
+            gwt_core::usage::UsageState::Ok,
+        )];
+        let selection =
+            select_launch_profile(&pool, &BTreeMap::new(), &exhausted, 80, &[], None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("claude"));
+        assert!(selection.skipped[0].reason.contains("limit"));
+
+        let all_held = BTreeMap::from([
+            ("codex".to_string(), "2026-08-22T04:00:00Z".to_string()),
+            ("claude".to_string(), "2026-08-22T05:00:00Z".to_string()),
+        ]);
+        let selection = select_launch_profile(&pool, &all_held, &[], 80, &[], None, now);
+        assert_eq!(selection.selected, None);
+        assert_eq!(selection.skipped.len(), 2);
+
+        let selection = select_launch_profile(&[], &BTreeMap::new(), &[], 80, &[], None, now);
+        assert_eq!(selection.selected, None);
+        assert!(selection.skipped.is_empty());
+    }
+
+    #[test]
+    fn select_launch_profile_demotes_by_usage_threshold_but_never_by_unknown_usage() {
+        let pool = vec![test_launch_profile("codex"), test_launch_profile("claude")];
+        let now = "2026-08-22T03:00:00Z";
+        let holds = BTreeMap::new();
+
+        let selection =
+            select_launch_profile(&pool, &holds, &[codex_usage(85.0)], 80, &[], None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("claude"));
+        assert!(selection.skipped[0].reason.contains("85"));
+
+        let selection =
+            select_launch_profile(&pool, &holds, &[codex_usage(79.0)], 80, &[], None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("codex"));
+
+        let selection =
+            select_launch_profile(&pool, &holds, &[claude_usage(10.0)], 80, &[], None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("codex"),
+            "unknown usage counts as within threshold, so pool order wins"
+        );
+
+        let disabled = [usage_account(
+            gwt_core::usage::UsageProvider::Codex,
+            &[(gwt_core::usage::WindowKind::FiveHour, 99.0)],
+            false,
+            gwt_core::usage::UsageState::Disabled,
+        )];
+        let selection = select_launch_profile(&pool, &holds, &disabled, 80, &[], None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("codex"),
+            "a non-Ok account is unknown, not exhausted"
+        );
+
+        let both_over = [codex_usage(90.0), claude_usage(85.0)];
+        let selection = select_launch_profile(&pool, &holds, &both_over, 80, &[], None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("claude"),
+            "when every candidate is over the threshold the lowest known usage wins"
+        );
+
+        let tie = [codex_usage(90.0), claude_usage(90.0)];
+        let selection = select_launch_profile(&pool, &holds, &tie, 80, &[], None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("codex"),
+            "ties resolve in pool order"
+        );
+
+        let weekly_opus = usage_account(
+            gwt_core::usage::UsageProvider::ClaudeCode,
+            &[
+                (gwt_core::usage::WindowKind::FiveHour, 10.0),
+                (gwt_core::usage::WindowKind::OpusWeekly, 95.0),
+            ],
+            false,
+            gwt_core::usage::UsageState::Ok,
+        );
+        let mut opus = test_launch_profile("claude");
+        opus.model = Some("opus".to_string());
+        let sonnet = test_launch_profile("claude");
+        assert_eq!(
+            candidate_used_percent(&opus, std::slice::from_ref(&weekly_opus)),
+            Some(95.0)
+        );
+        assert_eq!(candidate_used_percent(&sonnet, &[weekly_opus]), Some(10.0));
+        assert_eq!(candidate_used_percent(&sonnet, &[]), None);
+    }
+
+    #[test]
+    fn select_launch_profile_avoids_a_provider_softly_and_routes_by_work_tags() {
+        let now = "2026-08-22T03:00:00Z";
+        let pool = vec![test_launch_profile("codex"), test_launch_profile("claude")];
+        let selection =
+            select_launch_profile(&pool, &BTreeMap::new(), &[], 80, &[], Some("codex"), now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("claude"));
+        let claude_held =
+            BTreeMap::from([("claude".to_string(), "2026-08-22T04:00:00Z".to_string())]);
+        let selection =
+            select_launch_profile(&pool, &claude_held, &[], 80, &[], Some("codex"), now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("codex"),
+            "avoid is a soft preference, not an exclusion"
+        );
+
+        let mut codex = test_launch_profile("codex");
+        codex.prefer_for = vec!["type:perf".to_string(), "type:fix".to_string()];
+        let mut claude = test_launch_profile("claude");
+        claude.prefer_for = vec!["kind:spec".to_string()];
+        let grok = test_launch_profile("grok");
+        let pool = vec![codex, claude, grok];
+        let holds = BTreeMap::new();
+
+        let perf = vec!["type:perf".to_string(), "kind:issue".to_string()];
+        let selection = select_launch_profile(&pool, &holds, &[], 80, &perf, None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("codex"));
+
+        let spec = vec!["type:feat".to_string(), "kind:spec".to_string()];
+        let selection = select_launch_profile(&pool, &holds, &[], 80, &spec, None, now);
+        assert_eq!(selected_agent(&pool, &selection).as_deref(), Some("claude"));
+
+        let docs = vec!["type:docs".to_string(), "kind:issue".to_string()];
+        let selection = select_launch_profile(&pool, &holds, &[], 80, &docs, None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("grok"),
+            "a general candidate outranks mismatched ones"
+        );
+
+        let codex_held =
+            BTreeMap::from([("codex".to_string(), "2026-08-22T04:00:00Z".to_string())]);
+        let selection = select_launch_profile(&pool, &codex_held, &[], 80, &perf, None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("grok"),
+            "a preferred candidate never crosses its hold"
+        );
+
+        let selection = select_launch_profile(&pool, &holds, &[], 80, &[], None, now);
+        assert_eq!(
+            selected_agent(&pool, &selection).as_deref(),
+            Some("codex"),
+            "without work tags routing is off and pool order stands"
+        );
+    }
+
+    #[test]
+    fn a_pool_gate_only_closes_when_every_provider_is_held() {
+        let pool_prefs = |holds: BTreeMap<String, String>| {
+            let mut prefs = IssueMonitorPrefs {
+                enabled: true,
+                provider_quota_holds: holds,
+                ..IssueMonitorPrefs::default()
+            };
+            prefs.set_launch_profile_pool(vec![
+                test_launch_profile("codex"),
+                test_launch_profile("claude"),
+            ]);
+            prefs
+        };
+        let now = "2026-08-22T03:00:00Z";
+
+        let mut one_held = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            pool_prefs(BTreeMap::from([(
+                "codex".to_string(),
+                "2026-08-22T04:00:00Z".to_string(),
+            )])),
+        );
+        one_held.set_gui_connected(true);
+        one_held.record_candidate(issue(42));
+        assert_eq!(one_held.status_view_at(now).quota_hold, None);
+        assert_eq!(one_held.status_view_at(now).state, "idle");
+        assert!(one_held.next_launch_request(now).is_some());
+
+        let mut all_held = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            pool_prefs(BTreeMap::from([
+                ("codex".to_string(), "2026-08-22T05:00:00Z".to_string()),
+                ("claude".to_string(), "2026-08-22T04:00:00Z".to_string()),
+            ])),
+        );
+        all_held.set_gui_connected(true);
+        all_held.record_candidate(issue(42));
+        assert_eq!(
+            all_held.status_view_at(now).quota_hold,
+            Some(IssueMonitorProviderQuotaHold {
+                provider: "claude".to_string(),
+                reset_at: "2026-08-22T04:00:00Z".to_string(),
+                evidence: None,
+            }),
+            "the pool hold reports the earliest release"
+        );
+        assert_eq!(all_held.status_view_at(now).state, "quota_hold");
+        assert_eq!(all_held.next_launch_request(now), None);
+        assert_eq!(all_held.queued_issue_numbers(), vec![42]);
+        assert!(all_held
+            .next_launch_request("2026-08-22T04:00:01Z")
+            .is_some());
+    }
+
+    #[test]
+    fn a_pool_hold_switches_the_retry_to_the_healthy_candidate() {
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            provider_quota_holds: BTreeMap::from([(
+                "codex".to_string(),
+                "2026-08-22T04:00:00Z".to_string(),
+            )]),
+            ..IssueMonitorPrefs::default()
+        };
+        prefs.set_launch_profile_pool(vec![
+            test_launch_profile("codex"),
+            test_launch_profile("claude"),
+        ]);
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        monitor.record_candidate(candidate.clone());
+        let record = monitor.autonomous_record_mut(42);
+        record.retry_not_before = Some("2026-08-22T04:00:00Z".to_string());
+        record.retry_hold_reason = Some("Codex quota exhausted".to_string());
+        record.retry_hold_provider = Some("codex".to_string());
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, "2026-08-22T03:00:00Z"),
+            EligibilityDecision::Eligible,
+            "an unheld pool candidate admits the issue before the held provider resets"
+        );
+    }
+
+    #[test]
+    fn a_pool_hold_cancels_prepared_claims_only_when_every_provider_is_held() {
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 8,
+            ..IssueMonitorPrefs::default()
+        };
+        prefs.set_launch_profile_pool(vec![
+            test_launch_profile("codex"),
+            test_launch_profile("claude"),
+        ]);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 8,
+                ..IssueMonitorConfig::default()
+            },
+            prefs,
+        );
+        for number in [42, 43, 44] {
+            monitor.record_candidate(issue(number));
+        }
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        monitor.complete_active_launch(44, "tab-1::agent-44");
+        let prepared_claim = || IssueMonitorEffectPayload::AcquireClaim {
+            issue_number: 43,
+            claim_id: "claim-43".to_string(),
+            owner: "host/session".to_string(),
+            heartbeat_at: "2026-08-22T02:00:00Z".to_string(),
+            expires_at: "2026-08-22T02:30:00Z".to_string(),
+            launched_work_id: None,
+        };
+        let has_prepared_claim = |monitor: &IssueMonitorState| {
+            monitor.pending_effects().iter().any(|effect| {
+                effect.state == IssueMonitorEffectState::Prepared
+                    && matches!(
+                        effect.payload,
+                        IssueMonitorEffectPayload::AcquireClaim { .. }
+                    )
+            })
+        };
+        monitor
+            .prepare_pending_effect("claim-prepared", prepared_claim())
+            .expect("prepared claim");
+
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "codex",
+                "Codex quota exhausted",
+                Some("2026-08-22T04:00:00Z"),
+                None,
+                "2026-08-22T02:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert!(
+            has_prepared_claim(&monitor),
+            "claude is still available, so the prepared claim survives"
+        );
+
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                44,
+                "tab-1::agent-44",
+                "claude",
+                "Claude quota exhausted",
+                Some("2026-08-22T05:00:00Z"),
+                None,
+                "2026-08-22T02:02:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert!(
+            !has_prepared_claim(&monitor),
+            "with every provider held the prepared claim is compensated"
+        );
+    }
+
+    #[test]
+    fn status_projections_expose_the_candidate_pool_and_provider_holds() {
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            launch_usage_threshold_percent: 65,
+            provider_quota_holds: BTreeMap::from([(
+                "codex".to_string(),
+                "2026-08-22T04:00:00Z".to_string(),
+            )]),
+            ..IssueMonitorPrefs::default()
+        };
+        let mut codex = test_launch_profile("codex");
+        codex.prefer_for = vec!["type:perf".to_string()];
+        prefs.set_launch_profile_pool(vec![codex, test_launch_profile("claude")]);
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let now = "2026-08-22T03:00:00Z";
+
+        let status = monitor.status_view_at(now);
+        assert!(
+            status.launch_profile_summary.starts_with("auto (2): "),
+            "{}",
+            status.launch_profile_summary
+        );
+        assert!(status.launch_profile_summary.contains(" | "));
+        assert_eq!(status.usage_threshold_percent, 65);
+        assert_eq!(status.launch_profile_candidates.len(), 2);
+        assert_eq!(status.launch_profile_candidates[0].index, 0);
+        assert_eq!(status.launch_profile_candidates[0].agent_id, "codex");
+        assert_eq!(
+            status.launch_profile_candidates[0].prefer_for,
+            vec!["type:perf".to_string()]
+        );
+        assert_eq!(
+            status.launch_profile_candidates[0].held_until.as_deref(),
+            Some("2026-08-22T04:00:00Z")
+        );
+        assert_eq!(status.launch_profile_candidates[1].agent_id, "claude");
+        assert_eq!(status.launch_profile_candidates[1].held_until, None);
+        assert!(!status.launch_profile_candidates[1].summary.is_empty());
+        assert_eq!(
+            status.provider_quota_holds,
+            vec![IssueMonitorProviderQuotaHold {
+                provider: "codex".to_string(),
+                reset_at: "2026-08-22T04:00:00Z".to_string(),
+                evidence: None,
+            }]
+        );
+
+        let agent = serde_json::to_value(monitor.agent_status_at(now)).expect("agent status");
+        assert_eq!(agent["usage_threshold_percent"], 65);
+        assert_eq!(
+            agent["launch_profile_candidates"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(agent["provider_quota_holds"][0]["provider"], "codex");
+        assert!(agent["launch_profile_summary"]
+            .as_str()
+            .is_some_and(|summary| summary.starts_with("auto (2): ")));
+
+        let single = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(
+            !single
+                .status_view_at(now)
+                .launch_profile_summary
+                .starts_with("auto"),
+            "a single candidate keeps the plain summary"
         );
     }
 
@@ -14398,6 +15504,282 @@ mod tests {
             IssueMonitorRequeueOutcome::NotHeld
         );
         assert_eq!(monitor.prefs(), before);
+    }
+
+    fn generation_conflict_message(issue_number: u64, holder_state: &str) -> String {
+        format!(
+            "{} issue #{issue_number} (active generation held by Session holder-{issue_number} ({holder_state})); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+            crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
+        )
+    }
+
+    /// Issue #3964 AC-1: the generation reaper releases the owner's
+    /// generation, but the Monitor row that failed on that generation stayed
+    /// `agent_failed` until a human ran `issue.monitor.requeue` — 29 of the 45
+    /// stranded production rows were exactly this. Once the generation is no
+    /// longer Active, the hold has nothing left to protect.
+    #[test]
+    fn release_stranded_generation_failures_requeues_rows_whose_generation_is_no_longer_active() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43), issue(44)],
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Interrupted"));
+        monitor.record_agent_issue_failed(43, "attempts exhausted");
+        monitor.record_agent_issue_failed(44, generation_conflict_message(44, "Idle"));
+        for number in [42, 43, 44] {
+            monitor.record_attempt(number);
+        }
+
+        let summary =
+            monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
+                match issue_number {
+                    42 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                        holder_session_state: "Interrupted".to_string(),
+                    }),
+                    43 => panic!("a row that did not fail on a generation is never probed"),
+                    44 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        status: crate::cli::execution_state::ExecutionControlStatus::Completed,
+                        holder_session_state: "Idle".to_string(),
+                    }),
+                    _ => None,
+                }
+            });
+
+        assert_eq!(summary.released, vec![42, 44]);
+        assert_eq!(
+            summary.released_by_holder_state,
+            BTreeMap::from([("Idle".to_string(), 1), ("Interrupted".to_string(), 1)])
+        );
+        assert!(summary.stranded.is_empty());
+        assert_eq!(summary.released_at.as_deref(), Some("2026-09-05T00:05:00Z"));
+        for number in [42, 44] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "#{number} must be launchable again"
+            );
+            assert!(monitor.queued_issue_numbers().contains(&number));
+            assert_eq!(monitor.attempt_count(number), 0);
+            assert!(
+                !monitor
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == number),
+                "the persisted hold must be gone, not just the in-memory row"
+            );
+        }
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed),
+            "an unrelated failure keeps its hold"
+        );
+        assert!(
+            monitor
+                .prefs()
+                .requeue_audit
+                .iter()
+                .any(|entry| entry.issue_number == 42 && entry.reason.contains("generation")),
+            "the release is audited like an operator requeue"
+        );
+        assert_eq!(
+            monitor
+                .agent_status_at("2026-09-05T00:06:00Z")
+                .generation_reclaim,
+            Some(summary.clone()),
+            "issue.monitor.status must show the reclaim result"
+        );
+        assert_eq!(
+            monitor.prefs().generation_reclaim,
+            Some(summary),
+            "the summary must survive a process that rebuilds the monitor from prefs"
+        );
+    }
+
+    /// Issue #3964 AC-2 / AC-4: a row whose generation is still Active stays
+    /// held, and the reader can see who is holding it without collecting the
+    /// inbox by hand.
+    #[test]
+    fn release_stranded_generation_failures_reports_rows_whose_generation_is_still_active() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-09-05T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        monitor.record_agent_issue_failed(43, generation_conflict_message(43, "Interrupted"));
+
+        let first =
+            monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                    holder_session_state: if issue_number == 42 {
+                        "Running".to_string()
+                    } else {
+                        "Interrupted".to_string()
+                    },
+                })
+            });
+
+        assert!(first.released.is_empty());
+        assert_eq!(first.released_at, None);
+        assert_eq!(first.stranded, vec![42, 43]);
+        assert_eq!(
+            first.stranded_by_holder_state,
+            BTreeMap::from([("Interrupted".to_string(), 1), ("Running".to_string(), 1)])
+        );
+        for number in [42, 43] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::AgentFailed)
+            );
+        }
+
+        // The next scan releases #43 and must keep #42 visible as stranded
+        // while remembering what it released.
+        let second =
+            monitor.release_stranded_generation_failures("2026-09-05T00:10:00Z", |issue_number| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: if issue_number == 43 {
+                        crate::cli::execution_state::ExecutionControlStatus::Blocked
+                    } else {
+                        crate::cli::execution_state::ExecutionControlStatus::Active
+                    },
+                    holder_session_state: if issue_number == 42 {
+                        "Running".to_string()
+                    } else {
+                        "Interrupted".to_string()
+                    },
+                })
+            });
+        assert_eq!(second.released, vec![43]);
+        assert_eq!(second.released_at.as_deref(), Some("2026-09-05T00:10:00Z"));
+        assert_eq!(second.stranded, vec![42]);
+
+        // A quiet scan keeps the last release visible instead of blanking it.
+        let third = monitor.release_stranded_generation_failures("2026-09-05T00:15:00Z", |_| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                holder_session_state: "Running".to_string(),
+            })
+        });
+        assert_eq!(third.recorded_at, "2026-09-05T00:15:00Z");
+        assert_eq!(third.released, vec![43]);
+        assert_eq!(third.released_at.as_deref(), Some("2026-09-05T00:10:00Z"));
+        assert_eq!(third.stranded, vec![42]);
+    }
+
+    /// Issue #3964 (review follow-up): the automatic release applies the same
+    /// live-launch guard as `requeue_failed_issue`. A hold that still has a
+    /// launch in flight — a stale failure row racing a fresh launch — is not
+    /// released, because clearing its tracking would strand the running
+    /// agent's slot; it stays reported instead.
+    #[test]
+    fn release_stranded_generation_failures_never_touches_a_row_with_a_live_launch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-05T00:00:00Z");
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Interrupted"));
+        // A fresh launch of the same Issue is in flight while the failure row
+        // from the previous attempt is still persisted.
+        monitor.active_launches.push(42);
+        monitor
+            .launched_windows
+            .insert(42, "tab-1::agent-9".to_string());
+        let before = monitor.prefs();
+
+        let summary = monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |_| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                holder_session_state: "Interrupted".to_string(),
+            })
+        });
+
+        assert!(
+            summary.released.is_empty(),
+            "a live launch is never released"
+        );
+        assert_eq!(summary.stranded, vec![42]);
+        // Reporting the row is the only change: the hold, the launch tracking
+        // and the release audit are exactly as they were.
+        let mut after = monitor.prefs();
+        assert_eq!(after.generation_reclaim, Some(summary.clone()));
+        after.generation_reclaim = None;
+        assert_eq!(
+            after, before,
+            "the row and its launch tracking stay untouched"
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(monitor
+            .prefs()
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 42));
+    }
+
+    /// Issue #3964 AC-3: an `agent_failed` row at the head of the priority
+    /// order must not stop the launch pass. The queued row behind it is the
+    /// one the free slot goes to, in both launch planners.
+    #[test]
+    fn queued_rows_launch_past_an_agent_failed_row_at_the_head_of_the_priority_order() {
+        let build = || {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            scan_issue_monitor_candidates(
+                &mut monitor,
+                &[issue(41), issue(42)],
+                "2026-09-05T02:26:00Z",
+            );
+            monitor.record_agent_issue_failed(41, generation_conflict_message(41, "Idle"));
+            monitor.set_priority_order(vec![41, 42]);
+            assert_eq!(
+                monitor
+                    .inbox
+                    .iter()
+                    .map(|item| (item.issue.number, item.state))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (41, MonitorInboxState::AgentFailed),
+                    (42, MonitorInboxState::Queued)
+                ],
+                "fixture: the refused row sits ahead of the queued row"
+            );
+            monitor
+        };
+
+        let mut gui = build();
+        let request = gui
+            .next_launch_request("2026-09-05T02:26:35Z")
+            .expect("the queued row behind the failed row launches");
+        assert_eq!(request.issue_number, 42);
+        assert_eq!(
+            gui.inbox_item(41).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed),
+            "the refused row is left alone"
+        );
+
+        let mut daemon = build();
+        assert_eq!(
+            daemon.prepare_claim_effects_with_probe("host:1", "2026-09-05T02:26:35Z", 1, |_| false),
+            1
+        );
+        assert!(
+            daemon.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    ..
+                }
+            )),
+            "the claim proposal targets the queued row, not the refused one"
+        );
     }
 
     /// Issue #3645: the manual recovery that produced this Issue was undone

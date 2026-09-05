@@ -1491,12 +1491,27 @@ enum IssueMonitorControl {
     /// order takes effect now instead of at the next interval tick. The
     /// launch itself still goes through the ordinary claim/slot path.
     ScanNow,
+    /// Issue #3961 AC-4: release one provider's quota hold on the operator's
+    /// authority. Applied to the authoritative in-memory state under the
+    /// prefs lock, so the daemon's own rebase cannot restore the hold the way
+    /// it did when the release only reached disk. `released_at` is the fence
+    /// instant chosen by the caller (millisecond precision).
+    QuotaHoldClear {
+        provider: String,
+        reason: String,
+        released_at: String,
+    },
     ConfigSet {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
+    },
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole.
+    ProfilesSet {
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        usage_threshold_percent: Option<u8>,
     },
     ClaimLaunchDelivery {
         issue_number: u64,
@@ -1861,6 +1876,26 @@ fn try_apply_issue_monitor_control(
             *monitor = candidate;
             Some(true)
         }
+        IssueMonitorControl::ProfilesSet {
+            profiles,
+            usage_threshold_percent,
+        } => {
+            if crate::cli::issue::validate_monitor_profiles_set(&profiles, usage_threshold_percent)
+                .is_err()
+            {
+                return None;
+            }
+            let mut candidate = monitor.clone();
+            // Same revocation as the GUI save: proposals prepared against the
+            // previous pool must not commit under the new one.
+            candidate.advance_effect_authority_epoch()?;
+            candidate.set_launch_profile_pool(profiles);
+            if let Some(percent) = usage_threshold_percent {
+                candidate.set_launch_usage_threshold_percent(percent);
+            }
+            *monitor = candidate;
+            Some(true)
+        }
         control @ (IssueMonitorControl::LaunchFailed {
             failure: Some(_), ..
         }
@@ -1979,7 +2014,8 @@ fn apply_routine_issue_monitor_control(
     match control {
         IssueMonitorControl::Enabled(_)
         | IssueMonitorControl::AutonomousMode(_)
-        | IssueMonitorControl::ConfigSet { .. } => false,
+        | IssueMonitorControl::ConfigSet { .. }
+        | IssueMonitorControl::ProfilesSet { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
         IssueMonitorControl::ScanNow => true,
         IssueMonitorControl::ClaimLaunchDelivery {
@@ -2155,6 +2191,20 @@ fn apply_routine_issue_monitor_control(
                 true
             }
         },
+        IssueMonitorControl::QuotaHoldClear {
+            provider,
+            reason,
+            released_at,
+        } => {
+            // Issue #3961 AC-4: the release lands in the authoritative state
+            // inside the same lock-protected commit that persists it, so no
+            // later rebase can join the hold back. The decoder already refused
+            // a blank provider; the scan readmits the issues the hold held.
+            matches!(
+                monitor.clear_provider_quota_hold(&provider, &reason, &released_at),
+                crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+            )
+        }
         IssueMonitorControl::WindowClosed { target, .. } => match target {
             Some(target) => monitor.requeue_exact_window(&target).is_some(),
             // Pre-generation publishers can still be decoded for wire
@@ -2441,10 +2491,52 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     launch_agent,
                 });
             }
+            if let Some(profiles_set) = payload
+                .get("profiles_set")
+                .and_then(serde_json::Value::as_object)
+            {
+                let profiles = serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfile>>(
+                    profiles_set.get("profiles")?.clone(),
+                )
+                .ok()?;
+                let usage_threshold_percent = match profiles_set.get("usage_threshold_percent") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(u8::try_from(value.as_u64()?).ok()?),
+                };
+                crate::cli::issue::validate_monitor_profiles_set(
+                    &profiles,
+                    usage_threshold_percent,
+                )
+                .ok()?;
+                return Some(IssueMonitorControl::ProfilesSet {
+                    profiles,
+                    usage_threshold_percent,
+                });
+            }
             // SPEC-3431 FR-006: `scan_now` carries no fields — its presence is
             // the whole request.
             if payload.get("scan_now").is_some() {
                 return Some(IssueMonitorControl::ScanNow);
+            }
+            // Issue #3961: the PM's release reaches the authoritative state
+            // instead of only the durable prefs. A blank provider or fence
+            // instant is a malformed control, not a release of nothing.
+            if let Some(clear) = payload.get("quota_hold_clear") {
+                let provider = clear.get("provider")?.as_str()?.trim();
+                let released_at = clear.get("released_at")?.as_str()?.trim();
+                if provider.is_empty() || released_at.is_empty() {
+                    return None;
+                }
+                let reason = clear
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return Some(IssueMonitorControl::QuotaHoldClear {
+                    provider: provider.to_string(),
+                    reason,
+                    released_at: released_at.to_string(),
+                });
             }
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
@@ -2778,7 +2870,10 @@ fn scan_failure_fallback(
     failure: crate::issue_monitor_worker::IssueMonitorScanFailure,
     now: String,
 ) -> crate::IssueMonitorState {
-    preserved.record_scan_error(now, failure.to_string());
+    // Issue #3963 AC-4: an aborted scan never reached the launch stage. Say so
+    // in the same line, so a reader can tell it from a degraded scan
+    // (`continued_with_*`) without knowing either message by heart.
+    preserved.record_scan_error(now, format!("{failure} (launch_suppressed)"));
     preserved
 }
 
@@ -4847,11 +4942,26 @@ if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
       ;;
   esac
 fi
+if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
+  # Issue #3963: every gh call is journaled so a test can prove the open-PR
+  # readback is ONE inventory call per scan, not one call per candidate branch.
+  if [ -n "$GWT_FAKE_GH_CALL_LOG" ]; then
+    printf '%s\n' "$*" >> "$GWT_FAKE_GH_CALL_LOG"
+  fi
+  case "$*" in
+    *"issue list"*)
+      cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
+      exit 0
+      ;;
+  esac
+  printf '%s\n' '[]'
+  exit 0
+fi
 if [ "$GWT_FAKE_GH_MODE" = "open_pr_readback_hang" ]; then
   case "$*" in
-    *"--head work/issue-"*)
-      # Issue #3933: one per-branch open-PR readback that outlives every
-      # plausible budget. It must degrade that branch alone, not the scan.
+    *"pr list --state open --json number,headRefName"*)
+      # Issue #3933 / #3963: the one open-PR inventory readback outlives every
+      # plausible budget. It must degrade that readback alone, not the scan.
       sleep 30
       exit 0
       ;;
@@ -5963,6 +6073,7 @@ exit 0
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
             windows_shell: None,
+            prefer_for: Vec::new(),
         }
     }
 
@@ -8330,6 +8441,71 @@ exit 0
         assert_eq!(persisted.effect_authority_epoch, 9);
     }
 
+    /// SPEC #3914 FR-011: `profiles_set` reaches the daemon as one atomic
+    /// control frame, exactly like `config_set`.
+    #[test]
+    fn issue_monitor_profiles_set_decodes_and_commits_atomically() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "profiles_set": {
+                    "profiles": [{"agent_id": "codex"}, {"agent_id": "claude"}],
+                    "usage_threshold_percent": 70,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("profiles control");
+        let IssueMonitorControl::ProfilesSet {
+            profiles,
+            usage_threshold_percent,
+        } = &control
+        else {
+            panic!("expected ProfilesSet, got {control:?}");
+        };
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[1].agent_id, "claude");
+        assert_eq!(*usage_threshold_percent, Some(70));
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            launch_profile: Some(sample_issue_monitor_profile()),
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let pool = persisted.launch_profile_pool();
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool[0].agent_id, "codex");
+        assert_eq!(persisted.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(persisted.launch_usage_threshold_percent, 70);
+        assert_eq!(persisted.effect_authority_epoch, 8);
+        assert_eq!(monitor.launch_profile_pool().len(), 2);
+
+        for profiles_set in [
+            serde_json::json!({"profiles": []}),
+            serde_json::json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": 0}),
+            serde_json::json!({"profiles": [{"model": "opus"}]}),
+        ] {
+            let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"profiles_set": profiles_set}),
+                std::process::id() + 1,
+            );
+            assert!(decode_issue_monitor_control(payload).is_none());
+        }
+    }
+
     /// Issue #3923 AC-5: the daemon applies a launch-agent switch to the
     /// saved profile and refuses one when no profile was ever saved.
     #[test]
@@ -8378,6 +8554,7 @@ exit 0
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
                 windows_shell: None,
+                prefer_for: Vec::new(),
             }),
             ..crate::IssueMonitorPrefs::default()
         };
@@ -8418,6 +8595,110 @@ exit 0
             );
             assert!(decode_issue_monitor_control(payload).is_none());
         }
+    }
+
+    /// Issue #3961 AC-1 / AC-2 / AC-4: a `quota_hold_clear` control releases
+    /// the hold in the daemon's authoritative in-memory state and in the
+    /// durable prefs inside one commit, and asks for an immediate scan so the
+    /// held queue moves without waiting for the interval tick.
+    #[test]
+    fn quota_hold_clear_control_releases_the_hold_in_the_authoritative_state_and_prefs() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let reset_at = "2026-09-07T03:58:00Z";
+        let seed = crate::IssueMonitorPrefs {
+            enabled: true,
+            launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_id: "codex".to_string(),
+                ..sample_issue_monitor_profile()
+            }),
+            provider_quota_holds: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                reset_at.to_string(),
+            )]),
+            autonomous_records: vec![crate::AutonomousIssueRecord {
+                issue_number: 42,
+                retry_not_before: Some(reset_at.to_string()),
+                retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                retry_hold_provider: Some("codex".to_string()),
+                ..crate::AutonomousIssueRecord::new(42)
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &seed).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), seed);
+        let now = "2026-09-05T01:26:00Z";
+        assert!(
+            monitor.agent_status_at(now).quota_hold.is_some(),
+            "the seeded hold gates the saved profile"
+        );
+
+        let released_at = "2026-09-05T01:26:30.123Z";
+        let control =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "quota_hold_clear": {
+                        "provider": "codex",
+                        "reason": "PM: Codex is not rate limited",
+                        "released_at": released_at,
+                    }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("quota_hold_clear decodes");
+        assert_eq!(
+            control,
+            IssueMonitorControl::QuotaHoldClear {
+                provider: "codex".to_string(),
+                reason: "PM: Codex is not rate limited".to_string(),
+                released_at: released_at.to_string(),
+            }
+        );
+
+        assert!(
+            super::apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                control
+            ),
+            "a released hold must trigger an immediate scan"
+        );
+
+        let status = monitor.agent_status_at(now);
+        assert_eq!(status.quota_hold, None);
+        assert!(status.provider_quota_holds.is_empty());
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.provider_quota_holds.is_empty());
+        let release = persisted
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("release fence is durable");
+        assert_eq!(release.released_at, released_at);
+        assert_eq!(release.released_reset_at.as_deref(), Some(reset_at));
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("the record survives");
+        assert_eq!(record.retry_hold_provider, None);
+
+        // A blank provider is a malformed control, not a release of nothing.
+        assert!(
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "quota_hold_clear": {
+                        "provider": "   ",
+                        "reason": "x",
+                        "released_at": released_at,
+                    }
+                }),
+                std::process::id() + 1,
+            ))
+            .is_none()
+        );
     }
 
     #[test]
@@ -8595,10 +8876,11 @@ exit 0
         assert!(!monitor.prefs().merged_issues.contains(&43));
     }
 
-    /// Issue #3933 AC-1/AC-4/AC-5: one per-branch open-PR readback that outlives
-    /// its budget degrades that branch alone. The scan keeps every other finding,
-    /// still reaches the launch stage in the SAME pass, and says in `last_error`
-    /// which stage/branch degraded and that the scan continued — so an operator
+    /// Issue #3933 AC-1/AC-4/AC-5 and Issue #3963 AC-3: the one open-PR
+    /// inventory readback that outlives its budget degrades that readback alone.
+    /// The scan keeps every other finding, still reaches the launch stage in the
+    /// SAME pass, and says in `last_error` which stage degraded, how many
+    /// candidates it left unknown, and that the scan continued — so an operator
     /// can tell a degraded scan from a stopped one.
     #[test]
     fn daemon_scan_continues_to_launch_when_open_pr_readback_exceeds_its_budget() {
@@ -8686,10 +8968,148 @@ exit 0
             .last_error
             .expect("a degraded scan still reports why");
         assert!(last_error.contains("open-pr-readback"), "{last_error}");
-        assert!(last_error.contains("work/issue-43"), "{last_error}");
+        assert!(
+            last_error.contains("1 implementing candidate"),
+            "{last_error}"
+        );
         assert!(
             last_error.contains("continued_with_stale_readback"),
             "{last_error}"
+        );
+    }
+
+    /// Issue #3963 AC-1/AC-2: with a queue-scale in-flight set (150 Implementing
+    /// candidates) the open-PR readback is ONE inventory call per scan, never one
+    /// `gh pr list --head` per branch, and the scan still reaches the launch
+    /// stage in the same pass.
+    #[test]
+    fn daemon_scan_reads_open_prs_once_for_a_150_issue_in_flight_queue() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_inventory");
+        let call_log = temp.path().join("gh-calls.log");
+        let _call_log = ScopedEnvVar::set("GWT_FAKE_GH_CALL_LOG", &call_log);
+
+        const IN_FLIGHT_COUNT: u64 = 150;
+        const QUEUED_ISSUE: u64 = 44;
+        let in_flight: Vec<u64> = (1000..1000 + IN_FLIGHT_COUNT).collect();
+        let issue_row = |number: u64, title: &str| {
+            serde_json::json!({
+                "number": number,
+                "title": title,
+                "body": "Issue body",
+                "labels": [{"name": "bug"}],
+                "state": "OPEN",
+                "url": format!("https://example.test/issues/{number}"),
+                "updatedAt": "2026-08-15T00:00:00Z",
+            })
+        };
+        let mut issues: Vec<serde_json::Value> = in_flight
+            .iter()
+            .map(|number| issue_row(*number, "In-flight issue"))
+            .collect();
+        issues.push(issue_row(QUEUED_ISSUE, "Queued issue"));
+        let issue_list = temp.path().join("issues.json");
+        fs::write(
+            &issue_list,
+            serde_json::to_string(&issues).expect("issue list json"),
+        )
+        .expect("write issue list");
+        let _issue_list = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_LIST_FILE", &issue_list);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let symbolic_ref = gwt_core::process::hidden_command("git")
+            .args([
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("set origin HEAD");
+        assert!(symbolic_ref.success());
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            autonomous_records: in_flight
+                .iter()
+                .map(|number| crate::AutonomousIssueRecord {
+                    phase: crate::AutonomousPhase::Implementing,
+                    ..crate::AutonomousIssueRecord::new(*number)
+                })
+                .collect(),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_secs(20),
+        );
+        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("a queue-scale readback must not abort the scan");
+
+        let calls = fs::read_to_string(&call_log).expect("gh call log");
+        let open_pr_reads = calls
+            .lines()
+            .filter(|line| line.starts_with("pr list") && line.contains("--state open"))
+            .count();
+        assert_eq!(
+            open_pr_reads, 1,
+            "one open-PR inventory per scan, not one per candidate:\n{calls}"
+        );
+        assert!(
+            !calls.lines().any(|line| line.contains("--head")),
+            "no per-branch open-PR readback may remain:\n{calls}"
+        );
+        assert!(
+            scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "the launch stage must still run with a 150-issue in-flight set: {:?}",
+            scanned.pending_effects()
+        );
+        assert!(
+            in_flight.iter().all(|number| {
+                scanned
+                    .autonomous_record(*number)
+                    .map(|record| record.phase)
+                    == Some(crate::AutonomousPhase::Implementing)
+            }),
+            "no open PR keeps every candidate Implementing"
+        );
+        let last_error = scanned.status_view().last_error.unwrap_or_default();
+        assert!(
+            !last_error.contains("open-pr-readback"),
+            "a clean inventory is not a degraded readback: {last_error}"
         );
     }
 
@@ -11278,11 +11698,15 @@ exit 1
 
         assert_eq!(failed.effect_authority_epoch(), 7);
         assert_eq!(failed.pending_effects(), &[effect]);
-        assert!(failed
+        let last_error = failed
             .status_view()
             .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("branch-protection")));
+            .expect("an aborted scan reports its failure");
+        assert!(last_error.contains("branch-protection"), "{last_error}");
+        // Issue #3963 AC-4: the aborted form says the launch stage did not run,
+        // so a reader can tell it from a degraded scan (`continued_with_*`)
+        // without knowing either message by heart.
+        assert!(last_error.contains("launch_suppressed"), "{last_error}");
     }
 
     #[tokio::test]
@@ -13547,6 +13971,39 @@ exit 1
     }
 
     #[test]
+    fn persist_daemon_state_preserves_the_gui_owned_candidate_pool() {
+        // SPEC #3914 FR-012 / AC-7: the pool is saved by the GUI / gwtd straight
+        // to disk; the daemon's stale in-memory copy must not shrink it back to
+        // one candidate or drop the usage threshold.
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut on_disk = crate::IssueMonitorPrefs {
+            launch_usage_threshold_percent: 65,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut codex = sample_issue_monitor_profile();
+        codex.agent_id = "codex".to_string();
+        on_disk.set_launch_profile_pool(vec![codex, sample_issue_monitor_profile()]);
+        crate::save_issue_monitor_prefs(&prefs_path, &on_disk).expect("seed disk");
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(sample_closed_issue_monitor_issue(42));
+        monitor.record_merged(42);
+        assert!(monitor.prefs().launch_profile_pool().is_empty());
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload");
+        let pool = persisted.launch_profile_pool();
+        assert_eq!(pool.len(), 2, "both candidates survive the daemon persist");
+        assert_eq!(pool[0].agent_id, "codex");
+        assert_eq!(pool[1].agent_id, "claude");
+        assert_eq!(persisted.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(persisted.launch_usage_threshold_percent, 65);
+        assert_eq!(monitor.prefs().launch_profile_pool().len(), 2);
+    }
+
+    #[test]
     fn persist_daemon_state_preserves_gui_owned_launch_profile_and_tuning() {
         // adversarial review (launch_profile clobber): launch_profile and
         // autonomous_tuning have no daemon control channel, so the daemon's
@@ -13570,6 +14027,7 @@ exit 1
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
                 windows_shell: None,
+                prefer_for: Vec::new(),
             }),
             autonomous_tuning: crate::issue_monitor::AutonomousTuning {
                 max_attempts: 9,
