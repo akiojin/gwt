@@ -2816,7 +2816,7 @@ mod tests {
         let cache = Cache::new(dir.path().to_path_buf());
         let mut expected: Vec<(u64, Vec<&str>)> = Vec::new();
         let mut number = 100;
-        for heading in ["Acceptance Criteria", "受け入れ基準"] {
+        for heading in ["Acceptance Criteria", "受け入れ基準", "受け入れ条件"] {
             for prefixed in [true, false] {
                 for in_comment in [false, true] {
                     number += 1;
@@ -2882,6 +2882,73 @@ mod tests {
             );
             assert_eq!(criteria.ids, *want, "live #{number}");
         }
+    }
+
+    /// Issue #3959 AC-1: #3864's own shape, as it was stored in production —
+    /// `plan` and `spec` both routed to comments, so the Issue body is nothing
+    /// but the section header and the `tasks` artifact, while the
+    /// `- [ ] AC-N:` block lives in the spec comment. Duplicating that block
+    /// into the body was the only thing that un-quarantined it, which is the
+    /// proof the classifier never saw the comment.
+    #[test]
+    fn issue_3864_comment_resident_spec_reaches_the_acceptance_classifier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let spec_comment = 5_502_609_215_u64;
+        let plan_comment = 5_494_509_117_u64;
+        let acceptance = (1..=14)
+            .map(|index| format!("- [ ] AC-{index}: 受け入れ条件 {index}\n"))
+            .collect::<String>();
+        let snapshot = IssueSnapshot {
+            number: IssueNumber(3864),
+            title: "SPEC 3864".to_string(),
+            body: format!(
+                "<!-- gwt-spec id=3864 version=1 -->\n\
+                 <!-- sections:\n\
+                 plan=comment:{plan_comment}\n\
+                 spec=comment:{spec_comment}\n\
+                 tasks=body\n\
+                 -->\n\n\
+                 <!-- artifact:tasks BEGIN -->\n- [x] T-001: 実装\n<!-- artifact:tasks END -->"
+            ),
+            labels: vec!["gwt-spec".to_string(), "auto-merge".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: vec![
+                CommentSnapshot {
+                    id: CommentId(plan_comment),
+                    body: "<!-- artifact:plan BEGIN -->\n## 実装計画\n\nPhase 1\n\
+                           <!-- artifact:plan END -->"
+                        .to_string(),
+                    updated_at: UpdatedAt::new("t1"),
+                },
+                CommentSnapshot {
+                    id: CommentId(spec_comment),
+                    body: format!(
+                        "<!-- artifact:spec BEGIN -->\n# Spec\n\n## 受け入れ基準\n\n{acceptance}\
+                         <!-- artifact:spec END -->"
+                    ),
+                    updated_at: UpdatedAt::new("t1"),
+                },
+            ],
+        };
+        cache.write_snapshot(&snapshot).expect("write spec");
+        let want: Vec<String> = (1..=14).map(|index| format!("AC-{index}")).collect();
+
+        let candidates = load_cached_issue_monitor_candidates(dir.path()).expect("load cache");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.number == 3864)
+            .expect("cached candidate");
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+            candidate.body.as_deref().unwrap_or(""),
+        );
+        assert!(
+            criteria.machine_checkable,
+            "the comment-resident block must reach the classifier: {:?}",
+            candidate.body
+        );
+        assert_eq!(criteria.ids, want);
     }
 
     #[test]
