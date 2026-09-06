@@ -745,14 +745,6 @@ fn is_allowed_argv_exception(argv: &[String]) -> bool {
                 argv.get(1).map(String::as_str),
                 argv.get(2).map(String::as_str),
                 argv.get(3),
-            ),
-            (Some("hook"), Some("gwt-self-improvement-stop"), None)
-        )
-        || matches!(
-            (
-                argv.get(1).map(String::as_str),
-                argv.get(2).map(String::as_str),
-                argv.get(3),
                 argv.get(4),
                 argv.get(5),
             ),
@@ -777,9 +769,7 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message.push_str(
         "Example: {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}\n",
     );
-    message.push_str(
-        "Hook transport exceptions: gwtd hook event <Event>; gwtd hook gwt-self-improvement-stop\n",
-    );
+    message.push_str("Hook transport exceptions: gwtd hook event <Event>\n");
     message
 }
 

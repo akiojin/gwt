@@ -1659,6 +1659,16 @@ export function createLaunchWizardSurface({
                   }),
               );
             }
+            // Issue #3962 AC-5: a saved model that left the agent's catalog
+            // falls back to the default instead of failing the launch. Say so
+            // next to the Model field so the swap is never silent.
+            if (launchWizard.model_fallback_notice) {
+              const fallback = createLaunchField("Model changed", true);
+              fallback.appendChild(
+                createNode("div", "launch-note", launchWizard.model_fallback_notice),
+              );
+              grid.appendChild(fallback);
+            }
             if (launchWizard.show_reasoning) {
               const reasoningLabel = launchWizard.selected_agent_id === "grok"
                 ? "Effort"
