@@ -53,11 +53,12 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 use super::continuation::set_durable_launch_recovery_directory_sync_test_hook;
 use super::continuation::{
     clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
-    durable_launch_recovery_exists, durable_launch_recovery_session_identity,
-    nonlocal_runtime_index_scan_metrics, persist_durable_launch_recovery,
-    reset_nonlocal_runtime_index_scan_metrics, resolve_split_workspace_state_external_commit,
+    continuation_launch_config, durable_launch_recovery_exists,
+    durable_launch_recovery_session_identity, nonlocal_runtime_index_scan_metrics,
+    persist_durable_launch_recovery, reset_nonlocal_runtime_index_scan_metrics,
+    resolve_split_workspace_state_external_commit,
     set_fresh_execution_pre_work_commit_hook_for_test, set_missing_session_cleanup_hook_for_test,
-    ActiveOwnerLiveness, DurableLaunchRecoveryKind,
+    ActiveOwnerLiveness, ContinueWorkLaunchSeed, DurableLaunchRecoveryKind,
 };
 use super::{
     active_work_projection_from_saved, continue_work_readiness_decision,
@@ -63730,5 +63731,203 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
             .window("agent-7")
             .map(|window| window.status),
         Some(WindowProcessStatus::Error)
+    );
+}
+
+/// Issue #3489: build the durable Session seed the Continue work fixtures use
+/// for owner-linkage regression coverage.
+fn issue_3489_durable_seed(linked_issue_number: Option<u64>) -> ContinueWorkLaunchSeed {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "durable-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = linked_issue_number;
+    ContinueWorkLaunchSeed::DurableSession(Box::new(session))
+}
+
+/// Issue #3489: mint the binding Continue work installs for the Work owner and
+/// prove the launch Session accepts it. `set_execution_binding` runs before the
+/// PTY starts, so a rejection here is exactly the pre-PTY launch failure.
+fn issue_3489_binding_installs(config: &gwt_agent::LaunchConfig, owner_number: u64) -> bool {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "continuation-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = config.linked_issue_number;
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: "repo-3489".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3489".to_string(),
+            binding_id: "binding-3489".to_string(),
+            ledger_head_hash: "head-3489".to_string(),
+        },
+        capability_generation: 1,
+    };
+    session.set_execution_binding(Some(binding)).is_ok()
+}
+
+/// Issue #3489 AC-1: a durable Session that carries no owner linkage must not
+/// seed the continuation with `None`. Continue work mints the binding from the
+/// Work owner, so an inherited `None` fails the binding install before the PTY
+/// starts and leaves the pane with a bare invariant string.
+#[test]
+fn continue_work_durable_seed_without_owner_linkage_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &issue_3489_durable_seed(None),
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert!(
+        issue_3489_binding_installs(&config, owner.number),
+        "an unbound durable seed must still install the owner binding before the PTY starts"
+    );
+}
+
+/// Issue #3489 AC-2: a durable Session linked to another owner must be
+/// re-resolved to the Work owner the continuation binding is minted for.
+#[test]
+fn continue_work_durable_seed_with_foreign_owner_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &issue_3489_durable_seed(Some(3464)),
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert!(
+        issue_3489_binding_installs(&config, owner.number),
+        "a foreign-owner durable seed must be re-resolved before the PTY starts"
+    );
+}
+
+/// Issue #3489 AC-2: the Work projection seed keeps the same single source of
+/// owner truth, so both seeds stay interchangeable for the binding install.
+#[test]
+fn continue_work_projection_seed_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &ContinueWorkLaunchSeed::WorkProjection {
+            agent_id: gwt_agent::AgentId::Codex,
+            display_name: Some("Projection seed".to_string()),
+            branch: "work/issue-3489".to_string(),
+        },
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert_eq!(config.display_name, "Projection seed");
+}
+
+/// Issue #3489 AC-4: the owner-mismatch refusal fails before the PTY starts, so
+/// the pane only ever shows this one line. It must name both sides of the
+/// mismatch and the recovery route instead of the bare invariant string.
+#[test]
+fn owner_mismatch_launch_failure_names_both_owners_and_the_recovery_route() {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "continuation-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = Some(3464);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: "repo-3489".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number: 3489,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3489".to_string(),
+            binding_id: "binding-3489".to_string(),
+            ledger_head_hash: "head-3489".to_string(),
+        },
+        capability_generation: 1,
+    };
+    let detail = session
+        .set_execution_binding(Some(binding))
+        .expect_err("a foreign linked owner must be refused");
+
+    assert!(
+        detail.contains("continuation-3489") && detail.contains("3464") && detail.contains("3489"),
+        "the refusal must name the Session and both owners: {detail}"
+    );
+
+    let diagnostic = String::from_utf8(AppRuntime::launch_error_terminal_bytes(
+        &AppRuntime::user_facing_launch_error_detail(&detail),
+    ))
+    .expect("diagnostic bytes are UTF-8");
+    assert!(
+        diagnostic.contains("execution.status"),
+        "the pane diagnostic must name the recovery probe: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("Continue work"),
+        "the pane diagnostic must name the continuation route: {diagnostic}"
+    );
+}
+
+/// Issue #3489 AC-4: unrelated launch failures keep their exact detail, so the
+/// recovery hint never widens beyond the owner-mismatch refusal.
+#[test]
+fn unrelated_launch_failure_detail_is_not_rewritten_with_the_owner_hint() {
+    let detail = "execution binding session does not match the durable Session";
+
+    assert_eq!(
+        AppRuntime::user_facing_launch_error_detail(detail),
+        detail,
+        "only the owner mismatch gains the recovery route"
+    );
+}
+
+/// Issue #3489 AC-1: the owner-linkage regression above proves the binding
+/// install accepts the resolved config. That only matters because the install
+/// runs on the pre-PTY path — pin that ordering so a later refactor cannot move
+/// the refusal behind a started pane, where it would stop being a launch
+/// failure at all.
+#[test]
+fn launch_worker_installs_the_execution_binding_before_the_process_launch() {
+    let source = include_str!("launch.rs");
+    let worker = source
+        .split("fn spawn_agent_window_async_with_claim")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn close_work").next())
+        .expect("async launch worker body");
+    let install = worker
+        .find("set_execution_binding(Some(binding.clone()))?")
+        .expect("prepared continuation binding install");
+    let process_launch = worker
+        .find("let process_launch = ProcessLaunch {")
+        .expect("process launch construction");
+    assert!(
+        install < process_launch,
+        "the execution binding must be installed before the PTY process launch is built"
     );
 }
