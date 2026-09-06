@@ -105,10 +105,10 @@ jobs:
         shell: bash
         run: |
           cargo test -p gwt-core --lib real_bun_global_placeholder_fixture
-          cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture -- --test-threads=1
-          cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary -- --test-threads=1
-          cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture -- --test-threads=1
-          cargo test -p gwt --bin gwt command_prompt_agent_wrapper -- --test-threads=1
+          cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture
+          cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary
+          cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture
+          cargo test -p gwt --bin gwt command_prompt_agent_wrapper
         timeout-minutes: 15
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
@@ -151,6 +151,74 @@ jobs:
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
+
+  # Issue #3404 AC-3. The targeted Windows steps above pin --test-threads=1 per
+  # fixture because they own external resources (a real PTY, a real probe
+  # binary, a console subsystem). That serialization is a fixture contract, not
+  # a suite-wide requirement, so it cannot prove the deadline-sensitive suites
+  # survive Windows' default parallelism. This job removes RUST_TEST_THREADS
+  # entirely and runs the suites that hold the inventoried deadline tests three
+  # times in a row on one SHA: a single green run cannot distinguish a
+  # deterministic suite from a flake that happened to win the race.
+  test-windows-default-parallel:
+    name: Test (Rust default parallelism, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      # Compiling inside the timed loop would charge the first iteration for the
+      # build and let a slow compile read as an unstable suite — the exact
+      # confusion this job exists to remove. Build first, on its own budget.
+      - name: Build the default-parallel suites
+        run: cargo test -p gwt --lib --all-features --no-run
+        timeout-minutes: 45
+      # windows-latest gives 4 logical processors, and one pass over these
+      # suites costs ~16 minutes there, so three passes need a budget in the
+      # 60-minute range before runner variance. A cap that the honest run
+      # brushes against is itself a wall-clock deadline, and this job would
+      # then fail on timing rather than on determinism.
+      # `-p gwt --bin gwt` is deliberately absent. Under Windows default
+      # parallelism that target deadlocks: four app_runtime tests that take
+      # env_test_lock first
+      # (app_runtime_closing_issue_monitor_window_returns_issue_to_pending,
+      # ..._duplicate_pty_error_after_live_hook_keeps_active_agent_for_recovery,
+      # ..._duplicate_viewport_update_skips_workspace_broadcast_and_persist,
+      # ..._failed_live_handoff_delivery_keeps_the_answer_pending) reported
+      # "running for over 60 seconds" and then produced nothing for 74 minutes
+      # until the step was killed. The same target is green three times in a
+      # row at default parallelism on macOS, and no CI path ran it broadly on
+      # Windows before this job existed, so the deadlock was never observable.
+      # Including it here would burn 90 minutes of Windows runner time and fail
+      # every PR, so this job proves what it can prove today. #4014 owns the
+      # deadlock and re-adds the target here — that is the remaining half of
+      # #3404 AC-3.
+      #
+      # `-p gwt-core` is absent for the same reason and with the same promise.
+      # Its first default-parallel Windows run failed four tests that no CI
+      # path had ever exercised there: two index_coordinator lease tests built
+      # on a 50ms TTL, an update installer test whose expected timeout stopped
+      # firing, and windows_process_priority_class_roundtrips_on_a_live_child,
+      # which asserts a fresh child is Normal but read BelowNormal because a
+      # child inherits the priority class of a test binary another test
+      # already lowered. Those are reported on #3404 and await their own owner.
+      - name: Prove default-parallel Rust suites are stable
+        shell: pwsh
+        run: |
+          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
+          Write-Host "logical processors: $([Environment]::ProcessorCount)"
+          1..3 | ForEach-Object {
+            Write-Host "default-parallel run $_ of 3"
+            cargo test -p gwt --lib --all-features
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+        timeout-minutes: 90
 
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch, ${{ matrix.provider }}/${{ matrix.selector }})
