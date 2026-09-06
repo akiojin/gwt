@@ -1,6 +1,6 @@
 //! Tokio-based IPC server for the runtime daemon (SPEC-2077 Phase 1
 //! runtime layer). The transport is a Unix domain socket on Unix and a
-//! named pipe on Windows (Issue #3526, see [`super::transport`]).
+//! named pipe on Windows (Issue #3526, see `super::transport`).
 //!
 //! Foreground entry: caller blocks inside [`serve_blocking`] until the
 //! daemon receives `SIGINT` / `SIGTERM` (Unix) or Ctrl-C / Ctrl-Break /

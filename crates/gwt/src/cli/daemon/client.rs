@@ -2,7 +2,7 @@
 //!
 //! This module is the front-door client used by `gwt` and the in-process
 //! hook dispatcher to talk to a running `gwtd` daemon over the local
-//! IPC transport ([`super::transport`]: Unix domain socket or Windows
+//! IPC transport (`super::transport`: Unix domain socket or Windows
 //! named pipe).
 //!
 //! Wire format mirrors `super::server::handle_connection`:
@@ -34,7 +34,7 @@ use super::transport::{IpcReadHalf, IpcStream, IpcWriteHalf};
 /// Connected, post-handshake daemon client.
 ///
 /// `DaemonClient` owns the split read/write halves of the underlying
-/// [`IpcStream`]; dropping the value closes the connection.
+/// `IpcStream`; dropping the value closes the connection.
 pub struct DaemonClient {
     reader: BufReader<IpcReadHalf>,
     writer: IpcWriteHalf,

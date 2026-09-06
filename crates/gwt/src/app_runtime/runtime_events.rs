@@ -7,13 +7,10 @@
 
 use base64::Engine as _;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc as std_mpsc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-
-#[cfg(unix)]
-use std::sync::mpsc as std_mpsc;
-#[cfg(unix)]
-use std::sync::Mutex;
 
 use super::{
     close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
@@ -1467,11 +1464,7 @@ impl AppRuntime {
         event.kind != gwt::RuntimeHookEventKind::RuntimeState
     }
 }
-
-#[cfg(unix)]
 const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
-
-#[cfg(unix)]
 enum RuntimeDaemonPublish {
     Output {
         project_root: PathBuf,
@@ -1489,33 +1482,23 @@ enum RuntimeDaemonPublish {
         event: gwt::RuntimeHookEvent,
     },
 }
-
-#[cfg(unix)]
 #[derive(Debug)]
 struct RuntimeDaemonApprovalPublish {
     project_root: PathBuf,
     id: String,
     waiting: bool,
 }
-
-#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeDaemonPublishEnqueueError {
     Full,
     Disconnected,
 }
-
-#[cfg(unix)]
 static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
     Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
 > = std::sync::OnceLock::new();
-
-#[cfg(unix)]
 static RUNTIME_DAEMON_APPROVAL_PUBLISH_QUEUE: std::sync::OnceLock<
     Mutex<Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>>,
 > = std::sync::OnceLock::new();
-
-#[cfg(unix)]
 fn runtime_daemon_publish_sender() -> Option<std_mpsc::SyncSender<RuntimeDaemonPublish>> {
     let queue = RUNTIME_DAEMON_PUBLISH_QUEUE.get_or_init(|| Mutex::new(None));
     runtime_daemon_publish_sender_from(queue, |receiver| {
@@ -1525,8 +1508,6 @@ fn runtime_daemon_publish_sender() -> Option<std_mpsc::SyncSender<RuntimeDaemonP
             .map(|_handle| ())
     })
 }
-
-#[cfg(unix)]
 fn runtime_daemon_publish_sender_from(
     queue: &Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
     spawn_worker: impl FnOnce(std_mpsc::Receiver<RuntimeDaemonPublish>) -> std::io::Result<()>,
@@ -1551,15 +1532,11 @@ fn runtime_daemon_publish_sender_from(
         }
     }
 }
-
-#[cfg(unix)]
 fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
     for publish in receiver {
         publish_runtime_daemon_event(publish);
     }
 }
-
-#[cfg(unix)]
 fn runtime_daemon_approval_publish_sender() -> Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>
 {
     let queue = RUNTIME_DAEMON_APPROVAL_PUBLISH_QUEUE.get_or_init(|| Mutex::new(None));
@@ -1570,8 +1547,6 @@ fn runtime_daemon_approval_publish_sender() -> Option<std_mpsc::Sender<RuntimeDa
             .map(|_handle| ())
     })
 }
-
-#[cfg(unix)]
 fn runtime_daemon_approval_publish_sender_from(
     queue: &Mutex<Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>>,
     spawn_worker: impl FnOnce(std_mpsc::Receiver<RuntimeDaemonApprovalPublish>) -> std::io::Result<()>,
@@ -1595,8 +1570,6 @@ fn runtime_daemon_approval_publish_sender_from(
         }
     }
 }
-
-#[cfg(unix)]
 fn run_runtime_daemon_approval_publish_worker(
     receiver: std_mpsc::Receiver<RuntimeDaemonApprovalPublish>,
 ) {
@@ -1604,8 +1577,6 @@ fn run_runtime_daemon_approval_publish_worker(
         publish_runtime_daemon_approval_event(publish);
     }
 }
-
-#[cfg(unix)]
 fn try_enqueue_runtime_daemon_publish(
     sender: &std_mpsc::SyncSender<RuntimeDaemonPublish>,
     publish: RuntimeDaemonPublish,
@@ -1615,8 +1586,6 @@ fn try_enqueue_runtime_daemon_publish(
         std_mpsc::TrySendError::Disconnected(_) => RuntimeDaemonPublishEnqueueError::Disconnected,
     })
 }
-
-#[cfg(unix)]
 fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
     let Some(sender) = runtime_daemon_publish_sender() else {
         return;
@@ -1628,8 +1597,6 @@ fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
         );
     }
 }
-
-#[cfg(unix)]
 fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
     match publish {
         RuntimeDaemonPublish::Output {
@@ -1700,8 +1667,6 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
         }
     }
 }
-
-#[cfg(unix)]
 fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) {
     let payload = gwt::runtime_daemon_events::runtime_approval_overlay_payload(
         &publish.id,
@@ -1723,8 +1688,6 @@ fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) 
         );
     }
 }
-
-#[cfg(unix)]
 fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
     enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
         project_root: project_root.to_path_buf(),
@@ -1732,11 +1695,6 @@ fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
         data: data.to_vec(),
     });
 }
-
-#[cfg(not(unix))]
-fn publish_runtime_output_change(_project_root: &Path, _id: &str, _data: &[u8]) {}
-
-#[cfg(unix)]
 fn publish_runtime_status_change(
     project_root: &Path,
     id: &str,
@@ -1750,28 +1708,12 @@ fn publish_runtime_status_change(
         detail,
     });
 }
-
-#[cfg(not(unix))]
-fn publish_runtime_status_change(
-    _project_root: &Path,
-    _id: &str,
-    _status: WindowProcessStatus,
-    _detail: Option<String>,
-) {
-}
-
-#[cfg(unix)]
 fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
     enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Hook {
         project_root: project_root.to_path_buf(),
         event: event.clone(),
     });
 }
-
-#[cfg(not(unix))]
-fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
-
-#[cfg(unix)]
 fn publish_runtime_approval_overlay_change(project_root: &Path, id: &str, waiting: bool) {
     let Some(sender) = runtime_daemon_approval_publish_sender() else {
         return;
@@ -1788,25 +1730,16 @@ fn publish_runtime_approval_overlay_change(project_root: &Path, id: &str, waitin
     }
 }
 
-#[cfg(not(unix))]
-fn publish_runtime_approval_overlay_change(_project_root: &Path, _id: &str, _waiting: bool) {}
-
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::path::PathBuf;
-
-    #[cfg(unix)]
-    use std::sync::{mpsc, Mutex};
-
-    #[cfg(unix)]
     use super::{
         runtime_daemon_approval_publish_sender_from, runtime_daemon_publish_sender_from,
         try_enqueue_runtime_daemon_publish, RuntimeDaemonApprovalPublish, RuntimeDaemonPublish,
         RuntimeDaemonPublishEnqueueError,
     };
-    #[cfg(unix)]
     use crate::WindowProcessStatus;
+    use std::path::PathBuf;
+    use std::sync::{mpsc, Mutex};
 
     /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
     /// SQLite race must not show the raw provider stack. The same string is the
@@ -1988,8 +1921,6 @@ mod tests {
             })
         );
     }
-
-    #[cfg(unix)]
     #[test]
     fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
         let (sender, _receiver) = mpsc::sync_channel(1);
@@ -2017,8 +1948,6 @@ mod tests {
             Err(RuntimeDaemonPublishEnqueueError::Full)
         ));
     }
-
-    #[cfg(unix)]
     #[test]
     fn runtime_approval_overlay_lane_survives_output_queue_saturation_in_order() {
         let (output_sender, _output_receiver) = mpsc::sync_channel(1);
@@ -2063,8 +1992,6 @@ mod tests {
         assert!(captured_rx.recv().expect("true").waiting);
         assert!(!captured_rx.recv().expect("false").waiting);
     }
-
-    #[cfg(unix)]
     #[test]
     fn runtime_daemon_publish_sender_retries_after_spawn_failure() {
         let queue = Mutex::new(None);

@@ -8949,7 +8949,6 @@ impl IssueMonitorState {
     /// that snapshot, however, so its `FreshRequired` decision must survive.
     /// Newer terminal/disabled disk state remains authoritative and prevents a
     /// stale scan from reviving the marker.
-    #[cfg(unix)]
     pub(crate) fn restore_scanned_launch_session_strategies(
         &mut self,
         proposed: &BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
