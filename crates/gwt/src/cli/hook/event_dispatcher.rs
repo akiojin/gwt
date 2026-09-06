@@ -335,7 +335,13 @@ fn handle_stop(
         ),
         (
             "skill-discussion-stop-check",
-            Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
+            Box::new(|| {
+                skill_discussion_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
         ),
         (
             "skill-plan-spec-stop-check",
@@ -1085,10 +1091,6 @@ mod tests {
                 "only the uniform obligation gate may block here: {reason}"
             );
         }
-        assert!(
-            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
-            "no auto-capture side effect may fire for the removed gate"
-        );
     }
 
     // SPEC-3248 P8a (T-108/T-116 subset): a launch-written Execution Control

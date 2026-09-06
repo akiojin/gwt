@@ -229,6 +229,7 @@ Recommended alternatives:\n\
 - PR workflow: JSON operations `pr.current`, `pr.list`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
 - PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
 - Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
+- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),

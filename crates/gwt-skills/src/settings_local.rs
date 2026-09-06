@@ -588,6 +588,23 @@ pub(crate) fn codex_event_hook_commands(event: &str) -> Vec<String> {
     codex_event_hook_commands_with_bin(&gwt_hook_bin_path(), event)
 }
 
+/// The repo-owned `gwt-self-improvement-stop` Stop hook, verbatim as this
+/// repository used to commit it in `.codex/hooks.json`.
+///
+/// The self-improvement CLI has since been removed, so a freshly cloned repo no
+/// longer carries this hook. Worktrees materialized before that removal still
+/// do, and `existing_user_hooks` preserves it untouched — which is why it lands
+/// at Stop group index 1 and why its fallback stays the machine independent
+/// literal `gwtd` instead of an absolute install path. It is still a gwt hook
+/// transport, so gwt keeps pre-trusting it rather than making those worktrees
+/// stop on Codex's `Hooks need review` prompt (Issue #3967).
+pub(crate) fn codex_self_improvement_stop_hook_commands() -> Vec<String> {
+    vec![
+        "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true"
+            .to_string(),
+    ]
+}
+
 pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
     vec![
         posix_codex_event_hook_command_with_bin(bin, event),
@@ -1111,56 +1128,35 @@ mod tests {
         assert!(plugin.contains("prependContext"));
     }
 
+    // AC-R5: the self-improvement Stop hook is retired, so no provider bridge
+    // may emit it — not even in the `akiojin/gwt` repository, which used to be
+    // the one origin that received it.
     #[test]
-    fn provider_hooks_add_self_improvement_stop_only_for_gwt_repo() {
-        let gwt_repo = tempfile::tempdir().unwrap();
-        init_repo_with_origin(gwt_repo.path(), "https://github.com/akiojin/gwt.git");
-        generate_opencode_hooks(gwt_repo.path()).unwrap();
-        generate_openclaw_hooks(gwt_repo.path()).unwrap();
-        generate_hermes_hooks_with_source(gwt_repo.path(), None).unwrap();
-
-        let opencode =
-            fs::read_to_string(gwt_repo.path().join(".gwt/opencode/plugins/gwt-hooks.js")).unwrap();
-        let openclaw = fs::read_to_string(
-            gwt_repo
-                .path()
-                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
-        )
-        .unwrap();
-        let hermes =
-            fs::read_to_string(gwt_repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"))
-                .unwrap();
-        assert!(opencode.contains("gwt-self-improvement-stop"));
-        assert!(openclaw.contains("gwt-self-improvement-stop"));
-        assert!(hermes.contains("gwt-self-improvement-stop"));
-
-        let target_repo = tempfile::tempdir().unwrap();
-        init_repo_with_origin(
-            target_repo.path(),
+    fn provider_hooks_never_emit_the_retired_self_improvement_stop() {
+        for origin in [
+            "https://github.com/akiojin/gwt.git",
             "https://github.com/example/target-project.git",
-        );
-        generate_opencode_hooks(target_repo.path()).unwrap();
-        generate_openclaw_hooks(target_repo.path()).unwrap();
-        generate_hermes_hooks_with_source(target_repo.path(), None).unwrap();
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            init_repo_with_origin(repo.path(), origin);
+            generate_opencode_hooks(repo.path()).unwrap();
+            generate_openclaw_hooks(repo.path()).unwrap();
+            generate_hermes_hooks_with_source(repo.path(), None).unwrap();
 
-        let generated = [
-            target_repo
-                .path()
-                .join(".gwt/opencode/plugins/gwt-hooks.js"),
-            target_repo
-                .path()
-                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
-            target_repo
-                .path()
-                .join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
-        ];
-        for path in generated {
-            let content = fs::read_to_string(&path).unwrap();
-            assert!(
-                !content.contains("gwt-self-improvement-stop"),
-                "non-gwt repo must not receive direct self-improvement hook: {}",
-                path.display()
-            );
+            let generated = [
+                repo.path().join(".gwt/opencode/plugins/gwt-hooks.js"),
+                repo.path()
+                    .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+                repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
+            ];
+            for path in generated {
+                let content = fs::read_to_string(&path).unwrap();
+                assert!(
+                    !content.contains("gwt-self-improvement-stop"),
+                    "origin {origin} must not receive the retired self-improvement hook: {}",
+                    path.display()
+                );
+            }
         }
     }
 
@@ -1776,7 +1772,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_codex_hooks_preserves_direct_gwt_self_improvement_hook() {
+    fn generate_codex_hooks_preserves_repo_owned_stop_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1787,7 +1783,7 @@ mod tests {
                     "Stop": [{
                         "matcher": "*",
                         "hooks": [{
-                            "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop",
+                            "command": "./scripts/repo-owned-stop-check.sh",
                             "type": "command"
                         }]
                     }]
@@ -1811,8 +1807,8 @@ mod tests {
         assert!(
             stop_commands
                 .iter()
-                .any(|command| command.contains(" hook gwt-self-improvement-stop")),
-            "direct gwt self-improvement hook must be preserved as a repo-owned hook: {stop_commands:?}"
+                .any(|command| command.contains("repo-owned-stop-check.sh")),
+            "an unmanaged repo-owned Stop hook must be preserved: {stop_commands:?}"
         );
     }
 

@@ -226,6 +226,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.questions | issue.monitor.question.answer",
         "  issue.monitor.wait",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
+        "  issue.monitor.reconcile",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -279,7 +280,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Fetch GitHub Actions run/job logs via JSON envelope.",
+        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -289,9 +290,15 @@ fn format_actions_help() -> String {
         "Operations:",
         "  actions.logs                            Print raw run logs",
         "  actions.job_logs                        Print raw job logs",
+        "  actions.rerun                           Re-run a failed run or a single failed job",
         "",
         "Key params:",
         "  run_id, job_id",
+        "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "",
+        "Notes:",
+        "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
     .join("\n")
@@ -744,14 +751,6 @@ fn is_allowed_argv_exception(argv: &[String]) -> bool {
                 argv.get(1).map(String::as_str),
                 argv.get(2).map(String::as_str),
                 argv.get(3),
-            ),
-            (Some("hook"), Some("gwt-self-improvement-stop"), None)
-        )
-        || matches!(
-            (
-                argv.get(1).map(String::as_str),
-                argv.get(2).map(String::as_str),
-                argv.get(3),
                 argv.get(4),
                 argv.get(5),
             ),
@@ -776,9 +775,7 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message.push_str(
         "Example: {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}\n",
     );
-    message.push_str(
-        "Hook transport exceptions: gwtd hook event <Event>; gwtd hook gwt-self-improvement-stop\n",
-    );
+    message.push_str("Hook transport exceptions: gwtd hook event <Event>\n");
     message
 }
 
@@ -873,6 +870,20 @@ mod tests {
         // must point at the real `search` family (SPEC-1942 FR-109).
         assert_eq!(did_you_mean("serach"), Some("search"));
         assert_eq!(did_you_mean("baord"), Some("board"));
+    }
+
+    /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
+    /// and both of its target params, so an agent blocked on `gh run rerun`
+    /// can discover the sanctioned replacement from the help alone.
+    #[test]
+    fn actions_family_help_documents_rerun() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
     }
 
     #[test]
@@ -1077,6 +1088,10 @@ mod tests {
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",
+            // Issue #3883 AC-6: the only recovery for launches that are still
+            // running but no longer tracked. Undiscoverable here means the
+            // operator hand-edits the state file, which is the bug.
+            "issue.monitor.reconcile",
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             "launch_agent",
             "project_root",

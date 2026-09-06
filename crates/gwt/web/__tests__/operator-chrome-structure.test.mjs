@@ -1732,76 +1732,6 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   );
 });
 
-test("Improvement candidates refresh already-mounted inbox windows without workspace_state", () => {
-  const refreshBody = extractFunctionBody(appSource, "refreshMountedImprovementInboxWindows");
-  assert.match(
-    refreshBody,
-    /querySelectorAll\(\s*["']\.workspace-window\[data-preset="improvement"\]["']\s*,?\s*\)/,
-    "refresh helper must target already-mounted Improvement Inbox windows",
-  );
-  assert.match(
-    refreshBody,
-    /querySelector\(\s*["']\.window-body["']\s*\)/,
-    "refresh helper must remount the existing window body",
-  );
-  assert.match(
-    refreshBody,
-    /improvementInboxSurface\.mount\(\s*body\s*,\s*\{\s*improvement_candidates:\s*improvementCandidates\s*,?\s*\}/,
-    "refresh helper must pass the latest candidate snapshot into the mounted surface",
-  );
-
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  const caseIndex = receiveBody.indexOf('case "improvement_candidates":');
-  const revisionIndex = receiveBody.indexOf("improvementCandidatesRevision += 1;", caseIndex);
-  const refreshIndex = receiveBody.indexOf("refreshMountedImprovementInboxWindows();", caseIndex);
-  assert.ok(
-    caseIndex >= 0 && revisionIndex > caseIndex && refreshIndex > revisionIndex,
-    "improvement_candidates receive path must refresh mounted inbox windows after recording the new revision",
-  );
-});
-
-test("Improvement async replies are scoped to the active project", () => {
-  const scopeBody = extractFunctionBody(appSource, "improvementEventMatchesActiveProject");
-  assert.match(
-    scopeBody,
-    /event\?\.project_root/,
-    "improvement replies must carry their source project root",
-  );
-  assert.match(
-    scopeBody,
-    /activeProjectTab\(\)\?\.project_root/,
-    "improvement replies must compare against the active project",
-  );
-
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  for (const kind of [
-    "improvement_candidates",
-    "improvement_action_result",
-    "improvement_action_error",
-  ]) {
-    const start = receiveBody.indexOf(`case "${kind}":`);
-    const end = receiveBody.indexOf("case ", start + 5);
-    const arm = receiveBody.slice(start, end);
-    assert.match(
-      arm,
-      /improvementEventMatchesActiveProject\(event\)/,
-      `${kind} must ignore a delayed reply from another project`,
-    );
-  }
-
-  const renderBody = extractFunctionBody(appSource, "renderAppState");
-  assert.match(
-    renderBody,
-    /improvementCandidatesProjectRoot\s*!==\s*activeProjectRoot/,
-    "project switching must clear the prior project's candidate snapshot",
-  );
-  assert.match(
-    renderBody,
-    /improvementCandidates\s*=\s*\[\]/,
-    "stale candidate rows must not remain visible while the new project refresh loads",
-  );
-});
-
 test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
   assert.match(
@@ -3743,10 +3673,10 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
   // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
-  // Console / Mock / Profile / Improvement) must keep tracking the active theme via --color-surface so tabbed windows
+  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile|improvement)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3770,7 +3700,6 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
-    "surface-improvement",
     "surface-console",
     "surface-mock",
   ]) {
@@ -3792,7 +3721,6 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
-    "improvement",
     "console",
     "mock",
   ]) {
@@ -5788,9 +5716,12 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
       assert.ok(defined.has(m[1]), `notification center references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`);
     }
   }
-  // level → accent rim via state tokens
-  assert.match(frontendStyle, /\.notification-center__item\[data-level="error"\]\s*\{[^}]*--color-state-blocked/);
-  assert.match(frontendStyle, /\.notification-center__item\[data-level="warn"\]\s*\{[^}]*--color-state-needs-input/);
+  // Issue #3979 — triage rows: the rim is driven by the row's severity (which
+  // the level maps onto), not by the level itself, and the same severity also
+  // shapes the marker chip so color is never the only cue.
+  assert.match(frontendStyle, /\.notification-center__item\[data-severity="critical"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(frontendStyle, /\.notification-center__item\[data-severity="warning"\]\s*\{[^}]*--color-state-needs-input/);
+  assert.match(frontendStyle, /\.notification-center__severity\[data-severity="critical"\]\s*\{[^}]*border-radius/);
   assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
   // history scrolls inside the drawer body
   assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);

@@ -3038,16 +3038,12 @@ fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_offers_improvement_inbox() {
+fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"data-preset="improvement""#),
-        "expected Add window modal to expose the Improvement Inbox preset",
-    );
-    assert!(
-        html.contains("<strong>Improvement Inbox</strong>"),
-        "expected Improvement Inbox to have a visible preset label",
+        !html.contains(r#"data-preset="improvement""#),
+        "the retired Improvement Inbox preset must not appear in the Add window modal",
     );
 }
 
@@ -3493,7 +3489,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         ".surface-knowledge",
         ".surface-mock",
         ".surface-profile",
-        ".surface-improvement",
     ];
 
     for (anchor, role) in [
