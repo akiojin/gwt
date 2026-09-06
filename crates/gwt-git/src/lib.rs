@@ -9,6 +9,7 @@ pub mod branch_protection;
 pub mod commit;
 pub mod diff;
 pub mod issue;
+pub mod merged_branch_prune;
 pub mod migration;
 pub mod pr_status;
 pub mod refs;

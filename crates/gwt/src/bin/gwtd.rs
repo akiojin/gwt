@@ -280,7 +280,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Fetch GitHub Actions run/job logs via JSON envelope.",
+        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -290,9 +290,15 @@ fn format_actions_help() -> String {
         "Operations:",
         "  actions.logs                            Print raw run logs",
         "  actions.job_logs                        Print raw job logs",
+        "  actions.rerun                           Re-run a failed run or a single failed job",
         "",
         "Key params:",
         "  run_id, job_id",
+        "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "",
+        "Notes:",
+        "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
     .join("\n")
@@ -864,6 +870,20 @@ mod tests {
         // must point at the real `search` family (SPEC-1942 FR-109).
         assert_eq!(did_you_mean("serach"), Some("search"));
         assert_eq!(did_you_mean("baord"), Some("board"));
+    }
+
+    /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
+    /// and both of its target params, so an agent blocked on `gh run rerun`
+    /// can discover the sanctioned replacement from the help alone.
+    #[test]
+    fn actions_family_help_documents_rerun() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
     }
 
     #[test]

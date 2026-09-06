@@ -210,6 +210,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
+        "branch.prune_merged" | "branch.prune-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "branch.prune_merged",
+            )?;
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                // Deleting remote branches is not reversible from here, so an
+                // unqualified call only reports candidates (Issue #3970 AC-3).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
@@ -514,6 +528,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "actions.job_logs" | "actions.job-logs" => CliCommand::Actions(ActionsCommand::JobLogs {
             job_id: required_u64(params, "job_id")?,
+        }),
+        "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
+            target: actions_rerun_target(params)?,
         }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
@@ -1282,6 +1299,35 @@ fn reject_unknown_params(
     Ok(())
 }
 
+/// Issue #3515: `actions.rerun` takes `run_id` **or** `job_id`, never both.
+/// `failed_only` narrows a run rerun to its failed jobs and is meaningless for
+/// a job target, so passing it there is rejected instead of silently ignored.
+fn actions_rerun_target(
+    params: &Map<String, Value>,
+) -> Result<crate::cli::ActionsRerunTarget, CliParseError> {
+    let job_id = optional_u64(params, "job_id")?;
+    let run_id = optional_u64(params, "run_id")?;
+    match (run_id, job_id) {
+        (Some(_), Some(_)) => Err(CliParseError::InvalidValue {
+            flag: "job_id",
+            reason: "run_id and job_id are mutually exclusive",
+        }),
+        (None, Some(job_id)) => {
+            if optional_bool(params, "failed_only")?.is_some() {
+                return Err(CliParseError::InvalidValue {
+                    flag: "failed_only",
+                    reason: "only applies to a run_id target",
+                });
+            }
+            Ok(crate::cli::ActionsRerunTarget::Job { job_id })
+        }
+        (run_id, None) => Ok(crate::cli::ActionsRerunTarget::Run {
+            run_id: run_id.ok_or(CliParseError::MissingFlag("run_id"))?,
+            failed_only: optional_bool(params, "failed_only")?.unwrap_or(false),
+        }),
+    }
+}
+
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
     optional_u64(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
@@ -1775,6 +1821,52 @@ mod tests {
             CliParseError::UnknownSubcommand(name) => assert_eq!(name, "does.not.exist"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// Issue #3970 AC-3: an unqualified `branch.prune_merged` only reports.
+    #[test]
+    fn branch_prune_merged_defaults_to_a_dry_run() {
+        match ok("branch.prune_merged", json!({})) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_accepts_apply_base_and_branch_filter() {
+        match ok(
+            "branch.prune-merged",
+            json!({
+                "dry_run": false,
+                "base": "develop",
+                "branches": ["work/issue-1", "work/issue-2"],
+            }),
+        ) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("develop"));
+                assert_eq!(branches, vec!["work/issue-1", "work/issue-2"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_rejects_an_unknown_param() {
+        let error = err("branch.prune_merged", json!({ "dryrun": false }));
+        assert!(format!("{error}").contains("dryrun"), "{error}");
     }
 
     #[test]
@@ -3262,6 +3354,45 @@ mod tests {
         assert!(matches!(
             ok("actions.job-logs", json!({"job_id": 5})),
             CliCommand::Actions(ActionsCommand::JobLogs { .. })
+        ));
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: false
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5, "failed_only": true})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: true
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"job_id": 7})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Job { job_id: 7 }
+            })
+        );
+        assert!(matches!(
+            err("actions.rerun", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"run_id": 5, "job_id": 7})),
+            CliParseError::InvalidValue { flag: "job_id", .. }
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"job_id": 7, "failed_only": true})),
+            CliParseError::InvalidValue {
+                flag: "failed_only",
+                ..
+            }
         ));
         assert!(matches!(
             ok("index.status", json!({})),

@@ -94,6 +94,8 @@ pub trait CliEnv {
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary>;
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String>;
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
+    /// Issue #3515: re-run a failed run or job. Returns the outcome line.
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn run_internal_command(
         &mut self,
         args: &[String],
