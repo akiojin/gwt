@@ -63325,3 +63325,28 @@ fn unrelated_launch_failure_detail_is_not_rewritten_with_the_owner_hint() {
         "only the owner mismatch gains the recovery route"
     );
 }
+
+/// Issue #3489 AC-1: the owner-linkage regression above proves the binding
+/// install accepts the resolved config. That only matters because the install
+/// runs on the pre-PTY path — pin that ordering so a later refactor cannot move
+/// the refusal behind a started pane, where it would stop being a launch
+/// failure at all.
+#[test]
+fn launch_worker_installs_the_execution_binding_before_the_process_launch() {
+    let source = include_str!("launch.rs");
+    let worker = source
+        .split("fn spawn_agent_window_async_with_claim")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn close_work").next())
+        .expect("async launch worker body");
+    let install = worker
+        .find("set_execution_binding(Some(binding.clone()))?")
+        .expect("prepared continuation binding install");
+    let process_launch = worker
+        .find("let process_launch = ProcessLaunch {")
+        .expect("process launch construction");
+    assert!(
+        install < process_launch,
+        "the execution binding must be installed before the PTY process launch is built"
+    );
+}
