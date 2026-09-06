@@ -716,6 +716,16 @@ mod tests {
     /// runner, not for a lease that was never released (Issue #3937).
     const RELEASE_OBSERVATION_BUDGET: Duration = Duration::from_secs(5);
 
+    /// How long a freshly spawned sibling may stay invisible to
+    /// [`scan_foreign_heavy`] before the scan is treated as broken. A spawned
+    /// test binary is not scannable the instant `spawn` returns: the OS still
+    /// has to publish the process and resolve its working directory, and under
+    /// Windows default parallelism on a shared runner that window is not
+    /// bounded by any small constant (Issue #3404). This is a deadlock guard,
+    /// not the contract — the contract is that the scan eventually reports the
+    /// sibling, which the convergence loop below asserts.
+    const FOREIGN_SCAN_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
+
     /// Issue #3937: one test's private verification-lease root, plus the
     /// diagnosis a failure owes its reader.
     ///
@@ -1050,17 +1060,29 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(300));
 
         let siblings = vec![dunce::canonicalize(sibling.path()).unwrap()];
-        let found = scan_foreign_heavy(own.path(), &siblings);
+        let deadline = Instant::now() + FOREIGN_SCAN_OBSERVATION_BUDGET;
+        let (found, hit) = loop {
+            let found = scan_foreign_heavy(own.path(), &siblings);
+            if let Some(index) = found.iter().position(|process| process.pid == child.id()) {
+                break (found, index);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "the parked test binary (pid {}) must be reported within {:?}: {found:?}",
+                    child.id(),
+                    FOREIGN_SCAN_OBSERVATION_BUDGET
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let _ = child.kill();
         let _ = child.wait();
 
-        let hit = found
-            .iter()
-            .find(|process| process.pid == child.id())
-            .unwrap_or_else(|| panic!("the parked test binary must be reported: {found:?}"));
+        let hit = &found[hit];
         assert_eq!(hit.kind, HeavyKind::TargetBinary);
         assert_eq!(hit.worktree, siblings[0]);
         assert!(
