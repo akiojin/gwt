@@ -3514,9 +3514,14 @@ impl AppRuntime {
                         // `launch_feedback_context` (and therefore the same
                         // delivery id).
                         if !is_fresh_execution_launch && autonomous_handoff_delivery.is_none() {
-                            if let Some(issue_number) = launch_feedback_context
-                                .as_ref()
-                                .and_then(|context| context.issue_monitor_issue_number)
+                            // Issue #4041: a review dispatch window never
+                            // ACKs the Issue's launch — that would rebind
+                            // `launched_issues` away from the running
+                            // implementation window.
+                            if let Some(issue_number) =
+                                launch_feedback_context.as_ref().and_then(|context| {
+                                    context.issue_monitor_launch_binding_issue_number()
+                                })
                             {
                                 let delivery_id =
                                     launch_feedback_context.as_ref().and_then(|context| {
