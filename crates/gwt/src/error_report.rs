@@ -93,18 +93,11 @@ fn publish_recorded(record: &ErrorRecord, project_root: Option<&str>) {
     let Ok(payload) = serde_json::to_value(record) else {
         return;
     };
-    #[cfg(unix)]
-    {
-        let _ = crate::daemon_publisher::publish_event(
-            std::path::Path::new(project_root),
-            ERRORS_CHANNEL,
-            payload,
-        );
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (project_root, payload);
-    }
+    let _ = crate::daemon_publisher::publish_event(
+        std::path::Path::new(project_root),
+        ERRORS_CHANNEL,
+        payload,
+    );
 }
 
 #[cfg(test)]
