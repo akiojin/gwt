@@ -4577,7 +4577,7 @@ impl AppRuntime {
                     let mut status = monitor.status_view();
                     self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorStatus {
-                        status,
+                        status: Box::new(status),
                     }));
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                         items: monitor.inbox,
@@ -5775,7 +5775,9 @@ impl AppRuntime {
         }
         let mut status = monitor.status_view();
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
-        let status_event = BackendEvent::IssueMonitorStatus { status };
+        let status_event = BackendEvent::IssueMonitorStatus {
+            status: Box::new(status),
+        };
         let inbox_event = BackendEvent::IssueMonitorInbox {
             items: monitor.inbox,
         };
@@ -6429,7 +6431,9 @@ impl AppRuntime {
                             );
                             events.push(OutboundEvent::reply(
                                 client_id.clone(),
-                                BackendEvent::IssueMonitorStatus { status },
+                                BackendEvent::IssueMonitorStatus {
+                                    status: Box::new(status),
+                                },
                             ));
                         }
                         return events;

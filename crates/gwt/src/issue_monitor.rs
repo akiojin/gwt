@@ -863,6 +863,9 @@ pub struct IssueMonitorPrefs {
     /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #4037 AC-4: the update drain, if raised. Absent in pre-#4037 prefs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_drain: Option<IssueMonitorUpdateDrain>,
     /// Issue #3964 AC-4: the last stranded-generation reclaim result, kept
     /// durable so a reader that rebuilds the monitor from prefs (no live
     /// daemon) still sees it.
@@ -1021,6 +1024,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            update_drain: None,
             generation_reclaim: None,
             launched_issues: Vec::new(),
             last_scan_driver: None,
@@ -1908,6 +1912,31 @@ pub struct IssueMonitorProviderQuotaHold {
     pub evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
 }
 
+/// Issue #4037: who raised the update drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorUpdateDrainReason {
+    /// Raised by the update mechanism itself (#3906 drain-and-apply).
+    Auto,
+    /// Raised by an operator through `issue.monitor.config.set`.
+    Manual,
+}
+
+/// Issue #4037: a non-destructive admission pause for a pending gwt update.
+///
+/// While raised, the monitor hands out no new launch and prepares no
+/// `AcquireClaim` effect, exactly like a provider quota hold — but unlike
+/// `enabled:false` it never touches the launches already in flight, so the
+/// agents being drained stay attributable and are never relaunched after the
+/// restart. `version` is the gwt version that raised the drain and `since`
+/// the RFC3339 instant it was raised; re-raising keeps the original instant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorUpdateDrain {
+    pub version: String,
+    pub since: String,
+    pub reason: IssueMonitorUpdateDrainReason,
+}
+
 /// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorProviderQuotaPollerWindow {
@@ -2087,6 +2116,9 @@ pub struct IssueMonitorStatusView {
     pub autonomous_mode: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// Issue #4037 AC-6: the update drain, if raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_drain: Option<IssueMonitorUpdateDrain>,
     /// SPEC #3200 T-048/FR-033: per-issue autonomous lifecycle summary, so every
     /// decision boundary (phase, attempts, needs-human) is observable.
     #[serde(default)]
@@ -2158,6 +2190,9 @@ pub struct IssueMonitorAgentStatus {
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// Issue #4037 AC-6: the update drain, if raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_drain: Option<IssueMonitorUpdateDrain>,
     /// SPEC #3914 FR-009: pool summary (`auto (N): …` for two or more).
     #[serde(default)]
     pub launch_profile_summary: String,
@@ -2689,6 +2724,10 @@ pub struct IssueMonitorState {
     /// Issue #3923 AC-1: release fences per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #4037 AC-1: the update drain, held next to the provider holds it
+    /// shares its admission gate with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update_drain: Option<IssueMonitorUpdateDrain>,
     /// Issue #3964 AC-4: last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
@@ -4436,6 +4475,7 @@ impl IssueMonitorState {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            update_drain: None,
             generation_reclaim: None,
             launched_windows: BTreeMap::new(),
             last_scan_driver: None,
@@ -4488,6 +4528,7 @@ impl IssueMonitorState {
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
         state.enforce_provider_quota_hold_releases();
+        state.update_drain = prefs.update_drain.clone();
         state.generation_reclaim = prefs.generation_reclaim;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
@@ -4679,6 +4720,7 @@ impl IssueMonitorState {
             provider_quota_holds: self.provider_quota_holds.clone(),
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
+            update_drain: self.update_drain.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
             launched_issues: self
                 .launched_windows
@@ -6771,6 +6813,9 @@ impl IssueMonitorState {
         self.launch_profiles = disk.launch_profile_pool();
         self.launch_usage_threshold_percent = disk.launch_usage_threshold_percent;
         self.autonomous_mode = disk.autonomous_mode;
+        // Issue #4037: the drain is raised and cleared through controls that
+        // commit to disk, so disk owns it like the other config switches.
+        self.update_drain = disk.update_drain.clone();
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
@@ -7755,6 +7800,43 @@ impl IssueMonitorState {
         self.provider_quota_hold_at(now).is_some()
     }
 
+    /// Issue #4037 AC-2: the one admission gate every launch path consults.
+    /// A raised update drain holds admission exactly like a provider hold.
+    fn launch_admission_is_held_at(&self, now: &str) -> bool {
+        self.update_drain.is_some() || self.saved_profile_provider_is_held_at(now)
+    }
+
+    /// Issue #4037 AC-1: the update drain, if raised.
+    pub fn update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
+        self.update_drain.as_ref()
+    }
+
+    /// Issue #4037 AC-1 / AC-3: raise the update drain. Only admission changes;
+    /// every launch ledger and pending effect stays exactly as it is. An
+    /// already raised drain keeps its original `since`, `version`, and
+    /// `reason` so the drain duration stays observable across re-requests.
+    pub fn set_update_drain(
+        &mut self,
+        reason: IssueMonitorUpdateDrainReason,
+        version: &str,
+        now: &str,
+    ) {
+        if self.update_drain.is_some() {
+            return;
+        }
+        self.update_drain = Some(IssueMonitorUpdateDrain {
+            version: version.to_string(),
+            since: now.to_string(),
+            reason,
+        });
+    }
+
+    /// Issue #4037 AC-3: clear the update drain and resume admission. Nothing
+    /// else changes: launches that were in flight stay in flight.
+    pub fn clear_update_drain(&mut self) {
+        self.update_drain = None;
+    }
+
     pub fn status_view(&self) -> IssueMonitorStatusView {
         let now = format_rfc3339_utc(chrono::Utc::now());
         self.status_view_with_quota_hold(&now, self.provider_quota_hold_at(&now))
@@ -7798,6 +7880,8 @@ impl IssueMonitorState {
                 "auth_required".to_string()
             } else if quota_hold.is_some() {
                 "quota_hold".to_string()
+            } else if self.update_drain.is_some() {
+                "update_drain".to_string()
             } else if !self.active_launches.is_empty() {
                 if self
                     .active_launches
@@ -7833,6 +7917,7 @@ impl IssueMonitorState {
             ),
             autonomous_mode: self.autonomous_mode,
             quota_hold,
+            update_drain: self.update_drain.clone(),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
@@ -7915,6 +8000,7 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
+            update_drain: status.update_drain.clone(),
             launch_profile_summary: status.launch_profile_summary.clone(),
             launch_profile_candidates: status.launch_profile_candidates.clone(),
             usage_threshold_percent: status.usage_threshold_percent,
@@ -8274,7 +8360,7 @@ impl IssueMonitorState {
         matches!(
             payload,
             IssueMonitorEffectPayload::AcquireClaim { heartbeat_at, .. }
-                if self.saved_profile_provider_is_held_at(heartbeat_at)
+                if self.launch_admission_is_held_at(heartbeat_at)
         )
     }
 
@@ -8976,7 +9062,7 @@ impl IssueMonitorState {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected
             || self.active_launches.len() >= max_active
-            || self.saved_profile_provider_is_held_at(now)
+            || self.launch_admission_is_held_at(now)
         {
             return None;
         }
@@ -9135,7 +9221,7 @@ impl IssueMonitorState {
         // Issue #3683: expired claim blocks re-enter the queue before slots
         // are planned, so a lapsed claim can never starve its issue.
         self.requeue_expired_claim_blocks(now);
-        if !self.gui_connected || self.saved_profile_provider_is_held_at(now) {
+        if !self.gui_connected || self.launch_admission_is_held_at(now) {
             return Ok(0);
         }
         let (mut available, candidates) = self.claim_probe_plan(active_cap);
@@ -9221,7 +9307,7 @@ impl IssueMonitorState {
         self.requeue_expired_claim_blocks(now);
         let mut launches = Vec::new();
         let max_active = self.config.max_active.max(1).min(active_cap);
-        if max_active == 0 || self.saved_profile_provider_is_held_at(now) {
+        if max_active == 0 || self.launch_admission_is_held_at(now) {
             return launches;
         }
         while self.config.enabled && self.gui_connected && self.active_launches.len() < max_active {
@@ -12204,6 +12290,7 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
                 quota_hold: None,
+                update_drain: None,
                 launch_profile_summary: "configure before auto start".to_string(),
                 launch_profile_candidates: Vec::new(),
                 usage_threshold_percent: 80,
@@ -14223,6 +14310,236 @@ mod tests {
         assert!(all_held
             .next_launch_request("2026-08-22T04:00:01Z")
             .is_some());
+    }
+
+    /// Issue #4037 AC-1 / AC-3 / AC-4: `update_drain` is a non-destructive
+    /// admission pause. Raising and clearing it leaves every launch ledger
+    /// byte-identical (unlike `enabled:false`), it survives a prefs
+    /// round-trip, and pre-#4037 prefs without the field still load.
+    #[test]
+    fn update_drain_persists_without_touching_launch_state() {
+        let now = "2026-09-07T00:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 3,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 3,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42), issue(43), issue(44)], now);
+        let bound = monitor
+            .next_launch_request(now)
+            .expect("first launch is claimed");
+        monitor.complete_active_launch(bound.issue_number, "tab-1::agent-1");
+        let launching = monitor
+            .next_launch_request(now)
+            .expect("second launch stays Launching");
+        assert_ne!(bound.issue_number, launching.issue_number);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 3, |_| false),
+            1,
+            "the third slot holds a prepared AcquireClaim effect"
+        );
+        let before = monitor.prefs();
+        assert_eq!(before.launched_issues.len(), 1);
+        assert_eq!(before.launching_issues.len(), 1);
+        assert_eq!(before.pending_effects.len(), 1);
+        assert!(before.update_drain.is_none());
+
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.91.0", now);
+        assert_eq!(
+            monitor.update_drain(),
+            Some(&IssueMonitorUpdateDrain {
+                version: "9.91.0".to_string(),
+                since: now.to_string(),
+                reason: IssueMonitorUpdateDrainReason::Manual,
+            })
+        );
+        // Re-raising an already raised drain keeps the original instant.
+        monitor.set_update_drain(
+            IssueMonitorUpdateDrainReason::Auto,
+            "9.92.0",
+            "2026-09-07T00:10:00Z",
+        );
+        assert_eq!(
+            monitor.update_drain().map(|drain| drain.since.as_str()),
+            Some(now)
+        );
+        let mut held = monitor.prefs();
+        assert!(held.update_drain.is_some());
+        held.update_drain = None;
+        assert_eq!(
+            held, before,
+            "raising the drain must not change any other durable field"
+        );
+
+        let json = serde_json::to_string(&monitor.prefs()).expect("serialize prefs");
+        let restored: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload prefs");
+        assert_eq!(restored.update_drain, monitor.prefs().update_drain);
+        let reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
+        assert_eq!(reloaded.update_drain(), monitor.update_drain());
+        assert_eq!(
+            reloaded.active_issue_numbers(),
+            monitor.active_issue_numbers()
+        );
+
+        monitor.clear_update_drain();
+        assert!(monitor.update_drain().is_none());
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "clearing the drain must restore the exact pre-drain prefs"
+        );
+
+        let legacy: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":true,"max_active_agents":2,"priority_order":[]}"#)
+                .expect("pre-#4037 prefs load");
+        assert!(legacy.update_drain.is_none());
+    }
+
+    /// Issue #4037 AC-2: while the drain is raised, no launch is handed out
+    /// and no `AcquireClaim` effect is prepared or admitted — the queue is
+    /// preserved, and clearing the drain resumes admission.
+    #[test]
+    fn update_drain_stops_new_launches_and_claims_until_cleared() {
+        let now = "2026-09-07T00:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.91.0", now);
+
+        assert_eq!(monitor.next_launch_request(now), None);
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            0
+        );
+        assert_eq!(
+            monitor.try_prepare_claim_effects_with_probe_confirmed(
+                "host/session",
+                now,
+                1,
+                None,
+                |_| Ok::<ClaimProbeOutcome, std::convert::Infallible>(ClaimProbeOutcome::Claimable),
+            ),
+            Ok(0)
+        );
+        assert!(!monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            "drained-scan-proposal",
+            monitor.effect_authority_epoch(),
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: now.to_string(),
+                expires_at: "2026-09-07T00:30:00Z".to_string(),
+                launched_work_id: None,
+            },
+        )));
+        assert!(monitor.pending_effects().is_empty());
+        assert!(monitor.active_issue_numbers().is_empty());
+
+        monitor.clear_update_drain();
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1,
+            "clearing the drain resumes claim admission"
+        );
+    }
+
+    /// Issue #4037 AC-6: the drain is one structured projection in both the
+    /// agent and GUI status, and `state` reads `update_drain` after
+    /// `quota_hold` and before `active`.
+    #[test]
+    fn update_drain_is_projected_in_agent_and_gui_status() {
+        let now = "2026-09-07T00:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        let request = monitor.next_launch_request(now).expect("launch");
+        monitor.complete_active_launch(request.issue_number, "tab-1::agent-1");
+        assert_eq!(monitor.status_view_at(now).state, "active");
+
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.91.0", now);
+        let expected = serde_json::json!({
+            "version": "9.91.0",
+            "since": now,
+            "reason": "manual",
+        });
+        let agent_status =
+            serde_json::to_value(monitor.agent_status_at(now)).expect("serialize agent status");
+        let gui_status =
+            serde_json::to_value(monitor.status_view_at(now)).expect("serialize GUI status");
+        assert_eq!(agent_status.get("update_drain"), Some(&expected));
+        assert_eq!(gui_status.get("update_drain"), Some(&expected));
+        assert_eq!(
+            gui_status.get("state").and_then(serde_json::Value::as_str),
+            Some("update_drain"),
+            "the drain outranks the active launch in the state summary"
+        );
+
+        monitor.clear_update_drain();
+        let cleared =
+            serde_json::to_value(monitor.status_view_at(now)).expect("serialize GUI status");
+        assert!(cleared.get("update_drain").is_none());
+        assert_eq!(
+            cleared.get("state").and_then(serde_json::Value::as_str),
+            Some("active")
+        );
+
+        let mut held = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-08T00:00:00Z".to_string(),
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        held.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.92.0", now);
+        assert_eq!(
+            held.status_view_at(now).state,
+            "quota_hold",
+            "a provider hold still outranks the drain"
+        );
+        assert_eq!(
+            serde_json::to_value(held.status_view_at(now))
+                .expect("serialize")
+                .get("update_drain")
+                .and_then(|drain| drain.get("reason"))
+                .and_then(serde_json::Value::as_str),
+            Some("auto")
+        );
     }
 
     #[test]
