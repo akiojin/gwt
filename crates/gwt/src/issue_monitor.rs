@@ -9756,6 +9756,18 @@ impl IssueMonitorState {
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
+        // Issue #4041 AC-3: replacing a different bound window is an ownership
+        // hand-off the operator must be able to trace (the #4037 / #4033
+        // review windows took the implementation binding silently). Record
+        // it before the binding moves; never replace a binding in silence.
+        if let Some(previous_window_id) = self
+            .launched_windows
+            .get(&issue_number)
+            .filter(|previous| !issue_monitor_window_ids_match(previous, &window_id))
+            .cloned()
+        {
+            self.record_launch_binding_replacement(issue_number, &previous_window_id, &window_id);
+        }
         self.launched_windows
             .insert(issue_number, window_id.clone());
         // Issue #3883: the one place a launch is confirmed is the one place the
@@ -10091,6 +10103,39 @@ impl IssueMonitorState {
             );
         }
         readopted
+    }
+
+    /// Issue #4041 AC-3: durable, reasoned evidence that a launch ACK moved an
+    /// Issue's binding from one window to another. Shares the operator reset
+    /// audit (`requeue_audit`) so the PM reads every binding change in one
+    /// place; it is not a failure release and leaves `released_failures`
+    /// alone.
+    fn record_launch_binding_replacement(
+        &mut self,
+        issue_number: u64,
+        previous_window_id: &str,
+        window_id: &str,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let attempts = self.attempt_count(issue_number);
+        self.failure_release_version += 1;
+        let reason = format!(
+            "launch binding replaced: window {previous_window_id} -> {window_id} (Issue #4041)"
+        );
+        tracing::warn!(
+            issue_number,
+            previous_window_id,
+            window_id,
+            "issue monitor launch binding replaced by a new launch ACK"
+        );
+        self.merge_requeue_audit(std::iter::once(IssueMonitorReleasedFailure {
+            issue_number,
+            release_version: self.failure_release_version,
+            released_at: now,
+            reason,
+            attempts_before: attempts,
+            attempts_after: attempts,
+        }));
     }
 
     /// Put one still-running agent window back under slot accounting.
@@ -12964,6 +13009,104 @@ mod tests {
             .launched_issues
             .iter()
             .any(|entry| entry.issue_number == 43));
+    }
+
+    #[test]
+    fn running_binding_without_claim_is_never_relaunched_by_a_scan() {
+        // Issue #4041 AC-1 / AC-4 / AC-5: the local Running binding outranks
+        // the GitHub claim. A window that kept running while its claim lapsed
+        // (rate limit, TTL) must stay Launched, hold its slot, and never
+        // re-enter the queue or the claim plan.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                max_active: 3,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-impl".to_string(),
+                }],
+                // No `launched_claims` row: the claim is gone, the window is not.
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        assert_eq!(monitor.live_claim_id(42), None);
+
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-06T16:41:34Z");
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launched)
+        );
+        let (_, claimable) = monitor.claim_probe_plan(3);
+        assert!(
+            claimable.is_empty(),
+            "a bound Issue is never a claim candidate"
+        );
+        assert!(
+            monitor
+                .next_launch_request("2026-09-06T16:41:34Z")
+                .is_none(),
+            "a bound Issue is never relaunched"
+        );
+        let status = monitor.status_view();
+        assert_eq!(status.queue_len, 0);
+        assert_eq!(status.active_count, 1);
+        assert_eq!(status.active_issue_number, Some(42));
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-impl"), Some(42));
+    }
+
+    #[test]
+    fn replacing_a_bound_launch_window_is_recorded_in_requeue_audit() {
+        // Issue #4041 AC-3: a launch ACK that replaces a different bound
+        // window is an ownership hand-off (the #4037 / #4033 review windows
+        // took over the implementation binding silently). It must leave a
+        // reasoned audit entry naming both windows.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-impl".to_string(),
+                }],
+                launched_claims: BTreeMap::from([(42, "claim-impl".to_string())]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(monitor.prefs().requeue_audit.is_empty());
+
+        monitor.complete_active_launch(42, "tab-1::agent-review");
+
+        let audit = monitor.prefs().requeue_audit;
+        assert_eq!(
+            audit.len(),
+            1,
+            "a binding replacement is audited: {audit:?}"
+        );
+        assert_eq!(audit[0].issue_number, 42);
+        assert!(
+            audit[0].reason.contains("tab-1::agent-impl")
+                && audit[0].reason.contains("tab-1::agent-review"),
+            "the audit names the replaced and the replacing window: {}",
+            audit[0].reason
+        );
+        assert!(
+            monitor.prefs().released_failures.is_empty(),
+            "a binding replacement is not a failure release"
+        );
+
+        // Re-acking the same window is idempotent, not a replacement.
+        monitor.complete_active_launch(42, "tab-1::agent-review");
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+
+        // A first binding is not a replacement either.
+        let mut fresh = IssueMonitorState::new(IssueMonitorConfig::default());
+        fresh.complete_active_launch(43, "tab-1::agent-43");
+        assert!(fresh.prefs().requeue_audit.is_empty());
     }
 
     #[test]

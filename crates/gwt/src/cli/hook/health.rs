@@ -345,11 +345,30 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
     }
 }
 
+/// The binary a config at `path` is expected to fall back to.
+///
+/// #3567: the generator writes the canonical bare `gwtd` into a git-tracked
+/// config and the absolute install path into a machine-local one, so the
+/// auditor has to ask the same question. Auditing a tracked config against the
+/// running binary's absolute path reported "binary skew" forever, and startup
+/// self-heal answered it by rewriting the tracked file on every boot — the loop
+/// that kept every worktree permanently dirty.
+fn expected_hook_bin_for_config_path<'a>(
+    path: &Path,
+    configured: Option<&'a str>,
+) -> Option<&'a str> {
+    if gwt_skills::managed_hook_config_is_git_tracked(path) {
+        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
+    }
+    configured
+}
+
 fn audit_hook_json_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
     health: &mut ManagedHookHealth,
 ) {
+    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -425,6 +444,7 @@ fn audit_provider_hook_config(
     expected_hook_bin: Option<&str>,
     health: &mut ManagedHookHealth,
 ) {
+    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
