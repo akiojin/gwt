@@ -4261,14 +4261,25 @@ body {
   flex-direction: column;
   gap: var(--space-2);
 }
+/* Issue #3979 — triage row layout (user ruling 2026-09-05). The drawer is where
+   unhandled notices get CLEARED, not read, so a row leads with a severity
+   marker in a fixed gutter and keeps title / clock / dismiss on one scan line,
+   with the message wrapping underneath. Severity is encoded twice — the stripe
+   and marker color AND the marker's shape + glyph — so the list stays sortable
+   by eye in grayscale. None of it uses the accent (--color-focus-ring /
+   --color-state-active): the accent means "current", not "urgent". */
 .notification-center__item {
   display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: start;
-  gap: var(--space-1) var(--space-2);
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "severity headline time dismiss"
+    ".        message  message message";
+  align-items: center;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
-  border-left: 3px solid var(--color-border-strong);
+  border-left: var(--space-0-5) solid var(--color-border-strong);
   border-radius: var(--radius-md);
   color: var(--color-text);
   background: var(--color-surface-elevated);
@@ -4283,24 +4294,68 @@ body {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
-.notification-center__item[data-level="info"] {
-  border-left-color: var(--color-focus-ring);
-}
-.notification-center__item[data-level="success"] {
-  border-left-color: var(--color-state-active);
-}
-.notification-center__item[data-level="warn"] {
-  border-left-color: var(--color-state-needs-input);
-}
-.notification-center__item[data-level="error"] {
+/* Severity stripe. Critical also gets a heavier stripe so the two loud rows
+   are separable from the quiet ones by weight alone. */
+.notification-center__item[data-severity="critical"] {
+  border-left-width: var(--space-1);
   border-left-color: var(--color-state-blocked);
 }
-.notification-center__item[data-level="done"] {
-  border-left-color: var(--color-state-done);
+.notification-center__item[data-severity="warning"] {
+  border-left-color: var(--color-state-needs-input);
+}
+.notification-center__item[data-severity="good"] {
+  border-left-color: var(--color-state-success);
+}
+.notification-center__item[data-severity="neutral"] {
+  border-left-color: var(--color-border-strong);
+}
+/* Severity marker: one glyph in a chip whose SHAPE differs per severity
+   (sharp square → rounded square → circle → hollow circle), so the severity
+   survives grayscale, forced-colors and color-blind viewing. */
+.notification-center__severity {
+  grid-area: severity;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-5);
+  height: var(--space-5);
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+}
+.notification-center__severity[data-severity="critical"] {
+  border-radius: var(--radius-sm);
+  border-color: var(--color-state-blocked);
+  background: var(--color-state-blocked);
+  color: var(--color-canvas);
+}
+.notification-center__severity[data-severity="warning"] {
+  border-radius: var(--radius-md);
+  border-color: var(--color-state-needs-input);
+  background: color-mix(in oklab, var(--color-state-needs-input) 18%, transparent);
+  color: var(--color-state-needs-input);
+}
+.notification-center__severity[data-severity="good"] {
+  border-radius: var(--radius-pill);
+  border-color: var(--color-state-success);
+  background: color-mix(in oklab, var(--color-state-success) 16%, transparent);
+  color: var(--color-state-success);
+}
+.notification-center__severity[data-severity="neutral"] {
+  border-radius: var(--radius-pill);
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-muted);
 }
 .notification-center__title {
+  grid-area: headline;
+  min-width: 0;
   font-weight: 700;
   color: var(--color-text-strong);
+  overflow-wrap: anywhere;
 }
 .notification-center__count {
   margin-left: var(--space-1);
@@ -4308,8 +4363,15 @@ body {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
 }
+/* A resolved row is done being triaged: it keeps its place in the history but
+   its marker de-escalates to the quiet treatment. */
 .notification-center__item[data-resolved="true"] {
   opacity: 0.7;
+}
+.notification-center__item[data-resolved="true"] .notification-center__severity {
+  border-color: var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-disabled);
 }
 .notification-center__item[data-resolved="true"] .notification-center__title::after {
   content: " · resolved";
@@ -4317,20 +4379,22 @@ body {
   font-weight: 400;
 }
 .notification-center__message {
-  grid-column: 1 / -1;
+  grid-area: message;
+  align-self: start;
   color: var(--color-text-muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .notification-center__time {
-  grid-column: 1 / -1;
+  grid-area: time;
   color: var(--color-text-disabled);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
+  white-space: nowrap;
 }
 .notification-center__dismiss {
-  align-self: start;
+  grid-area: dismiss;
   width: var(--space-5);
   border: 0;
   background: transparent;
