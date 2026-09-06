@@ -20,8 +20,6 @@
 //! `launch-complete` notifications onto that broadcast primitive without
 //! changing the control queue's lossless contract.
 
-#![cfg(unix)]
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

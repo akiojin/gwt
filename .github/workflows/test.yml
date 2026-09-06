@@ -118,6 +118,15 @@ jobs:
       - name: Run agent process resolver caller contracts
         run: cargo test -p gwt --test agent_process_resolution_contract_test
         timeout-minutes: 15
+      - name: Run Windows runtime daemon named-pipe transport contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --lib cli::daemon::transport -- --test-threads=1
+          cargo test -p gwt --lib cli::daemon::client -- --test-threads=1
+          cargo test -p gwt --lib cli::daemon::tests -- --test-threads=1
+          cargo test -p gwt --lib daemon_subscriber -- --test-threads=1
+          cargo test -p gwt --lib process::tests -- --test-threads=1
+        timeout-minutes: 20
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15

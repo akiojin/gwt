@@ -16,8 +16,6 @@
 //! Future phases (H2-H4) will reuse the same primitive for runtime
 //! status, hook events, and launch lifecycle channels.
 
-#![cfg(unix)]
-
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -322,13 +320,7 @@ mod tests {
     }
 
     async fn wait_for_socket(path: &std::path::Path) {
-        for _ in 0..50 {
-            if path.exists() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("daemon socket never appeared at {}", path.display());
+        crate::cli::daemon::transport::wait_until_bound(path).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

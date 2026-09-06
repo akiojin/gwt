@@ -260,7 +260,6 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    #[cfg(unix)]
     if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(&project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
@@ -791,7 +790,6 @@ fn run_monitor_config_set<E: CliEnv>(
     Ok(0)
 }
 
-#[cfg(unix)]
 fn publish_monitor_config_set(
     project_root: &std::path::Path,
     payload: serde_json::Value,
@@ -799,22 +797,9 @@ fn publish_monitor_config_set(
     crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
 }
 
-#[cfg(not(unix))]
-fn publish_monitor_config_set(
-    _project_root: &std::path::Path,
-    _payload: serde_json::Value,
-) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
-    Err(
-        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-            "Issue Monitor daemon control is unavailable on this platform".to_string(),
-        ),
-    )
-}
-
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
 /// Monitor daemon's control channel. The daemon re-judges the raw verdict
 /// (SHA-bound) — this only transports it.
-#[cfg(unix)]
 fn run_monitor_review_verdict<E: CliEnv>(
     env: &mut E,
     issue_number: u64,
@@ -851,20 +836,6 @@ fn run_monitor_review_verdict<E: CliEnv>(
             1
         }
     }
-}
-
-#[cfg(not(unix))]
-fn run_monitor_review_verdict<E: CliEnv>(
-    _env: &mut E,
-    issue_number: u64,
-    _reviewed_sha: &str,
-    _verdict_raw: &str,
-    out: &mut String,
-) -> i32 {
-    out.push_str(&format!(
-        "review verdict publish unavailable on this platform (#{issue_number})\n"
-    ));
-    1
 }
 
 fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<IssueCommand, CliParseError> {

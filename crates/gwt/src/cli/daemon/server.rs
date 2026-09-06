@@ -1,10 +1,13 @@
-//! Tokio-based Unix-socket IPC server for the runtime daemon (SPEC-2077
-//! Phase 1 runtime layer).
+//! Tokio-based IPC server for the runtime daemon (SPEC-2077 Phase 1
+//! runtime layer). The transport is a Unix domain socket on Unix and a
+//! named pipe on Windows (Issue #3526, see [`super::transport`]).
 //!
 //! Foreground entry: caller blocks inside [`serve_blocking`] until the
-//! daemon receives `SIGINT` / `SIGTERM`, at which point the listener is
-//! dropped, the socket file is removed, and the persisted endpoint file
-//! is unlinked. Per-connection workers handle:
+//! daemon receives `SIGINT` / `SIGTERM` (Unix) or Ctrl-C / Ctrl-Break /
+//! console close / logoff / shutdown (Windows), at which point the
+//! listener is dropped, the socket file is removed (Unix; a named pipe
+//! vanishes with its process), and the persisted endpoint file is
+//! unlinked. Per-connection workers handle:
 //!
 //! 1. Read one newline-delimited [`IpcHandshakeRequest`] JSON line.
 //! 2. Validate against the in-memory endpoint with
@@ -21,8 +24,6 @@
 //! `handle_runtime_hook_event` / `handle_launch_complete` /
 //! `handle_shell_launch_complete` ownership across the IPC boundary
 //! (see SPEC-2077 plan.md Phase H1-H4).
-
-#![cfg(unix)]
 
 use std::{
     collections::VecDeque,
@@ -42,15 +43,17 @@ use gwt_core::daemon::{
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     runtime::Builder,
-    signal::unix::{signal, SignalKind},
     sync::{broadcast::error::RecvError, mpsc, Notify},
 };
 
 use super::broadcast::{
     BroadcastHub, IssueMonitorControlCompletion, IssueMonitorControlQueueError,
     IssueMonitorControlRequest,
+};
+use super::transport::{
+    bind_address_for_endpoint_path, cleanup_stale_bind, prepare_bind_parent, IpcListener,
+    IpcReadHalf, IpcStream,
 };
 
 const ACCEPT_BACKOFF_MS: u64 = 50;
@@ -94,13 +97,13 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     endpoint_path: PathBuf,
     writer: &mut W,
 ) -> Result<i32, SpecOpsError> {
-    let socket_path = derive_socket_path(&endpoint_path);
-    if let Err(err) = ensure_socket_parent(&socket_path) {
+    let socket_path = bind_address_for_endpoint_path(&endpoint_path);
+    if let Err(err) = prepare_bind_parent(&socket_path) {
         return Err(config_error(format!(
             "failed to prepare daemon socket directory: {err}"
         )));
     }
-    cleanup_stale_socket(&socket_path);
+    cleanup_stale_bind(&socket_path);
 
     let auth_token = uuid::Uuid::new_v4().to_string();
     let endpoint = DaemonEndpoint::new(
@@ -148,7 +151,7 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     // shutdown unbounded after the worker's own absolute-deadline cleanup.
     runtime.shutdown_timeout(DAEMON_RUNTIME_SHUTDOWN_TIMEOUT);
 
-    let _ = fs::remove_file(&socket_path);
+    cleanup_stale_bind(&socket_path);
     let _ = fs::remove_file(&endpoint_path);
 
     result
@@ -183,7 +186,7 @@ async fn run_server_with_shutdown_and_worker_config(
     monitor_config: crate::IssueMonitorConfig,
     operation_timeout: Duration,
 ) -> Result<i32, SpecOpsError> {
-    let listener = UnixListener::bind(&socket_path).map_err(|err| {
+    let mut listener = IpcListener::bind(&socket_path).map_err(|err| {
         config_error(format!(
             "failed to bind daemon socket {}: {err}",
             socket_path.display()
@@ -211,7 +214,7 @@ async fn run_server_with_shutdown_and_worker_config(
             }
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _addr)) => {
+                    Ok(stream) => {
                         let endpoint = Arc::clone(&endpoint);
                         let hub = hub.clone();
                         let connections = Arc::clone(&connections);
@@ -282,7 +285,10 @@ impl Drop for ConnectionGuard {
     }
 }
 
+#[cfg(unix)]
 fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
+    use tokio::signal::unix::{signal, SignalKind};
+
     let term = shutdown;
     tokio::spawn(async move {
         let mut sigterm = match signal(SignalKind::terminate()) {
@@ -302,6 +308,47 @@ fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
         tokio::select! {
             _ = sigterm.recv() => {}
             _ = sigint.recv() => {}
+        }
+        term.request();
+    });
+}
+
+/// Windows counterpart of the Unix signal watcher (Issue #3526 AC-5): every
+/// console control event that ends a user-session process — Ctrl-C,
+/// Ctrl-Break, console window close, logoff, and system shutdown — runs the
+/// same cooperative shutdown so the authority fence is revoked and the
+/// endpoint file is unlinked instead of leaking a stale registration.
+#[cfg(windows)]
+fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+
+    let term = shutdown;
+    tokio::spawn(async move {
+        macro_rules! install {
+            ($ctor:ident) => {
+                match $ctor() {
+                    Ok(signal) => signal,
+                    Err(err) => {
+                        tracing::warn!(
+                            "gwtd daemon: failed to install {} handler: {err}",
+                            stringify!($ctor)
+                        );
+                        return;
+                    }
+                }
+            };
+        }
+        let mut ctrl_c = install!(ctrl_c);
+        let mut ctrl_break = install!(ctrl_break);
+        let mut ctrl_close = install!(ctrl_close);
+        let mut ctrl_logoff = install!(ctrl_logoff);
+        let mut ctrl_shutdown = install!(ctrl_shutdown);
+        tokio::select! {
+            _ = ctrl_c.recv() => {}
+            _ = ctrl_break.recv() => {}
+            _ = ctrl_close.recv() => {}
+            _ = ctrl_logoff.recv() => {}
+            _ = ctrl_shutdown.recv() => {}
         }
         term.request();
     });
@@ -3223,7 +3270,7 @@ fn issue_monitor_gui_connected(hub: &BroadcastHub) -> bool {
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: IpcStream,
     endpoint: Arc<DaemonEndpoint>,
     hub: BroadcastHub,
     started_at: Instant,
@@ -3482,7 +3529,7 @@ async fn enqueue_issue_monitor_control(
 }
 
 async fn read_handshake(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    reader: &mut BufReader<IpcReadHalf>,
 ) -> Result<IpcHandshakeRequest, String> {
     let mut line = String::new();
     let n = reader
@@ -3538,28 +3585,16 @@ where
     Ok(())
 }
 
-fn derive_socket_path(endpoint_path: &Path) -> PathBuf {
-    endpoint_path.with_extension("sock")
-}
-
-fn ensure_socket_parent(socket_path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
-}
-
-fn cleanup_stale_socket(socket_path: &Path) {
-    if socket_path.exists() {
-        let _ = fs::remove_file(socket_path);
-    }
-}
-
 fn config_error(message: impl Into<String>) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message.into()))
 }
 
-#[cfg(test)]
+// The server fixtures below run fake `gh` shell scripts and raw Unix
+// streams. The transport-neutral server surface (bind / accept /
+// handshake / status / publish / subscribe) is covered on every host by
+// `super::client::tests`, `super::transport::tests`, and
+// `crate::daemon_subscriber::tests`.
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs::{self, OpenOptions},

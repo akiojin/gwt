@@ -2360,7 +2360,6 @@ impl AppRuntime {
         self.publish_issue_monitor_control(project_root, payload)
     }
 
-    #[cfg(unix)]
     fn publish_issue_monitor_control(
         &self,
         project_root: &Path,
@@ -2372,19 +2371,6 @@ impl AppRuntime {
             std::process::id(),
         );
         gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-    }
-
-    #[cfg(not(unix))]
-    fn publish_issue_monitor_control(
-        &self,
-        _project_root: &Path,
-        _payload: serde_json::Value,
-    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        Err(
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-                "Issue Monitor daemon control is unavailable on this platform".to_string(),
-            ),
-        )
     }
 
     fn claim_issue_monitor_launch_delivery(

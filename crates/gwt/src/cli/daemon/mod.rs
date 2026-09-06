@@ -1,8 +1,9 @@
 //! `gwtd daemon ...` family — long-running runtime daemon (SPEC-2077).
 //!
 //! - `mod.rs` (this file): argv parsing + dispatch + status reporting.
-//! - `server.rs`: tokio-based IPC listener (Unix domain socket today;
-//!   Windows named-pipe support is a follow-up).
+//! - `server.rs`: tokio-based IPC listener.
+//! - `transport.rs`: the platform transport behind the listener (Unix
+//!   domain socket on Unix, named pipe on Windows — Issue #3526).
 //!
 //! The contract layer (`gwt_core::daemon::*`) defines the on-disk endpoint
 //! file, handshake protocol, and `DaemonBootstrapAction`. `Start` honours
@@ -12,28 +13,22 @@
 //! [`gwt_core::daemon::DaemonEndpoint`], and
 //! enter the listen loop.
 
-#[cfg(unix)]
 pub(crate) mod broadcast;
-#[cfg(unix)]
 pub mod client;
-#[cfg(unix)]
 pub(crate) mod server;
+pub(crate) mod transport;
 
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::time::Duration;
 
 use gwt_core::daemon::{
-    resolve_bootstrap_action, DaemonBootstrapAction, DaemonStatus, RuntimeScope, RuntimeTarget,
-    DAEMON_PROTOCOL_VERSION,
+    resolve_bootstrap_action, ClientFrame, DaemonBootstrapAction, DaemonEndpoint, DaemonFrame,
+    DaemonStatus, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
 };
-#[cfg(unix)]
-use gwt_core::daemon::{ClientFrame, DaemonEndpoint, DaemonFrame};
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::{CliEnv, CliParseError, DaemonCommand};
 
-#[cfg(unix)]
 const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
@@ -151,7 +146,6 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
     }
 }
 
-#[cfg(unix)]
 fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonStatus, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -189,14 +183,6 @@ fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonStatus, Stri
     })
 }
 
-#[cfg(not(unix))]
-fn probe_daemon_endpoint(
-    _endpoint: &gwt_core::daemon::DaemonEndpoint,
-) -> Result<DaemonStatus, String> {
-    Err("probe not implemented on this platform".to_string())
-}
-
-#[cfg(unix)]
 fn subscribe_command<E: CliEnv>(
     env: &mut E,
     channels: Vec<String>,
@@ -293,21 +279,6 @@ fn subscribe_command<E: CliEnv>(
     })
 }
 
-#[cfg(not(unix))]
-fn subscribe_command<E: CliEnv>(
-    _env: &mut E,
-    _channels: Vec<String>,
-    _timeout_seconds: Option<u64>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    out.push_str(
-        "gwtd daemon subscribe: not implemented on this platform; \
-         subscribe support requires Unix domain sockets.\n",
-    );
-    Ok(2)
-}
-
-#[cfg(unix)]
 fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     match result {
         Ok(status) => format!(
@@ -320,15 +291,6 @@ fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     }
 }
 
-#[cfg(not(unix))]
-fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
-    match result {
-        Ok(_) => "ok".to_string(),
-        Err(err) => format!("failed:{err}"),
-    }
-}
-
-#[cfg(unix)]
 fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsError> {
     let scope = resolve_scope(env)?;
     let gwt_home = gwt_core::paths::gwt_home();
@@ -357,15 +319,6 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
             server::serve_blocking(scope, endpoint_path, env.stdout())
         }
     }
-}
-
-#[cfg(not(unix))]
-fn start_daemon<E: CliEnv>(_env: &mut E, out: &mut String) -> Result<i32, SpecOpsError> {
-    out.push_str(
-        "gwtd daemon start: long-running daemon mode is not yet implemented on this platform; \
-         use `gwt hook ...` synchronous dispatch.\n",
-    );
-    Ok(2)
 }
 
 // Liveness probe lives in `crate::process::is_process_alive` so the
@@ -459,13 +412,54 @@ mod tests {
         assert!(matches!(err, CliParseError::Usage));
     }
 
+    /// Issue #3526 AC-1 / AC-2: the daemon transport layer must compile on
+    /// every supported host. A crate-level Unix-only module gate or a
+    /// platform stub means Windows silently loses `daemon.start`,
+    /// `daemon.subscribe`, the status probe, and every daemon-backed
+    /// control publish. The needles are assembled at runtime so this test
+    /// does not match its own source text.
+    #[test]
+    fn daemon_modules_have_no_platform_gate_or_platform_stub() {
+        let sources = [
+            ("cli/daemon/mod.rs", include_str!("mod.rs")),
+            ("cli/daemon/server.rs", include_str!("server.rs")),
+            ("cli/daemon/client.rs", include_str!("client.rs")),
+            ("cli/daemon/broadcast.rs", include_str!("broadcast.rs")),
+            (
+                "daemon_publisher.rs",
+                include_str!("../../daemon_publisher.rs"),
+            ),
+            (
+                "daemon_subscriber.rs",
+                include_str!("../../daemon_subscriber.rs"),
+            ),
+            ("cli/issue.rs", include_str!("../issue.rs")),
+            ("cli/workspace.rs", include_str!("../workspace.rs")),
+            ("lib.rs", include_str!("../../lib.rs")),
+        ];
+        let module_gate = format!("#![cfg({})]", "unix");
+        let stubs = ["not implemented", "not yet implemented", "unavailable"]
+            .map(|prefix| format!("{prefix} on this {}", "platform"));
+        for (name, source) in sources {
+            assert!(
+                !source.contains(&module_gate),
+                "{name}: daemon module must not be gated to Unix"
+            );
+            for stub in &stubs {
+                assert!(
+                    !source.contains(stub.as_str()),
+                    "{name}: daemon surface must not carry the platform stub {stub:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn format_probe_result_err_includes_message() {
         let result: Result<DaemonStatus, String> = Err("connection refused".to_string());
         assert_eq!(format_probe_result(&result), "failed:connection refused");
     }
 
-    #[cfg(unix)]
     #[test]
     fn probe_daemon_endpoint_fails_for_unreachable_bind() {
         use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
@@ -502,9 +496,6 @@ mod tests {
             issue_monitor: None,
         };
         let formatted = format_probe_result(&Ok(status));
-        #[cfg(unix)]
         assert_eq!(formatted, "ok uptime=12s channels=2 connections=1");
-        #[cfg(not(unix))]
-        assert_eq!(formatted, "ok");
     }
 }

@@ -12,10 +12,8 @@ pub mod branch_list;
 pub mod cli;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
-#[cfg(unix)]
 pub mod daemon_publisher;
 pub mod daemon_runtime;
-#[cfg(unix)]
 pub mod daemon_subscriber;
 mod discussion_resume;
 pub mod file_content;

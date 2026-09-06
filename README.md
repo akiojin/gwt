@@ -225,12 +225,17 @@ the live endpoint for diagnostics. Without JSON operation `daemon.start`,
 multi-instance fan-out is inactive but local file-based state and
 the file watcher continue to work as before.
 
-Windows currently has no long-running daemon: JSON operation `daemon.start`
-exits with "not yet implemented", and managed hooks fall back to
-synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
-therefore unavailable on Windows pending follow-up work; JSON operation
-`daemon.status` still works there but always reports `stopped` until
-the named-pipe path lands.
+On Windows the same JSON operation `daemon.start` runs the daemon as a
+user-session process over a named pipe (`\\.\pipe\gwtd-<scope>-<hash>`,
+local clients only; the endpoint file under `~/.gwt` carries the auth
+token). `daemon.status`, `daemon.subscribe`, Issue Monitor controls, and
+multi-instance fan-out behave as on macOS / Linux. Stop it with Ctrl-C,
+Ctrl-Break, or by closing its console; logoff and shutdown also run the
+same cleanup. gwt does not install a Windows Service: the daemon only
+scans and claims — agent panes are still created by the GUI — so a
+service would not enable headless autonomous runs and would fight the
+per-user `~/.gwt` state. Headless autonomous execution is not a goal of
+the daemon.
 
 ## Agent Workflow
 
