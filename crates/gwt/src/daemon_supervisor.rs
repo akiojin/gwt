@@ -15,20 +15,22 @@
 //! thread, backoff schedule, or restart bookkeeping: calling it on the existing
 //! Issue Monitor tick both starts the daemon and replaces one that died.
 //!
-//! Windows has no daemon transport yet (`serve_blocking` is Unix-only), so
-//! [`DaemonEnsureOutcome::Unsupported`] is returned there until Issue #3526
-//! decides the Windows residency model.
+//! Issue #3526 settled the Windows residency model on the same shape: the
+//! daemon is a user-session child of the GUI (named-pipe transport), not a
+//! Windows Service — a service could not create agent panes anyway and
+//! would not share the per-user `~/.gwt` state. Only the child's signal
+//! delivery differs: Unix sends `SIGTERM` so the serve loop unlinks its
+//! socket, Windows terminates the child and relies on the liveness-driven
+//! endpoint / authority-fence recovery that every crash already needs.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
-};
-
-#[cfg(unix)]
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     process::Child,
-    sync::{Mutex, PoisonError},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, PoisonError,
+    },
 };
 
 /// What one [`DaemonSupervisor::ensure_running`] call did.
@@ -42,8 +44,6 @@ pub enum DaemonEnsureOutcome {
     /// published its endpoint yet. Starting another one here is what produces
     /// two drivers for one project.
     Starting { pid: u32 },
-    /// This platform has no daemon transport yet (Issue #3526).
-    Unsupported,
     /// Issue #4038 (AC-6): a live daemon of another gwt version serves this
     /// scope. It was asked to terminate; nothing is spawned until its
     /// descriptor is gone, so the next ensure tick starts the replacement.
@@ -76,7 +76,6 @@ pub fn daemon_spawn_request(gwtd_path: &Path, project_root: &Path) -> DaemonSpaw
 }
 
 /// Where one daemon child is being started.
-#[cfg(unix)]
 pub struct DaemonSpawnContext<'a> {
     pub project_root: &'a Path,
     /// The endpoint file this daemon is expected to publish. Also anchors the
@@ -85,7 +84,6 @@ pub struct DaemonSpawnContext<'a> {
     pub endpoint_path: &'a Path,
 }
 
-#[cfg(unix)]
 type DaemonSpawner = Box<dyn Fn(&DaemonSpawnContext<'_>) -> std::io::Result<Child> + Send + Sync>;
 
 /// Where a daemon child's stderr is captured.
@@ -109,7 +107,6 @@ pub fn daemon_stderr_log_path(endpoint_path: &Path) -> PathBuf {
 /// Production reads the real gwt home and the shared liveness probe; tests
 /// substitute a temporary home so the bookkeeping can be exercised without
 /// touching the user's runtime directory.
-#[cfg(unix)]
 pub struct DaemonEnsureInputs<'a> {
     pub gwt_home: PathBuf,
     pub is_process_alive: &'a dyn Fn(u32) -> bool,
@@ -128,9 +125,7 @@ pub struct DaemonEnsureInputs<'a> {
 /// after it has been reaped — the [`std::process::Child`] handle is the only
 /// thing that ever addresses the process.
 pub struct DaemonSupervisor {
-    #[cfg(unix)]
     spawn: DaemonSpawner,
-    #[cfg(unix)]
     children: Mutex<HashMap<PathBuf, Child>>,
     ensure_attempts: AtomicUsize,
 }
@@ -139,9 +134,7 @@ impl DaemonSupervisor {
     /// The production supervisor: starts real `gwtd` daemon children.
     pub fn gwtd() -> Self {
         Self {
-            #[cfg(unix)]
             spawn: Box::new(spawn_production_daemon),
-            #[cfg(unix)]
             children: Mutex::new(HashMap::new()),
             ensure_attempts: AtomicUsize::new(0),
         }
@@ -149,7 +142,6 @@ impl DaemonSupervisor {
 
     /// A supervisor with a caller-supplied child factory, for tests that need
     /// the bookkeeping without a real daemon process.
-    #[cfg(unix)]
     pub fn with_spawner(
         spawn: impl Fn(&DaemonSpawnContext<'_>) -> std::io::Result<Child> + Send + Sync + 'static,
     ) -> Self {
@@ -165,13 +157,11 @@ impl DaemonSupervisor {
     /// running on the developer's machine.
     pub fn disabled() -> Self {
         Self {
-            #[cfg(unix)]
             spawn: Box::new(|_context| {
                 Err(std::io::Error::other(
                     "this supervisor is disabled and never starts a daemon",
                 ))
             }),
-            #[cfg(unix)]
             children: Mutex::new(HashMap::new()),
             ensure_attempts: AtomicUsize::new(0),
         }
@@ -186,7 +176,6 @@ impl DaemonSupervisor {
 
     /// Make sure a runtime daemon is serving `project_root`, starting one if
     /// it is missing or has died.
-    #[cfg(unix)]
     pub fn ensure_running(&self, project_root: &Path) -> Result<DaemonEnsureOutcome, String> {
         let result = self.ensure_running_with(
             project_root,
@@ -210,15 +199,6 @@ impl DaemonSupervisor {
         result
     }
 
-    #[cfg(not(unix))]
-    pub fn ensure_running(&self, _project_root: &Path) -> Result<DaemonEnsureOutcome, String> {
-        // `crates/gwt/src/cli/daemon/server.rs` is `#![cfg(unix)]`; there is no
-        // process to start here until Issue #3526 settles Windows residency.
-        self.ensure_attempts.fetch_add(1, Ordering::SeqCst);
-        Ok(DaemonEnsureOutcome::Unsupported)
-    }
-
-    #[cfg(unix)]
     pub fn ensure_running_with(
         &self,
         project_root: &Path,
@@ -298,7 +278,6 @@ impl DaemonSupervisor {
     /// Whether a daemon child started by this supervisor is still running for
     /// `project_root`. Reaps first, so a child that has already exited reports
     /// `false` instead of lingering as a zombie.
-    #[cfg(unix)]
     pub fn has_live_child_for(&self, project_root: &Path, gwt_home: &Path) -> bool {
         use gwt_core::daemon::{RuntimeScope, RuntimeTarget};
 
@@ -316,13 +295,12 @@ impl DaemonSupervisor {
     /// in the endpoint contract compares `daemon_version`, so a surviving
     /// daemon from a previous build would be reused after an update. Stopping
     /// the ones we own keeps exactly one, version-matched driver per project.
-    #[cfg(unix)]
     pub fn shutdown(&self) {
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
         for (endpoint_path, mut child) in children.drain() {
             // SIGTERM lets the serve loop unlink its socket and endpoint file;
             // `Child::kill` sends SIGKILL and would leave both behind.
-            terminate_gracefully(&child);
+            terminate_gracefully(&mut child);
             if let Err(error) = child.wait() {
                 tracing::warn!(
                     %error,
@@ -332,9 +310,6 @@ impl DaemonSupervisor {
             }
         }
     }
-
-    #[cfg(not(unix))]
-    pub fn shutdown(&self) {}
 }
 
 impl Default for DaemonSupervisor {
@@ -354,7 +329,6 @@ impl std::fmt::Debug for DaemonSupervisor {
 
 /// Drop a finished child from the table and return the pid of the one that is
 /// still running, if any.
-#[cfg(unix)]
 fn reap_finished_child(
     children: &mut HashMap<PathBuf, Child>,
     endpoint_path: &Path,
@@ -390,7 +364,6 @@ fn reap_finished_child(
 
 /// The last non-empty line the exited daemon wrote, so the warning that
 /// announces the exit also carries the reason instead of only a status code.
-#[cfg(unix)]
 fn last_daemon_stderr_line(endpoint_path: &Path) -> Option<String> {
     const MAX_REPORTED_BYTES: usize = 4096;
     let captured = std::fs::read_to_string(daemon_stderr_log_path(endpoint_path)).ok()?;
@@ -407,7 +380,7 @@ fn last_daemon_stderr_line(endpoint_path: &Path) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn terminate_gracefully(child: &Child) {
+fn terminate_gracefully(child: &mut Child) {
     // The child has not been reaped yet (we still hold its handle), so the pid
     // cannot have been recycled by another process.
     terminate_pid_gracefully(child.id());
@@ -428,10 +401,49 @@ fn terminate_pid_gracefully(pid: u32) {
     }
 }
 
+/// Windows has no cross-process cooperative signal for a windowless child
+/// (console control events need a shared console, which a `CREATE_NO_WINDOW`
+/// child does not have), so the supervisor terminates the daemon outright.
+/// The endpoint descriptor and authority fence it leaves behind are exactly
+/// what a crashed daemon leaves, and both are reclaimed by the liveness
+/// probes in `resolve_bootstrap_action` and the fence recovery (Issue #3526).
+#[cfg(windows)]
+fn terminate_gracefully(child: &mut Child) {
+    if let Err(error) = child.kill() {
+        tracing::warn!(pid = child.id(), %error, "failed to terminate a runtime daemon");
+    }
+}
+
+/// Issue #4038 (AC-6): Windows counterpart for a stale-version daemon this
+/// GUI did not spawn (no `Child` handle). Terminated outright like
+/// [`terminate_gracefully`]; the descriptor and fence it leaves behind are
+/// reclaimed by the same liveness-driven recovery a crashed daemon needs.
+#[cfg(windows)]
+fn terminate_pid_gracefully(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    match std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::warn!(
+            pid,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "failed to terminate a stale-version runtime daemon"
+        ),
+        Err(error) => tracing::warn!(
+            pid,
+            %error,
+            "failed to invoke taskkill for a stale-version runtime daemon"
+        ),
+    }
+}
+
 /// Start a real `gwtd` daemon for one project.
-#[cfg(unix)]
 fn spawn_production_daemon(context: &DaemonSpawnContext<'_>) -> std::io::Result<Child> {
-    use std::{io::Write, os::unix::process::CommandExt, process::Stdio};
+    use std::{io::Write, process::Stdio};
 
     use gwt_core::process::{resolved_command, ProcessPlanRequest};
 
@@ -453,18 +465,25 @@ fn spawn_production_daemon(context: &DaemonSpawnContext<'_>) -> std::io::Result<
     // Go through the shared resolver rather than `Command::new` so the daemon
     // child gets the same executable resolution and window-hiding rules as
     // every other process gwt starts (Issues #3290, #3293).
-    let mut child = resolved_command(
+    let mut command = resolved_command(
         ProcessPlanRequest::new(&request.program).current_dir(&request.current_dir),
     )
-    .map_err(|error| std::io::Error::other(error.to_string()))?
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::from(stderr_log))
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_log));
     // Leave the launcher's process group. A daemon that shares it dies
     // with any signal aimed at the foreground job — which is how the
     // manually started daemons observed in Issue #3633 kept vanishing.
-    .process_group(0)
-    .spawn()?;
+    // Windows children already run under `CREATE_NO_WINDOW` through
+    // `resolved_command`, so no console signal can reach them.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
 
     // gwtd's only sanctioned non-hook transport is one newline-delimited
     // stdin envelope; argv invocations are refused with exit 2.
@@ -516,7 +535,6 @@ mod tests {
     /// Issue #3633 AC-7: the recurrence guard for the spawn subject itself.
     /// #3505 was closed while no production code path started a daemon, so the
     /// regression to catch is "the subject degraded back into a no-op".
-    #[cfg(unix)]
     #[test]
     fn the_production_spawner_starts_a_real_gwtd_daemon() {
         let spawner = supervisor_source_between("fn spawn_production_daemon", "\n#[cfg(test)]");
@@ -537,7 +555,6 @@ mod tests {
     /// The exit warning is only useful if it carries the reason. A daemon that
     /// dies during bind writes one diagnostic line and nothing else, and that
     /// line is the whole difference between "it exited" and a diagnosis.
-    #[cfg(unix)]
     #[test]
     fn the_exit_reason_is_the_last_thing_the_daemon_managed_to_say() {
         let temp = tempfile::TempDir::new().expect("tempdir");
@@ -569,7 +586,6 @@ mod tests {
 
     /// A daemon that logs for weeks must not turn one warning into a
     /// multi-megabyte line.
-    #[cfg(unix)]
     #[test]
     fn a_large_diagnostic_log_still_reports_only_its_last_line() {
         let temp = tempfile::TempDir::new().expect("tempdir");

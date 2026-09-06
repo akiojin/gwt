@@ -1,10 +1,13 @@
-//! Tokio-based Unix-socket IPC server for the runtime daemon (SPEC-2077
-//! Phase 1 runtime layer).
+//! Tokio-based IPC server for the runtime daemon (SPEC-2077 Phase 1
+//! runtime layer). The transport is a Unix domain socket on Unix and a
+//! named pipe on Windows (Issue #3526, see `super::transport`).
 //!
 //! Foreground entry: caller blocks inside [`serve_blocking`] until the
-//! daemon receives `SIGINT` / `SIGTERM`, at which point the listener is
-//! dropped, the socket file is removed, and the persisted endpoint file
-//! is unlinked. Per-connection workers handle:
+//! daemon receives `SIGINT` / `SIGTERM` (Unix) or Ctrl-C / Ctrl-Break /
+//! console close / logoff / shutdown (Windows), at which point the
+//! listener is dropped, the socket file is removed (Unix; a named pipe
+//! vanishes with its process), and the persisted endpoint file is
+//! unlinked. Per-connection workers handle:
 //!
 //! 1. Read one newline-delimited [`IpcHandshakeRequest`] JSON line.
 //! 2. Validate against the in-memory endpoint with
@@ -22,8 +25,6 @@
 //! `handle_shell_launch_complete` ownership across the IPC boundary
 //! (see SPEC-2077 plan.md Phase H1-H4).
 
-#![cfg(unix)]
-
 use std::{
     collections::{HashSet, VecDeque},
     fs, io,
@@ -38,20 +39,21 @@ use std::{
 use gwt_core::daemon::{
     persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
     DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
-    RuntimeScope, DAEMON_PROTOCOL_VERSION, MAX_UNIX_SOCKET_PATH_LEN,
+    RuntimeScope, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     runtime::Builder,
-    signal::unix::{signal, SignalKind},
     sync::{broadcast::error::RecvError, mpsc, Notify},
 };
 
 use super::broadcast::{
     BroadcastHub, IssueMonitorControlCompletion, IssueMonitorControlQueueError,
     IssueMonitorControlRequest,
+};
+use super::transport::{
+    bind_is_served, cleanup_stale_bind, prepare_bind_parent, IpcListener, IpcReadHalf, IpcStream,
 };
 
 const ACCEPT_BACKOFF_MS: u64 = 50;
@@ -63,7 +65,7 @@ const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     /// Per-test prefs budget (Issue #4033).
     ///
@@ -77,12 +79,12 @@ thread_local! {
 }
 
 /// Pin the prefs budget for the current test thread until dropped.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct ScopedIssueMonitorPrefsTimeout {
     previous: Option<Duration>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl ScopedIssueMonitorPrefsTimeout {
     fn set(timeout: Duration) -> Self {
         Self {
@@ -92,7 +94,7 @@ impl ScopedIssueMonitorPrefsTimeout {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for ScopedIssueMonitorPrefsTimeout {
     fn drop(&mut self) {
         ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(|current| current.set(self.previous));
@@ -107,11 +109,11 @@ impl Drop for ScopedIssueMonitorPrefsTimeout {
 /// filesystem happened to be that minute, and a loaded CI host silently
 /// converts a passing state machine into a failing one.
 fn issue_monitor_prefs_timeout() -> Duration {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(timeout) = ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
         return timeout;
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
         .filter(|timeout| *timeout <= 60_000)
@@ -202,6 +204,7 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
         "gwtd daemon start: bind={socket}",
         socket = socket_path.display()
     );
+    #[cfg(unix)]
     if socket.placement == DaemonSocketPlacement::Shortened {
         // The socket is not where an operator would look for it, so say
         // why it moved.
@@ -210,9 +213,11 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
             "gwtd daemon start: socket shortened; {colocated} exceeds this platform's \
              {limit}-byte sun_path limit",
             colocated = endpoint_path.with_extension("sock").display(),
-            limit = MAX_UNIX_SOCKET_PATH_LEN
+            limit = gwt_core::daemon::MAX_UNIX_SOCKET_PATH_LEN
         );
     }
+    #[cfg(windows)]
+    debug_assert_eq!(socket.placement, DaemonSocketPlacement::Colocated);
     let _ = writeln!(
         writer,
         "gwtd daemon start: pid={pid} version={version}",
@@ -242,8 +247,8 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     // daemon may have replaced them while we were serving. Our listener is
     // already dropped, so a socket that still accepts connections belongs
     // to someone else.
-    if std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
-        let _ = fs::remove_file(&socket_path);
+    if !bind_is_served(&socket_path.to_string_lossy()) {
+        cleanup_stale_bind(&socket_path);
     }
     if endpoint_descriptor_describes(&endpoint_path, &endpoint) {
         let _ = fs::remove_file(&endpoint_path);
@@ -281,7 +286,7 @@ async fn run_server_with_shutdown_and_worker_config(
     monitor_config: crate::IssueMonitorConfig,
     operation_timeout: Duration,
 ) -> Result<i32, SpecOpsError> {
-    let listener = UnixListener::bind(&socket_path).map_err(|err| {
+    let mut listener = IpcListener::bind(&socket_path).map_err(|err| {
         config_error(format!(
             "failed to bind daemon socket {}: {err}",
             socket_path.display()
@@ -319,7 +324,7 @@ async fn run_server_with_shutdown_and_worker_config(
             }
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _addr)) => {
+                    Ok(stream) => {
                         let endpoint = Arc::clone(&endpoint);
                         let hub = hub.clone();
                         let connections = Arc::clone(&connections);
@@ -399,7 +404,10 @@ impl Drop for ConnectionGuard {
     }
 }
 
+#[cfg(unix)]
 fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
+    use tokio::signal::unix::{signal, SignalKind};
+
     let term = shutdown;
     tokio::spawn(async move {
         let mut sigterm = match signal(SignalKind::terminate()) {
@@ -424,7 +432,48 @@ fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
     });
 }
 
-#[cfg(test)]
+/// Windows counterpart of the Unix signal watcher (Issue #3526 AC-5): every
+/// console control event that ends a user-session process — Ctrl-C,
+/// Ctrl-Break, console window close, logoff, and system shutdown — runs the
+/// same cooperative shutdown so the authority fence is revoked and the
+/// endpoint file is unlinked instead of leaking a stale registration.
+#[cfg(windows)]
+fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+
+    let term = shutdown;
+    tokio::spawn(async move {
+        macro_rules! install {
+            ($ctor:ident) => {
+                match $ctor() {
+                    Ok(signal) => signal,
+                    Err(err) => {
+                        tracing::warn!(
+                            "gwtd daemon: failed to install {} handler: {err}",
+                            stringify!($ctor)
+                        );
+                        return;
+                    }
+                }
+            };
+        }
+        let mut ctrl_c = install!(ctrl_c);
+        let mut ctrl_break = install!(ctrl_break);
+        let mut ctrl_close = install!(ctrl_close);
+        let mut ctrl_logoff = install!(ctrl_logoff);
+        let mut ctrl_shutdown = install!(ctrl_shutdown);
+        tokio::select! {
+            _ = ctrl_c.recv() => {}
+            _ = ctrl_break.recv() => {}
+            _ = ctrl_close.recv() => {}
+            _ = ctrl_logoff.recv() => {}
+            _ = ctrl_shutdown.recv() => {}
+        }
+        term.request();
+    });
+}
+
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_worker_with_config(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -442,18 +491,18 @@ fn spawn_issue_monitor_worker_with_config(
 
 #[derive(Clone, Default)]
 struct IssueMonitorWorkerTestHooks {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Default)]
 struct IssueMonitorScanConcurrencyProbe {
     active: AtomicUsize,
     overlap_observed: AtomicBool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl IssueMonitorScanConcurrencyProbe {
     fn enter(self: &Arc<Self>) -> IssueMonitorScanConcurrencyGuard {
         if self.active.fetch_add(1, Ordering::AcqRel) > 0 {
@@ -469,19 +518,19 @@ impl IssueMonitorScanConcurrencyProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct IssueMonitorScanConcurrencyGuard {
     probe: Arc<IssueMonitorScanConcurrencyProbe>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for IssueMonitorScanConcurrencyGuard {
     fn drop(&mut self) {
         self.probe.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_worker_with_config_and_scan_probe(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -1195,7 +1244,7 @@ impl IssueMonitorControlLaneGuard {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn new_with_authority_without_lease(
         hub: BroadcastHub,
         grant_lane_open: Arc<AtomicBool>,
@@ -1321,7 +1370,7 @@ fn issue_monitor_shutdown_revoke_marker_path(prefs_path: &Path) -> PathBuf {
     crate::issue_monitor_authority_fence_path(prefs_path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn persist_issue_monitor_shutdown_revoke_marker(prefs_path: &Path) -> io::Result<()> {
     crate::persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path)
 }
@@ -1664,7 +1713,7 @@ struct PendingIssueMonitorAuthorityControls {
 }
 
 impl PendingIssueMonitorAuthorityControls {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn after_failure(control: IssueMonitorControl) -> Self {
         Self::after_accepted_failure(AcceptedIssueMonitorControl::new(control), None)
     }
@@ -1697,7 +1746,7 @@ impl PendingIssueMonitorAuthorityControls {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn push(&mut self, control: IssueMonitorControl) {
         self.push_accepted_with_completion(AcceptedIssueMonitorControl::new(control), None);
     }
@@ -1718,7 +1767,7 @@ impl PendingIssueMonitorAuthorityControls {
             });
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn front(&self) -> Option<&IssueMonitorControl> {
         self.controls.front().map(|entry| &entry.accepted.control)
     }
@@ -2074,7 +2123,7 @@ fn try_apply_typed_issue_monitor_failure(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn apply_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
@@ -2310,7 +2359,7 @@ fn rebase_issue_monitor_control_candidate(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn apply_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2324,7 +2373,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn try_apply_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2337,7 +2386,7 @@ fn try_apply_issue_monitor_control_with_disk_migration(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn try_apply_issue_monitor_control_with_disk_migration_observed(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2857,7 +2906,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn scan_issue_monitor_once(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2881,7 +2930,7 @@ async fn scan_issue_monitor_once(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_scan(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2923,12 +2972,12 @@ fn spawn_issue_monitor_scan_with_deadline(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let _scan_concurrency_guard = test_hooks
             .scan_concurrency_probe
             .as_ref()
             .map(IssueMonitorScanConcurrencyProbe::enter);
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
@@ -2968,7 +3017,7 @@ fn scan_failure_fallback(
 /// Test-only compatibility seam that scans once and persists the resulting
 /// state. Production worker scans are supervised by the revisioned single-flight
 /// driver, which persists only a result whose captured revision is still current.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn scan_and_persist_issue_monitor(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -3116,7 +3165,7 @@ fn accept_completed_issue_monitor_scan(
 /// to the remote executor. A caller that receives `Some` therefore has a
 /// durable `(effect_id, authority_epoch, attempt)` receipt to reconcile after a
 /// crash or outcome-ambiguous command.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn fence_next_issue_monitor_effect(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -3225,7 +3274,7 @@ struct IssueMonitorEffectPermitToken {
 }
 
 impl IssueMonitorEffectPermitToken {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn always_open() -> Self {
         Self {
             generation_open: Arc::new(AtomicBool::new(true)),
@@ -3324,7 +3373,7 @@ fn spawn_issue_monitor_effect(
 ) -> InFlightIssueMonitorEffect {
     let handle = tokio::task::spawn_blocking(move || {
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if let (Some(started), Some(release)) = (
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_STARTED"),
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_RELEASE"),
@@ -3534,7 +3583,7 @@ fn issue_monitor_http_client(scope: &RuntimeScope) -> Result<HttpIssueClient, St
 fn issue_monitor_http_client_with_repository(
     scope: &RuntimeScope,
 ) -> Result<(HttpIssueClient, gwt_github::client::RepositoryIdentity), String> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(marker) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_HTTP_CLIENT_MARKER") {
         let _ = fs::write(marker, b"attempted");
     }
@@ -4346,7 +4395,7 @@ fn issue_monitor_gui_connected(hub: &BroadcastHub) -> bool {
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: IpcStream,
     endpoint: Arc<DaemonEndpoint>,
     hub: BroadcastHub,
     started_at: Instant,
@@ -4640,7 +4689,7 @@ async fn enqueue_issue_monitor_control(
 }
 
 async fn read_handshake(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    reader: &mut BufReader<IpcReadHalf>,
 ) -> Result<IpcHandshakeRequest, String> {
     let mut line = String::new();
     let n = reader
@@ -4697,25 +4746,19 @@ where
 }
 
 fn ensure_socket_parent(socket_path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
+    prepare_bind_parent(socket_path)
 }
 
 /// Refuse to start when a live daemon still answers on `socket_path`;
 /// remove the socket file only when nothing accepts connections on it.
 fn ensure_socket_not_served(socket_path: &Path) -> Result<(), SpecOpsError> {
-    if !socket_path.exists() {
-        return Ok(());
-    }
-    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+    if bind_is_served(&socket_path.to_string_lossy()) {
         return Err(config_error(format!(
             "daemon socket {} is already served by a live daemon; refusing duplicate start",
             socket_path.display()
         )));
     }
-    let _ = fs::remove_file(socket_path);
+    cleanup_stale_bind(socket_path);
     Ok(())
 }
 
@@ -4848,7 +4891,12 @@ fn config_error(message: impl Into<String>) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message.into()))
 }
 
-#[cfg(test)]
+// The server fixtures below run fake `gh` shell scripts and raw Unix
+// streams. The transport-neutral server surface (bind / accept /
+// handshake / status / publish / subscribe) is covered on every host by
+// `super::client::tests`, `super::transport::tests`, and
+// `crate::daemon_subscriber::tests`.
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs::{self, OpenOptions},
@@ -6162,7 +6210,14 @@ exit 0
                 let connections = Arc::clone(&connections);
                 handlers.spawn(async move {
                     let guard = ConnectionGuard::new(connections);
-                    handle_connection(stream, endpoint, hub, Instant::now(), &guard).await
+                    handle_connection(
+                        super::IpcStream::Unix(stream),
+                        endpoint,
+                        hub,
+                        Instant::now(),
+                        &guard,
+                    )
+                    .await
                 });
             }
             while let Some(result) = handlers.join_next().await {

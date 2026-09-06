@@ -981,13 +981,11 @@ fn spawn_workspace_projection_watcher(
 /// returns `None` and the entry stays unfilled. The next time
 /// [`Self::sync`] runs (after a project tab change) we retry the
 /// resolve, so a daemon that comes up later is picked up automatically.
-#[cfg(unix)]
 #[derive(Default)]
 struct BoardDaemonSubscriberRegistry {
     subscribers: HashMap<PathBuf, gwt::daemon_subscriber::DaemonSubscriber>,
 }
 
-#[cfg(unix)]
 impl BoardDaemonSubscriberRegistry {
     fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
         let mut active_roots = HashSet::new();
@@ -1011,7 +1009,6 @@ impl BoardDaemonSubscriberRegistry {
     }
 }
 
-#[cfg(unix)]
 fn spawn_board_daemon_subscriber(
     project_root: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
@@ -1080,7 +1077,6 @@ fn spawn_board_daemon_subscriber(
     )
 }
 
-#[cfg(unix)]
 fn daemon_subscriber_channels() -> Vec<String> {
     vec![
         "board".to_string(),
@@ -1093,7 +1089,6 @@ fn daemon_subscriber_channels() -> Vec<String> {
     ]
 }
 
-#[cfg(unix)]
 fn daemon_broadcast_user_event(
     channel: &str,
     payload: serde_json::Value,
@@ -1128,7 +1123,6 @@ fn daemon_broadcast_user_event(
     }
 }
 
-#[cfg(unix)]
 fn issue_monitor_daemon_user_event(
     event: serde_json::Value,
     project_root: &Path,
@@ -1212,7 +1206,6 @@ fn issue_monitor_daemon_user_event(
 
 // Liveness probe shared with `cli::daemon` and `daemon_publisher`;
 // see `gwt::process::is_process_alive`.
-#[cfg(unix)]
 use gwt::process::is_process_alive as is_subscriber_pid_alive;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1815,7 +1808,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_subscriber_channels_include_runtime_h2_channels() {
         let channels = super::daemon_subscriber_channels();
@@ -1882,7 +1874,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
         let project_root = Path::new("/tmp/gwt-project");
@@ -1993,7 +1984,6 @@ mod tests {
         .is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_broadcast_issue_monitor_payloads_map_to_frontend_dispatch_and_launch_request() {
         let project_root = Path::new("/tmp/gwt-project");
@@ -8602,9 +8592,7 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start the terminal convergence tick thread");
         }
     }
-    #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
-    #[cfg(unix)]
     board_daemon_subscribers.sync(&app, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
@@ -8876,7 +8864,6 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
                         // Issue #3633: stop the daemons this GUI started so an
                         // update never inherits a previous build's daemon.
@@ -8917,7 +8904,6 @@ fn main() -> std::io::Result<()> {
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
-                    #[cfg(unix)]
                     board_daemon_subscribers.sync(&app, proxy.clone());
                 }
                 clients.dispatch(events);
@@ -9544,7 +9530,6 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_migration_done(&tab_id, &branch_worktree_path);
                 board_projection_watchers.sync(&app, proxy.clone());
                 workspace_projection_watchers.sync(&app, proxy.clone());
-                #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
             }
@@ -9566,7 +9551,6 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_clone_project_done(&workspace_home);
                 board_projection_watchers.sync(&app, proxy.clone());
                 workspace_projection_watchers.sync(&app, proxy.clone());
-                #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
             }
@@ -9644,7 +9628,6 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
                         app.daemon_supervisor.shutdown();
                         server.shutdown();
