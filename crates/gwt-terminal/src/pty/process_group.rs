@@ -90,17 +90,7 @@ mod imp {
         /// helper that execs the target from another thread would keep nice 0.
         /// `cpu_limit_percent` has no tree-wide Unix equivalent and is ignored.
         pub fn apply_policy(&mut self, pid: u32, policy: ProcessPolicy) -> Result<(), String> {
-            let nice = policy.priority.unix_nice();
-            // SAFETY: setpriority has no memory-safety preconditions.
-            let status =
-                unsafe { libc::setpriority(libc::PRIO_PGRP as _, pid as libc::id_t, nice) };
-            if status != 0 {
-                return Err(format!(
-                    "setpriority(pgrp {pid}, nice {nice}): {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            Ok(())
+            apply_group_nice(pid, policy.priority.unix_nice(), set_group_nice)
         }
 
         /// Signal every process in the group without waiting for reap.
@@ -125,12 +115,55 @@ mod imp {
             self.terminate();
         }
     }
+
+    /// Describe a rejected renice with the platform reason. Issue #3942:
+    /// `setpriority` returns EPERM whenever the caller may not renice the
+    /// target group, so the reason has to reach the launch route's warning.
+    pub(super) fn apply_group_nice(
+        pid: u32,
+        nice: i32,
+        set: impl Fn(u32, i32) -> Result<(), std::io::Error>,
+    ) -> Result<(), String> {
+        set(pid, nice).map_err(|error| format!("setpriority(pgrp {pid}, nice {nice}): {error}"))
+    }
+
+    fn set_group_nice(pid: u32, nice: i32) -> Result<(), std::io::Error> {
+        // SAFETY: setpriority has no memory-safety preconditions.
+        let status = unsafe { libc::setpriority(libc::PRIO_PGRP as _, pid as libc::id_t, nice) };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 pub use imp::ProcessGroup;
 
 #[cfg(test)]
 mod tests {
+    /// Issue #3942: on hosts where the launcher may not renice the target's
+    /// group, `setpriority` fails with EPERM. The failure must keep the
+    /// platform reason so the launch route can warn with something actionable.
+    #[cfg(unix)]
+    #[test]
+    fn setpriority_eperm_is_reported_with_the_platform_reason() {
+        let error = super::imp::apply_group_nice(4242, 10, |_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        })
+        .expect_err("EPERM must surface as a policy error");
+        assert!(error.contains("setpriority(pgrp 4242, nice 10)"), "{error}");
+        assert!(error.contains("Operation not permitted"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applied_group_nice_reports_success() {
+        assert_eq!(
+            super::imp::apply_group_nice(4242, 10, |_, _| Ok(())),
+            Ok(())
+        );
+    }
+
     #[test]
     fn windows_process_group_reuses_shared_job_owner() {
         let source = include_str!("process_group.rs");
