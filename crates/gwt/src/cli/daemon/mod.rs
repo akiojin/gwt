@@ -184,13 +184,91 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
             Ok(0)
         }
         DaemonBootstrapAction::Spawn { endpoint_path } => {
+            let state = match unregistered_daemon_evidence(&endpoint_path) {
+                Some(evidence) => format!("unregistered {evidence}"),
+                None => "stopped".to_string(),
+            };
             out.push_str(&format!(
-                "stopped scope={repo_hash}/{worktree_hash} endpoint={path}\n",
+                "{state} scope={repo_hash}/{worktree_hash} endpoint={path}\n",
                 repo_hash = scope.repo_hash,
                 worktree_hash = scope.worktree_hash,
                 path = endpoint_path.display()
             ));
             Ok(0)
+        }
+    }
+}
+
+/// Issue #2338 AC-B: evidence that a daemon is serving this scope even though
+/// no usable descriptor names it, or `None` when nothing is running.
+///
+/// Without this, `stopped` covers two states a reader must act on differently:
+/// no daemon at all (start one) versus a daemon that is up but undiscoverable
+/// (find out what erased or skewed its descriptor). The production incident
+/// was the second one, reported as the first for hours.
+#[cfg(unix)]
+fn unregistered_daemon_evidence(endpoint_path: &std::path::Path) -> Option<String> {
+    // A descriptor this gwtd cannot use — wrong protocol, wrong scope — but
+    // whose owner is still running. Since Issue #2338 AC-A such a descriptor
+    // is preserved rather than deleted, so it is here to be read.
+    if let Some(endpoint) = std::fs::read(endpoint_path)
+        .ok()
+        .and_then(|payload| serde_json::from_slice::<DaemonEndpoint>(&payload).ok())
+    {
+        if endpoint.has_live_owner(is_process_alive_pid) {
+            return Some(format!(
+                "pid={pid} bind={bind} reason=endpoint-unusable-for-this-client",
+                pid = endpoint.pid,
+                bind = endpoint.bind
+            ));
+        }
+        return None;
+    }
+
+    // No readable descriptor, but the scope's canonical socket still answers:
+    // exactly the shape the production machine was in.
+    let socket = gwt_core::daemon::resolve_daemon_socket_path(endpoint_path).ok()?;
+    std::os::unix::net::UnixStream::connect(&socket.path)
+        .ok()
+        .map(|_| {
+            format!(
+                "socket={path} reason=endpoint-missing",
+                path = socket.path.display()
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn unregistered_daemon_evidence(_endpoint_path: &std::path::Path) -> Option<String> {
+    None
+}
+
+/// Issue #2338 AC-D: drop the descriptors earlier gwt generations left behind
+/// in this project's daemon directory.
+///
+/// Runs at daemon start because that is the one moment a writer legitimately
+/// owns this directory, and because the sweep only ever removes descriptors
+/// whose owner is provably gone — it cannot strand the daemon about to bind.
+/// Failures are logged, never fatal: a daemon that can serve must not refuse
+/// to start over housekeeping.
+#[cfg(unix)]
+fn sweep_past_generation_endpoints(daemon_dir: &std::path::Path) {
+    match gwt_core::daemon::sweep_dead_endpoints(daemon_dir, is_process_alive_pid, |bind| {
+        std::os::unix::net::UnixStream::connect(bind).is_ok()
+    }) {
+        Ok(removed) if !removed.is_empty() => {
+            tracing::info!(
+                removed = removed.len(),
+                dir = %daemon_dir.display(),
+                "gwtd daemon: swept past-generation endpoint descriptors (#2338 AC-D)"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                dir = %daemon_dir.display(),
+                "gwtd daemon: endpoint descriptor sweep failed: {error}"
+            );
         }
     }
 }
@@ -374,6 +452,7 @@ fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
 fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsError> {
     let scope = resolve_scope(env)?;
     let gwt_home = gwt_core::paths::gwt_home();
+    sweep_past_generation_endpoints(&scope.daemon_dir(&gwt_home));
     let action = resolve_bootstrap_action(
         &gwt_home,
         &scope,
@@ -641,6 +720,82 @@ mod tests {
         );
         let result = probe_daemon_endpoint(&endpoint);
         assert!(result.is_err(), "expected probe to fail for missing socket");
+    }
+
+    /// Issue #2338 AC-B: on the production machine the daemon process was
+    /// running and `daemon.status` still said `stopped`, because the status
+    /// path only ever asks "is there a usable descriptor". A reader cannot
+    /// tell "nobody is serving this project" from "somebody is serving it but
+    /// the descriptor is gone or unusable" — and only the second one is a bug
+    /// worth chasing.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_separates_an_unregistered_live_daemon_from_a_stopped_one() {
+        use std::os::unix::net::UnixListener;
+
+        use gwt_core::{
+            daemon::{persist_endpoint, resolve_daemon_socket_path},
+            test_support::ScopedGwtHome,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let mut env = crate::cli::TestEnv::new(project_root.clone());
+        env.repo_path = project_root.clone();
+        let scope = resolve_scope(&env).expect("scope");
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+
+        let mut stopped = String::new();
+        run(&mut env, DaemonCommand::Status, &mut stopped).expect("status with nothing running");
+        assert!(
+            stopped.starts_with("stopped "),
+            "no daemon and no socket must still read as stopped: {stopped}"
+        );
+
+        // A live owner whose descriptor this gwtd cannot use (protocol skew).
+        let mut skewed = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            temp.path().join("skewed.sock").display().to_string(),
+            "skewed-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        skewed.protocol_version = DAEMON_PROTOCOL_VERSION + 1;
+        persist_endpoint(&endpoint_path, &skewed).expect("persist skewed endpoint");
+        let mut skewed_out = String::new();
+        run(&mut env, DaemonCommand::Status, &mut skewed_out).expect("status with skewed endpoint");
+        assert!(
+            skewed_out.starts_with("unregistered "),
+            "a live owner with an unusable descriptor is not `stopped`: {skewed_out}"
+        );
+        assert!(
+            skewed_out.contains(&format!("pid={}", std::process::id())),
+            "the owner pid is the whole point of the report: {skewed_out}"
+        );
+
+        // The production shape: descriptor gone, daemon still serving.
+        std::fs::remove_file(&endpoint_path).expect("remove endpoint");
+        let socket = resolve_daemon_socket_path(&endpoint_path).expect("socket path");
+        if let Some(parent) = socket.path.parent() {
+            std::fs::create_dir_all(parent).expect("socket parent");
+        }
+        let _listener = UnixListener::bind(&socket.path).expect("bind canonical socket");
+        let mut serving_out = String::new();
+        run(&mut env, DaemonCommand::Status, &mut serving_out)
+            .expect("status with a served socket and no descriptor");
+        assert!(
+            serving_out.starts_with("unregistered "),
+            "a served socket with no descriptor is not `stopped`: {serving_out}"
+        );
+        assert!(
+            serving_out.contains(&socket.path.display().to_string()),
+            "the report must name the socket that proves it: {serving_out}"
+        );
     }
 
     #[test]

@@ -408,6 +408,20 @@ impl DaemonEndpoint {
             && !self.auth_token.trim().is_empty()
             && is_process_alive(self.pid)
     }
+
+    /// Whether the process that wrote this descriptor is still running.
+    ///
+    /// Issue #2338 AC-A: deliberately separate from [`Self::is_usable`].
+    /// `is_usable` asks "may *I* talk to this daemon", which a protocol or
+    /// scope mismatch answers with no; this asks "is anyone still behind this
+    /// file", which decides whether the file may be deleted. Conflating the
+    /// two let a version-skewed caller erase a healthy daemon's descriptor.
+    pub fn has_live_owner<F>(&self, is_process_alive: F) -> bool
+    where
+        F: Fn(u32) -> bool,
+    {
+        self.pid > 0 && is_process_alive(self.pid)
+    }
 }
 
 /// Hook event payload forwarded into the daemon runtime.
@@ -576,10 +590,24 @@ where
 {
     let endpoint_path = scope.endpoint_path(gwt_home);
     match load_endpoint(&endpoint_path) {
-        Ok(endpoint) if endpoint.is_usable(scope, expected_protocol_version, is_process_alive) => {
+        Ok(endpoint) if endpoint.is_usable(scope, expected_protocol_version, &is_process_alive) => {
             Ok(DaemonBootstrapAction::Reuse(endpoint))
         }
-        Ok(_) | Err(GwtError::Other(_)) => {
+        // Issue #2338 AC-A: "not reusable" and "abandoned" are different
+        // questions, and `is_usable` only answers the first. Four of this
+        // function's five production callers merely read the endpoint, so
+        // deleting on any `is_usable` failure meant a single version-skewed
+        // or wrong-scope caller could erase a running daemon's descriptor —
+        // `daemon.status` breaking the daemon it was asked about. Only a
+        // descriptor whose owner is provably gone is ours to remove.
+        Ok(endpoint) => {
+            if !endpoint.has_live_owner(&is_process_alive) {
+                remove_endpoint_file(&endpoint_path)?;
+            }
+            Ok(DaemonBootstrapAction::Spawn { endpoint_path })
+        }
+        // Unparsable: no owner pid can be read, so nothing can be preserved.
+        Err(GwtError::Other(_)) => {
             remove_endpoint_file(&endpoint_path)?;
             Ok(DaemonBootstrapAction::Spawn { endpoint_path })
         }
@@ -588,6 +616,54 @@ where
         }
         Err(err) => Err(err),
     }
+}
+
+/// Issue #2338 AC-D: remove the past-generation descriptors in `daemon_dir`.
+///
+/// Endpoint files are only ever removed by whoever happens to resolve that
+/// exact path, so descriptors left by earlier gwt generations pile up — a
+/// production machine accumulated 746 of them, every one a
+/// `internal://gwt-front-door` sentinel. Returns the paths that were removed.
+///
+/// Abandonment must be *proven*, never assumed: a descriptor is removed only
+/// when its recorded owner is gone (`is_process_alive` says no, or the pid is
+/// zero) *and* nothing answers on its bind address (`is_bind_serving`). A
+/// descriptor whose pid died but whose socket still serves belongs to a daemon
+/// this sweep cannot see, and an unreadable descriptor names no owner at all;
+/// both are left alone. Files that are not `*.json` are never touched.
+///
+/// A missing `daemon_dir` is not an error — there is simply nothing to sweep.
+pub fn sweep_dead_endpoints<F, G>(
+    daemon_dir: &Path,
+    is_process_alive: F,
+    is_bind_serving: G,
+) -> Result<Vec<PathBuf>>
+where
+    F: Fn(u32) -> bool,
+    G: Fn(&str) -> bool,
+{
+    let entries = match fs::read_dir(daemon_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut removed = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(endpoint) = load_endpoint(&path) else {
+            continue;
+        };
+        if endpoint.has_live_owner(&is_process_alive) || is_bind_serving(endpoint.bind.trim()) {
+            continue;
+        }
+        remove_endpoint_file(&path)?;
+        removed.push(path);
+    }
+    Ok(removed)
 }
 
 fn load_endpoint(path: &Path) -> Result<DaemonEndpoint> {
