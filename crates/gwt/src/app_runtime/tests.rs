@@ -24,11 +24,11 @@ use base64::Engine;
 use chrono::{TimeZone, Utc};
 use gwt::{
     empty_workspace_state, load_restored_workspace_state, load_session_state, load_workspace_state,
-    refresh_managed_gwt_assets_for_worktree, workspace_state_path, ArrangeMode, BackendEvent,
-    BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits, FocusCycleDirection,
-    FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState, LinkedIssueKind,
-    ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState, WindowGeometry,
-    WindowPlacement, WindowPreset, WindowProcessStatus,
+    refresh_managed_gwt_assets_for_worktree, save_workspace_state, workspace_state_path,
+    ArrangeMode, BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
+    FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
+    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState,
+    WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -71,14 +71,16 @@ use super::{
     set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
     AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AgentLaunchRuntimeContext,
     AppEventProxy, AppRuntime, ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner,
-    CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
+    BlockingTestTaskQueue, CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
     IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
     KnowledgeSearchRequest, LaunchFeedbackContext, LaunchPaneDisposition, LaunchWizardMemoryCache,
     LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, PreparedProjectSwitch,
+    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectTabRuntime,
     ReadinessDeadlineDecision, ReadinessPaneEvidence, ScheduledIssueMonitorScanOutcome, UserEvent,
     WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
+use crate::app_runtime::initial_project_tab_incarnations;
 use crate::embedded_server::AgentPmSendResponder;
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -1363,6 +1365,7 @@ fn sample_window(
         tab_group_id: None,
         tab_group_active: false,
         session_id: None,
+        linked_issue_number: None,
         is_pm: false,
     }
 }
@@ -3655,9 +3658,15 @@ fn sample_runtime_with_events(
     let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
     let blocking_tasks = BlockingTaskSpawner::thread();
     let persist_dispatcher = super::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+    let (project_tab_incarnations, next_project_incarnation) =
+        initial_project_tab_incarnations(&tabs);
     let mut runtime = AppRuntime {
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
+        project_tab_incarnations,
+        next_project_incarnation,
+        project_navigation_request: 0,
+        pending_project_navigation: None,
         recent_projects: Vec::new(),
         profile_selections: HashMap::new(),
         profile_config_path: Some(profile_config_path),
@@ -6617,30 +6626,37 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
         .recv_timeout(Duration::from_secs(1))
         .expect("Session lease holder starts");
 
-    let started = Instant::now();
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::SendInput {
-            text: "must-not-block-tao\r".to_string(),
-        },
-    );
-    let elapsed = started.elapsed();
+    let (dispatch_done_tx, dispatch_done_rx) = std::sync::mpsc::sync_channel(1);
+    let dispatch = std::thread::spawn(move || {
+        let outcome = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            grant,
+            AgentFrontendRequest::SendInput {
+                text: "must-not-block-tao\r".to_string(),
+            },
+        );
+        dispatch_done_tx
+            .send(outcome)
+            .expect("report tao dispatch outcome");
+    });
 
+    // The holder cannot release its Session lease until this receive finishes
+    // and `release_lease_tx` fires below. A successful receive therefore proves
+    // dispatch completed while the lease was still contended. The generous
+    // timeout is only a deadlock guard; it is not the behavior contract.
+    let outcome = dispatch_done_rx.recv_timeout(Duration::from_secs(2));
     release_lease_tx
         .send(())
         .expect("release contended Session lease");
     holder.join().expect("join Session lease holder");
+    dispatch.join().expect("join tao dispatch");
+    let outcome = outcome.expect("tao dispatch must finish before the contended lease is released");
     assert!(
         matches!(
             outcome,
             super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
         ),
         "tao dispatch must fail closed when its pre-dispatch lease is no longer immediately available"
-    );
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "tao dispatch waited {elapsed:?} for a contended Session lease"
     );
 }
 
@@ -7376,35 +7392,51 @@ fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
     let (proxy, events) = AppEventProxy::stub();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let spawn_started = Instant::now();
     let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::new_for_test();
+    let project_root = temp.path().to_path_buf();
+    let (spawn_returned_tx, spawn_returned_rx) = mpsc::sync_channel(1);
 
-    let spawned = service.spawn_with(
-        proxy,
-        temp.path().to_path_buf(),
-        move |_project_root| {
-            started_tx.send(()).expect("signal bootstrap start");
-            release_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("release bootstrap");
-            Ok(())
-        },
-        |_project_root| {
-            gwt::ProjectIndexStatusView::new(
-                gwt::ProjectIndexStatusState::Ready,
-                "test bootstrap complete",
-            )
-        },
-    );
-    let spawn_elapsed = spawn_started.elapsed();
+    let spawn_caller = std::thread::spawn(move || {
+        let spawned = service.spawn_with(
+            proxy,
+            project_root,
+            move |_project_root| {
+                started_tx.send(()).expect("signal bootstrap start");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release bootstrap");
+                Ok(())
+            },
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(
+                    gwt::ProjectIndexStatusState::Ready,
+                    "test bootstrap complete",
+                )
+            },
+        );
+        spawn_returned_tx
+            .send(spawned)
+            .expect("report bootstrap spawn return");
+    });
+
+    // The bootstrap body cannot complete until `release_tx` fires below.
+    // Receiving the return value first proves launch is independent of the
+    // background bootstrap duration. This timeout only bounds a regression.
+    let spawned = match spawn_returned_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(spawned) => {
+            spawn_caller.join().expect("join bootstrap spawn caller");
+            spawned
+        }
+        Err(error) => {
+            let _ = release_tx.send(());
+            let _ = spawn_caller.join();
+            panic!("bootstrap spawn did not return before body release: {error}");
+        }
+    };
 
     assert_eq!(
         spawned,
         crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
-    );
-    assert!(
-        spawn_elapsed < Duration::from_millis(250),
-        "spawning bootstrap must return before the slow bootstrap body completes"
     );
     started_rx
         .recv_timeout(Duration::from_secs(1))
@@ -11290,6 +11322,546 @@ fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_ta
     );
 }
 
+fn take_project_navigation_completion(
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> ProjectNavigationPrepared {
+    wait_for_recorded_event("project navigation completion", recorded_events, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+    });
+    let mut events = recorded_events.lock().expect("event log");
+    let index = events
+        .iter()
+        .position(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+        .expect("project navigation completion");
+    match events.remove(index) {
+        UserEvent::ProjectNavigationPrepared(prepared) => *prepared,
+        _ => unreachable!("matched project navigation completion"),
+    }
+}
+
+fn drain_queued_blocking_tasks(tasks: &BlockingTestTaskQueue) {
+    loop {
+        let task = tasks.lock().expect("blocking task queue").pop();
+        let Some(task) = task else {
+            break;
+        };
+        task();
+    }
+}
+
+/// SPEC #3170: project open / switch is prepared off the tao thread, so a
+/// focused test drives the queued worker and the generation-checked commit
+/// explicitly instead of reading a tab straight out of the dispatch call.
+fn commit_pending_project_navigation(
+    runtime: &mut AppRuntime,
+    queued_tasks: &BlockingTestTaskQueue,
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    drain_queued_blocking_tasks(queued_tasks);
+    let prepared = take_project_navigation_completion(recorded_events);
+    runtime.handle_project_navigation_prepared(prepared)
+}
+
+#[test]
+fn project_prepare_open_returns_before_repo_restore_and_preserves_cancel() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let current = temp.path().join("current");
+    let selected = temp.path().join("selected");
+    fs::create_dir_all(&current).expect("current project");
+    fs::create_dir_all(&selected).expect("selected project");
+    let tab = sample_project_tab("tab-current", "Current", current, ProjectKind::NonRepo, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    let before_tabs = runtime.tabs.len();
+    let before_active = runtime.active_tab_id.clone();
+    let before_recent = runtime.recent_projects.clone();
+    let events = runtime.open_project_dialog_selection_events(Some(selected));
+
+    assert!(
+        events.is_empty(),
+        "open prepare must return without a broadcast"
+    );
+    assert_eq!(runtime.tabs.len(), before_tabs);
+    assert_eq!(runtime.active_tab_id, before_active);
+    assert_eq!(runtime.recent_projects, before_recent);
+    assert_eq!(queued_tasks.lock().expect("task queue").len(), 1);
+    assert!(recorded_events.lock().expect("event log").is_empty());
+
+    let cancel_events = runtime.open_project_dialog_selection_events(None);
+    assert!(cancel_events.is_empty());
+    assert_eq!(runtime.tabs.len(), before_tabs);
+    assert_eq!(runtime.active_tab_id, before_active);
+    assert_eq!(runtime.recent_projects, before_recent);
+
+    drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_project_navigation_completion(&recorded_events);
+    assert!(
+        runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty(),
+        "cancel must invalidate a completion that was already queued"
+    );
+    assert_eq!(runtime.tabs.len(), before_tabs);
+    assert_eq!(runtime.active_tab_id, before_active);
+}
+
+#[test]
+fn project_prepare_open_loads_window_restore_plan_in_the_worker() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let current = temp.path().join("current");
+    let selected = temp.path().join("selected");
+    fs::create_dir_all(&current).expect("create current project");
+    fs::create_dir_all(&selected).expect("create selected project");
+    fs::create_dir_all(temp.path().join("repo.git/worktrees/selected"))
+        .expect("create linked-worktree metadata");
+    fs::write(
+        selected.join(".git"),
+        "gitdir: ../repo.git/worktrees/selected\n",
+    )
+    .expect("write linked-worktree marker");
+    let tabs = vec![sample_project_tab(
+        "tab-current",
+        "Current",
+        current,
+        ProjectKind::NonRepo,
+        &[],
+    )];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-current"));
+    let (blocking_tasks, queue) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    let mut workspace = empty_workspace_state();
+    workspace.windows.push(sample_window(
+        "shell-restore",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    ));
+    save_workspace_state(&workspace_state_path(&selected), &workspace)
+        .expect("save selected workspace");
+
+    assert!(runtime.open_project_path_events(selected).is_empty());
+    drain_queued_blocking_tasks(&queue);
+    let prepared = take_project_navigation_completion(&recorded_events);
+    let ProjectNavigationPayload::Open(open) = prepared.result.expect("prepared project") else {
+        panic!("expected open payload");
+    };
+
+    assert_eq!(
+        open.window_restores.len(),
+        1,
+        "the worker must load the restore plan before main-thread commit"
+    );
+}
+
+#[test]
+fn project_prepare_open_commits_once_and_reuses_an_existing_project_key() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let existing = temp.path().join("existing");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&existing).expect("existing project");
+    let tabs = vec![
+        sample_project_tab("tab-first", "First", first, ProjectKind::NonRepo, &[]),
+        sample_project_tab(
+            "tab-existing",
+            "Existing",
+            existing.clone(),
+            ProjectKind::NonRepo,
+            &[],
+        ),
+    ];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-first"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    assert!(runtime.open_project_path_events(existing).is_empty());
+    drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_project_navigation_completion(&recorded_events);
+    let events = runtime.handle_project_navigation_prepared(prepared.clone());
+
+    assert_eq!(
+        runtime.tabs.len(),
+        2,
+        "existing ProjectKey must not duplicate a tab"
+    );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-existing"));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(
+        runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty(),
+        "a completion is single-use"
+    );
+}
+
+#[test]
+fn project_prepare_clone_completion_uses_the_shared_async_open_contract() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let current = temp.path().join("current");
+    let cloned = temp.path().join("cloned");
+    fs::create_dir_all(&current).expect("current project");
+    fs::create_dir_all(&cloned).expect("cloned project");
+    let tabs = vec![sample_project_tab(
+        "tab-current",
+        "Current",
+        current,
+        ProjectKind::NonRepo,
+        &[],
+    )];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-current"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    assert!(runtime.handle_clone_project_done(&cloned).is_empty());
+    assert_eq!(
+        queued_tasks.lock().expect("task queue").len(),
+        1,
+        "clone completion must enter the same worker-backed open API"
+    );
+    assert_eq!(
+        runtime.tabs.len(),
+        1,
+        "clone completion must not open inline"
+    );
+
+    drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_project_navigation_completion(&recorded_events);
+    let events = runtime.handle_project_navigation_prepared(prepared);
+
+    assert_eq!(runtime.tabs.len(), 2);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::CloneProjectDone { workspace_home }
+            if workspace_home == &cloned.display().to_string()
+    )));
+    let active_tab = runtime
+        .active_tab_id
+        .as_ref()
+        .and_then(|tab_id| runtime.project_tab_incarnations.get(tab_id))
+        .expect("active project incarnation");
+    let canonical_key: gwt_core::repo_hash::ProjectKey =
+        gwt_core::paths::resolve_project_scope(&cloned).hash;
+    assert_eq!(
+        active_tab.project_key, canonical_key,
+        "the consumer must keep RepoHash as the only project identity"
+    );
+}
+
+#[test]
+fn project_prepare_spawn_failure_is_visible_for_open_and_switch() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let pending = temp.path().join("pending");
+    for path in [&first, &pending] {
+        fs::create_dir_all(path).expect("project");
+    }
+    let tabs = vec![
+        sample_project_tab(
+            "tab-first",
+            "First",
+            first.clone(),
+            ProjectKind::NonRepo,
+            &[],
+        ),
+        sample_project_tab("tab-second", "Second", first, ProjectKind::NonRepo, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-first"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+
+    let open_events = runtime.open_project_path_events(pending);
+    assert!(open_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ProjectOpenError { message } if message == "worker unavailable"
+    )));
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-first"));
+
+    let switch_events = runtime.select_project_tab_events("tab-second");
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-second"));
+    assert!(switch_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ProjectOpenError { message } if message == "worker unavailable"
+    )));
+}
+
+#[test]
+fn project_prepare_open_drops_stale_completion_after_newer_tab_selection() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    let pending = temp.path().join("pending");
+    for path in [&first, &second, &pending] {
+        fs::create_dir_all(path).expect("project");
+    }
+    let tabs = vec![
+        sample_project_tab("tab-first", "First", first, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-second", "Second", second, ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-first"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    assert!(runtime.open_project_path_events(pending.clone()).is_empty());
+    let open_task = queued_tasks
+        .lock()
+        .expect("task queue")
+        .pop()
+        .expect("open prepare task");
+    let select_events = runtime.select_project_tab_events("tab-second");
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-second"));
+    assert!(select_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+
+    open_task();
+    let prepared = take_project_navigation_completion(&recorded_events);
+    assert!(
+        runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty(),
+        "the newer selection owns navigation authority"
+    );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-second"));
+    assert!(!runtime
+        .tabs
+        .iter()
+        .any(|tab| same_worktree_path(&tab.project_root, &pending)));
+}
+
+#[test]
+fn project_prepare_switch_drops_completion_after_close_and_generation_change() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&second).expect("second project");
+    let tabs = vec![
+        sample_project_tab("tab-first", "First", first, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-second", "Second", second, ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-first"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    runtime.select_project_tab_events("tab-second");
+    drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_project_navigation_completion(&recorded_events);
+    runtime.close_project_tab_events("tab-second");
+
+    assert!(
+        runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty(),
+        "a closed project incarnation must reject its switch completion"
+    );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-first"));
+
+    runtime.select_project_tab_events("tab-first");
+    drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_project_navigation_completion(&recorded_events);
+    runtime.refresh_project_tab_incarnation("tab-first");
+    assert!(
+        runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty(),
+        "a migration/root generation update must reject the old completion"
+    );
+}
+
+/// SPEC #3170 T-963: the SPEC #3287 project-per-tab consumer must reach
+/// project open/switch only through the shared prepare → generation-checked
+/// commit contract. A completion whose payload names a different project than
+/// the request's incarnation is a foreign-project completion and must never
+/// commit or broadcast.
+#[test]
+fn project_navigation_commit_rejects_a_foreign_project_key_payload() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&second).expect("second project");
+    let foreign_key = gwt_core::paths::resolve_project_scope(&first).hash;
+    let tabs = vec![
+        sample_project_tab("tab-first", "First", first, ProjectKind::NonRepo, &[]),
+        sample_project_tab(
+            "tab-second",
+            "Second",
+            second.clone(),
+            ProjectKind::NonRepo,
+            &[],
+        ),
+    ];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-first"));
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    runtime.select_project_tab_events("tab-second");
+    drain_queued_blocking_tasks(&queued_tasks);
+    let mut prepared = take_project_navigation_completion(&recorded_events);
+    prepared.result = Ok(ProjectNavigationPayload::Switch(PreparedProjectSwitch {
+        tab_id: "tab-second".to_string(),
+        project_key: foreign_key,
+    }));
+
+    assert!(
+        runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty(),
+        "a completion carrying another project's ProjectKey must not broadcast"
+    );
+    assert!(
+        runtime.pending_project_navigation.is_some(),
+        "a foreign-project completion must not settle the reserved navigation request"
+    );
+
+    // The matching completion for the same request still commits, proving the
+    // rejection above is keyed on the payload's ProjectKey and not on the
+    // request having gone stale.
+    let prepared = ProjectNavigationPrepared {
+        request: runtime
+            .pending_project_navigation
+            .clone()
+            .expect("reserved navigation request"),
+        result: Ok(ProjectNavigationPayload::Switch(PreparedProjectSwitch {
+            tab_id: "tab-second".to_string(),
+            project_key: gwt_core::paths::resolve_project_scope(&second).hash,
+        })),
+    };
+    runtime.handle_project_navigation_prepared(prepared);
+    assert!(
+        runtime.pending_project_navigation.is_none(),
+        "the matching completion must settle the reserved navigation request"
+    );
+}
+
+/// SPEC #3170 T-962: moving the heavy switch apply off the tao thread must not
+/// downgrade what the switch broadcasts. `worktree_form` is only ever `Unknown`
+/// on disk, so a persisted-only projection would strip the ephemeral /
+/// branch-backed chrome from every live agent window on each tab switch.
+#[test]
+fn select_project_tab_broadcast_keeps_the_resolved_agent_worktree_form() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&second).expect("second project");
+    let tabs = vec![
+        sample_project_tab("tab-first", "First", first, ProjectKind::NonRepo, &[]),
+        sample_project_tab_with_window_at(
+            "tab-second",
+            "agent-1",
+            second.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-first"));
+    let (blocking_tasks, _queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    let window_id = combined_window_id("tab-second", "agent-1");
+    let mut session = sample_active_agent_session("tab-second", &window_id);
+    session.worktree_path = second;
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+
+    let events = runtime.select_project_tab_events("tab-second");
+
+    let workspace = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("WindowCanvasState broadcast for the selected tab");
+    let form = workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.id == "tab-second")
+        .and_then(|tab| {
+            tab.workspace
+                .windows
+                .iter()
+                .find(|window| window.id == window_id)
+        })
+        .map(|window| window.worktree_form)
+        .expect("projected agent window");
+    assert_eq!(
+        form,
+        gwt::WindowWorktreeForm::BranchBacked,
+        "a tab switch must keep the resolved worktree form instead of reporting `Unknown`"
+    );
+}
+
+/// SPEC #3170 T-963: pin the single-entry contract itself so a later
+/// project-per-tab consumer cannot reintroduce a synchronous open fallback or
+/// a second project identity beside `project_tab_incarnations`.
+#[test]
+fn project_navigation_is_the_only_project_open_and_switch_entry() {
+    let source = include_str!("project_tabs.rs");
+    assert!(
+        !source.contains("fn open_project_path("),
+        "the synchronous open fallback must stay removed; open goes through prepare → commit"
+    );
+    for entry in [
+        "fn open_project_dialog_selection_events",
+        "fn open_project_path_events",
+        "fn handle_clone_project_done",
+    ] {
+        let body = source
+            .split(entry)
+            .nth(1)
+            .and_then(|tail| tail.split("\n    pub(crate) fn ").next())
+            .unwrap_or_else(|| panic!("{entry} body"));
+        assert!(
+            body.contains("request_project_open"),
+            "{entry} must funnel into the shared asynchronous project open request"
+        );
+    }
+    let commit = source
+        .split("fn commit_prepared_project_open")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("\n    fn remember_prepared_recent_project")
+                .next()
+        })
+        .expect("commit body");
+    assert!(
+        commit.contains("incarnation.project_key == prepared.project_key"),
+        "duplicate-open detection must use the canonical ProjectKey, not a second identity"
+    );
+    let dispatch = source
+        .split("fn handle_project_navigation_prepared")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    fn commit_prepared_project_open").next())
+        .expect("dispatch body");
+    assert!(
+        dispatch.contains("project_navigation_request_is_current"),
+        "every completion must be generation-checked before it commits or broadcasts"
+    );
+}
+
 #[test]
 fn app_runtime_select_project_tab_broadcasts_fresh_project_pm_status() {
     let _env_lock = env_test_lock()
@@ -11531,12 +12103,15 @@ fn app_runtime_open_project_path_emits_active_work_projection_for_new_tab() {
         ProjectKind::NonRepo,
         &[],
     )];
-    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
 
     let other = temp.path().join("other-project");
     fs::create_dir_all(&other).expect("create other");
 
-    let events = runtime.open_project_path_events(other.clone());
+    assert!(runtime.open_project_path_events(other.clone()).is_empty());
+    let prepared = take_project_navigation_completion(&recorded_events);
+    let events = runtime.handle_project_navigation_prepared(prepared);
 
     assert!(
         events
@@ -11559,9 +12134,14 @@ fn app_runtime_open_project_path_broadcasts_pm_status_exactly_once() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
     disable_pm_auto_start(&repo);
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
 
-    let events = runtime.open_project_path_events(repo);
+    // SPEC #3170: the open is prepared off the tao thread; the PM snapshot
+    // is aggregated once at the generation-checked commit.
+    assert!(runtime.open_project_path_events(repo).is_empty());
+    let events = commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     assert_eq!(
         events
@@ -25478,6 +26058,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
         "tab-1",
@@ -25531,6 +26112,7 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
         "tab-1",
@@ -50961,9 +51543,17 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         "git init --bare failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
 
-    let events = runtime.handle_clone_project_done(&workspace_home);
+    assert!(
+        runtime
+            .handle_clone_project_done(&workspace_home)
+            .is_empty(),
+        "the clone completion is prepared off-thread"
+    );
+    let events = commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     assert_eq!(runtime.tabs.len(), 1);
     assert_eq!(
@@ -51106,12 +51696,14 @@ fn open_project_path_for_worktree_remembers_workspace_home_only() {
         );
     }
 
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
     let canonical_home = dunce::canonicalize(&workspace_home).unwrap();
 
-    runtime
-        .open_project_path(develop_worktree.clone())
-        .expect("open develop worktree");
+    assert!(runtime
+        .open_project_path_events(develop_worktree.clone())
+        .is_empty());
+    let prepared = take_project_navigation_completion(&recorded_events);
+    runtime.handle_project_navigation_prepared(prepared);
     assert_eq!(runtime.tabs.len(), 1);
     assert_eq!(
         runtime.tabs[0].project_root,
@@ -51124,9 +51716,11 @@ fn open_project_path_for_worktree_remembers_workspace_home_only() {
         "recent_projects must collapse to workspace home, not worktree path (Issue #2867)"
     );
 
-    runtime
-        .open_project_path(feature_worktree.clone())
-        .expect("open feature worktree");
+    assert!(runtime
+        .open_project_path_events(feature_worktree.clone())
+        .is_empty());
+    let prepared = take_project_navigation_completion(&recorded_events);
+    runtime.handle_project_navigation_prepared(prepared);
     assert_eq!(
         runtime.recent_projects.len(),
         1,
@@ -51192,8 +51786,12 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
 
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let open_events = runtime.open_project_path_events(project.clone());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    runtime.open_project_path_events(project.clone());
+    let open_events =
+        commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
     let tab_id = runtime.active_tab_id.clone().expect("active tab");
 
     assert!(open_events.iter().any(|event| matches!(
@@ -51215,8 +51813,16 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
         }
     ));
 
-    let mut next_runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let next_events = next_runtime.open_project_path_events(project);
+    let (mut next_runtime, next_recorded_events) =
+        sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (next_blocking_tasks, next_queued_tasks) = BlockingTaskSpawner::queued();
+    next_runtime.blocking_tasks = next_blocking_tasks;
+    next_runtime.open_project_path_events(project);
+    let next_events = commit_pending_project_navigation(
+        &mut next_runtime,
+        &next_queued_tasks,
+        &next_recorded_events,
+    );
 
     assert!(
         next_events.iter().any(|event| matches!(
@@ -51272,8 +51878,11 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
     fs::create_dir_all(project.join(gwt_core::migration::backup::BACKUP_DIR_NAME))
         .expect("migration backup dir");
 
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let events = runtime.open_project_path_events(project.clone());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    runtime.open_project_path_events(project.clone());
+    let events = commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     assert!(
         events.iter().any(|event| matches!(
@@ -58617,9 +59226,12 @@ fn pm_open_project_skips_migration_pending_repo() {
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
 
     runtime.open_project_path_events(project);
+    commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     let tab_id = runtime.active_tab_id.clone().expect("active tab");
     assert!(runtime

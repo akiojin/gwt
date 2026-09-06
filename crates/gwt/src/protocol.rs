@@ -396,6 +396,11 @@ pub enum FrontendEvent {
         id: String,
         geometry: Option<WindowGeometry>,
     },
+    /// SPEC-3885 FR-012: fold a Windowized Issue window back into its Issue row. The
+    /// window already knows its Issue, so the frontend only names the window.
+    DockAgentWindowToIssue {
+        id: String,
+    },
     SetAgentKanbanCardCollapsed {
         id: String,
         collapsed: bool,
