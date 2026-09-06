@@ -134,6 +134,107 @@ fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     );
 }
 
+/// Issue #3942: `setpriority` returns EPERM on hosts where the launcher may
+/// not renice the target's process group. Priority tuning is an optimization,
+/// so neither spawn route may turn it into `PTY creation failed`.
+#[test]
+fn agent_resource_policy_failure_never_fails_the_spawn_routes() {
+    let source = include_str!("launch.rs");
+    let direct = source
+        .split("pub(crate) fn spawn_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn spawn_bound_process_window_with_console_kind")
+                .next()
+        })
+        .expect("direct spawn route body");
+    let bound = source
+        .split("fn spawn_bound_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| tail.split("fn install_process_window").next())
+        .expect("bound spawn route body");
+
+    for (route, body) in [("direct", direct), ("bound", bound)] {
+        let apply = body
+            .find("best_effort_apply_policy(")
+            .expect("best-effort policy application");
+        let statement_end = body[apply..].find(';').expect("apply_policy statement end");
+        let statement = &body[apply..apply + statement_end];
+        for propagation in ["?", ".unwrap(", ".expect(", "map_err"] {
+            assert!(
+                !statement.contains(propagation),
+                "{route} route must not turn a resource policy failure into a launch failure: \
+                 {statement}"
+            );
+        }
+    }
+
+    // The routes cannot re-introduce the failure path even by editing the
+    // statement: the helper owns the call and hands no outcome back.
+    let helper = source
+        .split("pub(crate) fn best_effort_apply_policy(")
+        .nth(1)
+        .expect("best-effort helper");
+    let signature = &helper[..helper.find('{').expect("helper body")];
+    assert!(
+        !signature.contains("->"),
+        "the best-effort helper must not return an outcome the routes could propagate: {signature}"
+    );
+}
+
+/// Issue #3942 AC-2 / AC-3: a rejected policy is a single warning, never an
+/// error that the launch routes can turn into a user-facing "Agent error".
+#[test]
+fn agent_resource_policy_failure_warns_once_and_keeps_the_launch() {
+    let events = capture_tracing_events(|| {
+        super::launch::note_unapplied_agent_resource_policy(
+            "window-3942",
+            Err(gwt_terminal::TerminalError::PtyCreationFailed {
+                reason: "apply process policy: setpriority(pgrp 4242, nice 10): \
+                     Operation not permitted (os error 1)"
+                    .to_string(),
+            }),
+        );
+    });
+    let policy_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(event.fields.get("message"), Some(message) if message.contains("resource policy"))
+        })
+        .collect();
+    assert_eq!(
+        policy_events.len(),
+        1,
+        "a rejected resource policy must be recorded exactly once: {events:?}"
+    );
+    let warning = policy_events[0];
+    assert_eq!(
+        warning.level,
+        Level::WARN,
+        "a rejected resource policy must stay at warn level: {warning:?}"
+    );
+    assert_eq!(
+        warning.fields.get("window_id").map(String::as_str),
+        Some("window-3942"),
+        "the warning must name the window: {warning:?}"
+    );
+    assert!(
+        matches!(warning.fields.get("error"), Some(error) if error.contains("setpriority")),
+        "the warning must keep the platform reason: {warning:?}"
+    );
+
+    let applied = capture_tracing_events(|| {
+        super::launch::note_unapplied_agent_resource_policy("window-3942", Ok(()));
+    });
+    assert!(
+        applied.iter().all(|event| !matches!(
+            event.fields.get("message"),
+            Some(message) if message.contains("resource policy")
+        )),
+        "an applied resource policy must stay silent: {applied:?}"
+    );
+}
+
 #[test]
 fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
     for (source_name, source) in [
