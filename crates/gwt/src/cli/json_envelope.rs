@@ -337,6 +337,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 project_root: optional_path(params, "project_root")?,
             })
         }
+        "issue.monitor.reconcile" => CliCommand::Issue(IssueCommand::MonitorReconcile {
+            project_root: optional_path(params, "project_root")?,
+        }),
         "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
                 project_root: optional_path(params, "project_root")?,
@@ -2447,6 +2450,26 @@ mod tests {
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
         ));
+    }
+
+    /// Issue #3883 AC-6: the PM's recovery for launches that are still running
+    /// but no longer tracked. It takes no target and no reason because it
+    /// revokes nothing — it only re-adopts what the canvas already shows.
+    #[test]
+    fn issue_monitor_reconcile_parses_with_an_optional_project_scope() {
+        assert_eq!(
+            ok("issue.monitor.reconcile", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorReconcile { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.reconcile",
+                json!({"project_root": "/tmp/gwt-project"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorReconcile {
+                project_root: Some(std::path::PathBuf::from("/tmp/gwt-project")),
+            })
+        );
     }
 
     /// Issue #3923 AC-1: provider quota holds are listed and cleared through
