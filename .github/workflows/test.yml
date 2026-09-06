@@ -194,8 +194,9 @@ jobs:
       # row at default parallelism on macOS, and no CI path ran it broadly on
       # Windows before this job existed, so the deadlock was never observable.
       # Including it here would burn 90 minutes of Windows runner time and fail
-      # every PR, so this job proves what it can prove today. Re-add the target
-      # once the deadlock is fixed — that is the remaining half of #3404 AC-3.
+      # every PR, so this job proves what it can prove today. #4014 owns the
+      # deadlock and re-adds the target here — that is the remaining half of
+      # #3404 AC-3.
       - name: Prove default-parallel Rust suites are stable
         shell: pwsh
         run: |

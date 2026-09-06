@@ -337,12 +337,12 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
     "the --no-run build must precede the timed three-run loop"
   );
   // `--bin gwt` is excluded because it deadlocks under Windows default
-  // parallelism. Keep the exclusion tied to its reason so it cannot quietly
-  // become permanent once the deadlock is fixed (#3404 AC-3).
+  // parallelism. Keep the exclusion tied to its reason and its owner so it
+  // cannot quietly become permanent once the deadlock is fixed (#4014).
   assert.doesNotMatch(defaultParallelJob, /1\.\.3[\s\S]*?cargo test[^\n]*--bin gwt/);
   assert.match(
     defaultParallelJob,
-    /deadlocks[\s\S]*?#3404 AC-3/,
+    /deadlocks[\s\S]*?#4014/,
     "the --bin gwt exclusion must carry its reason and its follow-up owner"
   );
   for (const command of [
