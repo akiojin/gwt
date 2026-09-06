@@ -18,8 +18,10 @@
 //! agent judged the decision to need a human — or ignored the policy, in which
 //! case escalating is the safe outcome.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Marks a launch as a monitor-driven autonomous execution (SPEC #3200).
 /// Absent for every human-driven launch, which keeps their behavior unchanged.
@@ -61,6 +63,40 @@ impl AutonomousHandoffReason {
             Self::Unclassified => "unclassified",
         }
     }
+
+    /// Issue #3944 AC-1: which of the two human-answerable `needs_human` kinds
+    /// a question of this reason parks the Issue under. A boundary whose
+    /// effect cannot be undone (destructive, credential, external side effect)
+    /// asks for an approval; every other question is a choice only the user
+    /// can make.
+    pub fn needs_human_kind(self) -> crate::issue_monitor::NeedsHumanKind {
+        use crate::issue_monitor::NeedsHumanKind;
+        match self {
+            Self::IrreversibleAction | Self::SecurityCredential | Self::ExternalSideEffect => {
+                NeedsHumanKind::DestructiveChangeApproval
+            }
+            Self::SpecConflict | Self::HumanVerification | Self::Unclassified => {
+                NeedsHumanKind::UserChoiceRequired
+            }
+        }
+    }
+}
+
+/// Issue #3944 AC-5: the first non-empty line of `text`, trimmed and bounded,
+/// so a park reason stays one line however long the question body is.
+fn one_line(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= MAX_CHARS {
+        return line.to_string();
+    }
+    let mut truncated = line.chars().take(MAX_CHARS - 1).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 /// Lifecycle of one structured handoff. The Issue Monitor driver owns every
@@ -78,6 +114,208 @@ pub enum AutonomousHandoffState {
     Answered,
     /// The answer was delivered back to the owning session.
     Resumed,
+}
+
+/// Durable physical-delivery state for one answered handoff.
+///
+/// `Attempting` is a write-ahead fence: it is committed before any bytes may
+/// be submitted to the provider. If its bound materializer disappears without
+/// an authenticated `UserPromptSubmit` receipt, the outcome is ambiguous and
+/// must never cause an automatic replay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AutonomousHandoffDeliveryState {
+    /// The current answer has not crossed a physical submit boundary.
+    #[default]
+    Pending,
+    /// A submit is about to be attempted. Persisted before touching the pane
+    /// or starting a provider process.
+    Attempting {
+        attempt: u32,
+        prompt_sha256: String,
+        started_at: String,
+        /// Host identity of the process that created the fence. This closes
+        /// the prepare-to-target-bind race without mistaking a recycled PID
+        /// for the original materializer.
+        #[serde(default)]
+        materializer_pid: u32,
+        #[serde(default)]
+        materializer_started_at: u64,
+        /// Exact runtime identity authorized to submit this prompt. It is
+        /// rebound after the target gwt Session/window is materialized but
+        /// before any provider process or PTY write may begin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<Box<AutonomousHandoffDeliveryTarget>>,
+    },
+    /// The bound materializer disappeared while an Attempting record was
+    /// unresolved. Automatic retry is forbidden because the submit may have
+    /// reached the provider.
+    Ambiguous {
+        attempt: u32,
+        prompt_sha256: String,
+        detected_at: String,
+        reason: String,
+    },
+    /// A failure was proved to have happened before submit. The exact-session
+    /// retry remains bounded and cannot run before this clock.
+    RetryBackoff {
+        attempt: u32,
+        retry_not_before: String,
+        last_error: String,
+    },
+    /// The bounded, definitely-not-submitted retry ladder was exhausted.
+    Exhausted {
+        attempt: u32,
+        failed_at: String,
+        last_error: String,
+    },
+    /// An authenticated UserPromptSubmit receipt matched the current answer,
+    /// asking Session, attempt number, and protected prompt hash.
+    Delivered {
+        attempt: u32,
+        prompt_sha256: String,
+        delivered_at: String,
+    },
+}
+
+/// Durable destination of one answer attempt. The hook receipt must reproduce
+/// every provider/project/session field; the stored delivery/window pair also
+/// lets that same receipt settle launch ownership atomically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousHandoffDeliveryTarget {
+    pub gwt_session_id: String,
+    pub native_session_id: String,
+    pub provider: String,
+    pub issue_number: u64,
+    pub repo_hash: String,
+    pub project_state_root: String,
+    pub window_id: String,
+    #[serde(default)]
+    pub materializer_id: String,
+    #[serde(default)]
+    pub materializer_pid: u32,
+    #[serde(default)]
+    pub materializer_started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+}
+
+/// Provider-observed identity accompanying a `UserPromptSubmit` receipt.
+/// Window/delivery ownership remains trusted from the pre-submit target bind;
+/// the child proves only the identity it can independently observe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutonomousHandoffReceiptIdentity {
+    pub gwt_session_id: String,
+    pub native_session_id: String,
+    pub provider: String,
+    pub issue_number: u64,
+    pub repo_hash: String,
+    pub project_state_root: String,
+}
+
+/// Parsed identity from a protected autonomous-answer prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutonomousHandoffAnswerMarker {
+    pub handoff_id: String,
+    pub session_id: String,
+    pub attempt: u32,
+    pub prompt_sha256: String,
+}
+
+const AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX: &str = "\n\n[gwt-autonomous-answer:v1:";
+
+fn autonomous_handoff_answer_prompt_sha256(
+    body: &str,
+    handoff_id: &str,
+    session_id: &str,
+    attempt: u32,
+) -> String {
+    fn update_part(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"gwt autonomous handoff answer v1\0");
+    update_part(&mut hasher, handoff_id.as_bytes());
+    update_part(&mut hasher, session_id.as_bytes());
+    hasher.update(attempt.to_be_bytes());
+    update_part(&mut hasher, body.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Protect one answer prompt with its exact handoff, Session, attempt, and
+/// canonical body hash. The identifiers are URL-safe base64 so delimiters in a
+/// normal handoff id can never change the parsed identity.
+pub fn protected_autonomous_handoff_answer_prompt(
+    body: &str,
+    handoff_id: &str,
+    session_id: &str,
+    attempt: u32,
+) -> Option<String> {
+    if body.is_empty() || handoff_id.is_empty() || session_id.is_empty() || attempt == 0 {
+        return None;
+    }
+    let prompt_sha256 =
+        autonomous_handoff_answer_prompt_sha256(body, handoff_id, session_id, attempt);
+    Some(format!(
+        "{body}{AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX}{}:{}:{attempt}:{prompt_sha256}]",
+        URL_SAFE_NO_PAD.encode(handoff_id.as_bytes()),
+        URL_SAFE_NO_PAD.encode(session_id.as_bytes()),
+    ))
+}
+
+/// Parse and authenticate a protected answer prompt. Any body, identity,
+/// attempt, encoding, or hash alteration fails closed.
+pub fn parse_protected_autonomous_handoff_answer_prompt(
+    prompt: &str,
+) -> Option<AutonomousHandoffAnswerMarker> {
+    let prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
+    let marker_start = prompt.rfind(AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX)?;
+    let body = &prompt[..marker_start];
+    let marker = prompt[marker_start..]
+        .strip_prefix(AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX)?
+        .strip_suffix(']')?;
+    let mut parts = marker.split(':');
+    let handoff_encoded = parts.next()?;
+    let session_encoded = parts.next()?;
+    let attempt_raw = parts.next()?;
+    let prompt_sha256 = parts.next()?;
+    if parts.next().is_some() || !is_canonical_sha256(prompt_sha256) {
+        return None;
+    }
+    let handoff_bytes = URL_SAFE_NO_PAD.decode(handoff_encoded).ok()?;
+    let session_bytes = URL_SAFE_NO_PAD.decode(session_encoded).ok()?;
+    if URL_SAFE_NO_PAD.encode(&handoff_bytes) != handoff_encoded
+        || URL_SAFE_NO_PAD.encode(&session_bytes) != session_encoded
+    {
+        return None;
+    }
+    let handoff_id = String::from_utf8(handoff_bytes).ok()?;
+    let session_id = String::from_utf8(session_bytes).ok()?;
+    let attempt = attempt_raw.parse::<u32>().ok()?;
+    if handoff_id.is_empty()
+        || session_id.is_empty()
+        || attempt == 0
+        || attempt.to_string() != attempt_raw
+        || autonomous_handoff_answer_prompt_sha256(body, &handoff_id, &session_id, attempt)
+            != prompt_sha256
+    {
+        return None;
+    }
+    Some(AutonomousHandoffAnswerMarker {
+        handoff_id,
+        session_id,
+        attempt,
+        prompt_sha256: prompt_sha256.to_string(),
+    })
 }
 
 /// One selectable answer the agent offered.
@@ -125,14 +363,38 @@ pub struct AutonomousQuestionHandoff {
     pub answer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_at: Option<String>,
+    /// Monotonic identity of the human answer. Timestamps remain useful for
+    /// display, but cannot order two replacements recorded in the same second.
+    #[serde(default)]
+    pub answer_revision: u64,
     /// When the answer was handed to the resumed session. `None` on a
     /// `Resumed` handoff means the resume prompt is still owed to the launch
     /// path; set exactly once so the answer is never replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<String>,
+    /// Physical answer delivery. Missing in legacy preferences means the
+    /// current answer has not been attempted.
+    #[serde(default)]
+    pub delivery: AutonomousHandoffDeliveryState,
 }
 
 impl AutonomousQuestionHandoff {
+    /// Issue #3944 AC-5: the question on one line, for the park reason.
+    pub fn question_line(&self) -> String {
+        one_line(&self.question)
+    }
+
+    /// Issue #3944 AC-1/AC-5: the reason line the Issue is parked under — the
+    /// human-answerable kind, the judgment code, and what is being decided.
+    pub fn needs_human_reason(&self) -> String {
+        format!(
+            "{} — human judgment ({}): {}",
+            self.reason_code.needs_human_kind().label(),
+            self.reason_code.as_str(),
+            self.question_line()
+        )
+    }
+
     pub fn new(
         handoff_id: String,
         context: &AutonomousExecutionContext,
@@ -162,7 +424,9 @@ The question was converted into this handoff before the provider's question UI c
             state: AutonomousHandoffState::Pending,
             answer: None,
             answered_at: None,
+            answer_revision: 0,
             delivered_at: None,
+            delivery: AutonomousHandoffDeliveryState::Pending,
         }
     }
 
@@ -438,8 +702,15 @@ Question tools are blocked in this session. A question tool call is converted in
 NeedsHuman handoff before it can wait, the owner Issue is parked for a human, and the Issue \
 Monitor slot is released for the next ready Issue — so asking ends this execution instead of \
 pausing it.\n\n\
-User verification, PR/merge gates, branch protection and permission boundaries are unchanged and \
-must not be bypassed.",
+**Do not ask the user to look at anything.** Visual / manual user verification is waived for this \
+launch: record `User Verification Result: n/a (autonomous)` in the evidence bundle and do not \
+prepare an instance, share a URL, or open a verification handoff. A UI change is covered instead \
+by your own automated headed run (real browser, dark and light themes, zero console / page \
+errors), recorded on its own `Agent Visual Check:` line. That line is evidence you produced; it \
+is never a User Verification Result, and `n/a (autonomous)` is never a substitute for a skip you \
+chose because verification looked hard.\n\n\
+PR/merge gates, branch protection and permission boundaries are unchanged and must not be \
+bypassed.",
         issue = context.issue_number,
     )
 }
@@ -509,5 +780,35 @@ mod tests {
         });
         assert!(policy.contains("Issue #3478"));
         assert!(policy.contains("Question tools are blocked"));
+    }
+
+    /// Issue #4001 AC-A1/AC-A2: an unattended session must never park itself
+    /// waiting for a human to look at a screen. The injected policy is the only
+    /// hook-side text that states the verification contract, so it must name the
+    /// recorded value and the automated substitute instead of telling the agent
+    /// that user verification is unchanged.
+    #[test]
+    fn decision_policy_waives_user_visual_verification_for_autonomous_runs() {
+        let policy = autonomous_decision_policy(&AutonomousExecutionContext {
+            issue_number: 4001,
+            session_id: "s".to_string(),
+        });
+        assert!(
+            policy.contains("User Verification Result: n/a (autonomous)"),
+            "{policy}"
+        );
+        assert!(
+            policy.contains("headed"),
+            "policy must name the automated headed substitute: {policy}"
+        );
+        assert!(
+            !policy.contains("User verification, PR/merge gates"),
+            "policy must not keep the human-verification requirement: {policy}"
+        );
+        // Issue #4001 AC-2: the agent's own browser-check is evidence, never the
+        // user's verification result.
+        assert!(policy.contains("Agent Visual Check"), "{policy}");
+        // The gates that are genuinely unchanged must still be named.
+        assert!(policy.contains("branch protection"), "{policy}");
     }
 }

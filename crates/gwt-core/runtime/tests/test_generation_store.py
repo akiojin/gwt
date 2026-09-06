@@ -11,6 +11,7 @@ only GC target.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -21,12 +22,29 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import portalocker
+
 import chroma_index_runner as runner
 
 RUNNER_PATH = Path(runner.__file__).resolve()
 
 REPO_HASH = "abc1234567890def"
 WORKTREE_HASH = "111122223333ffff"
+
+
+def _exclusive_lock_available(lock_path: Path) -> bool:
+    probe = portalocker.Lock(
+        str(lock_path),
+        mode="a+",
+        timeout=0,
+        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+    )
+    try:
+        probe.acquire()
+    except portalocker.exceptions.LockException:
+        return False
+    probe.release()
+    return True
 
 
 def _make_project(base: Path, docs: int) -> Path:
@@ -332,6 +350,1545 @@ class GenerationStoreTests(unittest.TestCase):
         )
         active = json.loads(pointer.read_text(encoding="utf-8"))
         self.assertTrue((generations_root / active["generation"]).exists())
+
+
+class Phase71WorktreeViewPublicationTests(unittest.TestCase):
+    """AS-23/AS-25: publish a verified two-scope view, never a partial pair."""
+
+    def setUp(self):
+        runner._MODEL_CACHE = None
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.db_root = self.base / "index"
+        self.coordinator = self.base / "coordinator"
+        self.coordinator.mkdir()
+        self._env = mock.patch.dict(
+            os.environ,
+            {
+                "GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator),
+                "GWT_INDEX_FAKE_EMBEDDING": "1",
+            },
+            clear=False,
+        )
+        self._env.start()
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        self._git("init", "--quiet", str(self.repo))
+        self._git("-C", str(self.repo), "symbolic-ref", "HEAD", "refs/heads/develop")
+        (self.repo / "src").mkdir()
+        (self.repo / "docs").mkdir()
+        (self.repo / "src" / "feature.rs").write_text(
+            "//! feature v1\nfn feature() {}\n", encoding="utf-8"
+        )
+        (self.repo / "docs" / "guide.md").write_text(
+            "# Guide v1\n", encoding="utf-8"
+        )
+        self._commit("canonical v1")
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+        runner._MODEL_CACHE = None
+
+    def _git(self, *args: str) -> None:
+        env = os.environ.copy()
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_ATTR_NOSYSTEM"] = "1"
+        for key in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_PREFIX",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_SYSTEM",
+        ):
+            env.pop(key, None)
+        for key in list(env):
+            if (
+                key == "GIT_CONFIG_COUNT"
+                or key.startswith("GIT_CONFIG_KEY_")
+                or key.startswith("GIT_CONFIG_VALUE_")
+            ):
+                env.pop(key)
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as error:
+            self.fail(f"git fixture command timed out: {error}")
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"git {' '.join(args)} failed\n{completed.stderr}",
+        )
+
+    def _commit(self, message: str) -> None:
+        self._git("-C", str(self.repo), "add", "-A")
+        self._git(
+            "-C",
+            str(self.repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        )
+
+    def _build(self, compatibility_descriptor=None) -> dict:
+        return runner.action_index_files_v2(
+            project_root=str(self.repo),
+            repo_hash=REPO_HASH,
+            worktree_hash=WORKTREE_HASH,
+            mode="full",
+            db_root=self.db_root,
+            scope="files",
+            file_index_protocol="v2",
+            compatibility_descriptor=compatibility_descriptor,
+        )
+
+    def _build_legacy(self) -> dict:
+        return runner.action_index_files_v2(
+            project_root=str(self.repo),
+            repo_hash=REPO_HASH,
+            worktree_hash=WORKTREE_HASH,
+            mode="full",
+            db_root=self.db_root,
+            scope="files",
+            file_index_protocol="legacy",
+        )
+
+    def _search_v2(self) -> dict:
+        return runner.action_search_multi_v2(
+            repo_hash=REPO_HASH,
+            worktree_hash=WORKTREE_HASH,
+            project_root=str(self.repo),
+            query="feature",
+            n_results=10,
+            scopes=["files"],
+            db_root=self.db_root,
+            file_index_protocol="v2",
+        )
+
+    def _search_single_v2(self) -> dict:
+        return runner.action_search_v2(
+            action="search-files",
+            repo_hash=REPO_HASH,
+            worktree_hash=WORKTREE_HASH,
+            project_root=str(self.repo),
+            query="feature",
+            n_results=10,
+            db_root=self.db_root,
+            file_index_protocol="v2",
+        )
+
+    def _search_v2_in_fresh_process(self) -> dict:
+        home = self.base / "subprocess-home"
+        home.mkdir(exist_ok=True)
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(home),
+                "USERPROFILE": str(home),
+                "GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator),
+                "GWT_INDEX_FAKE_EMBEDDING": "1",
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER_PATH),
+                "--action",
+                "search-multi",
+                "--repo-hash",
+                REPO_HASH,
+                "--worktree-hash",
+                WORKTREE_HASH,
+                "--project-root",
+                str(self.repo),
+                "--query",
+                "feature",
+                "--n-results",
+                "10",
+                "--scopes",
+                "files",
+                "--db-root",
+                str(self.db_root),
+                "--file-index-protocol",
+                "v2",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        self.assertTrue(lines, completed)
+        return json.loads(lines[-1])
+
+    @staticmethod
+    def _file_results(payload: dict) -> list[dict]:
+        return list(
+            ((payload.get("scope_results") or {}).get("files") or {}).get(
+                "results"
+            )
+            or []
+        )
+
+    def _worktree_root(self) -> Path:
+        return (
+            runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+            / "worktrees"
+            / WORKTREE_HASH
+        )
+
+    def _head_path(self) -> Path:
+        return self._worktree_root() / "head.json"
+
+    def _head(self) -> dict:
+        path = self._head_path()
+        self.assertTrue(path.is_file(), "v2 build must publish a Worktree View head")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _view_descriptor(self, view_id: str) -> dict:
+        path = self._worktree_root() / "views" / view_id / "descriptor.json"
+        self.assertTrue(path.is_file(), f"view {view_id} is not materialized")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _expected_head_checksum(self, head: dict) -> str:
+        canonical = {
+            "schema_version": head["schema_version"],
+            "active_view_id": head["active_view_id"],
+            "previous_view_id": head["previous_view_id"],
+            "sequence": head["sequence"],
+        }
+        return hashlib.sha256(
+            json.dumps(
+                canonical,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _seed_legacy_and_two_views(
+        self, *, canonical_rebase: bool = False
+    ) -> tuple[dict, dict, dict]:
+        legacy = self._build_legacy()
+        self.assertTrue(legacy.get("ok"), legacy)
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        if canonical_rebase:
+            (self.repo / "src" / "feature.rs").write_text(
+                "//! feature canonical v2\nfn feature_v2() {}\n", encoding="utf-8"
+            )
+            self._commit("canonical v2")
+        else:
+            (self.repo / "src" / "overlay.rs").write_text(
+                "//! overlay feature\nfn overlay_feature() {}\n", encoding="utf-8"
+            )
+        second = self._build()
+        self.assertTrue(second.get("ok"), second)
+        head = self._head()
+        self.assertEqual(head["active_view_id"], second["view_id"])
+        self.assertEqual(head["previous_view_id"], first["view_id"])
+        return first, second, head
+
+    def test_active_corruption_selects_previous_before_legacy(self):
+        first, second, head = self._seed_legacy_and_two_views()
+        active_view = self._view_descriptor(second["view_id"])
+        active_overlay = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            active_view["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        (active_overlay / "descriptor.json").write_text(
+            "{corrupt active overlay", encoding="utf-8"
+        )
+        head_before = self._head_path().read_bytes()
+        quarantine_attempts = []
+        real_replace = os.replace
+
+        def fail_head_repair(src, dst, *args, **kwargs):
+            destination = Path(dst)
+            if ".quarantine-" in destination.name:
+                quarantine_attempts.append(destination)
+            if destination == self._head_path():
+                raise OSError(28, "simulated disk full during head repair")
+            return real_replace(src, dst, *args, **kwargs)
+
+        runner._MODEL_CACHE = None
+        with mock.patch("os.replace", side_effect=fail_head_repair):
+            repair_pending = self._search_single_v2()
+        self.assertTrue(repair_pending.get("ok"), repair_pending)
+        self.assertEqual(
+            repair_pending.get("fallback_source"), "previous", repair_pending
+        )
+        self.assertTrue(repair_pending.get("results"), repair_pending)
+        self.assertEqual(self._head_path().read_bytes(), head_before)
+        self.assertEqual(
+            quarantine_attempts,
+            [],
+            "a corrupt closure remains reachable until fallback head repair succeeds",
+        )
+
+        replace_events = []
+
+        def record_recovery_replace(src, dst, *args, **kwargs):
+            source = Path(src)
+            destination = Path(dst)
+            if destination == self._head_path():
+                replace_events.append("head-repaired")
+            if source == active_overlay and ".quarantine-" in destination.name:
+                repaired_head = runner._read_file_index_v2_head(self._head_path())
+                self.assertIsNotNone(repaired_head)
+                self.assertEqual(repaired_head["active_view_id"], first["view_id"])
+                self.assertTrue(
+                    runner._verify_file_index_v2_view(
+                        self._worktree_root() / "views" / first["view_id"]
+                    ),
+                    "fallback closure must be reverified before quarantine",
+                )
+                replace_events.append("corrupt-overlay-quarantined")
+            return real_replace(src, dst, *args, **kwargs)
+
+        # Recovery must derive the fallback from durable artifacts rather
+        # than an in-memory model state left by the writer.
+        runner._MODEL_CACHE = None
+        with mock.patch("os.replace", side_effect=record_recovery_replace):
+            result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result["scopes"]["files"]["state"], "stale", result)
+        self.assertEqual(
+            result["scopes"]["files"].get("fallback_source"), "previous", result
+        )
+        self.assertEqual(
+            result["scopes"]["files"].get("view_id"), first["view_id"], result
+        )
+        self.assertEqual(result.get("stale_scopes"), ["files"], result)
+        paths = {item["path"] for item in self._file_results(result)}
+        self.assertIn("src/feature.rs", paths, result)
+        self.assertNotIn("src/overlay.rs", paths, result)
+        self.assertEqual(head["active_view_id"], second["view_id"])
+        repaired = runner._read_file_index_v2_head(self._head_path())
+        self.assertIsNotNone(repaired, "fallback must durably repair the head")
+        self.assertEqual(repaired["active_view_id"], first["view_id"])
+        self.assertIn("corrupt-overlay-quarantined", replace_events, replace_events)
+        self.assertLess(
+            replace_events.index("head-repaired"),
+            replace_events.index("corrupt-overlay-quarantined"),
+            "the selected fallback head must be durable before quarantine",
+        )
+
+    def test_quarantined_corrupt_view_is_removed_from_durable_journal(self):
+        first, second, _head = self._seed_legacy_and_two_views()
+        corrupt_view = self._worktree_root() / "views" / second["view_id"]
+        (corrupt_view / "descriptor.json").write_text(
+            "{corrupt active view", encoding="utf-8"
+        )
+
+        result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(
+            result["scopes"]["files"].get("view_id"), first["view_id"], result
+        )
+        repaired = runner._read_file_index_v2_head(self._head_path())
+        journal = runner._read_file_index_v2_head(
+            self._worktree_root() / "head.previous.json"
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(journal, repaired)
+        self.assertEqual(journal["active_view_id"], first["view_id"])
+        self.assertIsNone(journal["previous_view_id"])
+        self.assertTrue(
+            (self._worktree_root() / "views" / first["view_id"]).is_dir()
+        )
+        self.assertTrue(
+            list(
+                (self._worktree_root() / "views").glob(
+                    f".{second['view_id']}.quarantine-*"
+                )
+            ),
+            "the corrupt View must be quarantined only after the journal is normalized",
+        )
+
+    def test_active_base_corruption_selects_previous_without_partial_pair(self):
+        first, second, _head = self._seed_legacy_and_two_views(
+            canonical_rebase=True
+        )
+        active = self._view_descriptor(second["view_id"])
+        active_base = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, active["base_generation_id"], db_root=self.db_root
+        )
+        (active_base / "descriptor.json").write_text(
+            "{corrupt active base", encoding="utf-8"
+        )
+
+        runner._MODEL_CACHE = None
+        result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(
+            result["scopes"]["files"].get("fallback_source"), "previous", result
+        )
+        self.assertEqual(
+            result["scopes"]["files"].get("view_id"), first["view_id"], result
+        )
+        self.assertNotIn("feature_v2", json.dumps(result), result)
+
+    def test_repaired_fallback_remains_stale_across_process_restart(self):
+        first, second, _head = self._seed_legacy_and_two_views()
+        active = self._view_descriptor(second["view_id"])
+        active_overlay = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            active["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        (active_overlay / "descriptor.json").write_text(
+            "{corrupt active overlay", encoding="utf-8"
+        )
+
+        repaired = self._search_v2()
+        self.assertTrue(repaired.get("ok"), repaired)
+        self.assertEqual(repaired["scopes"]["files"]["state"], "stale", repaired)
+        self.assertEqual(
+            repaired["scopes"]["files"].get("view_id"), first["view_id"], repaired
+        )
+
+        restarted = self._search_v2_in_fresh_process()
+        self.assertTrue(restarted.get("ok"), restarted)
+        self.assertEqual(
+            restarted["scopes"]["files"]["state"],
+            "stale",
+            "head repair must retain a durable projection-regeneration marker",
+        )
+        self.assertEqual(
+            restarted["scopes"]["files"].get("fallback_source"),
+            "previous",
+            restarted,
+        )
+        self.assertEqual(restarted.get("stale_scopes"), ["files"], restarted)
+
+    def test_head_token_is_derived_from_one_immutable_read(self):
+        future = {
+            "schema_version": 1,
+            "active_view_id": "future-view",
+            "previous_view_id": None,
+            "sequence": 9,
+        }
+        future["checksum"] = self._expected_head_checksum(future)
+        future_bytes = json.dumps(
+            future, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=[b"{corrupt observed head", future_bytes],
+        ) as read_bytes:
+            token, head = runner._read_file_index_v2_head_token(
+                self._head_path()
+            )
+
+        self.assertEqual(token, b"{corrupt observed head")
+        self.assertIsNone(head)
+        self.assertEqual(
+            read_bytes.call_count,
+            1,
+            "the CAS token and parsed head must come from the same filesystem read",
+        )
+
+    def test_repair_reinspects_component_before_quarantining_concurrent_replacement(self):
+        _first, second, _head = self._seed_legacy_and_two_views()
+        active = self._view_descriptor(second["view_id"])
+        active_overlay = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            active["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        descriptor_path = active_overlay / "descriptor.json"
+        healthy_descriptor = descriptor_path.read_bytes()
+        descriptor_path.write_text("{corrupt active overlay", encoding="utf-8")
+        real_replace = os.replace
+        quarantines = []
+
+        def concurrent_repair_after_head_replace(src, dst, *args, **kwargs):
+            source = Path(src)
+            destination = Path(dst)
+            result = real_replace(src, dst, *args, **kwargs)
+            if destination == self._head_path():
+                descriptor_path.write_bytes(healthy_descriptor)
+            if source == active_overlay and ".quarantine-" in destination.name:
+                quarantines.append(destination)
+            return result
+
+        with mock.patch("os.replace", side_effect=concurrent_repair_after_head_replace):
+            result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(
+            runner._load_verified_file_index_v2_artifact(active_overlay, "overlay"),
+            "a concurrent healthy replacement must remain reusable",
+        )
+        self.assertEqual(
+            quarantines,
+            [],
+            "reader repair must re-diagnose a private artifact under its lock",
+        )
+
+    def test_corrupt_head_recovers_previous_view_from_durable_journal(self):
+        legacy = self._build_legacy()
+        self.assertTrue(legacy.get("ok"), legacy)
+        # D is older than every published View. A directory scan that chooses
+        # the oldest valid generation must not mistake it for the predecessor.
+        (self.repo / "src" / "oldest-decoy.rs").write_text(
+            "//! oldest verified but unpublished decoy feature\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            runner,
+            "_publish_file_index_v2_view",
+            return_value={"ok": True, "published": False, "superseded": True},
+        ):
+            oldest_decoy = self._build()
+        self.assertTrue(oldest_decoy.get("ok"), oldest_decoy)
+        oldest_dir = self._worktree_root() / "views" / oldest_decoy["view_id"]
+        self.assertTrue(runner._verify_file_index_v2_view(oldest_dir))
+        oldest_time = time.time() - 3600
+        os.utime(oldest_dir, (oldest_time, oldest_time))
+
+        (self.repo / "src" / "oldest-decoy.rs").unlink()
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        (self.repo / "src" / "overlay.rs").write_text(
+            "//! published B overlay feature\n", encoding="utf-8"
+        )
+        second = self._build()
+        self.assertTrue(second.get("ok"), second)
+        self.assertEqual(self._head()["previous_view_id"], first["view_id"])
+
+        # C is newer than every published View. Recovery must use journaled A,
+        # not a newest-directory scan either.
+        (self.repo / "src" / "decoy.rs").write_text(
+            "//! verified but unpublished decoy feature\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            runner,
+            "_publish_file_index_v2_view",
+            return_value={"ok": True, "published": False, "superseded": True},
+        ):
+            decoy = self._build()
+        self.assertTrue(decoy.get("ok"), decoy)
+        self.assertNotEqual(decoy["view_id"], first["view_id"])
+        self.assertNotEqual(decoy["view_id"], second["view_id"])
+        self.assertNotEqual(decoy["view_id"], oldest_decoy["view_id"])
+        decoy_dir = self._worktree_root() / "views" / decoy["view_id"]
+        self.assertTrue(runner._verify_file_index_v2_view(decoy_dir))
+        newest_time = time.time() + 3600
+        os.utime(decoy_dir, (newest_time, newest_time))
+        second_view = self._view_descriptor(second["view_id"])
+        second_overlay = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            second_view["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        (second_overlay / "descriptor.json").write_text(
+            "{corrupt journal active closure", encoding="utf-8"
+        )
+        self._head_path().write_text("{corrupt head", encoding="utf-8")
+
+        result = self._search_v2_in_fresh_process()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(
+            result["scopes"]["files"].get("fallback_source"), "previous", result
+        )
+        self.assertEqual(
+            result["scopes"]["files"].get("view_id"), first["view_id"], result
+        )
+        self.assertNotEqual(
+            result["scopes"]["files"].get("view_id"), decoy["view_id"], result
+        )
+        self.assertNotEqual(
+            result["scopes"]["files"].get("view_id"),
+            oldest_decoy["view_id"],
+            result,
+        )
+        self.assertEqual(result.get("stale_scopes"), ["files"], result)
+        repaired = runner._read_file_index_v2_head(self._head_path())
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["active_view_id"], first["view_id"])
+        self.assertTrue(decoy_dir.is_dir(), "unreachable decoy is not a recovery source")
+        self.assertTrue(oldest_dir.is_dir(), "oldest decoy is not a recovery source")
+
+    def test_invalid_active_and_previous_fall_back_to_legacy_then_not_ready(self):
+        first, second, _head = self._seed_legacy_and_two_views()
+        closure_dirs = []
+        for view_id in (first["view_id"], second["view_id"]):
+            descriptor_path = (
+                self._worktree_root() / "views" / view_id / "descriptor.json"
+            )
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            closure_dirs.extend(
+                [
+                    runner.resolve_file_index_v2_base_dir(
+                        REPO_HASH,
+                        descriptor["base_generation_id"],
+                        db_root=self.db_root,
+                    ),
+                    runner.resolve_file_index_v2_overlay_dir(
+                        REPO_HASH,
+                        WORKTREE_HASH,
+                        descriptor["overlay_generation_id"],
+                        db_root=self.db_root,
+                    ),
+                ]
+            )
+            descriptor_path.write_text("{corrupt view", encoding="utf-8")
+
+        runner._MODEL_CACHE = None
+        legacy = self._search_v2()
+        self.assertTrue(legacy.get("ok"), legacy)
+        self.assertEqual(
+            legacy["scopes"]["files"].get("fallback_source"), "legacy", legacy
+        )
+        self.assertEqual(legacy["scopes"]["files"]["state"], "stale", legacy)
+        self.assertTrue(self._file_results(legacy), legacy)
+
+        legacy_db = runner.resolve_db_path(
+            REPO_HASH, WORKTREE_HASH, "files", db_root=self.db_root
+        )
+        (runner.resolve_active_store(legacy_db) / "chroma.sqlite3").unlink()
+        runner._MODEL_CACHE = None
+        unavailable = self._search_v2()
+        self.assertFalse(unavailable.get("ok"), unavailable)
+        self.assertEqual(unavailable.get("error_code"), "INDEX_NOT_READY", unavailable)
+        self.assertIs(unavailable.get("retryable"), True, unavailable)
+        self.assertEqual(unavailable.get("affected_scopes"), ["files"], unavailable)
+        self.assertNotIn("scope_results", unavailable)
+        self.assertNotIn("results", unavailable)
+        self.assertTrue(
+            all(path.is_dir() for path in closure_dirs),
+            "base/overlay artifacts alone must not become a partial readable pair",
+        )
+
+    def test_incompatible_active_falls_back_without_reset_or_quarantine(self):
+        legacy = self._build_legacy()
+        self.assertTrue(legacy.get("ok"), legacy)
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        incompatible = runner.default_file_index_compatibility()
+        incompatible["path_policy_hash"] = hashlib.sha256(
+            b"future-path-policy"
+        ).hexdigest()
+        second = self._build(compatibility_descriptor=incompatible)
+        self.assertTrue(second.get("ok"), second)
+        head_before = self._head_path().read_bytes()
+        active_descriptor_path = (
+            self._worktree_root()
+            / "views"
+            / second["view_id"]
+            / "descriptor.json"
+        )
+        descriptor_before = active_descriptor_path.read_bytes()
+        active_view = json.loads(descriptor_before)
+        forbidden_stores = {
+            runner.resolve_file_index_v2_base_dir(
+                REPO_HASH,
+                active_view["base_generation_id"],
+                db_root=self.db_root,
+            )
+            / "store",
+            runner.resolve_file_index_v2_overlay_dir(
+                REPO_HASH,
+                WORKTREE_HASH,
+                active_view["overlay_generation_id"],
+                db_root=self.db_root,
+            )
+            / "store",
+        }
+        quarantines_before = {
+            path
+            for path in runner.resolve_file_index_v2_root(
+                REPO_HASH, db_root=self.db_root
+            ).rglob("*quarantine-*")
+        }
+
+        real_open = runner._open_file_index_v2_collection
+        incompatible_opens = []
+
+        def reject_incompatible_open(store, collection_name):
+            candidate = Path(store)
+            if candidate in forbidden_stores:
+                incompatible_opens.append((candidate, collection_name))
+                raise AssertionError("incompatible Chroma store opened")
+            return real_open(store, collection_name)
+
+        with mock.patch.object(
+            runner,
+            "_open_file_index_v2_collection",
+            side_effect=reject_incompatible_open,
+        ):
+            result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        files = result["scopes"]["files"]
+        self.assertEqual(files.get("state"), "stale", files)
+        self.assertEqual(files.get("reason"), "active_view_incompatible", files)
+        self.assertEqual(files.get("fallback_source"), "previous", files)
+        self.assertEqual(files.get("view_id"), first["view_id"], files)
+        self.assertEqual(
+            incompatible_opens,
+            [],
+            "an incompatible closure must be rejected before Chroma open/reset",
+        )
+        self.assertEqual(self._head_path().read_bytes(), head_before)
+        self.assertEqual(active_descriptor_path.read_bytes(), descriptor_before)
+        self.assertEqual(
+            {
+                path
+                for path in runner.resolve_file_index_v2_root(
+                    REPO_HASH, db_root=self.db_root
+                ).rglob("*quarantine-*")
+            },
+            quarantines_before,
+            "incompatible artifacts are never reset or quarantined as corrupt",
+        )
+
+    def test_future_view_schema_falls_back_without_head_repair_or_quarantine(self):
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        (self.repo / "src" / "future.rs").write_text(
+            "fn future() {}\n", encoding="utf-8"
+        )
+        second = self._build()
+        self.assertTrue(second.get("ok"), second)
+        head_before = self._head_path().read_bytes()
+        active_view_dir = self._worktree_root() / "views" / second["view_id"]
+        descriptor_path = active_view_dir / "descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        descriptor["future_extension"] = {"reader_epoch": 2}
+        descriptor["descriptor_checksum"] = runner._sha256_json(
+            {
+                key: value
+                for key, value in descriptor.items()
+                if key != "descriptor_checksum"
+            }
+        )
+        descriptor_path.write_text(
+            json.dumps(descriptor, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        descriptor_before = descriptor_path.read_bytes()
+        quarantines_before = set(
+            runner.resolve_file_index_v2_root(
+                REPO_HASH, db_root=self.db_root
+            ).rglob("*quarantine-*")
+        )
+
+        result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        files = result["scopes"]["files"]
+        self.assertEqual(files.get("reason"), "active_view_incompatible", files)
+        self.assertEqual(files.get("fallback_source"), "previous", files)
+        self.assertEqual(files.get("view_id"), first["view_id"], files)
+        self.assertEqual(self._head_path().read_bytes(), head_before)
+        self.assertEqual(descriptor_path.read_bytes(), descriptor_before)
+        self.assertEqual(
+            set(
+                runner.resolve_file_index_v2_root(
+                    REPO_HASH, db_root=self.db_root
+                ).rglob("*quarantine-*")
+            ),
+            quarantines_before,
+            "an additive future View descriptor is incompatible, never corrupt",
+        )
+
+    def test_explicit_v2_build_never_promotes_unfingerprinted_legacy_vectors_to_cas(self):
+        legacy_vector = [0.0, 1.0] + [0.0] * 766
+        legacy_model = mock.MagicMock()
+        legacy_model.encode.side_effect = lambda values, **_: [
+            list(legacy_vector) for _ in values
+        ]
+        with mock.patch.object(
+            runner, "_get_embedding_model", return_value=legacy_model
+        ):
+            legacy = self._build_legacy()
+        self.assertTrue(legacy.get("ok"), legacy)
+        self.assertGreater(legacy_model.encode.call_count, 0)
+        legacy_db = runner.resolve_db_path(
+            REPO_HASH, WORKTREE_HASH, "files", db_root=self.db_root
+        )
+        legacy_pointer = runner.active_pointer_path(legacy_db)
+        legacy_pointer_before = legacy_pointer.read_bytes()
+
+        v2_vector = [1.0] + [0.0] * 31
+        encoded_inputs = []
+        v2_model = mock.MagicMock()
+
+        def encode_v2(values, **_):
+            encoded_inputs.extend(str(value) for value in values)
+            return [list(v2_vector) for _ in values]
+
+        v2_model.encode.side_effect = encode_v2
+        with mock.patch.object(runner, "_get_embedding_model", return_value=v2_model):
+            result = self._build()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertGreater(result.get("requested_embeddings", 0), 0, result)
+        self.assertEqual(
+            result.get("computed_embeddings"), result["requested_embeddings"], result
+        )
+        self.assertEqual(result.get("embedding_cache_hits"), 0, result)
+        self.assertEqual(len(encoded_inputs), result["computed_embeddings"])
+        self.assertTrue(
+            all(value.startswith("passage: ") for value in encoded_inputs),
+            encoded_inputs,
+        )
+        self.assertTrue(
+            any("src/feature.rs" in value for value in encoded_inputs),
+            "v2 compute must use the exact path-aware document input",
+        )
+        expected_input_digests = {
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in encoded_inputs
+        }
+        cas_entries = list(
+            (
+                runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+                / "cas"
+            ).glob("*/*.json")
+        )
+        self.assertEqual(len(cas_entries), result["computed_embeddings"])
+        for entry in cas_entries:
+            payload = json.loads(entry.read_text(encoding="utf-8"))
+            self.assertIn(payload["input_digest"], expected_input_digests)
+            self.assertEqual(payload["vector"], v2_vector)
+            self.assertNotEqual(payload["vector"], legacy_vector)
+        self.assertEqual(
+            legacy_pointer.read_bytes(),
+            legacy_pointer_before,
+            "additive v2 migration must not rewrite the healthy legacy store",
+        )
+
+    def test_verified_view_publish_rotates_active_and_previous_atomically(self):
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        first_head = self._head()
+        first_active = first_head.get("active_view_id")
+        self.assertIsInstance(first_active, str, first_head)
+        self.assertEqual(first_head.get("sequence"), 1, first_head)
+        self.assertIsNone(first_head.get("previous_view_id"), first_head)
+        self.assertEqual(first_head.get("checksum"), self._expected_head_checksum(first_head))
+        first_head_bytes = self._head_path().read_bytes()
+
+        repeated = self._build()
+        self.assertTrue(repeated.get("ok"), repeated)
+        self.assertEqual(
+            self._head_path().read_bytes(),
+            first_head_bytes,
+            "publishing the same immutable pair must be an idempotent no-op",
+        )
+
+        (self.repo / "src" / "overlay.rs").write_text(
+            "//! overlay\nfn overlay() {}\n", encoding="utf-8"
+        )
+        second = self._build()
+        self.assertTrue(second.get("ok"), second)
+        second_head = self._head()
+
+        self.assertEqual(
+            second_head.get("previous_view_id"),
+            first_active,
+            "head rotation must retain the exact previously active view",
+        )
+        self.assertNotEqual(second_head.get("active_view_id"), first_active)
+        self.assertEqual(
+            second_head.get("checksum"), self._expected_head_checksum(second_head)
+        )
+        active_id = second_head["active_view_id"]
+        descriptor = self._view_descriptor(active_id)
+        self.assertEqual(descriptor["view_id"], active_id)
+        self.assertEqual(descriptor["base_generation_id"], second["base_generation_id"])
+        self.assertEqual(
+            descriptor["overlay_generation_id"], second["overlay_generation_id"]
+        )
+        self.assertEqual(descriptor["visible_counts"], {"files": 2, "files-docs": 1})
+
+    def test_head_replace_runs_only_after_base_and_overlay_artifacts_finish(self):
+        events = []
+        real_materialize = runner._materialize_file_artifact_pair
+        real_replace = os.replace
+
+        def record_materialize(*args, **kwargs):
+            result = real_materialize(*args, **kwargs)
+            events.append(f"artifact:{args[4]['kind']}:done")
+            return result
+
+        def record_replace(src, dst, *args, **kwargs):
+            if Path(dst) == self._head_path():
+                candidate_head = json.loads(Path(src).read_text(encoding="utf-8"))
+                candidate_view = (
+                    self._worktree_root()
+                    / "views"
+                    / candidate_head["active_view_id"]
+                )
+                self.assertTrue(
+                    (candidate_view / "descriptor.json").is_file(),
+                    "a head must never point at an unmaterialized View",
+                )
+                verify = getattr(runner, "_verify_file_index_v2_view", None)
+                self.assertTrue(callable(verify), "head publish requires closure verification")
+                self.assertTrue(
+                    verify(candidate_view),
+                    "the complete View closure must verify before head replace",
+                )
+                events.append("view:verified")
+                events.append("head:replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with mock.patch.object(
+            runner, "_materialize_file_artifact_pair", side_effect=record_materialize
+        ):
+            with mock.patch("os.replace", side_effect=record_replace):
+                result = self._build()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertIn("head:replace", events, events)
+        self.assertLess(events.index("artifact:base:done"), events.index("head:replace"))
+        self.assertLess(events.index("artifact:overlay:done"), events.index("head:replace"))
+        self.assertLess(events.index("view:verified"), events.index("head:replace"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
+    def test_directory_artifact_publish_fsyncs_tree_and_parent_around_replace(self):
+        publish = getattr(
+            runner, "_durably_replace_file_index_v2_directory", None
+        )
+        self.assertTrue(
+            callable(publish),
+            "Base/Overlay/View closure must be durable before a durable head can name it",
+        )
+        staging = self.base / "artifact.staging"
+        target = self.base / "artifact"
+        (staging / "store").mkdir(parents=True)
+        (staging / "store" / "payload.bin").write_bytes(b"durable closure")
+        events = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def record_fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def record_replace(src, dst, *args, **kwargs):
+            events.append("replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with mock.patch("os.fsync", side_effect=record_fsync):
+            with mock.patch("os.replace", side_effect=record_replace):
+                publish(staging, target)
+
+        replace_index = events.index("replace")
+        self.assertIn("fsync", events[:replace_index], events)
+        self.assertIn("fsync", events[replace_index + 1 :], events)
+        self.assertEqual((target / "store" / "payload.bin").read_bytes(), b"durable closure")
+
+    def test_publisher_reverifies_view_inside_head_critical_section(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        old_head = self._head_path().read_bytes()
+        (self.repo / "src" / "candidate.rs").write_text(
+            "fn candidate() {}\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            runner,
+            "_publish_file_index_v2_view",
+            return_value={"ok": True, "published": False, "superseded": True},
+        ):
+            candidate = self._build()
+        self.assertTrue(candidate.get("ok"), candidate)
+        view_dir = self._worktree_root() / "views" / candidate["view_id"]
+        snapshot = runner._canonical_git_tree(self.repo)
+        inherited = {
+            record["path"]: record
+            for record in runner._canonical_base_records(self.repo, snapshot)
+        }
+        snapshot_id = runner._visible_file_index_v2_snapshot_id(
+            self.repo, snapshot, inherited
+        )
+
+        with mock.patch.object(
+            runner, "_verify_file_index_v2_view", side_effect=[True, False]
+        ) as verify:
+            result = runner._publish_file_index_v2_view(
+                self.repo,
+                runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root),
+                WORKTREE_HASH,
+                view_dir,
+                candidate["view_id"],
+                snapshot.get("root_tree_oid"),
+                snapshot_id,
+                inherited,
+            )
+
+        self.assertGreaterEqual(
+            verify.call_count,
+            2,
+            "publisher must reverify the closure after acquiring the head lock",
+        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("error_code"), "BUILD_VERIFY_FAILED", result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+
+    def test_head_sequence_exhaustion_preserves_old_head_bytes(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        exhausted = self._head()
+        exhausted["sequence"] = 2**64 - 1
+        exhausted["checksum"] = self._expected_head_checksum(exhausted)
+        self._head_path().write_text(
+            json.dumps(exhausted, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        old_head = self._head_path().read_bytes()
+
+        (self.repo / "src" / "new-view.rs").write_text(
+            "fn new_view() {}\n", encoding="utf-8"
+        )
+        result = self._build()
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
+        self.assertFalse(result.get("retryable"), result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+
+        overflow = dict(exhausted, sequence=2**64)
+        overflow["checksum"] = self._expected_head_checksum(overflow)
+        self.assertFalse(runner._file_index_v2_head_is_valid(overflow))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
+    def test_head_writer_fsyncs_same_directory_temp_and_parent_around_replace(self):
+        writer = getattr(runner, "_write_file_index_v2_head_atomic", None)
+        self.assertTrue(
+            callable(writer),
+            "T-IDX-427 requires a durable same-directory Worktree View head writer",
+        )
+        head_path = self._head_path()
+        head_path.parent.mkdir(parents=True)
+        head_path.write_bytes(b'{"old":true}')
+        events = []
+        replacements = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def record_fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def record_replace(src, dst, *args, **kwargs):
+            events.append("replace")
+            replacements.append((Path(src), Path(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        payload = {
+            "schema_version": 1,
+            "active_view_id": "view-a",
+            "previous_view_id": None,
+            "sequence": 1,
+        }
+        payload["checksum"] = self._expected_head_checksum(payload)
+        with mock.patch("os.fsync", side_effect=record_fsync):
+            with mock.patch("os.replace", side_effect=record_replace):
+                writer(head_path, payload)
+
+        self.assertEqual(len(replacements), 1, replacements)
+        source, destination = replacements[0]
+        self.assertEqual(destination, head_path)
+        self.assertEqual(source.parent, head_path.parent)
+        replace_index = events.index("replace")
+        self.assertIn("fsync", events[:replace_index], events)
+        self.assertIn("fsync", events[replace_index + 1 :], events)
+        self.assertEqual(json.loads(head_path.read_text(encoding="utf-8")), payload)
+
+    def test_recovery_marker_clear_propagates_io_failure(self):
+        marker = self._worktree_root() / "head.recovery.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{}", encoding="utf-8")
+
+        with mock.patch.object(
+            Path, "unlink", side_effect=OSError(5, "injected marker unlink failure")
+        ):
+            with self.assertRaisesRegex(OSError, "injected marker unlink failure"):
+                runner._clear_file_index_v2_recovery_marker(marker)
+
+    def test_overlay_failure_after_new_base_keeps_old_pinned_view(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        self._head()
+        old_head = self._head_path().read_bytes()
+        old_views = set((self._worktree_root() / "views").iterdir())
+
+        (self.repo / "src" / "feature.rs").write_text(
+            "//! feature v2\nfn feature_v2() {}\n", encoding="utf-8"
+        )
+        self._commit("canonical v2")
+        real_materialize = runner._materialize_file_artifact_pair
+        published_bases = []
+
+        def fail_after_base(*args, **kwargs):
+            descriptor = args[4]
+            result = real_materialize(*args, **kwargs)
+            if descriptor.get("kind") == "base":
+                published_bases.append(Path(args[0]))
+                return result
+            raise RuntimeError("injected overlay failure after base publish")
+
+        with mock.patch.object(
+            runner, "_materialize_file_artifact_pair", side_effect=fail_after_base
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected overlay failure"):
+                self._build()
+
+        self.assertTrue(published_bases and published_bases[-1].is_dir())
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+        old_active = json.loads(old_head)["active_view_id"]
+        old_view = self._view_descriptor(old_active)
+        self.assertEqual(
+            old_view["base_generation_id"], baseline["base_generation_id"]
+        )
+        self.assertEqual(
+            set((self._worktree_root() / "views").iterdir()),
+            old_views,
+            "base-only or overlay-only state must never create a partial view",
+        )
+
+    def test_source_superseded_during_build_retains_artifacts_without_head_switch(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        self._head()
+        old_head = self._head_path().read_bytes()
+        old_overlay_dirs = set((self._worktree_root() / "overlays").iterdir())
+        source = self.repo / "src" / "feature.rs"
+        staged_bytes = b"//! dirty v2\nfn dirty_v2() {}\n"
+        source.write_bytes(staged_bytes)
+        real_materialize = runner._materialize_file_artifact_pair
+        mutated = False
+
+        def mutate_after_overlay(*args, **kwargs):
+            nonlocal mutated
+            result = real_materialize(*args, **kwargs)
+            if args[4].get("kind") == "overlay" and not mutated:
+                source.write_text(
+                    "//! dirty v3 arrived during build\nfn dirty_v3() {}\n",
+                    encoding="utf-8",
+                )
+                mutated = True
+            return result
+
+        with mock.patch.object(
+            runner, "_materialize_file_artifact_pair", side_effect=mutate_after_overlay
+        ):
+            result = self._build()
+
+        self.assertTrue(mutated, "fixture must supersede the immutable source snapshot")
+        self.assertTrue(result.get("ok"), result)
+        self.assertIs(result.get("superseded"), True, result)
+        self.assertIs(result.get("published"), False, result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+        self.assertGreater(
+            len(set((self._worktree_root() / "overlays").iterdir())),
+            len(old_overlay_dirs),
+            "verified immutable artifacts and CAS work remain reusable for the follow-up",
+        )
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            result["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        manifest = json.loads(
+            (overlay_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        feature = next(
+            entry for entry in manifest["entries"] if entry["path"] == "src/feature.rs"
+        )
+        self.assertEqual(feature["source_digest"], hashlib.sha256(staged_bytes).hexdigest())
+        cas_path = (
+            runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+            / "cas"
+            / feature["cas_key"][:2]
+            / f"{feature['cas_key']}.json"
+        )
+        self.assertTrue(cas_path.is_file(), "superseded snapshot CAS must be retained")
+
+        served = self._search_v2_in_fresh_process()
+        self.assertTrue(served.get("ok"), served)
+        self.assertEqual(
+            served["scopes"]["files"].get("view_id"), baseline["view_id"], served
+        )
+        self.assertNotIn("fallback_source", served["scopes"]["files"])
+
+    def test_kill_after_verified_view_before_head_keeps_old_serving_view(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        old_head = self._head_path().read_bytes()
+        old_views = set((self._worktree_root() / "views").iterdir())
+        (self.repo / "src" / "overlay.rs").write_text(
+            "//! candidate killed before publish\nfn killed_candidate() {}\n",
+            encoding="utf-8",
+        )
+        marker = self.base / "verified-view-before-head.json"
+        driver = """
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, os.environ["GWT_TEST_RUNNER_DIR"])
+import chroma_index_runner as runner
+
+real_materialize = runner._materialize_file_index_v2_view
+
+def pause_after_verified_view(*args, **kwargs):
+    view_dir, view_id = real_materialize(*args, **kwargs)
+    Path(os.environ["GWT_TEST_KILL_MARKER"]).write_text(
+        json.dumps({"view_dir": str(view_dir), "view_id": view_id}),
+        encoding="utf-8",
+    )
+    time.sleep(60)
+    return view_dir, view_id
+
+runner._materialize_file_index_v2_view = pause_after_verified_view
+runner.action_index_files_v2(
+    project_root=os.environ["GWT_TEST_PROJECT_ROOT"],
+    repo_hash=os.environ["GWT_TEST_REPO_HASH"],
+    worktree_hash=os.environ["GWT_TEST_WORKTREE_HASH"],
+    mode="full",
+    db_root=Path(os.environ["GWT_TEST_DB_ROOT"]),
+    scope="files",
+    file_index_protocol="v2",
+)
+"""
+        env = os.environ.copy()
+        env.update(
+            {
+                "GWT_TEST_RUNNER_DIR": str(RUNNER_PATH.parent),
+                "GWT_TEST_KILL_MARKER": str(marker),
+                "GWT_TEST_PROJECT_ROOT": str(self.repo),
+                "GWT_TEST_REPO_HASH": REPO_HASH,
+                "GWT_TEST_WORKTREE_HASH": WORKTREE_HASH,
+                "GWT_TEST_DB_ROOT": str(self.db_root),
+                "GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator),
+                "GWT_INDEX_FAKE_EMBEDDING": "1",
+            }
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", driver],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while not marker.is_file() and process.poll() is None:
+                self.assertLess(time.monotonic(), deadline, "v2 kill marker timed out")
+                time.sleep(0.05)
+            self.assertTrue(marker.is_file(), "writer exited before verified View marker")
+            process.kill()
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertNotEqual(
+                process.returncode,
+                0,
+                f"killed writer unexpectedly succeeded\nstdout:{stdout}\nstderr:{stderr}",
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+
+        candidate = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertTrue(Path(candidate["view_dir"]).is_dir())
+        self.assertNotIn(Path(candidate["view_dir"]), old_views)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+        served = self._search_v2_in_fresh_process()
+        self.assertTrue(served.get("ok"), served)
+        self.assertEqual(
+            served["scopes"]["files"].get("view_id"), baseline["view_id"], served
+        )
+        paths = {item["path"] for item in self._file_results(served)}
+        self.assertNotIn("src/overlay.rs", paths, served)
+
+    def test_head_replace_disk_full_preserves_old_head_and_serving_bytes(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        self._head()
+        old_head = self._head_path().read_bytes()
+        (self.repo / "src" / "overlay.rs").write_text(
+            "//! second view\nfn second_view() {}\n", encoding="utf-8"
+        )
+        real_replace = os.replace
+
+        def deny_head_replace(src, dst, *args, **kwargs):
+            if Path(dst) == self._head_path():
+                self.assertEqual(
+                    self._head_path().read_bytes(),
+                    old_head,
+                    "head publication must not unlink or rename the old head before replace",
+                )
+                raise OSError(28, "simulated disk full during head replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with mock.patch("os.replace", side_effect=deny_head_replace):
+            result = self._build()
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+        served = self._search_v2_in_fresh_process()
+        self.assertTrue(served.get("ok"), served)
+        self.assertEqual(
+            served["scopes"]["files"].get("view_id"), baseline["view_id"], served
+        )
+
+    def test_v2_search_and_status_pin_reader_before_view_open_until_close(self):
+        built = self._build()
+        self.assertTrue(built.get("ok"), built)
+        events = []
+        seen_lock_paths = set()
+        v2_root = runner.resolve_file_index_v2_root(
+            REPO_HASH, db_root=self.db_root
+        )
+
+        def live_pins():
+            payloads = []
+            for marker in sorted((v2_root / "leases").glob("*/pin.json")):
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+                canonical = {
+                    key: value for key, value in payload.items() if key != "checksum"
+                }
+                self.assertEqual(payload.get("checksum"), runner._sha256_json(canonical))
+                self.assertEqual(payload.get("pin_id"), marker.parent.name)
+                lock_path = marker.parent / ".lock"
+                self.assertTrue(lock_path.is_file())
+                seen_lock_paths.add(lock_path)
+                self.assertFalse(
+                    _exclusive_lock_available(lock_path),
+                    "live reader pin must hold an advisory shared lock",
+                )
+                payloads.append(payload)
+            return payloads
+
+        real_select = runner._select_file_index_v2_view
+        real_open = runner._open_file_index_v2_collection
+        real_close = runner._close_chroma_client
+
+        def record_select(*args, **kwargs):
+            events.append(("select", live_pins()))
+            return real_select(*args, **kwargs)
+
+        def record_open(*args, **kwargs):
+            events.append(("open", live_pins()))
+            return real_open(*args, **kwargs)
+
+        def record_close(*args, **kwargs):
+            events.append(("close", live_pins()))
+            return real_close(*args, **kwargs)
+
+        def assert_pinned_lifetime(operation):
+            events.clear()
+            result = operation()
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(events[0][0], "select", events)
+            self.assertTrue(any(event == "open" for event, _ in events), events)
+            self.assertTrue(any(event == "close" for event, _ in events), events)
+            for event, pins in events:
+                self.assertEqual(len(pins), 1, (event, pins, events))
+                pin = pins[0]
+                self.assertEqual(pin.get("schema_version"), 1, pin)
+                self.assertEqual(pin.get("kind"), "reader", pin)
+                self.assertEqual(pin.get("repo_hash"), REPO_HASH, pin)
+                self.assertEqual(pin.get("worktree_hash"), WORKTREE_HASH, pin)
+                self.assertIn("bases", pin.get("protected_paths", []), pin)
+                self.assertIn("cas", pin.get("protected_paths", []), pin)
+                self.assertIn(
+                    f"worktrees/{WORKTREE_HASH}", pin.get("protected_paths", []), pin
+                )
+            pin_ids = {pins[0]["pin_id"] for _, pins in events}
+            lock_paths = {
+                v2_root / "leases" / pin_id / ".lock" for pin_id in pin_ids
+            }
+            self.assertEqual(
+                len(pin_ids), 1, "one reader lease must span the full operation"
+            )
+            self.assertEqual(
+                len(lock_paths), 1, "one reader lock must span the full operation"
+            )
+            self.assertEqual(live_pins(), [], "reader pin must release after use")
+            for lock_path in seen_lock_paths:
+                if lock_path.exists():
+                    self.assertTrue(
+                        _exclusive_lock_available(lock_path),
+                        "released reader pin must release its advisory lock",
+                    )
+
+        with mock.patch.object(
+            runner, "_select_file_index_v2_view", side_effect=record_select
+        ), mock.patch.object(
+            runner, "_open_file_index_v2_collection", side_effect=record_open
+        ), mock.patch.object(
+            runner, "_close_chroma_client", side_effect=record_close
+        ):
+            assert_pinned_lifetime(self._search_v2)
+            assert_pinned_lifetime(
+                lambda: runner.action_status_v2(
+                    REPO_HASH,
+                    WORKTREE_HASH,
+                    db_root=self.db_root,
+                    file_index_protocol="v2",
+                )
+            )
+
+    def test_v2_build_holds_migration_pin_through_verified_head_publish(self):
+        events = []
+        seen_lock_paths = set()
+        v2_root = runner.resolve_file_index_v2_root(
+            REPO_HASH, db_root=self.db_root
+        )
+
+        def live_pins():
+            payloads = []
+            for marker in sorted((v2_root / "leases").glob("*/pin.json")):
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+                canonical = {
+                    key: value for key, value in payload.items() if key != "checksum"
+                }
+                self.assertEqual(payload.get("checksum"), runner._sha256_json(canonical))
+                self.assertEqual(payload.get("pin_id"), marker.parent.name)
+                lock_path = marker.parent / ".lock"
+                self.assertTrue(lock_path.is_file())
+                seen_lock_paths.add(lock_path)
+                self.assertFalse(
+                    _exclusive_lock_available(lock_path),
+                    "live migration pin must hold an advisory shared lock",
+                )
+                payloads.append(payload)
+            return payloads
+
+        def record_stage(name, function):
+            def wrapped(*args, **kwargs):
+                events.append((name, live_pins()))
+                return function(*args, **kwargs)
+
+            return wrapped
+
+        with mock.patch.object(
+            runner,
+            "_materialize_file_artifact_pair",
+            side_effect=record_stage(
+                "artifact-pair", runner._materialize_file_artifact_pair
+            ),
+        ), mock.patch.object(
+            runner,
+            "_materialize_file_index_v2_view",
+            side_effect=record_stage("view", runner._materialize_file_index_v2_view),
+        ), mock.patch.object(
+            runner,
+            "_publish_file_index_v2_view",
+            side_effect=record_stage("publish", runner._publish_file_index_v2_view),
+        ):
+            result = self._build()
+
+        self.assertTrue(result.get("ok"), result)
+        migration_pin_ids = set()
+        for stage in ("artifact-pair", "view", "publish"):
+            snapshots = [pins for event, pins in events if event == stage]
+            self.assertTrue(snapshots, (stage, events))
+            for pins in snapshots:
+                self.assertEqual(len(pins), 1, (stage, pins, events))
+                pin = pins[0]
+                self.assertEqual(pin.get("schema_version"), 1, pin)
+                self.assertEqual(pin.get("kind"), "migration", pin)
+                self.assertEqual(pin.get("repo_hash"), REPO_HASH, pin)
+                self.assertEqual(pin.get("worktree_hash"), WORKTREE_HASH, pin)
+                self.assertIn("bases", pin.get("protected_paths", []), pin)
+                self.assertIn("cas", pin.get("protected_paths", []), pin)
+                self.assertIn(
+                    f"worktrees/{WORKTREE_HASH}", pin.get("protected_paths", []), pin
+                )
+                migration_pin_ids.add(pin["pin_id"])
+        migration_lock_paths = {
+            v2_root / "leases" / pin_id / ".lock" for pin_id in migration_pin_ids
+        }
+        self.assertEqual(
+            len(migration_pin_ids), 1, "one migration lease must span all build stages"
+        )
+        self.assertEqual(
+            len(migration_lock_paths), 1, "one migration lock must span all build stages"
+        )
+        self.assertEqual(live_pins(), [], "migration pin must release after publish")
+        for lock_path in seen_lock_paths:
+            if lock_path.exists():
+                self.assertTrue(
+                    _exclusive_lock_available(lock_path),
+                    "released migration pin must release its advisory lock",
+                )
+
+    def test_pin_releases_individual_lock_when_registry_cleanup_fails(self):
+        v2_root = runner.resolve_file_index_v2_root(
+            REPO_HASH, db_root=self.db_root
+        )
+        real_acquire_lock = runner.acquire_lock
+        calls = 0
+
+        def fail_cleanup_registry(db_path, exclusive=True):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("simulated registry cleanup lock failure")
+            return real_acquire_lock(db_path, exclusive=exclusive)
+
+        with mock.patch.object(
+            runner, "acquire_lock", side_effect=fail_cleanup_registry
+        ):
+            with runner._file_index_v2_pin(
+                REPO_HASH,
+                WORKTREE_HASH,
+                "reader",
+                self.db_root,
+            ) as payload:
+                lock_path = v2_root / "leases" / payload["pin_id"] / ".lock"
+                self.assertFalse(_exclusive_lock_available(lock_path))
+
+        self.assertTrue(lock_path.is_file(), "failed cleanup leaves a stale marker")
+        self.assertTrue(
+            _exclusive_lock_available(lock_path),
+            "cleanup failure must never leak the individual advisory lock",
+        )
 
 
 if __name__ == "__main__":

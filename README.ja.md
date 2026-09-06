@@ -11,9 +11,9 @@ Agent workspace を materialize するために worktree を使いますが、�
 
 ## gwt の特徴
 
-- **Agent workspace** — `Claude Code` / `Codex` / `Antigravity CLI` /
-  `Gemini CLI (legacy)` / `OpenCode` / `Copilot` / custom agent を共有
-  canvas から起動・再開・状態確認できます。
+- **Agent workspace** — `Claude Code` / `Codex` / `Grok Build` /
+  `Antigravity CLI` / `Gemini CLI (legacy)` / `OpenCode` / `Copilot` /
+  custom agent を共有 canvas から起動・再開・状態確認できます。
 - **Shared Board** — user と agent の communication を repo-scoped timeline に集約し、
   `status` / `claim` / `next` / `blocked` / `handoff` / `decision` /
   `question` を扱えます。
@@ -100,10 +100,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 
   Gemini CLI は、対象となる Standard / Enterprise または API-key workflow
   向けの legacy option として gwt 内に残ります。
+
+  Grok Build は xAI 公式の `grok` command で提供されます。
+  `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
+  API-key workflow では `XAI_API_KEY` を設定してください。
 - エージェント利用時は必要な API キーを設定すること
   - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` または `GEMINI_API_KEY`
+  - `XAI_API_KEY`
 - shared project index runtime の bootstrap / repair が必要な場合は
   Python 3.9+ が使えること
 
@@ -217,12 +222,19 @@ JSON operation `daemon.start` を実行していない場合は multi-instance f
 無効ですが、ローカルのファイルベース state とファイル watcher は
 従来どおり動作します。
 
-Windows では現状 long-running daemon は提供されておらず、
-JSON operation `daemon.start` は "not yet implemented" で終了します。managed
-hook は同期的な `gwt hook ...` dispatch にフォールバックし、複数
-インスタンス間のイベント fan-out は Windows 対応 (named-pipe 経路)
-が完了するまで利用できません。JSON operation `daemon.status` 自体は Windows
-でも実行可能ですが、daemon が動かないため常に `stopped` を表示します。
+Windows でも daemon は同じ形で動きます。GUI の Issue Monitor がユーザー
+セッションの子プロセスとして起動・監視し、JSON operation `daemon.start` で
+手動起動もできます。通信は named pipe（`\\.\pipe\gwtd-<scope>-<hash>`、
+ローカルクライアントのみ。auth token は `~/.gwt` 配下の endpoint file が
+持つ）です。`daemon.status` / `daemon.subscribe` / Issue Monitor control /
+複数インスタンス間の fan-out は macOS / Linux と同じように動作します。
+手動起動した daemon は Ctrl-C、Ctrl-Break、コンソールを閉じることで停止し、
+ログオフとシャットダウンでも同じ cleanup が走ります。GUI が終了させた
+daemon は次回起動時の liveness 判定で回収されます。gwt は Windows Service を
+インストールしません。daemon が行うのは scan と claim までで、エージェント
+pane の生成は GUI 側が担うため、Service 化してもヘッドレス自律実行には
+ならず、ユーザー単位の `~/.gwt` state とも噛み合わないためです。ヘッドレス
+自律実行は daemon の目標には含めていません。
 
 ## Agent Workflow
 
@@ -251,7 +263,11 @@ hook は同期的な `gwt hook ...` dispatch にフォールバックし、複�
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます
+  Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
+  開かず、Issue ウィンドウの右ペインに読み取り専用でミラー表示されます。入力
+  したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
+  の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
+  `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Profile` — environment/profile 管理
 - `File Tree` — 実リポジトリの read-only tree
@@ -294,7 +310,13 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 `issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
-`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。各 operation
+`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+`issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
+プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
+詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
+ため、1 つの provider が rate limit に入ってもキューは止まりません。GUI の Agent
+settings で別 provider を保存すると同じプールに追加されます。各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
@@ -318,6 +340,18 @@ opt-in** が必要です:
 エスカレーションし、`Autonomous` トグルは monitor が arm した auto-merge を
 能動的に解除する kill switch として機能します。ゲート設計と脅威モデルの全体は
 SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。
+
+work ブランチが `develop` に merge されると、monitor は delivered な Issue を
+自分で決着させます（`Closes #N` は default branch でしか発火しません）。
+受け入れ基準がすべてチェック済みか、PR 本文 / Issue コメントに残りの基準を
+別 Issue に委譲した記録（`残 AC は別 Issue に委譲`）があれば、PR 番号と merge
+SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
+`merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
+全 Phase の tasks が完了したときだけ close します。auto-close は既定で
+`Autonomous` トグルに連動し、`issue.monitor.config.set` の
+`auto_close_merged_issues=true|false` で上書きできます（off のときは
+`merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
+merge で再度 close することはありません。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
@@ -345,6 +379,11 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
   PM だけです。他のエージェントセッションは GUI 操作が必要です。マージ判断は
   影響を受けません — 上記の強い自動ゲートが引き続きすべてのマージを決めます。
+- PM は project store 単位ではなく**リポジトリ単位**で 1 つです。state が
+  2 つの store に分かれたリポジトリでも PM は 1 本だけになります。JSON operation
+  `pm.status` はリポジトリ内の全登録を一覧し、`pm.stop` は CLI から PM を
+  停止します。登録済み PM は孤児化した PM を停止でき、自分自身も GUI 操作なしで
+  停止できます。
 
 設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
 
@@ -753,6 +792,68 @@ cargo bundle -p gwt --format osx
 ```bash
 cargo test -p gwt-core -p gwt --all-features
 ```
+
+### 重量級検証の直列化
+
+重量級検証（`cargo test --all-features` / `cargo llvm-cov` / headed
+Playwright / `verify.run`）はホストの CPU を奪い合います。同じマシンで 2 つ
+同時に走らせると wall-clock に依存する fixture が理由なく失敗し、カバレッジ
+計測も汚れるため、gwt はホスト単位の lease で直列化します。保持者はマシン
+あたり 1 つで、リポジトリや worktree をまたいで共有されます。
+
+重量級コマンドの前に lease を取得し、終わったら解放します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
+JSON
+```
+
+応答は即時です。`verification lease: granted` の場合は解放に使う `lease_id`
+が返り、`verification lease: unavailable` の場合は現在の保持者と残り TTL が
+返るため、他プロセスを監視する必要はありません。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.status","params":{}}
+JSON
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
+JSON
+```
+
+TTL より実行が長引く場合は、同じ `lease_id` で `verify.lease.extend` を
+使います。既定 TTL は 45 分で、満了した lease は自動的に解放され、保持者が
+kill された場合も即座に解放されます。lease の遷移は
+`~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
+
+### GitHub API 予算
+
+gwt が発行する `gh` 呼び出しは、全マシン・全 worktree・全エージェントで
+1 つの GitHub アカウント予算を共有します。`pr.list` の inventory は
+cache-first で、`~/.gwt/projects/<hash>/pr-inventory-cache.json` の
+スナップショットが 5 分間は GitHub に触れずに応答します。一括クエリは軽量で、
+`statusCheckRollup` / `body` は変更のあった PR だけ個別に取得します。判断に
+ライブ状態が必要なときだけ `params.refresh:true` を渡し、重いフィールドは
+`params.include`（`["checks","body"]`、既定は `["checks"]`）で選びます。応答には
+`source` / `cache_age_secs` / `throttled` / `github_calls` が含まれ、予算が
+予備域を下回ると最後のスナップショットが返り `throttled` に理由が入ります。
+
+予算の観測は無料エンドポイントで行います:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+応答には GitHub が報告する primary window（`graphql` / `core`）、分あたりの
+secondary limit のローカル推定（GitHub は公開しないため、このマシンの
+`~/.gwt/github-budget/` の spawn ledger から近似）、最新の rate-limit 拒否、
+そして定期読み取りが今受ける間引き判定が含まれます。
 
 ### リリース手順
 

@@ -201,6 +201,7 @@ fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
         subcommand,
         Some(
             "view"
+                | "list"
                 | "create"
                 | "edit"
                 | "ready"
@@ -225,9 +226,10 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
 Recommended alternatives:\n\
 - read: JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`\n\
 - write: JSON operations `issue.create`, `issue.comment`\n\
-- PR workflow: JSON operations `pr.current`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
+- PR workflow: JSON operations `pr.current`, `pr.list`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
 - PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
 - Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
+- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),

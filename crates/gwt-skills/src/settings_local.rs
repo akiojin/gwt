@@ -139,6 +139,7 @@ fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
             managed_hook_shell(),
+            &managed_hook_bin_for_config_path(settings_path),
         )),
     );
 
@@ -347,8 +348,9 @@ pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
 fn merge_managed_and_user_hooks(
     user_hooks: Map<String, Value>,
     shell: HookShell,
+    bin: &str,
 ) -> Map<String, Value> {
-    let managed_hooks = managed_hooks(shell);
+    let managed_hooks = managed_hooks(shell, bin);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -451,23 +453,23 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
         .any(|suffix| command.contains(suffix))
 }
 
-fn managed_hooks(shell: HookShell) -> Map<String, Value> {
+fn managed_hooks(shell: HookShell, bin: &str) -> Map<String, Value> {
     let mut hooks = Map::new();
     for event in MANAGED_EVENT_ORDER {
         hooks.insert(
             event.to_string(),
-            Value::Array(vec![event_hook(event, shell)]),
+            Value::Array(vec![event_hook(event, shell, bin)]),
         );
     }
     hooks
 }
 
-fn event_hook(event: &str, shell: HookShell) -> Value {
+fn event_hook(event: &str, shell: HookShell, bin: &str) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": event_hook_command(event, shell),
+                "command": event_hook_command_with_bin(bin, event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -481,6 +483,127 @@ fn event_hook(event: &str, shell: HookShell) -> Value {
 /// the example's own binary path) and any future out-of-process
 /// regenerator.
 const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
+
+/// The portable fallback every generated runtime selector uses when the
+/// hook config it is written into is shared through git.
+///
+/// #3567: a hook config that git tracks is byte-compared against a commit, so
+/// any absolute path baked into it — a worktree-local `target/debug/gwtd`, an
+/// installed `/Applications/GWT.app/Contents/MacOS/gwtd`, a
+/// `C:\Users\<name>\AppData\...` — leaves the file permanently dirty on the
+/// machine that materialized it, and resolves to nothing at all on every other
+/// machine if someone commits it. The bare name defers resolution to run time,
+/// where `GWT_BIN_PATH` (injected by every gwt launch, with its directory
+/// prepended to `PATH`) already answers it.
+pub const CANONICAL_HOOK_BIN: &str = "gwtd";
+
+/// Which binary a generated hook config at `path` should fall back to.
+///
+/// #3567: git-tracked configs get [`CANONICAL_HOOK_BIN`] so materialization
+/// converges on the committed bytes; untracked, machine-local configs keep the
+/// absolute pin resolved for this install (#3810), which is what makes hooks
+/// work for a Codex started outside gwt with no `gwtd` on `PATH`.
+pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
+    sanitize_hook_bin_for_config_path(path, &gwt_hook_bin_path())
+}
+
+/// Reduce `bin` to what may actually be written into a hook config at `path`.
+///
+/// Generation and Codex trust pre-registration both call this, so the value a
+/// launch vouches for is always the value materialization wrote. Divergence
+/// here is not a cosmetic mismatch: Codex refuses to run a hook it was not
+/// given the exact command hash for, and stops the launch on
+/// `Hooks need review`.
+pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
+    if managed_hook_config_is_git_tracked(path) {
+        return CANONICAL_HOOK_BIN.to_string();
+    }
+    // #3567 (PM ruling): a process-global `GWT_HOOK_BIN` is authority only for
+    // the worktree it was set for. A developer running `target/debug/gwtd` may
+    // pin that build inside their own worktree, but repairing a *different*
+    // worktree must never hand it a build output that a `cargo clean` or a
+    // worktree removal silently deletes — the hook then fails open and every
+    // event goes missing without a word.
+    match build_output_owner_root(Path::new(bin)) {
+        Some(owner_root) if !path_is_inside(path, &owner_root) => CANONICAL_HOOK_BIN.to_string(),
+        _ => bin.to_string(),
+    }
+}
+
+/// The checkout root that owns `bin` when `bin` is a gwt build output
+/// (`<root>/target/[<triple>/]{debug,release}/gwt[d][.exe]`), else `None`.
+///
+/// Returned in the normalized forward-slash form both platforms can compare;
+/// see the private `path_is_inside` helper.
+pub fn build_output_owner_root(bin: &Path) -> Option<String> {
+    let normalized = normalize_path_text(bin);
+    let segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let file_name = segments.last()?.to_ascii_lowercase();
+    let binary_name = file_name.strip_suffix(".exe").unwrap_or(file_name.as_str());
+    if binary_name != "gwt" && binary_name != "gwtd" {
+        return None;
+    }
+    let target_index = segments
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, segment)| {
+            (segment.eq_ignore_ascii_case("target")
+                && segments[index + 1..segments.len().saturating_sub(1)]
+                    .iter()
+                    .any(|segment| {
+                        segment.eq_ignore_ascii_case("debug")
+                            || segment.eq_ignore_ascii_case("release")
+                    }))
+            .then_some(index)
+        })?;
+    let mut root = String::new();
+    if normalized.starts_with('/') {
+        root.push('/');
+    }
+    root.push_str(&segments[..target_index].join("/"));
+    Some(root)
+}
+
+fn normalize_path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Whether `path` lives at or below `owner_root` (both in normalized
+/// forward-slash form). Component-boundary aware, so `/repo/work/issue-1` never
+/// swallows `/repo/work/issue-10`, and case-insensitive on Windows.
+fn path_is_inside(path: &Path, owner_root: &str) -> bool {
+    let path = normalize_path_text(path);
+    let owner_root = owner_root.trim_end_matches('/');
+    if owner_root.is_empty() {
+        return true;
+    }
+    let (path, owner_root) = if cfg!(windows) {
+        (path.to_ascii_lowercase(), owner_root.to_ascii_lowercase())
+    } else {
+        (path, owner_root.to_string())
+    };
+    path == owner_root || path.starts_with(&format!("{owner_root}/"))
+}
+
+/// Whether git tracks `path`. A path outside a repository, or one git reports
+/// as untracked, answers `false` — those files are machine-local by definition,
+/// so pinning an absolute binary into them harms nobody.
+pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    gwt_core::process::hidden_command("git")
+        .arg("-C")
+        .arg(parent)
+        .args(["ls-files", "--error-unmatch", "-z", "--"])
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
 
 /// Return the stable fallback used by every generated runtime selector.
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
@@ -569,10 +692,6 @@ fn managed_hook_shell() -> HookShell {
     }
 }
 
-fn event_hook_command(event: &str, shell: HookShell) -> String {
-    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
-}
-
 fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_codex_event_hook_command_with_bin(bin, event),
@@ -582,6 +701,23 @@ fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> Stri
 
 pub(crate) fn codex_event_hook_commands(event: &str) -> Vec<String> {
     codex_event_hook_commands_with_bin(&gwt_hook_bin_path(), event)
+}
+
+/// The repo-owned `gwt-self-improvement-stop` Stop hook, verbatim as this
+/// repository used to commit it in `.codex/hooks.json`.
+///
+/// The self-improvement CLI has since been removed, so a freshly cloned repo no
+/// longer carries this hook. Worktrees materialized before that removal still
+/// do, and `existing_user_hooks` preserves it untouched — which is why it lands
+/// at Stop group index 1 and why its fallback stays the machine independent
+/// literal `gwtd` instead of an absolute install path. It is still a gwt hook
+/// transport, so gwt keeps pre-trusting it rather than making those worktrees
+/// stop on Codex's `Hooks need review` prompt (Issue #3967).
+pub(crate) fn codex_self_improvement_stop_hook_commands() -> Vec<String> {
+    vec![
+        "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true"
+            .to_string(),
+    ]
 }
 
 pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
@@ -708,6 +844,39 @@ mod tests {
     };
 
     use super::*;
+
+    /// #3567: the owner-root containment check is what decides whether a build
+    /// output may be pinned, so it has to hold at a component boundary. Sibling
+    /// worktrees whose names share a prefix (`issue-1` / `issue-10`) are the
+    /// shape this repository actually produces.
+    #[test]
+    fn build_output_owner_root_matches_only_whole_path_components() {
+        let owner_root = build_output_owner_root(Path::new(
+            "/repo/work/issue-1/target/x86_64-apple-darwin/release/gwtd",
+        ))
+        .expect("a build output has an owner root");
+        assert_eq!(owner_root, "/repo/work/issue-1");
+
+        assert!(path_is_inside(
+            Path::new("/repo/work/issue-1/.claude/settings.local.json"),
+            &owner_root
+        ));
+        assert!(!path_is_inside(
+            Path::new("/repo/work/issue-10/.claude/settings.local.json"),
+            &owner_root
+        ));
+        assert!(!path_is_inside(
+            Path::new("/repo/work/other/.claude/settings.local.json"),
+            &owner_root
+        ));
+
+        assert_eq!(
+            build_output_owner_root(Path::new(r"C:\repo\target\debug\gwt.exe")).as_deref(),
+            Some("C:/repo")
+        );
+        assert!(build_output_owner_root(Path::new("/usr/local/bin/gwtd")).is_none());
+        assert!(build_output_owner_root(Path::new("/repo/target/debug/other")).is_none());
+    }
 
     #[test]
     fn concurrent_codex_hook_regeneration_uses_distinct_atomic_temp_files() {
@@ -1194,56 +1363,35 @@ mod tests {
         assert!(plugin.contains("prependContext"));
     }
 
+    // AC-R5: the self-improvement Stop hook is retired, so no provider bridge
+    // may emit it — not even in the `akiojin/gwt` repository, which used to be
+    // the one origin that received it.
     #[test]
-    fn provider_hooks_add_self_improvement_stop_only_for_gwt_repo() {
-        let gwt_repo = tempfile::tempdir().unwrap();
-        init_repo_with_origin(gwt_repo.path(), "https://github.com/akiojin/gwt.git");
-        generate_opencode_hooks(gwt_repo.path()).unwrap();
-        generate_openclaw_hooks(gwt_repo.path()).unwrap();
-        generate_hermes_hooks_with_source(gwt_repo.path(), None).unwrap();
-
-        let opencode =
-            fs::read_to_string(gwt_repo.path().join(".gwt/opencode/plugins/gwt-hooks.js")).unwrap();
-        let openclaw = fs::read_to_string(
-            gwt_repo
-                .path()
-                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
-        )
-        .unwrap();
-        let hermes =
-            fs::read_to_string(gwt_repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"))
-                .unwrap();
-        assert!(opencode.contains("gwt-self-improvement-stop"));
-        assert!(openclaw.contains("gwt-self-improvement-stop"));
-        assert!(hermes.contains("gwt-self-improvement-stop"));
-
-        let target_repo = tempfile::tempdir().unwrap();
-        init_repo_with_origin(
-            target_repo.path(),
+    fn provider_hooks_never_emit_the_retired_self_improvement_stop() {
+        for origin in [
+            "https://github.com/akiojin/gwt.git",
             "https://github.com/example/target-project.git",
-        );
-        generate_opencode_hooks(target_repo.path()).unwrap();
-        generate_openclaw_hooks(target_repo.path()).unwrap();
-        generate_hermes_hooks_with_source(target_repo.path(), None).unwrap();
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            init_repo_with_origin(repo.path(), origin);
+            generate_opencode_hooks(repo.path()).unwrap();
+            generate_openclaw_hooks(repo.path()).unwrap();
+            generate_hermes_hooks_with_source(repo.path(), None).unwrap();
 
-        let generated = [
-            target_repo
-                .path()
-                .join(".gwt/opencode/plugins/gwt-hooks.js"),
-            target_repo
-                .path()
-                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
-            target_repo
-                .path()
-                .join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
-        ];
-        for path in generated {
-            let content = fs::read_to_string(&path).unwrap();
-            assert!(
-                !content.contains("gwt-self-improvement-stop"),
-                "non-gwt repo must not receive direct self-improvement hook: {}",
-                path.display()
-            );
+            let generated = [
+                repo.path().join(".gwt/opencode/plugins/gwt-hooks.js"),
+                repo.path()
+                    .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+                repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
+            ];
+            for path in generated {
+                let content = fs::read_to_string(&path).unwrap();
+                assert!(
+                    !content.contains("gwt-self-improvement-stop"),
+                    "origin {origin} must not receive the retired self-improvement hook: {}",
+                    path.display()
+                );
+            }
         }
     }
 
@@ -1859,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_codex_hooks_preserves_direct_gwt_self_improvement_hook() {
+    fn generate_codex_hooks_preserves_repo_owned_stop_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1870,7 +2018,7 @@ mod tests {
                     "Stop": [{
                         "matcher": "*",
                         "hooks": [{
-                            "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop",
+                            "command": "./scripts/repo-owned-stop-check.sh",
                             "type": "command"
                         }]
                     }]
@@ -1894,8 +2042,8 @@ mod tests {
         assert!(
             stop_commands
                 .iter()
-                .any(|command| command.contains(" hook gwt-self-improvement-stop")),
-            "direct gwt self-improvement hook must be preserved as a repo-owned hook: {stop_commands:?}"
+                .any(|command| command.contains("repo-owned-stop-check.sh")),
+            "an unmanaged repo-owned Stop hook must be preserved: {stop_commands:?}"
         );
     }
 
@@ -2243,7 +2391,10 @@ mod tests {
         let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("session start command");
-        let expected = event_hook_command("SessionStart", managed_hook_shell());
+        // #3567: the file is git-tracked here, so the migrated command keeps the
+        // canonical portable fallback instead of this machine's absolute path.
+        let expected =
+            event_hook_command_with_bin(CANONICAL_HOOK_BIN, "SessionStart", managed_hook_shell());
         assert_eq!(session_start_command, expected);
     }
 

@@ -15,10 +15,12 @@ import json
 import math
 import os
 import re
+import stat
 import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
@@ -454,17 +456,15 @@ def collect_files(project_root: Path) -> List[Path]:
     return result
 
 
-def extract_description(file_path: Path) -> str:
-    """Extract a short description from a file's content."""
+def _extract_description_from_content(rel_path: str, content: str) -> str:
+    """Extract the same description from filesystem and immutable Git blobs."""
+    file_path = Path(rel_path)
     suffix = file_path.suffix.lower()
     name = file_path.name.lower()
-
     try:
-        content = file_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        lines = content.splitlines()
+    except (AttributeError, TypeError):
         return file_path.name
-
-    lines = content.splitlines()
     if not lines:
         return file_path.name
 
@@ -569,6 +569,15 @@ def extract_description(file_path: Path) -> str:
     return file_path.name
 
 
+def extract_description(file_path: Path) -> str:
+    """Extract a short description from a file's content."""
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return file_path.name
+    return _extract_description_from_content(file_path.name, content)
+
+
 def action_probe() -> dict:
     """Check if chromadb is available."""
     if importlib.util.find_spec("chromadb") is None:
@@ -580,6 +589,7 @@ def action_probe() -> dict:
         "ok": True,
         "chromadbVersion": chromadb.__version__,
         "pythonVersion": sys.version.split()[0],
+        "file_index_protocols": ["legacy", "v2"],
     }
 
 
@@ -1299,6 +1309,40 @@ V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
 V2_WORKS_COLLECTION = "works"
 
+FILE_INDEX_V2_LAYOUT_VERSION = 2
+FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2"
+FILE_INDEX_V2_MODEL_ID = "intfloat/multilingual-e5-base"
+FILE_INDEX_V2_MODEL_REVISION = "d128750597153bb5987e10b1c3493a34e5a4502a"
+FILE_INDEX_V2_COMPATIBILITY_FIELDS = (
+    "layout_version",
+    "index_schema_version",
+    "scope_set",
+    "model_id",
+    "model_revision",
+    "dimension",
+    "normalization",
+    "metric",
+    "query_prefix",
+    "passage_prefix",
+    "document_contract",
+    "path_policy_hash",
+    "writer_protocol",
+)
+FILE_EMBEDDING_CONTRACT_FIELDS = (
+    "model_id",
+    "revision",
+    "dimension",
+    "normalization",
+    "metric",
+    "query_prefix",
+    "passage_prefix",
+)
+FILE_INDEX_V2_REQUIRED_FIELDS = FILE_INDEX_V2_COMPATIBILITY_FIELDS + (
+    "runner_hash",
+)
+CANONICAL_BLOB_BATCH_BYTES = 8 * 1024 * 1024
+FILE_INDEX_V2_VECTOR_BATCH = 16
+
 
 def gwt_index_root() -> Path:
     """Return the root directory for all gwt vector index data."""
@@ -1325,6 +1369,193 @@ def resolve_db_path(
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
+
+
+def resolve_file_index_v2_root(
+    repo_hash: str, db_root: Optional[Path] = None
+) -> Path:
+    """Return the additive repo-scoped Phase 71 file-index root."""
+    root = Path(db_root) if db_root is not None else gwt_index_root()
+    return root / _safe_artifact_id(repo_hash) / "file-index-v2"
+
+
+def _safe_artifact_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value
+    ):
+        raise ValueError(f"unsafe file-index-v2 artifact id: {value!r}")
+    return value
+
+
+def resolve_file_index_v2_base_dir(
+    repo_hash: str, generation_id: str, db_root: Optional[Path] = None
+) -> Path:
+    return resolve_file_index_v2_root(repo_hash, db_root=db_root) / "bases" / _safe_artifact_id(generation_id)
+
+
+def resolve_file_index_v2_overlay_dir(
+    repo_hash: str,
+    worktree_hash: str,
+    generation_id: str,
+    db_root: Optional[Path] = None,
+) -> Path:
+    return (
+        resolve_file_index_v2_root(repo_hash, db_root=db_root)
+        / "worktrees"
+        / _safe_artifact_id(worktree_hash)
+        / "overlays"
+        / _safe_artifact_id(generation_id)
+    )
+
+
+def _stable_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_stable_json_bytes(value)).hexdigest()
+
+
+def _path_policy_hash() -> str:
+    return _sha256_json(INDEX_PATH_POLICY)
+
+
+def default_file_index_compatibility() -> Dict[str, Any]:
+    """Pinned semantic contract for newly built v2 file artifacts."""
+    try:
+        runner_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        runner_hash = "unavailable"
+    return {
+        "layout_version": FILE_INDEX_V2_LAYOUT_VERSION,
+        "index_schema_version": INDEX_SCHEMA_VERSION,
+        "scope_set": ["files", "files-docs"],
+        "model_id": FILE_INDEX_V2_MODEL_ID,
+        "model_revision": FILE_INDEX_V2_MODEL_REVISION,
+        "dimension": 768,
+        "normalization": "none",
+        "metric": "cosine",
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+        "document_contract": {
+            "payload_builder_version": 1,
+            "decode": "utf-8-replace",
+            "content_limit": 2000,
+        },
+        "path_policy_hash": _path_policy_hash(),
+        "writer_protocol": FILE_INDEX_V2_WRITER_PROTOCOL,
+        "runner_hash": runner_hash,
+    }
+
+
+def _semantic_file_index_contract(descriptor: Dict[str, Any]) -> Dict[str, Any]:
+    return {field: descriptor.get(field) for field in FILE_INDEX_V2_COMPATIBILITY_FIELDS}
+
+
+def _file_index_descriptor_has_valid_shape(descriptor: Any) -> bool:
+    if not isinstance(descriptor, dict) or any(
+        field not in descriptor for field in FILE_INDEX_V2_REQUIRED_FIELDS
+    ):
+        return False
+    positive_int_fields = ("layout_version", "index_schema_version", "dimension")
+    if any(
+        not isinstance(descriptor.get(field), int)
+        or isinstance(descriptor.get(field), bool)
+        or descriptor[field] <= 0
+        for field in positive_int_fields
+    ):
+        return False
+    if descriptor.get("scope_set") != ["files", "files-docs"]:
+        return False
+    string_fields = (
+        "model_id",
+        "model_revision",
+        "normalization",
+        "metric",
+        "query_prefix",
+        "passage_prefix",
+        "path_policy_hash",
+        "writer_protocol",
+        "runner_hash",
+    )
+    if any(
+        not isinstance(descriptor.get(field), str) or not descriptor[field]
+        for field in string_fields
+    ):
+        return False
+    document_contract = descriptor.get("document_contract")
+    if not isinstance(document_contract, dict):
+        return False
+    if any(
+        not isinstance(document_contract.get(field), str)
+        or not document_contract[field]
+        for field in ("decode",)
+    ):
+        return False
+    payload_version = document_contract.get("payload_builder_version")
+    content_limit = document_contract.get("content_limit")
+    return (
+        isinstance(payload_version, int)
+        and not isinstance(payload_version, bool)
+        and payload_version > 0
+        and isinstance(content_limit, int)
+        and not isinstance(content_limit, bool)
+        and content_limit > 0
+    )
+
+
+def _validated_file_index_descriptor(descriptor: Any) -> Dict[str, Any]:
+    if not _file_index_descriptor_has_valid_shape(descriptor):
+        raise ValueError("invalid file-index-v2 compatibility descriptor")
+    if descriptor.get("layout_version") != FILE_INDEX_V2_LAYOUT_VERSION:
+        raise ValueError("unsupported file-index-v2 layout version")
+    if descriptor.get("writer_protocol") != FILE_INDEX_V2_WRITER_PROTOCOL:
+        raise ValueError("unsupported file-index-v2 writer protocol")
+    return descriptor
+
+
+def file_index_compatibility(
+    left: Dict[str, Any], right: Dict[str, Any]
+) -> bool:
+    """Return whether two artifact descriptors have the same semantics.
+
+    `runner_hash` is intentionally provenance-only; every field that can
+    change stored documents, vectors, or search distance remains semantic.
+    """
+    if not _file_index_descriptor_has_valid_shape(
+        left
+    ) or not _file_index_descriptor_has_valid_shape(right):
+        return False
+    return _semantic_file_index_contract(left) == _semantic_file_index_contract(right)
+
+
+def _embedding_contract(descriptor: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "model_id": descriptor.get("model_id"),
+        "revision": descriptor.get("model_revision"),
+        "dimension": descriptor.get("dimension"),
+        "normalization": descriptor.get("normalization"),
+        "metric": descriptor.get("metric"),
+        "query_prefix": descriptor.get("query_prefix"),
+        "passage_prefix": descriptor.get("passage_prefix"),
+    }
+
+
+def file_embedding_cas_key(
+    embedding_contract: Dict[str, Any], model_input: str
+) -> Dict[str, str]:
+    """Identify a vector by its pinned model contract and exact input bytes."""
+    normalized_contract = {
+        field: embedding_contract.get(field)
+        for field in FILE_EMBEDDING_CONTRACT_FIELDS
+    }
+    input_digest = hashlib.sha256(model_input.encode("utf-8")).hexdigest()
+    cas_key = hashlib.sha256(
+        _stable_json_bytes(normalized_contract) + b"\0" + bytes.fromhex(input_digest)
+    ).hexdigest()
+    return {"cas_key": cas_key, "input_digest": input_digest}
 
 
 # ---------------------------------------------------------------------
@@ -1400,6 +1631,116 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
         fh.close()
 
 
+def _file_index_v2_reader_state_exists(v2_root: Path, worktree_hash: str) -> bool:
+    """True when the worktree has any v2 head a reader could pin."""
+    worktree_root = v2_root / "worktrees" / worktree_hash
+    return (worktree_root / "head.json").is_file() or (
+        worktree_root / "head.previous.json"
+    ).is_file()
+
+
+def _file_index_v2_reader_pin_if_present(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+):
+    """Reader pin for search / status, or a no-op when only legacy can serve.
+
+    AS-31: a worktree without any v2 head or journal has no closure to
+    protect, and the read-only legacy fallback must not create ``leases/``
+    or any other byte below the v2 layout.
+    """
+    v2_root = resolve_file_index_v2_root(_safe_artifact_id(repo_hash), db_root=db_root)
+    if _file_index_v2_reader_state_exists(v2_root, _safe_artifact_id(worktree_hash)):
+        return _file_index_v2_pin(repo_hash, worktree_hash, "reader", db_root)
+    return contextlib.nullcontext()
+
+
+@contextlib.contextmanager
+def _file_index_v2_pin(
+    repo_hash: str,
+    worktree_hash: str,
+    kind: str,
+    db_root: Optional[Path],
+) -> Iterator[Dict[str, Any]]:
+    """Publish one live GC pin while a v2 reader or migration owns its closure.
+
+    The registry lock makes marker setup/removal atomic with the Rust GC scan.
+    The per-pin advisory lock is the liveness source of truth; ``pin.json`` is
+    durable diagnostic data and supplies the conservative protected roots.
+    """
+    if kind not in {"reader", "migration", "continuation"}:
+        raise ValueError(f"unknown file-index-v2 pin kind: {kind}")
+    safe_repo_hash = _safe_artifact_id(repo_hash)
+    safe_worktree_hash = _safe_artifact_id(worktree_hash)
+    v2_root = resolve_file_index_v2_root(safe_repo_hash, db_root=db_root)
+    leases_root = v2_root / "leases"
+    pin_id = uuid.uuid4().hex
+    pin_dir = leases_root / pin_id
+    marker_path = pin_dir / "pin.json"
+    pin_lock = None
+    pin_lock_held = False
+    pin_dir_created = False
+    canonical = {
+        "schema_version": 1,
+        "pin_id": pin_id,
+        "kind": kind,
+        "repo_hash": safe_repo_hash,
+        "worktree_hash": safe_worktree_hash,
+        "protected_paths": [
+            "bases",
+            "cas",
+            f"worktrees/{safe_worktree_hash}",
+        ],
+        "owner_pid": os.getpid(),
+        "created_at": _file_index_timestamp(),
+    }
+    payload = {**canonical, "checksum": _sha256_json(canonical)}
+    try:
+        with acquire_lock(leases_root, exclusive=False):
+            pin_dir.mkdir(parents=False, exist_ok=False)
+            pin_dir_created = True
+            pin_lock = acquire_lock(pin_dir, exclusive=False)
+            pin_lock.__enter__()
+            pin_lock_held = True
+            _write_durable_json_atomic(marker_path, payload)
+        yield payload
+    finally:
+        # A GC scan takes the registry lock exclusively. Holding the shared
+        # handshake here prevents it from observing a half-created or
+        # half-removed pin directory. If reacquiring that handshake fails,
+        # always release the individual liveness lock and leave the directory
+        # for the next stale-pin sweep.
+        registry_lock = None
+        registry_lock_held = False
+        if pin_dir_created:
+            try:
+                registry_lock = acquire_lock(leases_root, exclusive=False)
+                registry_lock.__enter__()
+                registry_lock_held = True
+            except Exception:
+                registry_lock = None
+        try:
+            if registry_lock_held:
+                with contextlib.suppress(OSError):
+                    marker_path.unlink()
+                    _fsync_directory(pin_dir)
+        finally:
+            if pin_lock_held and pin_lock is not None:
+                with contextlib.suppress(Exception):
+                    pin_lock.__exit__(None, None, None)
+                pin_lock_held = False
+            if registry_lock_held:
+                with contextlib.suppress(OSError):
+                    (pin_dir / LOCK_FILENAME).unlink()
+                with contextlib.suppress(OSError):
+                    pin_dir.rmdir()
+                    _fsync_directory(leases_root)
+                assert registry_lock is not None
+                with contextlib.suppress(Exception):
+                    registry_lock.__exit__(None, None, None)
+
+
 # ---------------------------------------------------------------------
 # Embedding model + E5 prefix handling
 # ---------------------------------------------------------------------
@@ -1425,25 +1766,31 @@ class _FakeEmbeddingModel:
 
 
 _MODEL_CACHE: Optional[Any] = None
+_MODEL_CACHE_REVISION: Optional[str] = None
 
 
-def _get_embedding_model() -> Any:
+def _get_embedding_model(revision: Optional[str] = None) -> Any:
     """Lazily load (and cache) the embedding model.
 
     Honors GWT_INDEX_FAKE_EMBEDDING=1 to substitute a deterministic
     hash-based fake. Otherwise loads ``intfloat/multilingual-e5-base``.
     """
-    global _MODEL_CACHE
-    if _MODEL_CACHE is not None:
+    global _MODEL_CACHE, _MODEL_CACHE_REVISION
+    if _MODEL_CACHE is not None and _MODEL_CACHE_REVISION == revision:
         return _MODEL_CACHE
 
     if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
         _MODEL_CACHE = _FakeEmbeddingModel()
+        _MODEL_CACHE_REVISION = revision
         return _MODEL_CACHE
 
     from sentence_transformers import SentenceTransformer  # type: ignore
 
-    _MODEL_CACHE = SentenceTransformer("intfloat/multilingual-e5-base")
+    if revision is None:
+        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+    else:
+        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+    _MODEL_CACHE_REVISION = revision
     return _MODEL_CACHE
 
 
@@ -1581,6 +1928,40 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
         collection = client.get_collection(
             name=collection_name,
             embedding_function=ef,
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
+
+
+def _make_file_index_v2_collection(db_path: Path, collection_name: str):
+    """Create a v2 collection without attaching the legacy floating model."""
+    import chromadb  # type: ignore
+
+    db_path.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(db_path))
+    try:
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"},
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
+
+
+def _open_file_index_v2_collection(db_path: Path, collection_name: str):
+    """Open a v2 collection; query vectors must be encoded explicitly."""
+    import chromadb  # type: ignore
+
+    client = chromadb.PersistentClient(path=str(db_path))
+    try:
+        collection = client.get_collection(
+            name=collection_name,
+            embedding_function=None,
         )
     except Exception:
         _close_chroma_client(client)
@@ -1812,6 +2193,1968 @@ def build_embedding_document(
     if normalized_text:
         parts.append(normalized_text)
     return "\n".join(parts)
+
+
+def _record_from_bytes(rel_path: str, content_bytes: bytes) -> Optional[Dict[str, Any]]:
+    if len(content_bytes) > MAX_FILE_SIZE:
+        return None
+    suffix = Path(rel_path).suffix.lower()
+    if suffix in BINARY_EXTENSIONS or _policy_denies_path(rel_path):
+        return None
+    bucket = classify_file_bucket(rel_path)
+    if bucket == "skip":
+        return None
+    text = content_bytes.decode("utf-8", errors="replace")
+    description = _extract_description_from_content(rel_path, text)
+    document = build_embedding_document(
+        rel_path=rel_path,
+        description=description,
+        text=text[:2000],
+        bucket=bucket,
+        file_type=Path(rel_path).suffix.lstrip(".") or "unknown",
+    )
+    return {
+        "path": rel_path,
+        "bucket": bucket,
+        "document": document,
+        "source_digest": hashlib.sha256(content_bytes).hexdigest(),
+        "source_object": f"sha256:{hashlib.sha256(content_bytes).hexdigest()}",
+        "metadata": {
+            "path": rel_path,
+            "description": description,
+            "file_type": Path(rel_path).suffix.lstrip(".") or "unknown",
+            "size": len(content_bytes),
+            "bucket": bucket,
+        },
+    }
+
+
+class _FileIndexSourceSnapshotChanged(RuntimeError):
+    """A filesystem source disappeared or was renamed during fixed capture."""
+
+
+def _collect_file_index_v2_files_strict(project_root: Path) -> List[Path]:
+    """Collect v2 sources without turning I/O failures into deletions."""
+    policy = load_index_path_policy()
+    patterns = load_project_ignore_patterns(project_root)
+    compiled = [
+        pattern
+        for pattern in (
+            _pattern_to_regex(raw_pattern, base)
+            for base, raw_pattern in patterns
+        )
+        if pattern is not None
+    ]
+
+    def fail_walk(error: OSError) -> None:
+        if isinstance(error, FileNotFoundError):
+            raise _FileIndexSourceSnapshotChanged(
+                f"file-index-v2 source changed during traversal: {error.filename}"
+            ) from error
+        raise RuntimeError(
+            f"file-index-v2 source traversal failed: {error}"
+        ) from error
+
+    result: List[Path] = []
+    for current_root, directories, files in os.walk(
+        project_root, onerror=fail_walk
+    ):
+        root_path = Path(current_root)
+        relative_root = root_path.relative_to(project_root)
+        relative_root_text = "" if str(relative_root) == "." else str(relative_root)
+        directories[:] = [
+            directory
+            for directory in directories
+            if not _policy_denies_path(
+                f"{relative_root_text}/{directory}"
+                if relative_root_text
+                else directory,
+                policy,
+            )
+            and not should_ignore(
+                f"{relative_root_text}/{directory}"
+                if relative_root_text
+                else directory,
+                compiled,
+            )
+        ]
+        for filename in files:
+            relative_path = (
+                f"{relative_root_text}/{filename}"
+                if relative_root_text
+                else filename
+            )
+            if _policy_denies_path(relative_path, policy) or should_ignore(
+                relative_path, compiled
+            ):
+                continue
+            path = root_path / filename
+            if is_binary_file(path):
+                continue
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError as error:
+                raise _FileIndexSourceSnapshotChanged(
+                    f"file-index-v2 source changed during stat: {relative_path}"
+                ) from error
+            except OSError as error:
+                raise RuntimeError(
+                    f"file-index-v2 source stat failed: {relative_path}: {error}"
+                ) from error
+            if size <= MAX_FILE_SIZE:
+                result.append(path)
+    return result
+
+
+def _visible_file_records(
+    root: Path,
+    git_snapshot: Optional[Dict[str, Optional[str]]] = None,
+    inherited_records: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Capture one fixed visible corpus using Git objects for clean paths.
+
+    The index blob, not checkout bytes, is canonical for a clean tracked file.
+    This preserves inherited classification across EOL/smudge filters while
+    still treating staged branch differences as overlay input. Dirty and
+    untracked bytes are read exactly once and retained in the returned records.
+    """
+    visible_paths: Dict[str, Path] = {}
+    for path in _collect_file_index_v2_files_strict(root):
+        try:
+            rel_path = normalize_rel_path(path.relative_to(root))
+        except ValueError as error:
+            raise RuntimeError("file-index-v2 source escaped project root") from error
+        if rel_path in visible_paths:
+            raise RuntimeError("file-index-v2 source contains duplicate normalized paths")
+        visible_paths[rel_path] = path
+
+    records_by_path: Dict[str, Dict[str, Any]] = {}
+    clean_paths: set[str] = set()
+    if git_snapshot is not None:
+        dirty_paths = _git_worktree_dirty_paths(root)
+        index_entries = {
+            rel_path: (blob_oid, size)
+            for rel_path, blob_oid, size in _git_index_blob_entries(root)
+            if rel_path in visible_paths and rel_path not in dirty_paths
+        }
+        entries_to_read: List[tuple[str, str, int]] = []
+        inherited_records = inherited_records or {}
+        for rel_path, (blob_oid, size) in sorted(index_entries.items()):
+            inherited = inherited_records.get(rel_path)
+            if inherited is not None and inherited.get("source_object") == f"git:{blob_oid}":
+                records_by_path[rel_path] = inherited
+                clean_paths.add(rel_path)
+            else:
+                entries_to_read.append((rel_path, blob_oid, size))
+        for batch in _bounded_blob_entry_batches(entries_to_read):
+            blobs = _git_cat_file_batch(root, batch)
+            if set(blobs) != {rel_path for rel_path, _, _ in batch}:
+                raise RuntimeError("git cat-file omitted a clean tracked source")
+            for rel_path, blob_oid, _ in batch:
+                record = _record_from_bytes(rel_path, blobs[rel_path])
+                if record is not None:
+                    record["source_object"] = f"git:{blob_oid}"
+                    records_by_path[rel_path] = record
+                clean_paths.add(rel_path)
+
+    for rel_path, path in sorted(visible_paths.items()):
+        if rel_path in clean_paths:
+            continue
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError as error:
+            raise _FileIndexSourceSnapshotChanged(
+                f"file-index-v2 source changed during capture: {rel_path}"
+            ) from error
+        except OSError as error:
+            raise RuntimeError(
+                f"file-index-v2 source is unreadable: {rel_path}: {error}"
+            ) from error
+        record = _record_from_bytes(rel_path, content)
+        if record is not None:
+            records_by_path[rel_path] = record
+    return [records_by_path[path] for path in sorted(records_by_path)]
+
+
+def _capture_visible_file_records(
+    root: Path,
+    git_snapshot: Optional[Dict[str, Optional[str]]],
+    inherited_records: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    for _ in range(2):
+        try:
+            return _visible_file_records(root, git_snapshot, inherited_records)
+        except _FileIndexSourceSnapshotChanged:
+            continue
+    raise _FileIndexSourceSnapshotChanged(
+        "file-index-v2 source kept changing during fixed capture"
+    )
+
+
+def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] = None):
+    environment = os.environ.copy()
+    for override in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_NAMESPACE",
+        "GIT_COMMON_DIR",
+    ):
+        environment.pop(override, None)
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            input=input_bytes,
+            check=False,
+            capture_output=True,
+            env=environment,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"git {' '.join(args)} failed: {error}") from error
+
+
+def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
+    """Pin the first available canonical local ref without fetching."""
+    repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
+    if repository_probe.returncode != 0:
+        if (root / ".git").exists():
+            raise RuntimeError("git repository metadata is present but unreadable")
+        return None
+    top_level = _git_command(root, ["rev-parse", "--show-toplevel"])
+    prefix_output = _git_command(root, ["rev-parse", "--show-prefix"])
+    if top_level.returncode != 0 or prefix_output.returncode != 0:
+        raise RuntimeError("git repository root boundary could not be resolved")
+    try:
+        top_level_path = Path(top_level.stdout.decode("utf-8", errors="strict").strip())
+        tree_prefix = prefix_output.stdout.decode("utf-8", errors="strict").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("git repository root boundary is not valid UTF-8") from error
+    if tree_prefix and not tree_prefix.endswith("/"):
+        raise RuntimeError("git repository prefix is malformed")
+    expected_root = top_level_path.joinpath(*tree_prefix.rstrip("/").split("/"))
+    if root.resolve() != expected_root.resolve():
+        raise RuntimeError("git project root does not match its repository prefix")
+    candidates = (
+        ("origin/develop", "refs/remotes/origin/develop"),
+        ("origin/HEAD", "refs/remotes/origin/HEAD"),
+        ("origin/main", "refs/remotes/origin/main"),
+        ("origin/master", "refs/remotes/origin/master"),
+    )
+    ref_listing = _git_command(
+        root,
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            *(refname for _, refname in candidates),
+            "refs/heads/",
+        ],
+    )
+    if ref_listing.returncode != 0:
+        raise RuntimeError("git canonical ref existence probe failed")
+    try:
+        existing_refs = {
+            line
+            for line in ref_listing.stdout.decode("utf-8", errors="strict").splitlines()
+            if line
+        }
+    except UnicodeDecodeError as error:
+        raise RuntimeError("git canonical ref listing is not valid UTF-8") from error
+    head_probe = _git_command(
+        root, ["rev-parse", "--symbolic-full-name", "--verify", "--quiet", "HEAD"]
+    )
+    if head_probe.returncode == 0:
+        head_exists = True
+    else:
+        symbolic_head = _git_command(root, ["symbolic-ref", "--quiet", "HEAD"])
+        if symbolic_head.returncode == 0:
+            try:
+                head_target = symbolic_head.stdout.decode(
+                    "utf-8", errors="strict"
+                ).strip()
+            except UnicodeDecodeError as error:
+                raise RuntimeError("git symbolic HEAD is not valid UTF-8") from error
+            head_exists = head_target in existing_refs
+        else:
+            # A valid repository always has HEAD. A non-symbolic HEAD that
+            # cannot resolve is detached on a missing/corrupt object.
+            head_exists = True
+    candidate_presence = [
+        (reference, refname in existing_refs) for reference, refname in candidates
+    ]
+    candidate_presence.append(("HEAD", head_exists))
+
+    for reference, exists in candidate_presence:
+        if not exists:
+            continue
+        expression = f"{reference}^{{tree}}"
+        completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
+        if completed.returncode != 0:
+            stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"git canonical ref {expression} exists but could not be peeled: {stderr}"
+            )
+        tree_oid = completed.stdout.decode("ascii", errors="ignore").strip().lower()
+        if len(tree_oid) in (40, 64) and all(char in "0123456789abcdef" for char in tree_oid):
+            return {
+                "reference": reference,
+                "root_tree_oid": tree_oid,
+                "tree_prefix": tree_prefix,
+            }
+        raise RuntimeError(f"git rev-parse returned an invalid tree OID for {expression}")
+    return {"reference": None, "root_tree_oid": None, "tree_prefix": tree_prefix}
+
+
+def _canonical_git_rel_path(raw_path: bytes, tree_prefix: str) -> str:
+    try:
+        repo_rel_path = raw_path.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("git tree path is not valid UTF-8") from error
+    if tree_prefix:
+        if not repo_rel_path.startswith(tree_prefix):
+            raise RuntimeError("git tree path escaped the project prefix")
+        repo_rel_path = repo_rel_path[len(tree_prefix) :]
+    parts = repo_rel_path.split("/")
+    if (
+        not repo_rel_path
+        or repo_rel_path.startswith("/")
+        or "\\" in repo_rel_path
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(ord(char) < 32 or ord(char) == 127 for char in repo_rel_path)
+    ):
+        raise RuntimeError("git tree path is unsafe for file-index-v2")
+    return repo_rel_path
+
+
+def _git_worktree_dirty_paths(root: Path) -> set[str]:
+    completed = _git_command(
+        root, ["diff-files", "--name-only", "-z", "--relative", "--", "."]
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("git diff-files failed during source capture")
+    dirty = set()
+    for raw_path in completed.stdout.split(b"\0"):
+        if raw_path:
+            dirty.add(_canonical_git_rel_path(raw_path, ""))
+    return dirty
+
+
+def _git_index_blob_entries(root: Path) -> List[tuple[str, str, int]]:
+    completed = _git_command(root, ["ls-files", "--stage", "-z", "--", "."])
+    if completed.returncode != 0:
+        raise RuntimeError("git ls-files failed during source capture")
+    staged: List[tuple[str, str]] = []
+    normalized_paths = set()
+    for raw_entry in completed.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        if b"\t" not in raw_entry:
+            raise RuntimeError("git ls-files returned a malformed entry")
+        header, raw_path = raw_entry.split(b"\t", 1)
+        parts = header.split()
+        if len(parts) != 3:
+            raise RuntimeError("git ls-files returned a malformed header")
+        mode, raw_oid, raw_stage = parts
+        if raw_stage != b"0" or mode not in {b"100644", b"100755"}:
+            continue
+        try:
+            oid = raw_oid.decode("ascii", errors="strict").lower()
+        except UnicodeDecodeError as error:
+            raise RuntimeError("git index returned an invalid blob OID") from error
+        if len(oid) not in (40, 64) or any(
+            char not in "0123456789abcdef" for char in oid
+        ):
+            raise RuntimeError("git index returned an invalid blob OID")
+        rel_path = _canonical_git_rel_path(raw_path, "")
+        if rel_path in normalized_paths:
+            raise RuntimeError("git index contains duplicate normalized paths")
+        normalized_paths.add(rel_path)
+        staged.append((rel_path, oid))
+
+    if not staged:
+        return []
+    request = b"".join(oid.encode("ascii") + b"\n" for _, oid in staged)
+    checked = _git_command(
+        root,
+        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        input_bytes=request,
+    )
+    if checked.returncode != 0:
+        raise RuntimeError("git cat-file --batch-check failed for index blobs")
+    lines = checked.stdout.splitlines()
+    if len(lines) != len(staged):
+        raise RuntimeError("git cat-file --batch-check returned the wrong object count")
+    entries: List[tuple[str, str, int]] = []
+    for (rel_path, expected_oid), line in zip(staged, lines):
+        fields = line.split()
+        if len(fields) != 3 or fields[1] != b"blob":
+            raise RuntimeError("git index object is not a blob")
+        try:
+            actual_oid = fields[0].decode("ascii", errors="strict").lower()
+            size = int(fields[2])
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("git index returned invalid blob metadata") from error
+        if actual_oid != expected_oid or size < 0:
+            raise RuntimeError("git index blob metadata changed during capture")
+        if (
+            size <= MAX_FILE_SIZE
+            and Path(rel_path).suffix.lower() not in BINARY_EXTENSIONS
+            and not _policy_denies_path(rel_path)
+            and classify_file_bucket(rel_path) != "skip"
+        ):
+            entries.append((rel_path, expected_oid, size))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _git_tree_blob_entries(
+    root: Path, tree_oid: str, tree_prefix: str
+) -> List[tuple[str, str, int]]:
+    pathspec = f"{tree_prefix}." if tree_prefix else "."
+    completed = _git_command(
+        root, ["ls-tree", "-rlz", "--full-tree", tree_oid, "--", pathspec]
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("git ls-tree failed for the pinned canonical tree")
+    entries: List[tuple[str, str, int]] = []
+    normalized_paths = set()
+    for raw_entry in completed.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        if b"\t" not in raw_entry:
+            raise RuntimeError("git ls-tree returned a malformed entry")
+        header, raw_path = raw_entry.split(b"\t", 1)
+        header_parts = header.split()
+        if len(header_parts) != 4:
+            raise RuntimeError("git ls-tree returned a malformed header")
+        if header_parts[1] != b"blob" or header_parts[0] not in {b"100644", b"100755"}:
+            continue
+        rel_path = _canonical_git_rel_path(raw_path, tree_prefix)
+        try:
+            oid = header_parts[2].decode("ascii", errors="strict").lower()
+            size = int(header_parts[3])
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("git ls-tree returned invalid blob identity") from error
+        if (
+            len(oid) not in (40, 64)
+            or any(char not in "0123456789abcdef" for char in oid)
+            or size < 0
+        ):
+            raise RuntimeError("git ls-tree returned invalid blob identity")
+        if rel_path in normalized_paths:
+            raise RuntimeError("git tree contains duplicate normalized paths")
+        normalized_paths.add(rel_path)
+        if (
+            size > MAX_FILE_SIZE
+            or Path(rel_path).suffix.lower() in BINARY_EXTENSIONS
+            or _policy_denies_path(rel_path)
+            or classify_file_bucket(rel_path) == "skip"
+        ):
+            continue
+        entries.append((rel_path, oid, size))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _git_cat_file_batch(
+    root: Path, entries: Sequence[tuple[str, str, int]]
+) -> Dict[str, bytes]:
+    if not entries:
+        return {}
+    request = b"".join(oid.encode("ascii") + b"\n" for _, oid, _ in entries)
+    completed = _git_command(root, ["cat-file", "--batch"], input_bytes=request)
+    if completed.returncode != 0:
+        raise RuntimeError("git cat-file --batch failed for the pinned canonical tree")
+    output = completed.stdout
+    cursor = 0
+    blobs: Dict[str, bytes] = {}
+    for rel_path, expected_oid, expected_size in entries:
+        line_end = output.find(b"\n", cursor)
+        if line_end < 0:
+            raise RuntimeError("git cat-file --batch truncated an object header")
+        header = output[cursor:line_end].decode("ascii", errors="replace").split()
+        cursor = line_end + 1
+        if len(header) != 3 or header[0].lower() != expected_oid or header[1] != "blob":
+            raise RuntimeError("git cat-file --batch returned an unexpected object")
+        try:
+            size = int(header[2])
+        except ValueError:
+            raise RuntimeError("git cat-file --batch returned an invalid object size")
+        if size != expected_size:
+            raise RuntimeError("git cat-file --batch returned an unexpected object size")
+        blob = output[cursor : cursor + size]
+        cursor += size
+        if output[cursor : cursor + 1] != b"\n":
+            raise RuntimeError("git cat-file --batch truncated object content")
+        cursor += 1
+        blobs[rel_path] = blob
+    return blobs
+
+
+def _bounded_blob_entry_batches(
+    entries: Sequence[tuple[str, str, int]],
+) -> Iterator[List[tuple[str, str, int]]]:
+    batch: List[tuple[str, str, int]] = []
+    batch_bytes = 0
+    for entry in entries:
+        if batch and batch_bytes + entry[2] > CANONICAL_BLOB_BATCH_BYTES:
+            yield batch
+            batch = []
+            batch_bytes = 0
+        batch.append(entry)
+        batch_bytes += entry[2]
+    if batch:
+        yield batch
+
+
+def _canonical_base_records(
+    root: Path, snapshot: Dict[str, Optional[str]]
+) -> List[Dict[str, Any]]:
+    tree_oid = snapshot.get("root_tree_oid")
+    if tree_oid is None:
+        return []
+    entries = _git_tree_blob_entries(root, tree_oid, snapshot.get("tree_prefix") or "")
+    records: List[Dict[str, Any]] = []
+    for entry_batch in _bounded_blob_entry_batches(entries):
+        blobs = _git_cat_file_batch(root, entry_batch)
+        if set(blobs) != {rel_path for rel_path, _, _ in entry_batch}:
+            raise RuntimeError("git cat-file did not return every pinned tree blob")
+        for rel_path, blob_oid, _ in entry_batch:
+            record = _record_from_bytes(rel_path, blobs[rel_path])
+            if record is None:
+                continue
+            record["source_object"] = f"git:{blob_oid}"
+            records.append(record)
+    records.sort(key=lambda record: record["path"])
+    return records
+
+
+def _final_passage_input(descriptor: Dict[str, Any], document: str) -> str:
+    prefix = str(descriptor.get("passage_prefix") or "passage: ")
+    return document if document.startswith(prefix) else f"{prefix}{document}"
+
+
+def _cas_entry_path(cas_root: Path, cas_key: str) -> Path:
+    safe_key = _safe_artifact_id(cas_key)
+    return cas_root / safe_key[:2] / f"{safe_key}.json"
+
+
+def _vector_checksum(vector: Sequence[Any]) -> str:
+    return hashlib.sha256(
+        _stable_json_bytes([float(value) for value in vector])
+    ).hexdigest()
+
+
+def _chroma_vector_matches_cas(
+    stored: Sequence[Any], expected: Sequence[Any]
+) -> bool:
+    """Allow only Chroma's float32 roundtrip drift at the storage boundary."""
+    if len(stored) != len(expected):
+        return False
+    try:
+        return all(
+            math.isfinite(float(left))
+            and math.isclose(
+                float(left),
+                float(right),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            for left, right in zip(stored, expected)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _file_index_timestamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _is_file_index_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _expected_file_index_vector_dimension(descriptor: Dict[str, Any]) -> int:
+    declared_dimension = int(descriptor["dimension"])
+    if (
+        os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1"
+        and declared_dimension == default_file_index_compatibility()["dimension"]
+    ):
+        return _FakeEmbeddingModel.DIM
+    return declared_dimension
+
+
+def _read_cas_vector(
+    cas_root: Path,
+    identity: Dict[str, str],
+    embedding_contract: Dict[str, Any],
+    expected_dimension: int,
+) -> Optional[List[float]]:
+    path = _cas_entry_path(cas_root, identity["cas_key"])
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        vector = [float(value) for value in payload["vector"]]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if (
+        not vector
+        or not all(math.isfinite(value) for value in vector)
+        or payload.get("schema_version") != 1
+        or payload.get("cas_key") != identity["cas_key"]
+        or payload.get("input_digest") != identity["input_digest"]
+        or payload.get("embedding_contract") != embedding_contract
+        or payload.get("dimension") != expected_dimension
+        or len(vector) != expected_dimension
+        or payload.get("vector_checksum") != _vector_checksum(vector)
+        or not _is_file_index_timestamp(payload.get("created_at"))
+        or not _is_file_index_timestamp(payload.get("last_verified_at"))
+    ):
+        return None
+    return vector
+
+
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist directory entries where the platform exposes directory fsync."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(str(path), flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> None:
+    """Publish a verified immutable directory before a durable head names it."""
+    for current_root, _directories, filenames in os.walk(staging, topdown=False):
+        current = Path(current_root)
+        for filename in filenames:
+            # Windows rejects fsync on a read-only handle (EBADF), so open
+            # read/write without truncating; POSIX accepts either mode.
+            with (current / filename).open("r+b") as artifact:
+                os.fsync(artifact.fileno())
+        _fsync_directory(current)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging, target)
+    _fsync_directory(target.parent)
+
+
+def _write_cas_vector(
+    cas_root: Path,
+    identity: Dict[str, str],
+    embedding_contract: Dict[str, Any],
+    vector: Sequence[Any],
+    expected_dimension: int,
+) -> List[float]:
+    normalized = [float(value) for value in vector]
+    if (
+        len(normalized) != expected_dimension
+        or not all(math.isfinite(value) for value in normalized)
+    ):
+        raise ValueError("embedding CAS vector has invalid values or dimension")
+    path = _cas_entry_path(cas_root, identity["cas_key"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = _file_index_timestamp()
+    payload = {
+        "schema_version": 1,
+        "cas_key": identity["cas_key"],
+        "input_digest": identity["input_digest"],
+        "embedding_contract": embedding_contract,
+        "vector": normalized,
+        "vector_checksum": _vector_checksum(normalized),
+        "dimension": expected_dimension,
+        "created_at": timestamp,
+        "last_verified_at": timestamp,
+    }
+    _write_bytes_atomic(path, _stable_json_bytes(payload))
+    return normalized
+
+
+def _plan_file_artifact(
+    records: Sequence[Dict[str, Any]],
+    descriptor: Dict[str, Any],
+) -> tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
+    """Plan stable identities and manifest fields without retaining model inputs."""
+    embedding_contract = _embedding_contract(descriptor)
+    identities: List[Dict[str, str]] = []
+    manifest_plans: List[Dict[str, Any]] = []
+    for record in records:
+        model_input = _final_passage_input(descriptor, record["document"])
+        identity = file_embedding_cas_key(embedding_contract, model_input)
+        identities.append(identity)
+        manifest_plans.append(
+            {
+                "path": record["path"],
+                "source_object": record["source_object"],
+                "source_digest": record["source_digest"],
+                "payload_digest": hashlib.sha256(
+                    record["document"].encode("utf-8")
+                ).hexdigest(),
+                "metadata_digest": _sha256_json(record["metadata"]),
+                "scope": "files" if record["bucket"] == "code" else "files-docs",
+                "cas_key": identity["cas_key"],
+                "input_digest": identity["input_digest"],
+            }
+        )
+    return identities, manifest_plans
+
+
+def _resolve_record_vector_batch(
+    records: Sequence[Dict[str, Any]],
+    identities: Sequence[Dict[str, str]],
+    descriptor: Dict[str, Any],
+    cas_root: Path,
+) -> tuple[List[List[float]], int, int]:
+    """Resolve at most one bounded batch under the repo-wide CAS lock."""
+    if len(records) != len(identities) or len(records) > FILE_INDEX_V2_VECTOR_BATCH:
+        raise ValueError("file-index-v2 vector batch violates the bounded contract")
+    embedding_contract = _embedding_contract(descriptor)
+    expected_dimension = _expected_file_index_vector_dimension(descriptor)
+    inputs = [
+        _final_passage_input(descriptor, record["document"]) for record in records
+    ]
+    vectors: List[Optional[List[float]]] = [None] * len(records)
+    hits = 0
+    computed = 0
+    populate_lock = cas_root / ".populate"
+    with acquire_lock(populate_lock, exclusive=True):
+        missing: List[int] = []
+        for index, identity in enumerate(identities):
+            cached = _read_cas_vector(
+                cas_root, identity, embedding_contract, expected_dimension
+            )
+            if cached is None:
+                missing.append(index)
+            else:
+                vectors[index] = cached
+                hits += 1
+        if missing:
+            model_inputs = [inputs[index] for index in missing]
+            encoded = _get_embedding_model(FILE_INDEX_V2_MODEL_REVISION).encode(
+                model_inputs
+            )
+            if len(encoded) != len(missing):
+                raise ValueError("embedding model returned the wrong vector count")
+            for index, vector in zip(missing, encoded):
+                vectors[index] = _write_cas_vector(
+                    cas_root,
+                    identities[index],
+                    embedding_contract,
+                    vector,
+                    expected_dimension,
+                )
+                computed += 1
+    return [vector or [] for vector in vectors], computed, hits
+
+
+def _manifest_entry_with_vector(
+    manifest_plan: Dict[str, Any], vector: Sequence[Any]
+) -> Dict[str, Any]:
+    return {
+        **manifest_plan,
+        "vector_checksum": _vector_checksum(vector),
+        "dimension": len(vector),
+    }
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    _write_bytes_atomic(path, _stable_json_bytes(payload))
+
+
+def _read_artifact_descriptor(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads((path / "descriptor.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _json_typed_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _json_typed_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_typed_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
+def _count_incompatible_artifacts(
+    artifacts_root: Path,
+    source_field: str,
+    source_identity: Optional[str],
+    descriptor: Dict[str, Any],
+) -> int:
+    try:
+        artifacts = list(artifacts_root.iterdir())
+    except OSError:
+        return 0
+    rejected = 0
+    for artifact in artifacts:
+        existing = _read_artifact_descriptor(artifact)
+        if (
+            not existing
+            or source_field not in existing
+            or existing.get(source_field) != source_identity
+        ):
+            continue
+        if not file_index_compatibility(existing.get("compatibility", {}), descriptor):
+            rejected += 1
+    return rejected
+
+
+def _file_index_record_identity(record: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """Return every field that can change a persisted file document."""
+    return (
+        record["path"],
+        record["source_digest"],
+        record["bucket"],
+        hashlib.sha256(record["document"].encode("utf-8")).hexdigest(),
+        _sha256_json(record["metadata"]),
+    )
+
+
+def _plan_file_index_v2_overlay(
+    base_records: Sequence[Dict[str, Any]],
+    visible_records: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Classify one immutable worktree snapshot against its pinned base.
+
+    Equality deliberately includes path, source bytes, scope, final payload,
+    and metadata. A source-digest-only diff would miss path-policy scope moves
+    and payload-builder changes, allowing the old base record to leak through.
+    """
+    base_by_path = {record["path"]: record for record in base_records}
+    visible_by_path = {record["path"]: record for record in visible_records}
+    inherited: List[str] = []
+    upserts: List[Dict[str, Any]] = []
+    files_shadow: set[str] = set()
+    files_docs_shadow: set[str] = set()
+
+    def add_shadow(record: Dict[str, Any]) -> None:
+        target = files_shadow if record["bucket"] == "code" else files_docs_shadow
+        target.add(record["path"])
+
+    for path in sorted(visible_by_path):
+        record = visible_by_path[path]
+        base_record = base_by_path.get(path)
+        if base_record is not None and _file_index_record_identity(
+            base_record
+        ) == _file_index_record_identity(record):
+            inherited.append(path)
+            continue
+        upserts.append(record)
+        add_shadow(record)
+        if base_record is not None:
+            # Same-path scope movement shadows the old scope and upserts the
+            # new one in the same overlay/View publication.
+            add_shadow(base_record)
+
+    tombstones = sorted(set(base_by_path) - set(visible_by_path))
+    for path in tombstones:
+        add_shadow(base_by_path[path])
+
+    source_snapshot_id = _sha256_json(
+        [_file_index_record_identity(visible_by_path[path]) for path in sorted(visible_by_path)]
+    )
+    return {
+        "source_snapshot_id": source_snapshot_id,
+        "inherited": inherited,
+        "upserts": upserts,
+        "tombstones": tombstones,
+        "files_shadow": sorted(files_shadow),
+        "files_docs_shadow": sorted(files_docs_shadow),
+    }
+
+
+def _manifest_entries_digest_from_file(path: Path) -> Optional[str]:
+    """Hash canonical manifest entries with constant auxiliary memory."""
+    prefix = b'{"entries":'
+    suffix = b',"schema_version":1}'
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            if source.read(len(prefix)) != prefix:
+                return None
+            tail = b""
+            while True:
+                chunk = source.read(64 * 1024)
+                if not chunk:
+                    break
+                combined = tail + chunk
+                if len(combined) <= len(suffix):
+                    tail = combined
+                    continue
+                split_at = len(combined) - len(suffix)
+                digest.update(combined[:split_at])
+                tail = combined[split_at:]
+    except OSError:
+        return None
+    return digest.hexdigest() if tail == suffix else None
+
+
+def _artifact_pair_metadata_is_verified(
+    artifact_dir: Path,
+    records: Sequence[Dict[str, Any]],
+    descriptor_identity: Dict[str, Any],
+) -> bool:
+    store = artifact_dir / "store"
+    existing_descriptor = _read_artifact_descriptor(artifact_dir)
+    dynamic_fields = {"manifest_digest", "created_at", "verified_at"}
+    expected_fields = set(descriptor_identity) | dynamic_fields
+    immutable_fields = tuple(
+        field for field in descriptor_identity if field != "compatibility"
+    )
+    same_immutable_identity = (
+        existing_descriptor is not None
+        and set(existing_descriptor) == expected_fields
+        and all(
+            _json_typed_equal(
+                existing_descriptor[field], descriptor_identity[field]
+            )
+            for field in immutable_fields
+        )
+        and file_index_compatibility(
+            existing_descriptor.get("compatibility", {}),
+            descriptor_identity.get("compatibility", {}),
+        )
+        and _is_file_index_timestamp(existing_descriptor.get("created_at"))
+        and _is_file_index_timestamp(existing_descriptor.get("verified_at"))
+    )
+    if not same_immutable_identity or not (store / "chroma.sqlite3").is_file():
+        return False
+    manifest_digest = existing_descriptor.get("manifest_digest")
+    if not isinstance(manifest_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", manifest_digest
+    ):
+        return False
+    if (
+        _manifest_entries_digest_from_file(artifact_dir / "manifest.json")
+        != manifest_digest
+    ):
+        return False
+    for bucket, collection_name in (
+        ("code", V2_FILES_CODE_COLLECTION),
+        ("docs", V2_FILES_DOCS_COLLECTION),
+    ):
+        try:
+            client, collection = _open_file_index_v2_collection(
+                store, collection_name
+            )
+            try:
+                expected_count = sum(
+                    record["bucket"] == bucket for record in records
+                )
+                if _safe_collection_count(collection) != expected_count:
+                    return False
+            finally:
+                _close_chroma_client(client)
+        except Exception:
+            return False
+    return True
+
+
+def _staged_artifact_vectors_are_verified(
+    artifact_dir: Path,
+    records: Sequence[Dict[str, Any]],
+    identities: Sequence[Dict[str, str]],
+    manifest_entries: Sequence[Dict[str, Any]],
+    descriptor_identity: Dict[str, Any],
+    cas_root: Path,
+) -> bool:
+    if not (
+        len(records) == len(identities) == len(manifest_entries)
+        and _artifact_pair_metadata_is_verified(
+            artifact_dir, records, descriptor_identity
+        )
+    ):
+        return False
+    store = artifact_dir / "store"
+    embedding_contract = _embedding_contract(descriptor_identity["compatibility"])
+    expected_dimension = _expected_file_index_vector_dimension(
+        descriptor_identity["compatibility"]
+    )
+    opened: Dict[str, tuple[Any, Any]] = {}
+    try:
+        for bucket, collection_name in (
+            ("code", V2_FILES_CODE_COLLECTION),
+            ("docs", V2_FILES_DOCS_COLLECTION),
+        ):
+            opened[bucket] = _open_file_index_v2_collection(store, collection_name)
+        for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
+            stop = start + FILE_INDEX_V2_VECTOR_BATCH
+            indexes = range(start, min(stop, len(records)))
+            for bucket in ("code", "docs"):
+                selected = [
+                    index for index in indexes if records[index]["bucket"] == bucket
+                ]
+                if not selected:
+                    continue
+                expected_vectors = []
+                for index in selected:
+                    vector = _read_cas_vector(
+                        cas_root,
+                        identities[index],
+                        embedding_contract,
+                        expected_dimension,
+                    )
+                    if vector is None:
+                        return False
+                    expected_vectors.append(vector)
+                collection = opened[bucket][1]
+                stored = collection.get(
+                    ids=[records[index]["path"] for index in selected],
+                    include=["documents", "metadatas", "embeddings"],
+                )
+                stored_ids = list(stored.get("ids") or [])
+                documents = list(stored.get("documents") or [])
+                metadatas = list(stored.get("metadatas") or [])
+                raw_embeddings = stored.get("embeddings")
+                embeddings = list(raw_embeddings) if raw_embeddings is not None else []
+                if not (
+                    len(stored_ids)
+                    == len(documents)
+                    == len(metadatas)
+                    == len(embeddings)
+                    == len(selected)
+                ):
+                    return False
+                stored_by_id = {
+                    record_id: (document, metadata, embedding)
+                    for record_id, document, metadata, embedding in zip(
+                        stored_ids, documents, metadatas, embeddings
+                    )
+                }
+                if len(stored_by_id) != len(selected):
+                    return False
+                for index, expected_vector in zip(selected, expected_vectors):
+                    record = records[index]
+                    manifest_entry = manifest_entries[index]
+                    stored_record = stored_by_id.get(record["path"])
+                    if stored_record is None:
+                        return False
+                    document, metadata, embedding = stored_record
+                    if (
+                        hashlib.sha256(str(document).encode("utf-8")).hexdigest()
+                        != manifest_entry.get("payload_digest")
+                        or _sha256_json(metadata)
+                        != manifest_entry.get("metadata_digest")
+                        or len(expected_vector) != manifest_entry.get("dimension")
+                        or _vector_checksum(expected_vector)
+                        != manifest_entry.get("vector_checksum")
+                        or not _chroma_vector_matches_cas(
+                            embedding, expected_vector
+                        )
+                    ):
+                        return False
+    except Exception:
+        return False
+    finally:
+        for client, _ in opened.values():
+            _close_chroma_client(client)
+    return True
+
+
+def _materialize_file_artifact_pair(
+    artifact_dir: Path,
+    records: Sequence[Dict[str, Any]],
+    identities: Sequence[Dict[str, str]],
+    manifest_plans: Sequence[Dict[str, Any]],
+    descriptor_identity: Dict[str, Any],
+    descriptor: Dict[str, Any],
+    cas_root: Path,
+) -> tuple[int, int]:
+    if _artifact_pair_metadata_is_verified(
+        artifact_dir, records, descriptor_identity
+    ):
+        return 0, len(records)
+    artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
+    with acquire_lock(lock_dir, exclusive=True):
+        if _artifact_pair_metadata_is_verified(
+            artifact_dir, records, descriptor_identity
+        ):
+            return 0, len(records)
+        if not (len(records) == len(identities) == len(manifest_plans)):
+            raise ValueError("file-index-v2 artifact plan length mismatch")
+        if artifact_dir.exists():
+            quarantine = artifact_dir.with_name(
+                f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+            )
+            os.replace(artifact_dir, quarantine)
+        staging = artifact_dir.with_name(
+            f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
+        )
+        shutil.rmtree(staging, ignore_errors=True)
+        store = staging / "store"
+        manifest_entries: List[Dict[str, Any]] = []
+        computed = 0
+        hits = 0
+        opened: Dict[str, tuple[Any, Any]] = {}
+        try:
+            for bucket, collection_name in (
+                ("code", V2_FILES_CODE_COLLECTION),
+                ("docs", V2_FILES_DOCS_COLLECTION),
+            ):
+                opened[bucket] = _make_file_index_v2_collection(
+                    store, collection_name
+                )
+            for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
+                stop = min(start + FILE_INDEX_V2_VECTOR_BATCH, len(records))
+                batch_records = records[start:stop]
+                batch_identities = identities[start:stop]
+                vectors, batch_computed, batch_hits = _resolve_record_vector_batch(
+                    batch_records, batch_identities, descriptor, cas_root
+                )
+                computed += batch_computed
+                hits += batch_hits
+                manifest_entries.extend(
+                    _manifest_entry_with_vector(plan, vector)
+                    for plan, vector in zip(manifest_plans[start:stop], vectors)
+                )
+                for bucket in ("code", "docs"):
+                    selected = [
+                        (record, vector)
+                        for record, vector in zip(batch_records, vectors)
+                        if record["bucket"] == bucket
+                    ]
+                    if not selected:
+                        continue
+                    opened[bucket][1].upsert(
+                        ids=[record["path"] for record, _ in selected],
+                        embeddings=[list(vector) for _, vector in selected],
+                        documents=[record["document"] for record, _ in selected],
+                        metadatas=[record["metadata"] for record, _ in selected],
+                    )
+            for bucket in ("code", "docs"):
+                expected_count = sum(
+                    record["bucket"] == bucket for record in records
+                )
+                if _safe_collection_count(opened[bucket][1]) != expected_count:
+                    raise RuntimeError(
+                        f"file-index-v2 {bucket} collection count mismatch"
+                    )
+            for client, _ in opened.values():
+                _close_chroma_client(client)
+            opened.clear()
+            manifest_digest = _sha256_json(manifest_entries)
+            timestamp = _file_index_timestamp()
+            descriptor_payload = {
+                **descriptor_identity,
+                "manifest_digest": manifest_digest,
+                "created_at": timestamp,
+                "verified_at": timestamp,
+            }
+            _write_json_atomic(
+                staging / "manifest.json",
+                {"schema_version": 1, "entries": list(manifest_entries)},
+            )
+            _write_json_atomic(staging / "descriptor.json", descriptor_payload)
+            if not _staged_artifact_vectors_are_verified(
+                staging,
+                records,
+                identities,
+                manifest_entries,
+                descriptor_identity,
+                cas_root,
+            ):
+                raise RuntimeError("file-index-v2 staging artifact verification failed")
+            _durably_replace_file_index_v2_directory(staging, artifact_dir)
+            return computed, hits
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        finally:
+            for client, _ in opened.values():
+                _close_chroma_client(client)
+
+
+_BASE_DESCRIPTOR_FIELDS = {
+    "schema_version",
+    "kind",
+    "base_generation_id",
+    "repo_hash",
+    "root_tree_oid",
+    "canonical_ref",
+    "compatibility",
+    "files_generation",
+    "files_docs_generation",
+    "manifest_digest",
+    "document_counts",
+    "build_state",
+    "created_at",
+    "verified_at",
+}
+_OVERLAY_DESCRIPTOR_FIELDS = {
+    "schema_version",
+    "kind",
+    "overlay_generation_id",
+    "repo_hash",
+    "worktree_hash",
+    "base_generation_id",
+    "source_snapshot_id",
+    "compatibility",
+    "files_generation",
+    "files_docs_generation",
+    "files_shadow",
+    "files_docs_shadow",
+    "tombstones",
+    "manifest_digest",
+    "build_state",
+    "created_at",
+    "verified_at",
+}
+_VIEW_DESCRIPTOR_FIELDS = {
+    "schema_version",
+    "view_id",
+    "repo_hash",
+    "worktree_hash",
+    "base_generation_id",
+    "overlay_generation_id",
+    "compatibility",
+    "visible_counts",
+    "source_snapshot_id",
+    "descriptor_checksum",
+    "verified_at",
+}
+_HEAD_FIELDS = {
+    "schema_version",
+    "active_view_id",
+    "previous_view_id",
+    "sequence",
+    "checksum",
+}
+_RECOVERY_MARKER_FIELDS = {
+    "schema_version",
+    "view_id",
+    "head_sequence",
+    "reason",
+    "fallback_source",
+    "checksum",
+}
+_MANIFEST_ENTRY_FIELDS = {
+    "path",
+    "source_object",
+    "source_digest",
+    "payload_digest",
+    "metadata_digest",
+    "scope",
+    "cas_key",
+    "input_digest",
+    "vector_checksum",
+    "dimension",
+}
+
+
+def _is_safe_file_index_v2_id(value: Any) -> bool:
+    try:
+        return _safe_artifact_id(value) == value
+    except ValueError:
+        return False
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_exact_file_index_v2_compatibility(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != set(FILE_INDEX_V2_REQUIRED_FIELDS):
+        return False
+    document_contract = value.get("document_contract")
+    if not isinstance(document_contract, dict) or set(document_contract) != {
+        "payload_builder_version",
+        "decode",
+        "content_limit",
+    }:
+        return False
+    try:
+        _validated_file_index_descriptor(value)
+    except ValueError:
+        return False
+    return value.get("index_schema_version") == INDEX_SCHEMA_VERSION
+
+
+def _is_generation_reference(value: Any, collection: str) -> bool:
+    return value == {"store": "store", "collection": collection}
+
+
+def _is_sorted_unique_string_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and all(_is_safe_file_index_v2_logical_path(item) for item in value)
+        and value == sorted(set(value))
+    )
+
+
+def _is_safe_file_index_v2_logical_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
+        return False
+    parts = value.split("/")
+    return (
+        all(part not in {"", ".", ".."} for part in parts)
+        and all(ord(char) >= 32 and ord(char) != 127 for char in value)
+        and normalize_rel_path(Path(value)) == value
+    )
+
+
+def _validated_file_index_v2_manifest_scope_paths(
+    entries: Any,
+) -> Optional[Dict[str, set[str]]]:
+    if not isinstance(entries, list):
+        return None
+    scope_paths: Dict[str, set[str]] = {"files": set(), "files-docs": set()}
+    all_paths: set[str] = set()
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != _MANIFEST_ENTRY_FIELDS
+            or not _is_safe_file_index_v2_logical_path(entry.get("path"))
+            or not isinstance(entry.get("source_object"), str)
+            or not entry["source_object"]
+            or entry.get("scope") not in scope_paths
+            or any(
+                not _is_sha256(entry.get(field))
+                for field in (
+                    "source_digest",
+                    "payload_digest",
+                    "metadata_digest",
+                    "cas_key",
+                    "input_digest",
+                    "vector_checksum",
+                )
+            )
+            or not isinstance(entry.get("dimension"), int)
+            or isinstance(entry.get("dimension"), bool)
+            or entry["dimension"] <= 0
+            or entry["path"] in all_paths
+        ):
+            return None
+        all_paths.add(entry["path"])
+        scope_paths[entry["scope"]].add(entry["path"])
+    return scope_paths
+
+
+def _file_index_v2_artifact_generation_id(
+    descriptor: Dict[str, Any], entries: Sequence[Dict[str, Any]]
+) -> str:
+    records = [[entry["path"], entry["cas_key"]] for entry in entries]
+    identity = {
+        "compatibility": _semantic_file_index_contract(descriptor["compatibility"]),
+        "records": records,
+    }
+    if descriptor["kind"] == "base":
+        identity["root_tree_oid"] = descriptor["root_tree_oid"]
+    else:
+        identity["source_snapshot_id"] = descriptor["source_snapshot_id"]
+        identity["base_generation_id"] = descriptor["base_generation_id"]
+    return _sha256_json(identity)
+
+
+def _file_index_v2_manifest_record_identity(
+    entry: Dict[str, Any],
+) -> tuple[str, str, str, str, str]:
+    return (
+        entry["path"],
+        entry["source_digest"],
+        "code" if entry["scope"] == "files" else "docs",
+        entry["payload_digest"],
+        entry["metadata_digest"],
+    )
+
+
+def _load_verified_file_index_v2_artifact(
+    artifact_dir: Path, kind: str
+) -> Optional[tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, set[str]]]]:
+    descriptor = _read_artifact_descriptor(artifact_dir)
+    expected_fields = (
+        _BASE_DESCRIPTOR_FIELDS if kind == "base" else _OVERLAY_DESCRIPTOR_FIELDS
+    )
+    id_field = "base_generation_id" if kind == "base" else "overlay_generation_id"
+    if (
+        descriptor is None
+        or set(descriptor) != expected_fields
+        or descriptor.get("schema_version") != 1
+        or descriptor.get("kind") != kind
+        or descriptor.get("build_state") != "verified"
+        or descriptor.get(id_field) != artifact_dir.name
+        or not _is_safe_file_index_v2_id(descriptor.get(id_field))
+        or not _is_safe_file_index_v2_id(descriptor.get("repo_hash"))
+        or not _is_exact_file_index_v2_compatibility(
+            descriptor.get("compatibility")
+        )
+        or not _is_generation_reference(
+            descriptor.get("files_generation"), V2_FILES_CODE_COLLECTION
+        )
+        or not _is_generation_reference(
+            descriptor.get("files_docs_generation"), V2_FILES_DOCS_COLLECTION
+        )
+        or not _is_sha256(descriptor.get("manifest_digest"))
+        or not _is_file_index_timestamp(descriptor.get("created_at"))
+        or not _is_file_index_timestamp(descriptor.get("verified_at"))
+    ):
+        return None
+    if kind == "base":
+        root_tree_oid = descriptor.get("root_tree_oid")
+        canonical_ref = descriptor.get("canonical_ref")
+        counts = descriptor.get("document_counts")
+        if (
+            (root_tree_oid is not None and not _is_safe_file_index_v2_id(root_tree_oid))
+            or (canonical_ref is not None and not isinstance(canonical_ref, str))
+            or canonical_ref == ""
+            or not isinstance(counts, dict)
+            or set(counts) != {"files", "files-docs", "total"}
+            or any(
+                not isinstance(counts.get(scope), int)
+                or isinstance(counts.get(scope), bool)
+                or counts[scope] < 0
+                for scope in ("files", "files-docs", "total")
+            )
+            or counts["total"] != counts["files"] + counts["files-docs"]
+        ):
+            return None
+    else:
+        if (
+            not _is_safe_file_index_v2_id(descriptor.get("worktree_hash"))
+            or not _is_safe_file_index_v2_id(descriptor.get("base_generation_id"))
+            or not _is_safe_file_index_v2_id(descriptor.get("source_snapshot_id"))
+            or not all(
+                _is_sorted_unique_string_list(descriptor.get(field))
+                for field in ("files_shadow", "files_docs_shadow", "tombstones")
+            )
+        ):
+            return None
+
+    manifest_path = artifact_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "entries"}
+        or manifest.get("schema_version") != 1
+        or not isinstance(manifest.get("entries"), list)
+        or _manifest_entries_digest_from_file(manifest_path)
+        != descriptor["manifest_digest"]
+    ):
+        return None
+    entries = manifest["entries"]
+    scope_paths = _validated_file_index_v2_manifest_scope_paths(entries)
+    if scope_paths is None:
+        return None
+    if [entry["path"] for entry in entries] != sorted(
+        entry["path"] for entry in entries
+    ):
+        return None
+    if _file_index_v2_artifact_generation_id(descriptor, entries) != descriptor[id_field]:
+        return None
+
+    manifest_counts = {scope: len(paths) for scope, paths in scope_paths.items()}
+    if kind == "base" and any(
+        descriptor["document_counts"][scope] != manifest_counts[scope]
+        for scope in ("files", "files-docs")
+    ):
+        return None
+    for scope, collection_name in (
+        ("files", V2_FILES_CODE_COLLECTION),
+        ("files-docs", V2_FILES_DOCS_COLLECTION),
+    ):
+        try:
+            client, collection = _open_file_index_v2_collection(
+                artifact_dir / "store", collection_name
+            )
+            try:
+                if _safe_collection_count(collection) != manifest_counts[scope]:
+                    return None
+            finally:
+                _close_chroma_client(client)
+        except Exception:
+            return None
+    return descriptor, entries, scope_paths
+
+
+def _file_index_v2_view_identity(
+    repo_hash: str,
+    worktree_hash: str,
+    base_generation_id: str,
+    overlay_generation_id: str,
+    compatibility: Dict[str, Any],
+    visible_counts: Dict[str, int],
+    source_snapshot_id: str,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "repo_hash": repo_hash,
+        "worktree_hash": worktree_hash,
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "compatibility": _semantic_file_index_contract(compatibility),
+        "visible_counts": visible_counts,
+        "source_snapshot_id": source_snapshot_id,
+    }
+
+
+def _verify_file_index_v2_view(view_dir: Path) -> bool:
+    """Verify the complete Base/Overlay/View closure before publication."""
+    view_dir = Path(view_dir)
+    descriptor = _read_artifact_descriptor(view_dir)
+    if (
+        descriptor is None
+        or set(descriptor) != _VIEW_DESCRIPTOR_FIELDS
+        or descriptor.get("schema_version") != 1
+        or descriptor.get("view_id") != view_dir.name
+        or not all(
+            _is_safe_file_index_v2_id(descriptor.get(field))
+            for field in (
+                "view_id",
+                "repo_hash",
+                "worktree_hash",
+                "base_generation_id",
+                "overlay_generation_id",
+                "source_snapshot_id",
+            )
+        )
+        or not _is_exact_file_index_v2_compatibility(
+            descriptor.get("compatibility")
+        )
+        or not _is_file_index_timestamp(descriptor.get("verified_at"))
+        or not _is_sha256(descriptor.get("descriptor_checksum"))
+    ):
+        return False
+    visible_counts = descriptor.get("visible_counts")
+    if (
+        not isinstance(visible_counts, dict)
+        or set(visible_counts) != {"files", "files-docs"}
+        or any(
+            not isinstance(visible_counts.get(scope), int)
+            or isinstance(visible_counts.get(scope), bool)
+            or visible_counts[scope] < 0
+            for scope in ("files", "files-docs")
+        )
+    ):
+        return False
+    checksum_payload = {
+        key: value for key, value in descriptor.items() if key != "descriptor_checksum"
+    }
+    if _sha256_json(checksum_payload) != descriptor["descriptor_checksum"]:
+        return False
+    expected_view_id = _sha256_json(
+        _file_index_v2_view_identity(
+            descriptor["repo_hash"],
+            descriptor["worktree_hash"],
+            descriptor["base_generation_id"],
+            descriptor["overlay_generation_id"],
+            descriptor["compatibility"],
+            visible_counts,
+            descriptor["source_snapshot_id"],
+        )
+    )
+    if descriptor["view_id"] != expected_view_id:
+        return False
+
+    worktree_root = view_dir.parent.parent
+    v2_root = worktree_root.parent.parent
+    if (
+        view_dir.parent.name != "views"
+        or worktree_root.parent.name != "worktrees"
+        or v2_root.name != "file-index-v2"
+        or descriptor["worktree_hash"] != worktree_root.name
+        or descriptor["repo_hash"] != v2_root.parent.name
+    ):
+        return False
+    base_dir = v2_root / "bases" / descriptor["base_generation_id"]
+    overlay_dir = worktree_root / "overlays" / descriptor["overlay_generation_id"]
+    base_verified = _load_verified_file_index_v2_artifact(base_dir, "base")
+    overlay_verified = _load_verified_file_index_v2_artifact(overlay_dir, "overlay")
+    if base_verified is None or overlay_verified is None:
+        return False
+    base_descriptor, base_entries, base_paths = base_verified
+    overlay_descriptor, overlay_entries, overlay_paths = overlay_verified
+    if (
+        base_descriptor["repo_hash"] != descriptor["repo_hash"]
+        or overlay_descriptor["repo_hash"] != descriptor["repo_hash"]
+        or overlay_descriptor["worktree_hash"] != descriptor["worktree_hash"]
+        or overlay_descriptor["base_generation_id"]
+        != descriptor["base_generation_id"]
+        or overlay_descriptor["source_snapshot_id"]
+        != descriptor["source_snapshot_id"]
+        or not file_index_compatibility(
+            base_descriptor["compatibility"], descriptor["compatibility"]
+        )
+        or not file_index_compatibility(
+            overlay_descriptor["compatibility"], descriptor["compatibility"]
+        )
+    ):
+        return False
+
+    files_shadow = set(overlay_descriptor["files_shadow"])
+    files_docs_shadow = set(overlay_descriptor["files_docs_shadow"])
+    tombstones = set(overlay_descriptor["tombstones"])
+    base_all = base_paths["files"] | base_paths["files-docs"]
+    overlay_all = overlay_paths["files"] | overlay_paths["files-docs"]
+    changed_or_removed = overlay_all | tombstones
+    expected_files_shadow = overlay_paths["files"] | (
+        base_paths["files"] & changed_or_removed
+    )
+    expected_files_docs_shadow = overlay_paths["files-docs"] | (
+        base_paths["files-docs"] & changed_or_removed
+    )
+    if (
+        tombstones & overlay_all
+        or not tombstones.issubset(base_all)
+        or files_shadow != expected_files_shadow
+        or files_docs_shadow != expected_files_docs_shadow
+    ):
+        return False
+    expected_counts = {
+        "files": len(base_paths["files"] - files_shadow)
+        + len(overlay_paths["files"]),
+        "files-docs": len(base_paths["files-docs"] - files_docs_shadow)
+        + len(overlay_paths["files-docs"]),
+    }
+    if visible_counts != expected_counts:
+        return False
+    visible_entries: Dict[str, Dict[str, Any]] = {}
+    for entry in base_entries:
+        shadow = files_shadow if entry["scope"] == "files" else files_docs_shadow
+        if entry["path"] not in shadow:
+            visible_entries[entry["path"]] = entry
+    for entry in overlay_entries:
+        if entry["path"] in visible_entries:
+            return False
+        visible_entries[entry["path"]] = entry
+    expected_source_snapshot_id = _sha256_json(
+        [
+            _file_index_v2_manifest_record_identity(visible_entries[path])
+            for path in sorted(visible_entries)
+        ]
+    )
+    return expected_source_snapshot_id == descriptor["source_snapshot_id"]
+
+
+def _materialize_file_index_v2_view(
+    v2_root: Path,
+    repo_hash: str,
+    worktree_hash: str,
+    base_generation_id: str,
+    overlay_generation_id: str,
+    compatibility: Dict[str, Any],
+    visible_counts: Dict[str, int],
+    source_snapshot_id: str,
+) -> tuple[Path, str]:
+    identity = _file_index_v2_view_identity(
+        repo_hash,
+        worktree_hash,
+        base_generation_id,
+        overlay_generation_id,
+        compatibility,
+        visible_counts,
+        source_snapshot_id,
+    )
+    view_id = _sha256_json(identity)
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    view_dir = worktree_root / "views" / _safe_artifact_id(view_id)
+    lock_dir = worktree_root / ".locks" / f"view-{view_id}"
+    with acquire_lock(lock_dir, exclusive=True):
+        if view_dir.exists():
+            if not _verify_file_index_v2_view(view_dir):
+                raise RuntimeError("file-index-v2 existing View failed closure verification")
+            return view_dir, view_id
+        staging = view_dir.with_name(
+            f".{view_id}.staging-{time.time_ns()}-{os.getpid()}"
+        )
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            timestamp = _file_index_timestamp()
+            descriptor = {
+                "schema_version": 1,
+                "view_id": view_id,
+                "repo_hash": repo_hash,
+                "worktree_hash": worktree_hash,
+                "base_generation_id": base_generation_id,
+                "overlay_generation_id": overlay_generation_id,
+                "compatibility": compatibility,
+                "visible_counts": visible_counts,
+                "source_snapshot_id": source_snapshot_id,
+                "verified_at": timestamp,
+            }
+            descriptor["descriptor_checksum"] = _sha256_json(descriptor)
+            _write_json_atomic(staging / "descriptor.json", descriptor)
+            view_dir.parent.mkdir(parents=True, exist_ok=True)
+            _durably_replace_file_index_v2_directory(staging, view_dir)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        if not _verify_file_index_v2_view(view_dir):
+            raise RuntimeError("file-index-v2 View closure verification failed")
+    return view_dir, view_id
+
+
+def _file_index_v2_head_is_valid(payload: Any) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _HEAD_FIELDS
+        or payload.get("schema_version") != 1
+        or not _is_safe_file_index_v2_id(payload.get("active_view_id"))
+        or (
+            payload.get("previous_view_id") is not None
+            and (
+                not _is_safe_file_index_v2_id(payload.get("previous_view_id"))
+                or payload["previous_view_id"] == payload.get("active_view_id")
+            )
+        )
+        or not isinstance(payload.get("sequence"), int)
+        or isinstance(payload.get("sequence"), bool)
+        or payload["sequence"] <= 0
+        or payload["sequence"] > (2**64 - 1)
+        or not _is_sha256(payload.get("checksum"))
+    ):
+        return False
+    canonical = {key: payload[key] for key in _HEAD_FIELDS if key != "checksum"}
+    return payload["checksum"] == _sha256_json(canonical)
+
+
+def _read_file_index_v2_head_token(
+    path: Path,
+) -> tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+    try:
+        token = path.read_bytes()
+    except OSError:
+        return None, None
+    try:
+        payload = json.loads(token.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return token, None
+    return token, payload if _file_index_v2_head_is_valid(payload) else None
+
+
+def _read_file_index_v2_head(path: Path) -> Optional[Dict[str, Any]]:
+    return _read_file_index_v2_head_token(path)[1]
+
+
+def _write_durable_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("xb") as output:
+            output.write(_stable_json_bytes(payload))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+def _write_file_index_v2_head_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    """Durably replace a flat head without unlinking the old Windows file."""
+    if not _file_index_v2_head_is_valid(payload):
+        raise ValueError("invalid file-index-v2 head payload")
+    _write_durable_json_atomic(path, payload)
+
+
+def _file_index_v2_recovery_marker_is_valid(payload: Any) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _RECOVERY_MARKER_FIELDS
+        or payload.get("schema_version") != 1
+        or not _is_safe_file_index_v2_id(payload.get("view_id"))
+        or not isinstance(payload.get("head_sequence"), int)
+        or isinstance(payload.get("head_sequence"), bool)
+        or payload["head_sequence"] <= 0
+        or payload["head_sequence"] > (2**64 - 1)
+        or not isinstance(payload.get("reason"), str)
+        or not payload["reason"]
+        or payload.get("fallback_source") != "previous"
+        or not _is_sha256(payload.get("checksum"))
+    ):
+        return False
+    canonical = {
+        key: payload[key]
+        for key in _RECOVERY_MARKER_FIELDS
+        if key != "checksum"
+    }
+    return payload["checksum"] == _sha256_json(canonical)
+
+
+def _read_file_index_v2_recovery_marker(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if _file_index_v2_recovery_marker_is_valid(payload) else None
+
+
+def _write_file_index_v2_recovery_marker_atomic(
+    path: Path, payload: Dict[str, Any]
+) -> None:
+    if not _file_index_v2_recovery_marker_is_valid(payload):
+        raise ValueError("invalid file-index-v2 recovery marker payload")
+    _write_durable_json_atomic(path, payload)
+
+
+def _clear_file_index_v2_recovery_marker(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_directory(path.parent)
+
+
+def _visible_file_index_v2_snapshot_id(
+    root: Path,
+    git_snapshot: Optional[Dict[str, Optional[str]]],
+    inherited_records: Dict[str, Dict[str, Any]],
+) -> str:
+    records = _capture_visible_file_records(root, git_snapshot, inherited_records)
+    by_path = {record["path"]: record for record in records}
+    return _sha256_json(
+        [_file_index_record_identity(by_path[path]) for path in sorted(by_path)]
+    )
+
+
+def _publish_file_index_v2_view(
+    root: Path,
+    v2_root: Path,
+    worktree_hash: str,
+    view_dir: Path,
+    view_id: str,
+    desired_root_tree_oid: Optional[str],
+    desired_source_snapshot_id: str,
+    inherited_records: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    head_path = worktree_root / "head.json"
+    previous_head_path = worktree_root / "head.previous.json"
+    recovery_marker_path = worktree_root / "head.recovery.json"
+    head_lock = worktree_root / ".head-lock"
+    if not _verify_file_index_v2_view(view_dir):
+        return {
+            "ok": False,
+            "error_code": "BUILD_VERIFY_FAILED",
+            "error": "file-index-v2 View closure verification failed before publish",
+            "retryable": True,
+        }
+    with acquire_lock(head_lock, exclusive=True):
+        try:
+            current_canonical = _canonical_git_tree(root)
+            current_root_tree_oid = (
+                current_canonical.get("root_tree_oid") if current_canonical else None
+            )
+            current_source_snapshot_id = _visible_file_index_v2_snapshot_id(
+                root, current_canonical, inherited_records
+            )
+        except _FileIndexSourceSnapshotChanged:
+            return {"ok": True, "published": False, "superseded": True}
+        except (OSError, RuntimeError) as error:
+            return {
+                "ok": False,
+                "error_code": "BUILD_VERIFY_FAILED",
+                "error": f"file-index-v2 desired snapshot capture failed: {error}",
+                "retryable": True,
+            }
+        if (
+            current_root_tree_oid != desired_root_tree_oid
+            or current_source_snapshot_id != desired_source_snapshot_id
+        ):
+            return {"ok": True, "published": False, "superseded": True}
+        if not _verify_file_index_v2_view(view_dir):
+            return {
+                "ok": False,
+                "error_code": "BUILD_VERIFY_FAILED",
+                "error": "file-index-v2 View closure changed before head publish",
+                "retryable": True,
+            }
+        current = _read_file_index_v2_head(head_path)
+        if head_path.exists() and current is None:
+            return {
+                "ok": False,
+                "error_code": "PUBLISH_FAILED",
+                "error": "existing file-index-v2 head is invalid",
+                "retryable": True,
+            }
+        if current is not None and current["active_view_id"] == view_id:
+            try:
+                _clear_file_index_v2_recovery_marker(recovery_marker_path)
+            except OSError as error:
+                return {
+                    "ok": False,
+                    "error_code": "PUBLISH_FAILED",
+                    "error": f"failed to clear file-index-v2 recovery marker: {error}",
+                    "retryable": True,
+                }
+            return {
+                "ok": True,
+                "published": False,
+                "superseded": False,
+                "already_active": True,
+            }
+        if current is not None and current["sequence"] == 2**64 - 1:
+            return {
+                "ok": False,
+                "error_code": "PUBLISH_FAILED",
+                "error": "file-index-v2 View head sequence is exhausted",
+                "retryable": False,
+            }
+        canonical = {
+            "schema_version": 1,
+            "active_view_id": view_id,
+            "previous_view_id": (
+                current["active_view_id"] if current is not None else None
+            ),
+            "sequence": current["sequence"] + 1 if current is not None else 1,
+        }
+        head = {**canonical, "checksum": _sha256_json(canonical)}
+        try:
+            if current is not None:
+                # Keep the exact last published head as the only recovery
+                # journal. Readers must never infer a predecessor by scanning
+                # immutable View directories: verified but unpublished Views
+                # may exist after a superseded or interrupted build.
+                _write_file_index_v2_head_atomic(previous_head_path, current)
+            _write_file_index_v2_head_atomic(head_path, head)
+            _clear_file_index_v2_recovery_marker(recovery_marker_path)
+        except OSError as error:
+            return {
+                "ok": False,
+                "error_code": "PUBLISH_FAILED",
+                "error": f"failed to publish file-index-v2 View head: {error}",
+                "retryable": True,
+            }
+    return {"ok": True, "published": True, "superseded": False}
 
 
 # ---------------------------------------------------------------------
@@ -2075,6 +4418,271 @@ def _read_continuation(continuation_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _validated_file_index_v2_action_inputs(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: str,
+    scope: str,
+    compatibility_descriptor: Optional[Dict[str, Any]],
+) -> tuple[Path, Dict[str, Any]]:
+    """Validate every externally supplied path/identity before source access."""
+    _safe_artifact_id(repo_hash)
+    _safe_artifact_id(worktree_hash)
+    if scope not in {"files", "files-docs"}:
+        raise ValueError(f"file-index-v2 does not support scope {scope!r}")
+    if (
+        not isinstance(project_root, str)
+        or not project_root
+        or any(ord(char) < 32 or ord(char) == 127 for char in project_root)
+    ):
+        raise ValueError("file-index-v2 project root is invalid")
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        raise ValueError("file-index-v2 project root must be an existing directory")
+    try:
+        descriptor_input = (
+            default_file_index_compatibility()
+            if compatibility_descriptor is None
+            else compatibility_descriptor
+        )
+        raw_descriptor = json.loads(json.dumps(descriptor_input))
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid file-index-v2 compatibility descriptor") from error
+    descriptor = _validated_file_index_descriptor(raw_descriptor)
+    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") != "1" and not file_index_compatibility(
+        descriptor, default_file_index_compatibility()
+    ):
+        raise ValueError(
+            "file-index-v2 descriptor does not match the pinned build contract"
+        )
+    return root, descriptor
+
+
+def _action_index_files_protocol_v2(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    scope: str,
+    compatibility_descriptor: Optional[Dict[str, Any]],
+) -> dict:
+    with _file_index_v2_pin(
+        repo_hash,
+        worktree_hash,
+        "migration",
+        db_root,
+    ):
+        return _action_index_files_protocol_v2_pinned(
+            project_root,
+            repo_hash,
+            worktree_hash,
+            db_root,
+            scope,
+            compatibility_descriptor,
+        )
+
+
+def _action_index_files_protocol_v2_pinned(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    scope: str,
+    compatibility_descriptor: Optional[Dict[str, Any]],
+) -> dict:
+    root, descriptor = _validated_file_index_v2_action_inputs(
+        project_root,
+        repo_hash,
+        worktree_hash,
+        scope,
+        compatibility_descriptor,
+    )
+    canonical = _canonical_git_tree(root)
+    if canonical is not None and canonical.get("root_tree_oid") is not None:
+        base_records = _canonical_base_records(root, canonical)
+    else:
+        base_records = []
+    base_by_path = {record["path"]: record for record in base_records}
+    visible_records = _capture_visible_file_records(root, canonical, base_by_path)
+    root_tree_oid = canonical.get("root_tree_oid") if canonical else None
+
+    overlay_plan = _plan_file_index_v2_overlay(base_records, visible_records)
+    overlay_records = overlay_plan["upserts"]
+    source_snapshot_id = overlay_plan["source_snapshot_id"]
+    files_shadow = overlay_plan["files_shadow"]
+    files_docs_shadow = overlay_plan["files_docs_shadow"]
+    tombstones = overlay_plan["tombstones"]
+    v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
+    cas_root = v2_root / "cas"
+    base_identities, base_manifest_plans = _plan_file_artifact(
+        base_records, descriptor
+    )
+    overlay_identities, overlay_manifest_plans = _plan_file_artifact(
+        overlay_records, descriptor
+    )
+
+    semantic_contract = _semantic_file_index_contract(descriptor)
+    base_generation_id = _sha256_json(
+        {
+            "root_tree_oid": root_tree_oid,
+            "compatibility": semantic_contract,
+            "records": [
+                [record["path"], identity["cas_key"]]
+                for record, identity in zip(base_records, base_identities)
+            ],
+        }
+    )
+    overlay_generation_id = _sha256_json(
+        {
+            "source_snapshot_id": source_snapshot_id,
+            "base_generation_id": base_generation_id,
+            "compatibility": semantic_contract,
+            "records": [
+                [record["path"], identity["cas_key"]]
+                for record, identity in zip(overlay_records, overlay_identities)
+            ],
+        }
+    )
+
+    bases_root = v2_root / "bases"
+    overlays_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash) / "overlays"
+    compatibility_rejections = _count_incompatible_artifacts(
+        bases_root, "root_tree_oid", root_tree_oid, descriptor
+    )
+    compatibility_rejections += _count_incompatible_artifacts(
+        overlays_root, "source_snapshot_id", source_snapshot_id, descriptor
+    )
+    base_dir = resolve_file_index_v2_base_dir(
+        repo_hash, base_generation_id, db_root=db_root
+    )
+    overlay_dir = resolve_file_index_v2_overlay_dir(
+        repo_hash, worktree_hash, overlay_generation_id, db_root=db_root
+    )
+    base_document_counts = {
+        "files": sum(record["bucket"] == "code" for record in base_records),
+        "files-docs": sum(record["bucket"] == "docs" for record in base_records),
+    }
+    base_document_counts["total"] = (
+        base_document_counts["files"] + base_document_counts["files-docs"]
+    )
+    overlay_document_counts = {
+        "files": sum(record["bucket"] == "code" for record in overlay_records),
+        "files-docs": sum(record["bucket"] == "docs" for record in overlay_records),
+    }
+    files_generation = {
+        "store": "store",
+        "collection": V2_FILES_CODE_COLLECTION,
+    }
+    files_docs_generation = {
+        "store": "store",
+        "collection": V2_FILES_DOCS_COLLECTION,
+    }
+    base_descriptor_identity = {
+        "schema_version": 1,
+        "kind": "base",
+        "base_generation_id": base_generation_id,
+        "repo_hash": repo_hash,
+        "root_tree_oid": root_tree_oid,
+        "canonical_ref": canonical.get("reference") if canonical else None,
+        "compatibility": descriptor,
+        "files_generation": files_generation,
+        "files_docs_generation": files_docs_generation,
+        "document_counts": base_document_counts,
+        "build_state": "verified",
+    }
+    base_computed, base_hits = _materialize_file_artifact_pair(
+        base_dir,
+        base_records,
+        base_identities,
+        base_manifest_plans,
+        base_descriptor_identity,
+        descriptor,
+        cas_root,
+    )
+    overlay_descriptor_identity = {
+        "schema_version": 1,
+        "kind": "overlay",
+        "overlay_generation_id": overlay_generation_id,
+        "repo_hash": repo_hash,
+        "worktree_hash": worktree_hash,
+        "base_generation_id": base_generation_id,
+        "source_snapshot_id": source_snapshot_id,
+        "compatibility": descriptor,
+        "files_generation": files_generation,
+        "files_docs_generation": files_docs_generation,
+        "files_shadow": files_shadow,
+        "files_docs_shadow": files_docs_shadow,
+        "tombstones": tombstones,
+        "build_state": "verified",
+    }
+    overlay_computed, overlay_hits = _materialize_file_artifact_pair(
+        overlay_dir,
+        overlay_records,
+        overlay_identities,
+        overlay_manifest_plans,
+        overlay_descriptor_identity,
+        descriptor,
+        cas_root,
+    )
+    computed = base_computed + overlay_computed
+    cache_hits = base_hits + overlay_hits
+    requested = len(base_records) + len(overlay_records)
+    if requested != computed + cache_hits:
+        raise RuntimeError("file-index-v2 CAS accounting invariant violated")
+    visible_counts = {
+        "files": sum(record["bucket"] == "code" for record in visible_records),
+        "files-docs": sum(record["bucket"] == "docs" for record in visible_records),
+    }
+    view_dir, view_id = _materialize_file_index_v2_view(
+        v2_root,
+        repo_hash,
+        worktree_hash,
+        base_generation_id,
+        overlay_generation_id,
+        descriptor,
+        visible_counts,
+        source_snapshot_id,
+    )
+    visible_count = sum(
+        record["bucket"] == ("code" if scope == "files" else "docs")
+        for record in visible_records
+    )
+    # The publication recheck retains only Base records for the Git-object
+    # identity fast path. Release overlay/source planning structures before
+    # taking the worktree head lock.
+    del visible_records, overlay_records, base_identities, overlay_identities
+    del base_manifest_plans, overlay_manifest_plans
+    publication = _publish_file_index_v2_view(
+        root,
+        v2_root,
+        worktree_hash,
+        view_dir,
+        view_id,
+        root_tree_oid,
+        source_snapshot_id,
+        base_by_path,
+    )
+    result = {
+        "ok": True,
+        "scope": scope,
+        "indexed": visible_count,
+        "total": visible_count,
+        "base_document_count": base_document_counts[scope],
+        "overlay_document_count": overlay_document_counts[scope],
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "requested_embeddings": requested,
+        "computed_embeddings": computed,
+        "embedding_cache_hits": cache_hits,
+        "compatibility_rejections": compatibility_rejections,
+        "view_id": view_id,
+    }
+    if not publication.get("ok"):
+        return {**result, **publication, "ok": False}
+    result.update(publication)
+    return result
+
+
 def action_index_files_v2(
     project_root: str,
     repo_hash: str,
@@ -2083,6 +4691,8 @@ def action_index_files_v2(
     db_root: Optional[Path] = None,
     scope: str = "files",
     qos: str = "background",
+    file_index_protocol: str = "legacy",
+    compatibility_descriptor: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Index project files into ChromaDB under the v2 layout.
 
@@ -2092,6 +4702,18 @@ def action_index_files_v2(
     background build yields at 16-document checkpoints when a
     higher-priority claimant is pending on the heavy lease.
     """
+    if file_index_protocol == "v2":
+        return _action_index_files_protocol_v2(
+            project_root=project_root,
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash,
+            db_root=db_root,
+            scope=scope,
+            compatibility_descriptor=compatibility_descriptor,
+        )
+    if file_index_protocol != "legacy":
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+
     root = Path(project_root).resolve()
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
@@ -3530,6 +6152,265 @@ def _work_project_state_dir(repo_hash: str) -> Path:
     return _gwt_home() / "projects" / repo_hash / "project-state"
 
 
+_KNOWN_WORK_EVENT_KINDS = {
+    "start",
+    "claim",
+    "update",
+    "blocked",
+    "handoff",
+    "resume",
+    "split",
+    "merge",
+    "pr",
+    "pause",
+    "done",
+    "discard",
+    "backfill",
+}
+_WORK_EVENT_OPTIONAL_STRING_FIELDS = {
+    "title",
+    "intent",
+    "summary",
+    "progress_summary",
+    "owner",
+    "next_action",
+    "agent_session_id",
+    "agent_id",
+    "display_name",
+    "board_entry_id",
+    "related_work_item_id",
+}
+_WORK_EVENT_CONTAINER_FIELDS = {
+    "branch",
+    "worktree_path",
+    "pr_number",
+    "pr_url",
+    "pr_state",
+}
+_RFC3339_INSTANT_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _parse_rfc3339_instant(value: str) -> tuple[int, int]:
+    match = _RFC3339_INSTANT_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("invalid RFC 3339 timestamp")
+    date, time, fraction, offset = match.groups()
+    parsed = datetime.datetime.fromisoformat(
+        f"{date}T{time}{'+00:00' if offset == 'Z' else offset}"
+    )
+    if parsed.tzinfo is None:
+        raise ValueError("timezone required")
+    utc = parsed.astimezone(datetime.timezone.utc)
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    delta = utc - epoch
+    seconds = delta.days * 86_400 + delta.seconds
+    nanoseconds = int((fraction or "0").ljust(9, "0"))
+    return seconds, nanoseconds
+
+
+def _validate_work_event_schema(event: Any, source: Path) -> bool:
+    """Validate the current compatible WorkEvent surface.
+
+    Additive top-level fields remain future-compatible. Unknown event kinds
+    validate all current fields but return ``False`` so the fallback leaves
+    their immutable source bytes untouched and skips projection.
+    """
+    if not isinstance(event, dict):
+        raise ValueError(f"Work event shard must contain a JSON object: {source}")
+    for field in ("id", "work_item_id", "kind", "updated_at"):
+        if not isinstance(event.get(field), str):
+            raise ValueError(
+                f"Work event shard field {field!r} must be a string: {source}"
+            )
+    try:
+        _parse_rfc3339_instant(event["updated_at"])
+    except ValueError as error:
+        raise ValueError(f"Work event shard has invalid updated_at: {source}") from error
+
+    for field in _WORK_EVENT_OPTIONAL_STRING_FIELDS:
+        value = event.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(
+                f"Work event shard field {field!r} must be a string or null: {source}"
+            )
+    status = event.get("status_category")
+    if status is not None and status not in {
+        "active",
+        "idle",
+        "blocked",
+        "done",
+        "unknown",
+    }:
+        raise ValueError(f"Work event shard has invalid status_category: {source}")
+    container = event.get("execution_container")
+    if container is not None:
+        if not isinstance(container, dict) or not set(container).issubset(
+            _WORK_EVENT_CONTAINER_FIELDS
+        ):
+            raise ValueError(
+                f"Work event shard has invalid execution_container: {source}"
+            )
+        for field in ("branch", "worktree_path", "pr_url", "pr_state"):
+            value = container.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(
+                    f"Work event shard execution_container.{field} is invalid: {source}"
+                )
+        pr_number = container.get("pr_number")
+        if pr_number is not None and (
+            isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or pr_number < 0
+            or pr_number > (1 << 64) - 1
+        ):
+            raise ValueError(
+                f"Work event shard execution_container.pr_number is invalid: {source}"
+            )
+    return event["kind"] in _KNOWN_WORK_EVENT_KINDS
+
+
+def _is_work_event_writer_temp_residue(path: Path) -> bool:
+    if re.fullmatch(r"\.[0-9a-f]{64}\.jsonl\.create-.+", path.name) is None:
+        return False
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _reject_non_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _read_work_event_shard(path: Path) -> Optional[str]:
+    if re.fullmatch(r"[0-9a-f]{64}\.jsonl", path.name) is None:
+        raise ValueError(f"invalid Work event shard filename or file type: {path}")
+    try:
+        is_regular_file = stat.S_ISREG(path.lstat().st_mode)
+    except OSError as error:
+        raise ValueError(f"failed to inspect Work event shard: {path}") from error
+    if not is_regular_file:
+        raise ValueError(f"invalid Work event shard filename or file type: {path}")
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"failed to read Work event shard: {path}") from error
+    if not content.endswith(b"\n") or content.count(b"\n") != 1:
+        raise ValueError(
+            f"Work event shard must contain exactly one newline-terminated event: {path}"
+        )
+    payload = content[:-1]
+    try:
+        text = payload.decode("utf-8")
+        event = json.loads(text, parse_constant=_reject_non_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"invalid Work event shard JSON: {path}") from error
+    known = _validate_work_event_schema(event, path)
+    expected = hashlib.sha256(event["id"].encode("utf-8")).hexdigest() + ".jsonl"
+    if path.name != expected:
+        raise ValueError(f"Work event shard filename does not match payload id: {path}")
+    return text if known else None
+
+
+def _work_event_shard_store_exists(shard_dir: Path) -> bool:
+    # Missing managed parents are the ordinary first-run/no-source case. Walk
+    # root-first so a symlinked `.gwt` is still rejected even when its target
+    # does not happen to contain `work/` yet.
+    for managed_parent in (shard_dir.parent.parent, shard_dir.parent):
+        try:
+            managed_parent_mode = managed_parent.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise ValueError(
+                f"failed to inspect Work event shard store parent: {managed_parent}"
+            ) from error
+        if not stat.S_ISDIR(managed_parent_mode):
+            raise ValueError(
+                "Work event shard store parent must be a real directory: "
+                f"{managed_parent}"
+            )
+    try:
+        shard_dir_mode = shard_dir.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ValueError(
+            f"failed to inspect Work event shard store: {shard_dir}"
+        ) from error
+    if not stat.S_ISDIR(shard_dir_mode):
+        raise ValueError(
+            f"Work event shard store must be a real directory: {shard_dir}"
+        )
+    return True
+
+
+def _enumerate_work_event_shards(shard_dir: Path) -> List[Path]:
+    """Return compatible flat and canonical two-hex-bucket shard paths.
+
+    W-33 flat shards remain immutable read inputs. New W-33b shards live at
+    ``<digest[:2]>/<digest>.jsonl``. Any other entry makes discovery
+    incomplete and therefore fails closed before index publication.
+    """
+    try:
+        entries = sorted(shard_dir.iterdir())
+    except OSError as error:
+        raise ValueError(
+            f"failed to enumerate Work event shards: {shard_dir}"
+        ) from error
+
+    shards: List[Path] = []
+    for entry in entries:
+        if _is_work_event_writer_temp_residue(entry):
+            continue
+        try:
+            mode = entry.lstat().st_mode
+        except OSError as error:
+            raise ValueError(f"failed to inspect Work event shard: {entry}") from error
+
+        if stat.S_ISREG(mode):
+            if re.fullmatch(r"[0-9a-f]{64}\.jsonl", entry.name) is None:
+                raise ValueError(
+                    f"invalid Work event shard filename or file type: {entry}"
+                )
+            shards.append(entry)
+            continue
+
+        if not stat.S_ISDIR(mode) or re.fullmatch(r"[0-9a-f]{2}", entry.name) is None:
+            raise ValueError(
+                f"invalid Work event shard bucket name or file type: {entry}"
+            )
+
+        try:
+            bucket_entries = sorted(entry.iterdir())
+        except OSError as error:
+            raise ValueError(
+                f"failed to enumerate Work event shard bucket: {entry}"
+            ) from error
+        for shard in bucket_entries:
+            if _is_work_event_writer_temp_residue(shard):
+                continue
+            try:
+                shard_mode = shard.lstat().st_mode
+            except OSError as error:
+                raise ValueError(
+                    f"failed to inspect Work event shard: {shard}"
+                ) from error
+            match = re.fullmatch(r"([0-9a-f]{64})\.jsonl", shard.name)
+            if (
+                not stat.S_ISREG(shard_mode)
+                or match is None
+                or match.group(1)[:2] != entry.name
+            ):
+                raise ValueError(
+                    f"invalid Work event shard bucket, filename, or file type: {shard}"
+                )
+            shards.append(shard)
+    return shards
+
+
 def _fold_work_events_into_items(
     items_by_id: Dict[str, Dict[str, Any]],
     order: List[str],
@@ -3553,7 +6434,11 @@ def _fold_work_events_into_items(
             event = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("work_item_id"):
+        if (
+            isinstance(event, dict)
+            and event.get("work_item_id")
+            and event.get("kind") in _KNOWN_WORK_EVENT_KINDS
+        ):
             events.append(event)
 
     seen_event_ids: set = set()
@@ -3563,7 +6448,16 @@ def _fold_work_events_into_items(
             if ev_id:
                 seen_event_ids.add(ev_id)
 
-    events.sort(key=lambda ev: str(ev.get("updated_at") or ""))
+    def updated_at_key(event: Dict[str, Any]) -> tuple[int, Any]:
+        value = str(event.get("updated_at") or "")
+        try:
+            return (0, _parse_rfc3339_instant(value))
+        except (ValueError, OverflowError):
+            # Legacy JSONL is intentionally tolerant; keep malformed legacy
+            # timestamps in a deterministic compatibility bucket.
+            return (1, value)
+
+    events.sort(key=updated_at_key)
     for event in events:
         event_id = event.get("id")
         if event_id and event_id in seen_event_ids:
@@ -3655,51 +6549,72 @@ def _load_work_documents(
                 if isinstance(item, dict) and str(item.get("id") or "").strip()
             ]
             try:
-                stat = projection_path.stat()
+                projection_stat = projection_path.stat()
                 manifest_entries.append(
                     {
                         "path": f"project-state/{projection_path.name}",
-                        "mtime": int(stat.st_mtime),
-                        "size": int(stat.st_size),
+                        "mtime": int(projection_stat.st_mtime),
+                        "size": int(projection_stat.st_size),
                     }
                 )
             except OSError:
                 pass
             return works, manifest_entries
 
-    # Fallback: fold the event logs into items.
+    # Fallback: validate/discover every event source, then fold one globally
+    # ordered stream so source enumeration does not decide event order.
     items_by_id: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
-    event_sources: List[Path] = [state_dir / "work-events.jsonl"]
+    event_sources: List[tuple[Path, str, bool]] = [
+        (state_dir / "work-events.jsonl", "project-state/work-events.jsonl", False)
+    ]
     if project_root:
+        repo_work_dir = Path(project_root) / ".gwt" / "work"
         event_sources.append(
-            Path(project_root) / ".gwt" / "work" / "events.jsonl"
+            (
+                repo_work_dir / "events.jsonl",
+                ".gwt/work/events.jsonl",
+                False,
+            )
         )
+        shard_dir = repo_work_dir / "events"
+        if _work_event_shard_store_exists(shard_dir):
+            for shard in _enumerate_work_event_shards(shard_dir):
+                path_label = shard.relative_to(Path(project_root)).as_posix()
+                event_sources.append(
+                    (shard, path_label, True)
+                )
 
-    for source in event_sources:
+    event_contents: List[str] = []
+    for source, path_label, is_shard in event_sources:
         if not source.is_file():
+            if is_shard:
+                raise ValueError(
+                    f"invalid Work event shard filename or file type: {source}"
+                )
             continue
+        if is_shard:
+            content = _read_work_event_shard(source)
+        else:
+            try:
+                content = source.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        if content is not None:
+            event_contents.append(content)
         try:
-            content = source.read_text(encoding="utf-8", errors="replace")
+            source_stat = source.stat()
         except OSError:
             continue
-        _fold_work_events_into_items(items_by_id, order, content)
-        try:
-            stat = source.stat()
-        except OSError:
-            continue
-        try:
-            rel = source.relative_to(_gwt_home() / "projects" / repo_hash)
-            path_label = rel.as_posix()
-        except ValueError:
-            path_label = ".gwt/work/events.jsonl"
         manifest_entries.append(
             {
                 "path": path_label,
-                "mtime": int(stat.st_mtime),
-                "size": int(stat.st_size),
+                "mtime": int(source_stat.st_mtime),
+                "size": int(source_stat.st_size),
             }
         )
+
+    _fold_work_events_into_items(items_by_id, order, "\n".join(event_contents))
 
     works = [items_by_id[work_id] for work_id in order]
     return works, manifest_entries
@@ -3923,7 +6838,7 @@ def _format_memory_results(
                     "title": title,
                     "heading": meta.get("heading", ""),
                     "chunk_idx": int(meta.get("chunk_idx", 0)),
-                    "distance": it.get("distance"),
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -3960,7 +6875,7 @@ def _format_discussion_results(
                     "promoted_to": _split_csv_meta(meta.get("promoted_to", "")),
                     "heading": meta.get("heading", ""),
                     "chunk_idx": int(meta.get("chunk_idx", 0)),
-                    "distance": it.get("distance"),
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -4245,9 +7160,21 @@ def _issue_status_v2(
         healthy = False
         repair_required = True
     else:
+        indexed_document_count = meta.get("document_count")
+        current_source_document_count = source.get("document_count")
         indexed_fingerprint = meta.get("source_cache_fingerprint")
         current_fingerprint = source.get("fingerprint")
-        if current_fingerprint and indexed_fingerprint != current_fingerprint:
+        if (
+            indexed_document_count is not None
+            and document_count != indexed_document_count
+        ) or (
+            current_source_document_count is not None
+            and document_count != current_source_document_count
+        ):
+            reason = "count_mismatch"
+            healthy = False
+            repair_required = True
+        elif current_fingerprint and indexed_fingerprint != current_fingerprint:
             reason = "source_cache_changed"
             healthy = False
             repair_required = True
@@ -4274,7 +7201,7 @@ def _issue_status_v2(
             status["source_document_count"] = meta.get("source_document_count")
         if meta.get("source_cache_refresh_at"):
             status["source_cache_refresh_at"] = meta.get("source_cache_refresh_at")
-        if reason == "source_cache_changed":
+        if reason in ("source_cache_changed", "count_mismatch"):
             status["current_source_cache_fingerprint"] = source.get("fingerprint")
             status["current_source_document_count"] = source.get("document_count")
         last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
@@ -4529,10 +7456,15 @@ def _search_collection_v2(
                     "id": doc_id,
                     "metadata": meta,
                     "document": results["documents"][0][idx] if results.get("documents") else "",
-                    "distance": round(distance, 4) if distance is not None else None,
+                    "distance": float(distance) if distance is not None else None,
                 }
             )
     return items
+
+
+def _wire_distance(value: Any) -> Optional[float]:
+    """Round only while formatting the public wire payload."""
+    return round(float(value), 4) if value is not None else None
 
 
 def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4543,7 +7475,7 @@ def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 {
                     "path": (it["metadata"] or {}).get("path", it["id"]),
                     "description": (it["metadata"] or {}).get("description", ""),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                     "fileType": (it["metadata"] or {}).get("file_type", ""),
                     "size": (it["metadata"] or {}).get("size", 0),
                 },
@@ -4575,7 +7507,7 @@ def _format_spec_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "status": meta.get("status", ""),
                     "phase": meta.get("phase", ""),
                     "dir_name": meta.get("dir_name", ""),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                     "matched_section": meta.get("chunk_heading", ""),
                 },
                 it,
@@ -4598,7 +7530,7 @@ def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "url": meta.get("url", ""),
                     "state": meta.get("state", ""),
                     "labels": labels,
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -4631,7 +7563,7 @@ def _format_board_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "audience": _split_csv_meta(meta.get("audience", "")),
                     "related_topics": _split_csv_meta(meta.get("related_topics", "")),
                     "related_owners": _split_csv_meta(meta.get("related_owners", "")),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -4664,7 +7596,7 @@ def _format_work_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "owner": meta.get("owner", ""),
                     "branches": _split_csv_meta(meta.get("branches", "")),
                     "pr_numbers": _split_csv_meta(meta.get("pr_numbers", "")),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -4745,6 +7677,7 @@ def action_search_v2(
     no_auto_build: bool = False,
     db_root: Optional[Path] = None,
     match_mode: str = "semantic",
+    file_index_protocol: str = "legacy",
 ) -> dict:
     """Unified v2 search dispatcher with auto-build fallback."""
     scope_for_action = {
@@ -4760,6 +7693,28 @@ def action_search_v2(
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
     scope = scope_for_action[action]
+    if file_index_protocol not in {"legacy", "v2"}:
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+    if file_index_protocol == "v2" and scope in {"files", "files-docs"}:
+        result = action_search_multi_v2(
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash,
+            project_root=project_root,
+            query=query,
+            n_results=n_results,
+            scopes=[scope],
+            db_root=db_root,
+            match_mode=match_mode,
+            file_index_protocol="v2",
+        )
+        if not result.get("ok"):
+            return result
+        scope_payload = (result.get("scope_results") or {}).get(scope) or {}
+        payload = {"ok": True, **scope_payload}
+        scope_state = (result.get("scopes") or {}).get(scope) or {}
+        if scope_state.get("fallback_source"):
+            payload["fallback_source"] = scope_state["fallback_source"]
+        return payload
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     if scope == "issues":
@@ -4897,8 +7852,8 @@ def _classify_scope_for_search(
 
     - ``missing``: store was never built.
     - ``corrupt``: store exists but needs repair before it can be trusted.
-    - ``stale``: verified store is intact but its source moved on (TTL
-      expiry or source cache drift) — serve it and queue a refresh.
+    - ``stale``: verified store is intact but its TTL expired — serve it and
+      queue a refresh.
     - ``fresh``: healthy and current.
     """
     if scope == "issues":
@@ -4909,8 +7864,6 @@ def _classify_scope_for_search(
             if health.get("ttl_remaining_seconds") == 0:
                 return "stale", health
             return "fresh", health
-        if health.get("reason") == "source_cache_changed":
-            return "stale", health
         return "corrupt", health
     health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
     if not health.get("exists"):
@@ -4918,6 +7871,591 @@ def _classify_scope_for_search(
     if health.get("repair_required"):
         return "corrupt", health
     return "fresh", health
+
+
+def _file_index_v2_view_metadata_is_valid(
+    view_dir: Path, descriptor: Any
+) -> bool:
+    """Validate a View descriptor without opening either Chroma store."""
+    if (
+        not isinstance(descriptor, dict)
+        or set(descriptor) != _VIEW_DESCRIPTOR_FIELDS
+        or descriptor.get("schema_version") != 1
+        or descriptor.get("view_id") != view_dir.name
+        or not all(
+            _is_safe_file_index_v2_id(descriptor.get(field))
+            for field in (
+                "view_id",
+                "repo_hash",
+                "worktree_hash",
+                "base_generation_id",
+                "overlay_generation_id",
+                "source_snapshot_id",
+            )
+        )
+        or not _is_file_index_timestamp(descriptor.get("verified_at"))
+        or not _is_sha256(descriptor.get("descriptor_checksum"))
+    ):
+        return False
+    compatibility = descriptor.get("compatibility")
+    if (
+        not isinstance(compatibility, dict)
+        or set(compatibility) != set(FILE_INDEX_V2_REQUIRED_FIELDS)
+        or not _file_index_descriptor_has_valid_shape(compatibility)
+        or not isinstance(compatibility.get("document_contract"), dict)
+        or set(compatibility["document_contract"])
+        != {"payload_builder_version", "decode", "content_limit"}
+    ):
+        return False
+    visible_counts = descriptor.get("visible_counts")
+    if (
+        not isinstance(visible_counts, dict)
+        or set(visible_counts) != {"files", "files-docs"}
+        or any(
+            not isinstance(visible_counts.get(scope), int)
+            or isinstance(visible_counts.get(scope), bool)
+            or visible_counts[scope] < 0
+            for scope in ("files", "files-docs")
+        )
+    ):
+        return False
+    checksum_payload = {
+        key: value for key, value in descriptor.items() if key != "descriptor_checksum"
+    }
+    if _sha256_json(checksum_payload) != descriptor["descriptor_checksum"]:
+        return False
+    expected_view_id = _sha256_json(
+        _file_index_v2_view_identity(
+            descriptor["repo_hash"],
+            descriptor["worktree_hash"],
+            descriptor["base_generation_id"],
+            descriptor["overlay_generation_id"],
+            compatibility,
+            visible_counts,
+            descriptor["source_snapshot_id"],
+        )
+    )
+    worktree_root = view_dir.parent.parent
+    v2_root = worktree_root.parent.parent
+    return (
+        descriptor["view_id"] == expected_view_id
+        and view_dir.parent.name == "views"
+        and worktree_root.parent.name == "worktrees"
+        and v2_root.name == "file-index-v2"
+        and descriptor["worktree_hash"] == worktree_root.name
+        and descriptor["repo_hash"] == v2_root.parent.name
+    )
+
+
+def _file_index_v2_compatibility_contract_kind(value: Any) -> str:
+    """Classify current, future-additive, and malformed compatibility shapes."""
+    if not isinstance(value, dict):
+        return "corrupt"
+    required = set(FILE_INDEX_V2_REQUIRED_FIELDS)
+    fields = set(value)
+    if not required.issubset(fields):
+        return "corrupt"
+    if fields != required:
+        return "incompatible"
+    document_contract = value.get("document_contract")
+    if not isinstance(document_contract, dict):
+        return "corrupt"
+    required_document_fields = {
+        "payload_builder_version",
+        "decode",
+        "content_limit",
+    }
+    document_fields = set(document_contract)
+    if not required_document_fields.issubset(document_fields):
+        return "corrupt"
+    if document_fields != required_document_fields:
+        return "incompatible"
+    if not _file_index_descriptor_has_valid_shape(value):
+        return "corrupt"
+    return "current"
+
+
+def _file_index_v2_view_contract_kind(descriptor: Any) -> str:
+    if not isinstance(descriptor, dict):
+        return "corrupt"
+    schema_version = descriptor.get("schema_version")
+    if (
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version > 1
+    ):
+        return "incompatible"
+    if schema_version != 1:
+        return "corrupt"
+    fields = set(descriptor)
+    if not _VIEW_DESCRIPTOR_FIELDS.issubset(fields):
+        return "corrupt"
+    if fields != _VIEW_DESCRIPTOR_FIELDS:
+        return "incompatible"
+    return _file_index_v2_compatibility_contract_kind(
+        descriptor.get("compatibility")
+    )
+
+
+def _file_index_v2_reader_compatible(compatibility: Dict[str, Any]) -> bool:
+    expected = default_file_index_compatibility()
+    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+        # The deterministic test runtime deliberately uses compact vectors;
+        # every other semantic field remains reader-pinned.
+        expected["dimension"] = compatibility.get("dimension")
+    return file_index_compatibility(compatibility, expected)
+
+
+def _file_index_v2_component_is_reader_compatible(path: Path) -> bool:
+    """Reject a newer component contract before any Chroma client is opened."""
+    descriptor = _read_artifact_descriptor(path)
+    if descriptor is None:
+        return True
+    expected_fields = (
+        _BASE_DESCRIPTOR_FIELDS
+        if path.parent.name == "bases"
+        else _OVERLAY_DESCRIPTOR_FIELDS
+        if path.parent.name == "overlays"
+        else None
+    )
+    schema_version = descriptor.get("schema_version")
+    if (
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version > 1
+    ):
+        return False
+    if expected_fields is not None:
+        fields = set(descriptor)
+        if expected_fields.issubset(fields) and fields != expected_fields:
+            return False
+    compatibility = descriptor.get("compatibility")
+    contract_kind = _file_index_v2_compatibility_contract_kind(compatibility)
+    if contract_kind == "incompatible":
+        return False
+    if contract_kind == "corrupt":
+        return True
+    return _file_index_v2_reader_compatible(compatibility)
+
+
+def _inspect_file_index_v2_view(
+    v2_root: Path,
+    worktree_root: Path,
+    view_id: str,
+) -> Dict[str, Any]:
+    """Inspect compatibility first, then verify and pin one complete closure."""
+    view_dir = worktree_root / "views" / _safe_artifact_id(view_id)
+    descriptor = _read_artifact_descriptor(view_dir)
+    contract_kind = _file_index_v2_view_contract_kind(descriptor)
+    if contract_kind == "incompatible":
+        return {"kind": "incompatible", "reason": "active_view_incompatible"}
+    if not _file_index_v2_view_metadata_is_valid(view_dir, descriptor):
+        return {
+            "kind": "corrupt",
+            "reason": "view_descriptor_invalid",
+            "corrupt_component": view_dir,
+        }
+    assert descriptor is not None
+    if not _file_index_v2_reader_compatible(descriptor["compatibility"]):
+        return {"kind": "incompatible", "reason": "active_view_incompatible"}
+    base_dir = v2_root / "bases" / descriptor["base_generation_id"]
+    overlay_dir = worktree_root / "overlays" / descriptor["overlay_generation_id"]
+    if not _file_index_v2_component_is_reader_compatible(
+        base_dir
+    ) or not _file_index_v2_component_is_reader_compatible(overlay_dir):
+        return {"kind": "incompatible", "reason": "active_view_incompatible"}
+    if not _verify_file_index_v2_view(view_dir):
+        # Base generations are shared by every worktree and are never
+        # quarantined by a reader. An invalid worktree-private Overlay or View
+        # can be isolated, but only after a fallback head is durable.
+        base_verified = _load_verified_file_index_v2_artifact(base_dir, "base")
+        overlay_verified = _load_verified_file_index_v2_artifact(
+            overlay_dir, "overlay"
+        )
+        corrupt_component = None
+        if base_verified is not None and overlay_verified is None:
+            corrupt_component = overlay_dir
+        elif base_verified is not None and overlay_verified is not None:
+            corrupt_component = view_dir
+        return {
+            "kind": "corrupt",
+            "reason": "view_closure_invalid",
+            "corrupt_component": corrupt_component,
+        }
+    overlay_descriptor = _read_artifact_descriptor(overlay_dir)
+    if overlay_descriptor is None:  # pragma: no cover - closure guard
+        return {
+            "kind": "corrupt",
+            "reason": "overlay_descriptor_missing",
+            "corrupt_component": overlay_dir,
+        }
+    return {
+        "kind": "compatible",
+        "view": {
+            "view_id": descriptor["view_id"],
+            "view_dir": view_dir,
+            "compatibility": descriptor["compatibility"],
+            "visible_counts": descriptor["visible_counts"],
+            "base_store": base_dir / "store",
+            "overlay_store": overlay_dir / "store",
+            "files_shadow": frozenset(overlay_descriptor["files_shadow"]),
+            "files_docs_shadow": frozenset(
+                overlay_descriptor["files_docs_shadow"]
+            ),
+            "tombstones": frozenset(overlay_descriptor["tombstones"]),
+        },
+    }
+
+
+def _repair_file_index_v2_head_and_quarantine(
+    worktree_root: Path,
+    source_head: Dict[str, Any],
+    source_head_path: Path,
+    source_head_token: Optional[bytes],
+    expected_head_token: Optional[bytes],
+    selected_view: Dict[str, Any],
+    reason: str,
+    corrupt_component: Optional[Path],
+) -> bool:
+    """Repair a search head, then isolate only a proven private component."""
+    head_path = worktree_root / "head.json"
+    previous_head_path = worktree_root / "head.previous.json"
+    recovery_marker_path = worktree_root / "head.recovery.json"
+    head_lock = worktree_root / ".head-lock"
+    sequence = source_head["sequence"]
+    if sequence == 2**64 - 1:
+        return False
+    sequence += 1
+    canonical = {
+        "schema_version": 1,
+        "active_view_id": selected_view["view_id"],
+        "previous_view_id": None,
+        "sequence": sequence,
+    }
+    repaired = {**canonical, "checksum": _sha256_json(canonical)}
+    marker_canonical = {
+        "schema_version": 1,
+        "view_id": selected_view["view_id"],
+        "head_sequence": sequence,
+        "reason": reason,
+        "fallback_source": "previous",
+    }
+    marker = {
+        **marker_canonical,
+        "checksum": _sha256_json(marker_canonical),
+    }
+    with acquire_lock(head_lock, exclusive=True):
+        # A publisher may have advanced the head after selection. Never
+        # overwrite its newer decision, and never quarantine based on a stale
+        # closure diagnosis.
+        current_head_token, _current = _read_file_index_v2_head_token(head_path)
+        if current_head_token != expected_head_token:
+            return False
+        current_source_token, current_source = _read_file_index_v2_head_token(
+            source_head_path
+        )
+        if current_source_token != source_head_token or current_source != source_head:
+            return False
+        component_lock = _file_index_v2_private_component_lock(
+            worktree_root, corrupt_component
+        )
+        lock_context = (
+            acquire_lock(component_lock, exclusive=True)
+            if component_lock is not None
+            else contextlib.nullcontext()
+        )
+        # Lock order is always head -> private component. Writers release the
+        # immutable component lock before acquiring head, so repair cannot
+        # deadlock a publisher.
+        with lock_context:
+            if not _verify_file_index_v2_view(selected_view["view_dir"]):
+                return False
+            should_quarantine = _file_index_v2_private_component_is_corrupt(
+                worktree_root, corrupt_component
+            )
+            try:
+                # A matching durable marker is written first. If head replace
+                # fails, the marker cannot match the old head and is ignored.
+                _write_file_index_v2_recovery_marker_atomic(
+                    recovery_marker_path, marker
+                )
+                # A private component that is about to be quarantined must no
+                # longer be rooted by the durable journal. Publish the same
+                # verified fallback to both heads before moving the corrupt
+                # View/Overlay out of its canonical path.
+                journal_head = repaired if should_quarantine else source_head
+                _write_file_index_v2_head_atomic(previous_head_path, journal_head)
+                _write_file_index_v2_head_atomic(head_path, repaired)
+            except OSError:
+                return False
+            readback = _read_file_index_v2_head(head_path)
+            if (
+                readback != repaired
+                or not _verify_file_index_v2_view(selected_view["view_dir"])
+            ):
+                return False
+            if not should_quarantine or not _file_index_v2_private_component_is_corrupt(
+                worktree_root, corrupt_component
+            ):
+                return True
+            assert corrupt_component is not None
+            quarantine = corrupt_component.with_name(
+                f".{corrupt_component.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+            )
+            with contextlib.suppress(OSError):
+                os.replace(corrupt_component, quarantine)
+            return True
+
+
+def _file_index_v2_private_component_lock(
+    worktree_root: Path, component: Optional[Path]
+) -> Optional[Path]:
+    if component is None:
+        return None
+    if component.parent == worktree_root / "views":
+        return worktree_root / ".locks" / f"view-{component.name}"
+    if component.parent == worktree_root / "overlays":
+        return component.parent / ".locks" / component.name
+    return None
+
+
+def _file_index_v2_private_component_is_corrupt(
+    worktree_root: Path, component: Optional[Path]
+) -> bool:
+    if component is None or not component.exists():
+        return False
+    if component.parent == worktree_root / "views":
+        return not _verify_file_index_v2_view(component)
+    if component.parent == worktree_root / "overlays":
+        return _load_verified_file_index_v2_artifact(component, "overlay") is None
+    return False
+
+
+def _select_file_index_v2_view(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    *,
+    repair_corruption: bool,
+) -> Dict[str, Any]:
+    """Select active, predecessor, or legacy without scanning View dirs."""
+    v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    head_path = worktree_root / "head.json"
+    head_token, head = _read_file_index_v2_head_token(head_path)
+    journal = None
+    journal_token = None
+    primary_issue: Optional[Dict[str, Any]] = None
+    if head is None:
+        reason = "view_head_invalid" if head_path.exists() else "view_head_missing"
+        primary_issue = {
+            "kind": "corrupt",
+            "reason": reason,
+            "corrupt_component": None,
+        }
+        journal_path = worktree_root / "head.previous.json"
+        journal_token, journal = _read_file_index_v2_head_token(journal_path)
+    source_head = head if head is not None else journal
+    source_head_path = (
+        head_path if head is not None else worktree_root / "head.previous.json"
+    )
+    source_head_token = head_token if head is not None else journal_token
+    if source_head is None:
+        return {
+            "view": None,
+            "state": "missing",
+            "reason": primary_issue["reason"] if primary_issue else "view_head_missing",
+            "repair_required": True,
+        }
+
+    recovery_marker = _read_file_index_v2_recovery_marker(
+        worktree_root / "head.recovery.json"
+    )
+    recovery_pending = bool(
+        head is not None
+        and recovery_marker is not None
+        and recovery_marker["view_id"] == head["active_view_id"]
+        and recovery_marker["head_sequence"] == head["sequence"]
+    )
+    candidates = [(source_head["active_view_id"], "active")]
+    if source_head.get("previous_view_id") is not None:
+        candidates.append((source_head["previous_view_id"], "previous"))
+    for view_id, role in candidates:
+        inspection = _inspect_file_index_v2_view(v2_root, worktree_root, view_id)
+        if inspection["kind"] != "compatible":
+            if role == "active":
+                primary_issue = inspection
+            continue
+        selected_view = inspection["view"]
+        marker_fallback = recovery_pending and role == "active"
+        fallback = head is None or role == "previous" or marker_fallback
+        if (
+            fallback
+            and not marker_fallback
+            and repair_corruption
+            and primary_issue is not None
+            and primary_issue["kind"] == "corrupt"
+        ):
+            _repair_file_index_v2_head_and_quarantine(
+                worktree_root,
+                source_head,
+                source_head_path,
+                source_head_token,
+                head_token,
+                selected_view,
+                primary_issue["reason"],
+                primary_issue.get("corrupt_component"),
+            )
+        return {
+            "view": selected_view,
+            "state": "stale" if fallback else "fresh",
+            "reason": (
+                recovery_marker["reason"]
+                if marker_fallback and recovery_marker is not None
+                else primary_issue["reason"]
+                if fallback and primary_issue is not None
+                else "ready"
+            ),
+            "fallback_source": "previous" if fallback else None,
+            "repair_required": fallback,
+        }
+    return {
+        "view": None,
+        "state": "corrupt",
+        "reason": primary_issue["reason"] if primary_issue else "view_closure_invalid",
+        "repair_required": True,
+    }
+
+
+def _encode_file_index_v2_query(
+    pinned_view: Dict[str, Any], query: str
+) -> List[float]:
+    """Encode once with the exact embedding contract verified for the View."""
+    compatibility = pinned_view["compatibility"]
+    query_prefix = compatibility["query_prefix"]
+    model_input = query if query.startswith(query_prefix) else f"{query_prefix}{query}"
+    encoded = _get_embedding_model(compatibility["model_revision"]).encode(
+        [model_input]
+    )
+    vectors = E5EmbeddingFunction._native_finite_query_vectors(encoded)
+    if len(vectors) != 1:
+        raise ValueError("file-index-v2 query model returned the wrong vector count")
+    vector = vectors[0]
+    if len(vector) != _expected_file_index_vector_dimension(compatibility):
+        raise ValueError("file-index-v2 query model returned the wrong vector dimension")
+    return vector
+
+
+def _file_index_v2_item_path(item: Dict[str, Any]) -> str:
+    metadata = item.get("metadata") or {}
+    return str(metadata.get("path") or item.get("id") or "")
+
+
+def _file_index_v2_raw_distance(item: Dict[str, Any]) -> float:
+    value = item.get("distance")
+    return float(value) if value is not None else math.inf
+
+
+def _rank_file_index_v2_candidates(
+    base_items: Sequence[Dict[str, Any]],
+    overlay_items: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Deduplicate by logical path with Overlay authority, then raw-rank."""
+    by_path: Dict[str, Dict[str, Any]] = {}
+    for item in overlay_items:
+        by_path[_file_index_v2_item_path(item)] = item
+    for item in base_items:
+        by_path.setdefault(_file_index_v2_item_path(item), item)
+    return sorted(by_path.values(), key=_file_index_v2_raw_distance)
+
+
+def _search_file_index_v2_scope(
+    pinned_view: Dict[str, Any],
+    scope: str,
+    query: str,
+    n_results: int,
+    match_mode: str,
+    query_embedding: List[float],
+) -> Dict[str, Any]:
+    """Query one scope from a pinned Base/Overlay pair and merge raw hits."""
+    collection_name = (
+        V2_FILES_CODE_COLLECTION
+        if scope == "files"
+        else V2_FILES_DOCS_COLLECTION
+    )
+    shadow_field = "files_shadow" if scope == "files" else "files_docs_shadow"
+    shadowed_paths = set(pinned_view[shadow_field]) | set(
+        pinned_view["tombstones"]
+    )
+    target = max(1, _search_fetch_count(scope, n_results, match_mode))
+    overlay_client = None
+    base_client = None
+    try:
+        overlay_client, overlay_collection = _open_file_index_v2_collection(
+            pinned_view["overlay_store"], collection_name
+        )
+        base_client, base_collection = _open_file_index_v2_collection(
+            pinned_view["base_store"], collection_name
+        )
+        # The pinned closure was verified moments ago. A new count failure is
+        # a query failure, never an empty result or a legacy-health fallback.
+        int(overlay_collection.count())
+        base_count = int(base_collection.count())
+        overlay_items = _search_collection_v2(
+            overlay_collection,
+            query,
+            target,
+            query_embedding=query_embedding,
+        )
+        base_fetch = target
+        ranked: List[Dict[str, Any]] = list(overlay_items)
+        while True:
+            base_items = _search_collection_v2(
+                base_collection,
+                query,
+                base_fetch,
+                query_embedding=query_embedding,
+            )
+            visible_base = [
+                item
+                for item in base_items
+                if _file_index_v2_item_path(item) not in shadowed_paths
+            ]
+            ranked = _rank_file_index_v2_candidates(visible_base, overlay_items)
+            if base_fetch >= base_count or len(base_items) < base_fetch:
+                break
+            boundary = (
+                _file_index_v2_raw_distance(base_items[-1])
+                if base_items
+                else math.inf
+            )
+            kth_distance = (
+                _file_index_v2_raw_distance(ranked[target - 1])
+                if len(ranked) >= target
+                else math.inf
+            )
+            if len(ranked) >= target and kth_distance <= boundary:
+                break
+            next_fetch = min(base_count, max(base_fetch + 1, base_fetch * 2))
+            if next_fetch <= base_fetch:
+                break
+            base_fetch = next_fetch
+    finally:
+        if base_client is not None:
+            _close_chroma_client(base_client)
+        if overlay_client is not None:
+            _close_chroma_client(overlay_client)
+
+    strict_items, suggestion_items = _apply_match_mode(ranked, query, match_mode)
+    payload = {
+        "results": _format_scope_results(scope, strict_items, n_results),
+        "view_id": pinned_view["view_id"],
+    }
+    if match_mode == "all_terms":
+        payload["suggestions"] = _format_scope_results(
+            scope, suggestion_items, n_results
+        )
+    return payload
 
 
 def _search_scope_collection(
@@ -4970,7 +8508,7 @@ def _search_failed_payload(
     }
 
 
-def action_search_multi_v2(
+def _action_search_multi_v2_pinned(
     repo_hash: str,
     worktree_hash: Optional[str],
     project_root: Optional[str],
@@ -4979,6 +8517,7 @@ def action_search_multi_v2(
     scopes: Sequence[str],
     db_root: Optional[Path] = None,
     match_mode: str = "semantic",
+    file_index_protocol: str = "legacy",
 ) -> Dict[str, Any]:
     """Versioned batch search across v2 scopes (Phase 70 FR-384).
 
@@ -4999,22 +8538,77 @@ def action_search_multi_v2(
         "files",
         "files-docs",
     }
+    if file_index_protocol not in {"legacy", "v2"}:
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+    invalid_scopes = [scope for scope in scopes if scope not in valid_scopes]
+    if invalid_scopes:
+        return {
+            "ok": False,
+            "error_code": "BAD_ARGS",
+            "error": f"unsupported search scope {invalid_scopes[0]}",
+        }
+    v2_file_scopes = [
+        scope for scope in scopes if scope in {"files", "files-docs"}
+    ]
+    pinned_file_view: Optional[Dict[str, Any]] = None
+    file_selection: Optional[Dict[str, Any]] = None
+    legacy_file_selections: Dict[str, Dict[str, Any]] = {}
+    if file_index_protocol == "v2" and v2_file_scopes:
+        if not worktree_hash:
+            raise ValueError("file-index-v2 search requires worktree_hash")
+        file_selection = _select_file_index_v2_view(
+            repo_hash,
+            worktree_hash,
+            db_root,
+            repair_corruption=True,
+        )
+        pinned_file_view = file_selection["view"]
+        if pinned_file_view is None:
+            unresolved: List[str] = []
+            for scope in dict.fromkeys(v2_file_scopes):
+                state, health = _classify_scope_for_search(
+                    repo_hash, worktree_hash, scope, db_root=db_root
+                )
+                if state in ("missing", "corrupt"):
+                    unresolved.append(scope)
+                    continue
+                legacy_file_selections[scope] = {
+                    "state": "stale",
+                    "reason": file_selection["reason"],
+                    "fallback_source": "legacy",
+                    "health": health,
+                }
+            if unresolved:
+                return {
+                    "ok": False,
+                    "error_code": "INDEX_NOT_READY",
+                    "retryable": True,
+                    "retry_after_ms": 250,
+                    "waited_ms": 0,
+                    "affected_scopes": unresolved,
+                    "error": "file index v2 has no compatible readable corpus",
+                }
     payload: Dict[str, Any] = {"ok": True}
     scope_states: Dict[str, Dict[str, Any]] = {}
     scope_results: Dict[str, Any] = {}
     stale_scopes: List[str] = []
     query_embedding: Optional[List[float]] = None
     for scope in scopes:
-        if scope not in valid_scopes:
-            return {
-                "ok": False,
-                "error_code": "BAD_ARGS",
-                "error": f"unsupported search scope {scope}",
-            }
         scope_worktree = worktree_hash if scope in WORKTREE_SCOPED else None
-        state, health = _classify_scope_for_search(
-            repo_hash, scope_worktree, scope, db_root=db_root
+        is_v2_file_scope = (
+            file_index_protocol == "v2" and scope in {"files", "files-docs"}
         )
+        if is_v2_file_scope:
+            if pinned_file_view is not None:
+                assert file_selection is not None
+                state, health = file_selection["state"], file_selection
+            else:
+                health = legacy_file_selections[scope]
+                state = health["state"]
+        else:
+            state, health = _classify_scope_for_search(
+                repo_hash, scope_worktree, scope, db_root=db_root
+            )
         if state in ("missing", "corrupt"):
             scope_states[scope] = {
                 "state": state,
@@ -5023,7 +8617,12 @@ def action_search_multi_v2(
             continue
         if query_embedding is None:
             try:
-                query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+                if pinned_file_view is not None:
+                    query_embedding = _encode_file_index_v2_query(
+                        pinned_file_view, query
+                    )
+                else:
+                    query_embedding = E5EmbeddingFunction().embed_query([query])[0]
             except Exception as error:
                 affected_scopes = [
                     candidate for candidate in scopes if candidate in valid_scopes
@@ -5034,17 +8633,41 @@ def action_search_multi_v2(
                     error,
                 )
         try:
-            result = _search_scope_collection(
-                repo_hash,
-                scope_worktree,
-                scope,
-                query,
-                n_results,
-                match_mode,
-                db_root,
-                query_embedding,
-            )
+            if is_v2_file_scope:
+                if pinned_file_view is not None:
+                    result = _search_file_index_v2_scope(
+                        pinned_file_view,
+                        scope,
+                        query,
+                        n_results,
+                        match_mode,
+                        query_embedding,
+                    )
+                else:
+                    result = _search_scope_collection(
+                        repo_hash,
+                        scope_worktree,
+                        scope,
+                        query,
+                        n_results,
+                        match_mode,
+                        db_root,
+                        query_embedding,
+                    )
+            else:
+                result = _search_scope_collection(
+                    repo_hash,
+                    scope_worktree,
+                    scope,
+                    query,
+                    n_results,
+                    match_mode,
+                    db_root,
+                    query_embedding,
+                )
         except Exception as error:
+            if is_v2_file_scope:
+                return _search_failed_payload([scope], "query", error)
             # Phase 70a FR-400: query-contract failures (for example an
             # unsupported embedding scalar type) do not prove the verified
             # store is corrupt. Re-check the same canonical health source used
@@ -5063,6 +8686,14 @@ def action_search_multi_v2(
                 continue
             return _search_failed_payload([scope], "query", error)
         scope_states[scope] = {"state": state}
+        if is_v2_file_scope:
+            if pinned_file_view is not None:
+                scope_states[scope]["view_id"] = pinned_file_view["view_id"]
+            fallback_source = health.get("fallback_source")
+            if fallback_source:
+                scope_states[scope]["fallback_source"] = fallback_source
+            if health.get("reason") != "ready":
+                scope_states[scope]["reason"] = health.get("reason")
         if state == "stale":
             stale_scopes.append(scope)
         scope_results[scope] = result
@@ -5076,6 +8707,48 @@ def action_search_multi_v2(
     if stale_scopes:
         payload["stale_scopes"] = stale_scopes
     return payload
+
+
+def action_search_multi_v2(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    project_root: Optional[str],
+    query: str,
+    n_results: int,
+    scopes: Sequence[str],
+    db_root: Optional[Path] = None,
+    match_mode: str = "semantic",
+    file_index_protocol: str = "legacy",
+) -> Dict[str, Any]:
+    has_v2_file_scope = any(scope in {"files", "files-docs"} for scope in scopes)
+    if file_index_protocol == "v2" and has_v2_file_scope and worktree_hash:
+        with _file_index_v2_reader_pin_if_present(
+            repo_hash,
+            worktree_hash,
+            db_root,
+        ):
+            return _action_search_multi_v2_pinned(
+                repo_hash,
+                worktree_hash,
+                project_root,
+                query,
+                n_results,
+                scopes,
+                db_root,
+                match_mode,
+                file_index_protocol,
+            )
+    return _action_search_multi_v2_pinned(
+        repo_hash,
+        worktree_hash,
+        project_root,
+        query,
+        n_results,
+        scopes,
+        db_root,
+        match_mode,
+        file_index_protocol,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -5097,12 +8770,87 @@ def _runtime_status_v2() -> Dict[str, Any]:
     }
 
 
+def _explicit_file_index_v2_status(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+) -> Dict[str, Dict[str, Any]]:
+    with _file_index_v2_reader_pin_if_present(
+        repo_hash,
+        worktree_hash,
+        db_root,
+    ):
+        return _explicit_file_index_v2_status_pinned(
+            repo_hash,
+            worktree_hash,
+            db_root,
+        )
+
+
+def _explicit_file_index_v2_status_pinned(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+) -> Dict[str, Dict[str, Any]]:
+    """Project the shared selector into additive, read-only scope health."""
+    selection = _select_file_index_v2_view(
+        repo_hash,
+        worktree_hash,
+        db_root,
+        repair_corruption=False,
+    )
+    view = selection["view"]
+    if view is not None:
+        result: Dict[str, Dict[str, Any]] = {}
+        for scope in ("files", "files-docs"):
+            status: Dict[str, Any] = {
+                "exists": True,
+                "healthy": True,
+                "repair_required": selection["repair_required"],
+                "document_count": view["visible_counts"][scope],
+                "reason": selection["reason"],
+                "legacy_residue_detected": False,
+                "last_repair_at": None,
+                "view_id": view["view_id"],
+            }
+            if selection.get("fallback_source"):
+                status["fallback_source"] = selection["fallback_source"]
+            result[scope] = status
+        return result
+
+    result = {}
+    for scope in ("files", "files-docs"):
+        legacy = _scope_status_v2(
+            repo_hash, worktree_hash, scope, db_root=db_root
+        )
+        if legacy.get("healthy") and not legacy.get("repair_required"):
+            legacy = {
+                **legacy,
+                "healthy": True,
+                "repair_required": True,
+                "reason": selection["reason"],
+                "fallback_source": "legacy",
+            }
+        else:
+            legacy = {
+                **legacy,
+                "healthy": False,
+                "repair_required": True,
+                "reason": selection["reason"],
+            }
+        result[scope] = legacy
+    return result
+
+
 def action_status_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
     db_root: Optional[Path] = None,
     worktree_hashes: Optional[Sequence[str]] = None,
+    file_index_protocol: str = "legacy",
 ) -> dict:
+    if file_index_protocol not in {"legacy", "v2"}:
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
     out: Dict[str, Any] = {
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
@@ -5112,24 +8860,42 @@ def action_status_v2(
         "works": _scope_status_v2(repo_hash, None, "works", db_root=db_root),
     }
     if worktree_hash:
-        for scope in ("files", "files-docs"):
-            out[scope] = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
+        if file_index_protocol == "v2":
+            out.update(
+                _explicit_file_index_v2_status(
+                    repo_hash, worktree_hash, db_root
+                )
+            )
+        else:
+            for scope in ("files", "files-docs"):
+                out[scope] = _scope_status_v2(
+                    repo_hash, worktree_hash, scope, db_root=db_root
+                )
 
     payload = {"ok": True, "runtime": _runtime_status_v2(), "status": out}
     if worktree_hashes:
         # Phase 70 FR-393 / AS-13: one batch process reports every requested
         # worktree so all-worktree status no longer spawns one Python per
         # worktree.
-        payload["worktrees"] = {
-            hash_value: {
-                scope: _scope_status_v2(
-                    repo_hash, hash_value, scope, db_root=db_root
+        if file_index_protocol == "v2":
+            payload["worktrees"] = {
+                hash_value: _explicit_file_index_v2_status(
+                    repo_hash, hash_value, db_root
                 )
-                for scope in ("files", "files-docs")
+                for hash_value in worktree_hashes
+                if hash_value
             }
-            for hash_value in worktree_hashes
-            if hash_value
-        }
+        else:
+            payload["worktrees"] = {
+                hash_value: {
+                    scope: _scope_status_v2(
+                        repo_hash, hash_value, scope, db_root=db_root
+                    )
+                    for scope in ("files", "files-docs")
+                }
+                for hash_value in worktree_hashes
+                if hash_value
+            }
     return payload
 
 
@@ -5194,6 +8960,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-root", dest="db_root", default="")
     # Phase 70 AS-13: batch all-worktree status in one process.
     parser.add_argument("--worktree-hashes", dest="worktree_hashes", default="")
+    parser.add_argument(
+        "--file-index-protocol",
+        dest="file_index_protocol",
+        default="legacy",
+        choices=["legacy", "v2"],
+    )
     return parser.parse_args()
 
 
@@ -5216,6 +8988,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash,
                     db_root=db_root,
                     worktree_hashes=worktree_hashes or None,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0
@@ -5248,6 +9021,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     scope=scope,
                     qos=args.qos or default_qos_for_action(action),
                     db_root=db_root,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0
@@ -5335,6 +9109,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     scopes=scopes,
                     match_mode=args.match_mode,
                     db_root=db_root,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0
@@ -5363,11 +9138,15 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     no_auto_build=args.no_auto_build,
                     match_mode=args.match_mode,
                     db_root=db_root,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0
 
         emit({"ok": False, "error_code": "BAD_ARGS", "error": f"unknown v2 action {action}"})
+        return 2
+    except ValueError as exc:
+        emit({"ok": False, "error_code": "BAD_ARGS", "error": str(exc)})
         return 2
     except Exception as exc:
         emit({"ok": False, "error_code": "RUNTIME_ERROR", "error": str(exc)})

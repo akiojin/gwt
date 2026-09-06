@@ -55,11 +55,33 @@ pub enum WindowPlacement {
         order: u32,
         collapsed: bool,
     },
+    /// SPEC-3671 FR-001: the window exists (and stays fully observable through
+    /// `pane.list` / `pane.read` / `pm.message.send`) but is not drawn on the
+    /// canvas. It is mirrored read-only in the owning Issue window's preview
+    /// pane instead, so an Issue Monitor auto-launch never steals the screen.
+    IssuePreview {
+        issue_window_id: String,
+        issue_number: u64,
+    },
 }
 
 impl WindowPlacement {
     pub fn is_canvas(&self) -> bool {
         matches!(self, Self::Canvas)
+    }
+
+    /// SPEC-3671 FR-004: the Rust-side counterpart of the frontend
+    /// `isOffCanvasPlacement()` seam — true for every placement that must not be
+    /// rendered as a top-level canvas window.
+    pub fn is_off_canvas(&self) -> bool {
+        matches!(self, Self::AgentKanban { .. } | Self::IssuePreview { .. })
+    }
+
+    pub fn issue_preview_issue_number(&self) -> Option<u64> {
+        match self {
+            Self::IssuePreview { issue_number, .. } => Some(*issue_number),
+            _ => None,
+        }
     }
 }
 
@@ -150,6 +172,12 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3885 FR-011: the Issue this agent window belongs to. It is durable and
+    /// independent of `placement`, so Windowize (IssuePreview -> Canvas) keeps the
+    /// Issue header and FR-012's return-to-list knows which row to fold back into.
+    /// `None` is a session with no Issue behind it, which stays a bare terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_issue_number: Option<u64>,
     /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
     /// window, recomputed per broadcast from the durable PM registration. It
     /// is never deserialized from disk — a stored flag would drift from
@@ -162,8 +190,27 @@ pub struct PersistedWindowState {
 pub struct PersistedWindowCanvasState {
     #[serde(default = "default_canvas_viewport")]
     pub viewport: CanvasViewport,
+    #[serde(deserialize_with = "deserialize_restorable_windows")]
     pub windows: Vec<PersistedWindowState>,
     pub next_z_index: u32,
+}
+
+/// Drop windows a newer gwt can no longer describe instead of failing the
+/// whole restore. A retired preset (Issue #3164's Improvement Inbox) still
+/// appears in workspaces saved while that window was open; rejecting the file
+/// would wipe every other window the user had arranged, so an unreadable entry
+/// costs only itself.
+fn deserialize_restorable_windows<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PersistedWindowState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<PersistedWindowState>(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +299,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -278,6 +326,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
                 is_pm: false,
             },
         ],
@@ -666,6 +715,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -692,6 +742,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
             ],
@@ -874,6 +925,133 @@ mod tests {
         assert_eq!(loaded.next_z_index, 2);
     }
 
+    // SPEC-3671 T-005: adding a third `WindowPlacement` variant must not change how
+    // already-persisted workspaces read. Untagged windows stay `Canvas` and existing
+    // `agent_kanban` blobs keep their lane data.
+    #[test]
+    fn load_workspace_state_reads_placements_written_before_issue_preview() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "shell-1",
+      "title": "Shell",
+      "preset": "shell",
+      "geometry": { "x": 20.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true
+    },
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "ready",
+      "persist": true,
+      "placement": {
+        "kind": "agent_kanban",
+        "board_id": "agent-kanban-1",
+        "lane_id": "active",
+        "order": 2,
+        "collapsed": false
+      }
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("pre-IssuePreview placements must load");
+        assert_eq!(loaded.windows.len(), 2);
+        assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+        assert_eq!(
+            loaded.windows[1].placement,
+            WindowPlacement::AgentKanban {
+                board_id: "agent-kanban-1".to_string(),
+                lane_id: AgentKanbanLane::Active,
+                order: 2,
+                collapsed: false,
+            }
+        );
+    }
+
+    // SPEC-3671 FR-001 / T-006.
+    #[test]
+    fn persisted_window_state_round_trips_issue_preview_placement() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.preset = WindowPreset::Agent;
+        window.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "issue-1".to_string(),
+            issue_number: 3671,
+        };
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"issue_preview\""),
+            "placement kind must be explicit: {json}"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed.placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
+        assert!(!parsed.placement.is_canvas());
+        assert!(parsed.placement.is_off_canvas());
+        assert_eq!(parsed.placement.issue_preview_issue_number(), Some(3671));
+    }
+
+    // SPEC-3671 T-014: a restored `issue_preview` window must not silently degrade to
+    // `Canvas`; that regression is exactly the "12 windows opened at once" incident the
+    // SPEC was filed for.
+    #[test]
+    fn load_workspace_state_restores_issue_preview_without_canvas_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "error",
+      "persist": true,
+      "placement": {
+        "kind": "issue_preview",
+        "issue_window_id": "issue-1",
+        "issue_number": 3671
+      }
+    }
+  ],
+  "next_z_index": 2
+}"#,
+        )
+        .expect("issue preview workspace write");
+
+        let loaded = load_workspace_state(&path).expect("issue_preview placement must load");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(
+            loaded.windows[0].placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
+    }
+
     #[test]
     fn persisted_window_state_round_trips_agent_kanban_placement() {
         let mut window = default_workspace_state().windows.remove(0);
@@ -940,6 +1118,50 @@ mod tests {
         .expect("legacy memo workspace write");
 
         let loaded = load_workspace_state(&path).expect("legacy memo load should not fail");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "board-1");
+        assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
+        assert_eq!(loaded.next_z_index, 3);
+    }
+
+    // Issue #3164: the Improvement Inbox preset was retired outright rather
+    // than kept as a legacy `WindowPreset` variant. A workspace saved while
+    // that window was open still names it, so an unknown preset must drop
+    // just its own window instead of failing the whole restore and wiping the
+    // user's layout.
+    #[test]
+    fn load_workspace_state_drops_windows_with_an_unknown_preset() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "improvement-1",
+      "title": "Improvement Inbox",
+      "preset": "improvement",
+      "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true
+    },
+    {
+      "id": "board-1",
+      "title": "Board",
+      "preset": "board",
+      "geometry": { "x": 40.0, "y": 60.0, "width": 520.0, "height": 480.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("retired preset workspace write");
+
+        let loaded = load_workspace_state(&path).expect("unknown preset must not fail the restore");
         assert_eq!(loaded.windows.len(), 1);
         assert_eq!(loaded.windows[0].id, "board-1");
         assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
@@ -1040,6 +1262,7 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                linked_issue_number: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1131,6 +1354,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1205,6 +1429,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1231,6 +1456,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
             ],
@@ -1445,6 +1671,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1471,6 +1698,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
             ],
