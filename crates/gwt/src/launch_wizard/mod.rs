@@ -421,6 +421,9 @@ pub struct LaunchWizardView {
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
     pub error: Option<String>,
+    /// Issue #3962 AC-5: non-blocking hint shown when a restored model is no
+    /// longer offered by the agent and the wizard fell back to the default.
+    pub model_fallback_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1046,6 +1049,10 @@ pub struct LaunchWizardState {
     pub initial_prompt: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
+    /// Issue #3962 AC-5: set when a restored model left the agent's catalog and
+    /// the wizard silently fell back to the current default. A non-blocking
+    /// hint, never an error — the launch still proceeds with the default model.
+    pub model_fallback_notice: Option<String>,
     pub is_hydrating: bool,
     pub runtime_context_resolved: bool,
     pub runtime_resolution_pending: bool,

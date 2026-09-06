@@ -164,6 +164,17 @@ Commenting on an existing Issue with `issue.comment` is never restricted
 - add evidence, propose acceptance criteria, and share analysis freely.
 Only creating a new Issue routes through the PM.
 
+### Friction in gwt itself takes the same route
+
+Friction and capability gaps in gwt itself - a hook, launch, skill, index,
+verification, coordination, or Issue/SPEC workflow that contradicts what gwt
+told you to do - is reported the same way: post it to the Board for the PM,
+who registers it with `gwt-register-issue`. Never file an Issue upstream in
+the gwt repository yourself, and never work around it silently. Include the
+contract you were following, what you observed instead, and the primary
+evidence (command, output, file and line). gwt has no automatic capture for
+this; the Board post is the intake.
+
 ## Work (current state)
 
 The Board is history; Work is current state. Update Work with a JSON
@@ -455,6 +466,16 @@ agent をブロックしているか）。PM は登録した Issue 番号を返�
 分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
 PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
 指定した Board 返信で返します。
+
+### gwt 自体の摩擦・機能ギャップも同じ経路
+
+gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
+扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
+起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
+回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
+一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
+無く、この Board 投稿が唯一の intake です。
 
 ## Work (current state)
 

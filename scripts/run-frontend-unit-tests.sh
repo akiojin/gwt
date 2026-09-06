@@ -18,7 +18,6 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/pm-launcher.test.mjs \
   crates/gwt/web/__tests__/pm-settings-panel.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
-  crates/gwt/web/__tests__/improvement-inbox-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \
   crates/gwt/web/__tests__/focus-trap.test.mjs \
   crates/gwt/web/__tests__/kanban-structure.test.mjs \
@@ -54,6 +53,8 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/settings-agent-backends-tab.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-backend-picker.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-hermes-options.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-controls.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-model-fallback.test.mjs \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/workspace-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \

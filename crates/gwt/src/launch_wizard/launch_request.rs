@@ -514,7 +514,7 @@ mod tests {
                 agent_id: "codex".to_string(),
             });
             state.apply(LaunchWizardAction::SetModel {
-                model: "gpt-5.4".to_string(),
+                model: "gpt-5.5".to_string(),
             });
             state.apply(LaunchWizardAction::SetReasoning {
                 reasoning: "high".to_string(),

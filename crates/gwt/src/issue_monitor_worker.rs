@@ -978,6 +978,69 @@ pub struct IssueMonitorMergeReconciliation {
     pub deliveries: BTreeMap<String, crate::MergedIssueDelivery>,
 }
 
+/// Delete the remote `work/issue-*` branches whose delivery this scan just
+/// confirmed (Issue #3970 AC-1).
+///
+/// The trigger is a *new* reconciliation, not the merged-PR list: that list
+/// keeps naming branches long after their heads are gone, so pruning off it
+/// every scan would push hundreds of no-op deletions forever. Gating on
+/// `reconciliation.merged` makes the pass cost nothing on an ordinary scan and
+/// run exactly when a delivery lands.
+///
+/// The pass then sweeps every `work/issue-*` branch the remote still has, not
+/// only the one that just merged, so a backlog that accumulated before this
+/// existed drains through the same safe rules instead of needing a separate
+/// migration.
+pub fn prune_delivered_work_branches(
+    repo_path: &Path,
+    base_branch: &str,
+    reconciliation: &IssueMonitorMergeReconciliation,
+) -> gwt_git::merged_branch_prune::PruneReport {
+    let mut report = gwt_git::merged_branch_prune::PruneReport::default();
+    if reconciliation.merged.is_empty() {
+        return report;
+    }
+    // Mirrors the gh command root: a workspace home resolves to its child bare
+    // repo, anything else runs where the caller pointed us.
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let repo_path = git_root.as_path();
+    if let Err(error) = gwt_git::merged_branch_prune::refresh_remote_refs(repo_path) {
+        report.skipped_reason = Some(format!("git fetch origin --prune failed: {error}"));
+        return report;
+    }
+    let branches = match gwt_git::merged_branch_prune::list_remote_work_branches(repo_path) {
+        Ok(branches) => branches,
+        Err(error) => {
+            report.skipped_reason = Some(format!("git ls-remote failed: {error}"));
+            return report;
+        }
+    };
+    // The merged-PR inventory this scan already paid for is reused, so the
+    // prune adds one `gh` call (the open-PR inventory), not two.
+    let merged = reconciliation
+        .deliveries
+        .iter()
+        .map(|(branch, delivery)| (branch.clone(), delivery.pr_number))
+        .collect::<BTreeMap<_, _>>();
+    let mut environment =
+        gwt_git::merged_branch_prune::GitPruneEnvironment::new(repo_path, base_branch)
+            .with_merged_prs(merged);
+    prune_delivered_work_branches_with(&mut environment, reconciliation, &branches)
+}
+
+/// Injectable core of [`prune_delivered_work_branches`].
+pub fn prune_delivered_work_branches_with<E: gwt_git::merged_branch_prune::PruneEnvironment>(
+    env: &mut E,
+    reconciliation: &IssueMonitorMergeReconciliation,
+    remote_branches: &[String],
+) -> gwt_git::merged_branch_prune::PruneReport {
+    if reconciliation.merged.is_empty() {
+        return gwt_git::merged_branch_prune::PruneReport::default();
+    }
+    gwt_git::merged_branch_prune::prune_merged_branches(env, remote_branches, false)
+}
+
 /// Issue #3917: propose settling every delivered Issue whose work branch
 /// merged. Side-effect free like the rest of the scan: it only prepares
 /// `SettleMergedIssue` effects for the durable executor. Delegation
