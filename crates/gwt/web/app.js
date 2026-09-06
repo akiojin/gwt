@@ -18,15 +18,21 @@
         findTitlebarDockTarget,
         resolveDragReleasePoint,
       } from "/window-docking.js";
-      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
-      import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
+      import {
+        attentionForWorkspace,
+        createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
+        formatLifecycleStateLabel,
+        mergeActiveWorkProjectionPatch,
+      } from "/workspace-kanban-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
         createAgentKanbanSurface,
         findAgentKanbanDropTargetAtPoint,
         isAgentKanbanEligible,
         isAgentKanbanPlacement,
+        isOffCanvasPlacement,
         placeAgentWindowMessage,
+        undockAgentWindowMessage,
         updateTerminalGridMessage,
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
@@ -73,8 +79,8 @@
       // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
       // Settings window — the PM is configured where it is seen.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
-      import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
+      import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -242,6 +248,9 @@
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
+      // Issue #3884: when each window's runtime state was last observed to change
+      // (ms epoch). Feeds the Issue row status row's elapsed-time label.
+      const windowRuntimeStateSinceMap = new Map();
       const terminalMap = new Map();
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
@@ -275,6 +284,7 @@
       const renderedWindowElementKeys = new Map();
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
+      const renderedIssuePreviewBodyKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
       // window-cleanup call site keeps its text).
@@ -462,9 +472,6 @@
         active_tab_id: null,
         recent_projects: [],
       };
-      let improvementCandidates = [];
-      let improvementCandidatesRevision = 0;
-      let improvementCandidatesProjectRoot = null;
       let renderedProjectTabsKey = "";
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
@@ -531,10 +538,6 @@
         }
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
-        if (windows.some((windowData) => presetSurface(windowData?.preset) === "improvement")) {
-          appendRenderKeyPart(parts, "improvement_candidates_revision");
-          appendRenderKeyPart(parts, improvementCandidatesRevision);
-        }
         for (const windowData of windows) {
           const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
@@ -688,6 +691,42 @@
           appendRenderKeyPart(parts, "tab_group_active");
           appendRenderKeyPart(parts, Boolean(tab.tab_group_active));
           appendWindowPlacementRenderKey(parts, tab);
+        }
+        return parts.join("");
+      }
+
+      // SPEC-3671 FR-007 / FR-011: the Issue preview pane is driven by workspace
+      // state (which agents exist, what they are doing), not by knowledge events, so
+      // it needs its own render key to stay live.
+      function issuePreviewBodyRenderKey(issueWindow) {
+        const parts = [];
+        appendRenderKeyPart(parts, "issue_window_id");
+        appendRenderKeyPart(parts, issueWindow?.id || "");
+        for (const windowData of activeWorkspace().windows || []) {
+          if (windowData?.placement?.kind !== "issue_preview") {
+            continue;
+          }
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, windowData.id || "");
+          appendRenderKeyPart(parts, "issue_number");
+          appendRenderKeyPart(parts, windowData.placement.issue_number ?? "");
+          appendRenderKeyPart(parts, "host");
+          appendRenderKeyPart(parts, windowData.placement.issue_window_id || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
+          appendRenderKeyPart(parts, "role");
+          appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+          // Issue #3884: the status row shows the activity line and elapsed time.
+          appendRenderKeyPart(parts, "activity");
+          appendRenderKeyPart(parts, windowActivityDetail(windowData));
+          appendRenderKeyPart(parts, "since_minute");
+          const since = windowRuntimeStateSinceMap.get(windowData.id);
+          appendRenderKeyPart(
+            parts,
+            Number.isFinite(since) ? Math.floor((Date.now() - since) / 60000) : "",
+          );
         }
         return parts.join("");
       }
@@ -846,9 +885,6 @@
         }
         if (preset === "work" || preset === "workspace") {
           return "work";
-        }
-        if (preset === "improvement" || preset === "improvements") {
-          return "improvement";
         }
         if (preset === "console") {
           return "console";
@@ -1305,14 +1341,6 @@
         );
       }
 
-      function improvementEventMatchesActiveProject(event) {
-        const eventProjectRoot = event?.project_root;
-        if (!eventProjectRoot) {
-          return true;
-        }
-        return eventProjectRoot === activeProjectTab()?.project_root;
-      }
-
       function activeWorkspace() {
         return activeProjectTab()?.workspace || emptyWorkspace();
       }
@@ -1376,7 +1404,7 @@
       }
 
       function visibleWindowData(windowData) {
-        if (isAgentKanbanPlacement(windowData)) {
+        if (isOffCanvasPlacement(windowData)) {
           return false;
         }
         if (!windowData?.tab_group_id) {
@@ -1490,9 +1518,15 @@
           profile: "Profile",
           logs: "Logs",
           agent_kanban: "Agent Kanban",
+          // SPEC-3671 FR-014: these three presets share the Knowledge surface but
+          // are different faces. Collapsing them to one "Issue" label made an open
+          // window's title unable to say which face it was.
           issue: "Issue",
-          issue_monitor: "Issue",
-          spec: "Issue",
+          issue_monitor: "Issue Monitor",
+          spec: "SPEC",
+          // SPEC-3671 FR-015: the wire preset is `work` (`workspace` is only a
+          // legacy deserialization alias), and the surface lists Works.
+          work: "Work",
           workspace: "Work",
           board: "Board",
           pr: "PR",
@@ -1507,6 +1541,10 @@
         "claude code": "Claude Code",
         claude_code: "Claude Code",
         codex: "Codex",
+        grok: "Grok Build",
+        "grok-build": "Grok Build",
+        "grok build": "Grok Build",
+        grok_build: "Grok Build",
         agy: "Antigravity CLI",
         antigravity: "Antigravity CLI",
         "antigravity-cli": "Antigravity CLI",
@@ -1637,6 +1675,15 @@
       // (dynamic_title_detail) so glanceable surfaces (Fleet Minimap cells,
       // switcher rows) read like "title · detail". Collapses to just the
       // title when there is no distinct detail.
+      // Issue #3884: the one-line "what is it doing now" for an agent window — the
+      // runtime status detail when the backend reported one (error / stopped),
+      // otherwise the live dynamic title detail.
+      function windowActivityDetail(windowData) {
+        const statusDetail = String(detailMap.get(windowData?.id) || "").trim();
+        if (statusDetail) return statusDetail;
+        return String(windowData?.dynamic_title_detail || "").trim();
+      }
+
       function windowActivityLabel(windowData) {
         const title = windowDisplayTitle(windowData);
         const detail = String(windowData?.dynamic_title_detail || "").trim();
@@ -1682,15 +1729,6 @@
               active_tab_id: null,
               recent_projects: [],
             };
-            const activeProjectRoot = activeProjectTab()?.project_root || null;
-            if (
-              improvementCandidatesProjectRoot &&
-              improvementCandidatesProjectRoot !== activeProjectRoot
-            ) {
-              improvementCandidates = [];
-              improvementCandidatesRevision += 1;
-              improvementCandidatesProjectRoot = null;
-            }
             setVersionState(appState.app_version, versionState.latest);
             const nextProjectTabsKey = projectTabsRenderKey(appState);
             if (renderedProjectTabsKey !== nextProjectTabsKey) {
@@ -2479,7 +2517,7 @@
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
         const workspaceWindow = workspaceWindowById(windowId);
-        if (isAgentKanbanPlacement(workspaceWindow)) {
+        if (isOffCanvasPlacement(workspaceWindow)) {
           const terminalHost = terminalMap.get(windowId)?.terminal?.element?.parentElement;
           return elementHasLayoutBox(terminalHost);
         }
@@ -3017,7 +3055,7 @@
         ),
       ) {
         const windowData = workspaceWindowById(windowId);
-        if (isAgentKanbanPlacement(windowData)) {
+        if (isOffCanvasPlacement(windowData)) {
           send(updateTerminalGridMessage(windowId, cols, rows));
           return;
         }
@@ -3116,6 +3154,9 @@
         const parts = [];
         appendRenderKeyPart(parts, "running");
         appendRenderKeyPart(parts, counts?.running ?? null);
+        // Issue #3884 AC-3: the inline-terminal breakdown of RUNNING.
+        appendRenderKeyPart(parts, "running_inline");
+        appendRenderKeyPart(parts, counts?.running_inline ?? null);
         appendRenderKeyPart(parts, "idle");
         appendRenderKeyPart(parts, counts?.idle ?? null);
         // FR-039 (anshin): the WAITING cell refreshes when the waiting count
@@ -3245,6 +3286,9 @@
         // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           running: 0,
+          // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
+          // them off the canvas — they live inside the Issue window.
+          running_inline: 0,
           idle: 0,
           // FR-039 (anshin): waiting is its own LOUD telemetry state for
           // agents waiting on the operator. It used to collapse into idle;
@@ -3265,6 +3309,9 @@
           const windowData = workspaceWindowById(windowId);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
           if (state in counts) counts[state] += 1;
+          if (state === "running" && windowData.placement?.kind === "issue_preview") {
+            counts.running_inline += 1;
+          }
           counts.agents += 1;
         }
         if (activeWorkProjection) {
@@ -3306,6 +3353,15 @@
       const { applyProviderUsageUi, renderUsagePanel } = createProviderUsageSurface({
         send,
         renderWorkspaceWindows: () => workspaceOverviewSurface.renderWindows(),
+        // Issue #3862 — name popover session rows by their window title.
+        sessionLabel: (sessionId) => {
+          for (const tab of appState?.tabs || []) {
+            for (const windowData of tab.workspace?.windows || []) {
+              if (windowData?.session_id === sessionId) return windowDisplayTitle(windowData);
+            }
+          }
+          return null;
+        },
       });
 
       function activeWorkFocusableAgents(work) {
@@ -3387,6 +3443,9 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
+            if (windowRuntimeStateMap.get(windowId) !== runtimeState) {
+              windowRuntimeStateSinceMap.set(windowId, Date.now());
+            }
             windowRuntimeStateMap.set(windowId, runtimeState);
             if (detail) {
               detailMap.set(windowId, detail);
@@ -3399,16 +3458,21 @@
               detailMap.delete(windowId);
             }
             const effectiveDetail = detailMap.get(windowId) || "";
-            agentCompletionNotifier.handleRuntimeState({
-              windowId,
-              runtimeState,
-              windowData,
-              projectTab: windowContext?.tab || activeProjectTab(),
-              statusDetail: effectiveDetail,
-            });
             // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
             // that carry a waiting state) raise in-app attention toasts.
+            // SPEC #3206 v2 (user ruling 2026-09-04): completion notices take
+            // the same gate. The controller has no preset check of its own, so
+            // ungated it publishes "Agent stopped" for Settings / Board / Logs
+            // windows using that window's own title — noise that v2 would then
+            // persist into the history instead of letting it pass as a toast.
             if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+              agentCompletionNotifier.handleRuntimeState({
+                windowId,
+                runtimeState,
+                windowData,
+                projectTab: windowContext?.tab || activeProjectTab(),
+                statusDetail: effectiveDetail,
+              });
               agentAttentionToaster.handleRuntimeState({
                 windowId,
                 runtimeState,
@@ -3860,23 +3924,29 @@
         );
       }
 
-      function attachTerminalContainerBindings(windowId, terminalContainer, terminal) {
+      // SPEC-3671 FR-008: an Issue-preview mirror is read-only. Every binding that
+      // can reach the PTY — paste, file drop, context menu, wheel-driven input — is
+      // left unattached; only selection/copy and the resize reflow remain, and
+      // neither writes to the agent.
+      const noopCleanup = () => {};
+
+      function attachTerminalContainerBindings(
+        windowId,
+        terminalContainer,
+        terminal,
+        options = {},
+      ) {
+        const readOnly = options.readOnly === true;
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
-        const imagePasteCleanup = installTerminalImagePasteHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
-        const fileDropCleanup = installTerminalFileDropHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
-        const contextMenuCleanup = installTerminalContextMenuHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
+        const imagePasteCleanup = readOnly
+          ? noopCleanup
+          : installTerminalImagePasteHandlers(windowId, terminalContainer, terminal);
+        const fileDropCleanup = readOnly
+          ? noopCleanup
+          : installTerminalFileDropHandlers(windowId, terminalContainer, terminal);
+        const contextMenuCleanup = readOnly
+          ? noopCleanup
+          : installTerminalContextMenuHandlers(windowId, terminalContainer, terminal);
         const wheelScrollCleanup = createTerminalWheelScrollController({
           terminalRoot: terminalContainer,
           terminal,
@@ -3884,7 +3954,7 @@
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
           sendTerminalInput: (data) => {
-            if (terminalMap.get(windowId)?.isReady !== true) {
+            if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
             terminal.focus();
@@ -3907,10 +3977,25 @@
         };
       }
 
-      function reparentTerminalRuntime(windowId, runtime, terminalContainer) {
-        if (!runtime || runtime.terminalContainer === terminalContainer) {
+      // SPEC-3671 FR-008: the single place that flips a runtime between the
+      // interactive canvas terminal and the read-only Issue preview mirror.
+      function applyTerminalReadOnly(runtime, readOnly) {
+        if (!runtime) return;
+        runtime.readOnly = readOnly === true;
+        if (runtime.terminal?.options) {
+          runtime.terminal.options.disableStdin = runtime.readOnly;
+        }
+      }
+
+      function reparentTerminalRuntime(windowId, runtime, terminalContainer, options = {}) {
+        const readOnly = options.readOnly === true;
+        if (!runtime) {
           return runtime;
         }
+        if (runtime.terminalContainer === terminalContainer && runtime.readOnly === readOnly) {
+          return runtime;
+        }
+        applyTerminalReadOnly(runtime, readOnly);
         const terminalElement = runtime.terminal?.element;
         if (terminalElement && terminalElement.parentElement !== terminalContainer) {
           terminalContainer.appendChild(terminalElement);
@@ -3921,19 +4006,26 @@
           windowId,
           terminalContainer,
           runtime.terminal,
+          { readOnly },
         );
         requestAnimationFrame(() => {
+          // SPEC-3671: a runtime created inside a hidden host never completed its
+          // initial fit handshake, and nothing else retries it for a window that is
+          // never revealed on the canvas. Reparenting into a laid-out container IS
+          // the reveal, so retry the handshake here; it is idempotent once ready.
+          completeInitialFitHandshake(windowId);
           scheduleTerminalFit(windowId, true);
         });
         return runtime;
       }
 
-      function createTerminalRuntime(windowId, terminalContainer) {
+      function createTerminalRuntime(windowId, terminalContainer, options = {}) {
         if (terminalMap.has(windowId)) {
           return reparentTerminalRuntime(
             windowId,
             terminalMap.get(windowId),
             terminalContainer,
+            options,
           );
         }
         const terminal = new Terminal({
@@ -3944,6 +4036,8 @@
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          // SPEC-3671 FR-008.
+          disableStdin: options.readOnly === true,
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -3953,6 +4047,7 @@
           windowId,
           terminalContainer,
           terminal,
+          { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
@@ -3961,6 +4056,11 @@
         terminal.onData((data) => {
           inputTraceSeq += 1;
           const wsState = socket ? socket.readyState : -1;
+          // SPEC-3671 FR-008: a read-only mirror never forwards data to the PTY,
+          // whatever produced it.
+          if (terminalMap.get(windowId)?.readOnly === true) {
+            return;
+          }
           // Issue #2924: drop pre-ready onData firings — see
           // gateTerminalInputForReadiness in terminal-viewport-reflow.js
           // for the contract. The runtime is fetched fresh each firing so
@@ -4015,6 +4115,8 @@
           handshakeAttempts: 0,
           terminalContainer,
           containerBindingsCleanup,
+          // SPEC-3671 FR-008.
+          readOnly: options.readOnly === true,
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
@@ -4381,6 +4483,11 @@
           } catch {
             // Picker may not be mounted yet during bootstrap.
           }
+          try {
+            renderAllKnowledgeBridgeWindows();
+          } catch {
+            // Knowledge surfaces may not be mounted yet during bootstrap.
+          }
           const notice = launchPending.consumeTimeoutNotice();
           if (notice) {
             console.warn("[launch-pending]", notice);
@@ -4401,6 +4508,28 @@
         send,
       });
 
+      // SPEC-3671 FR-010: where a Windowized Issue preview lands. The window keeps
+      // its own persisted geometry when it has one; otherwise it opens inside the
+      // current view like any freshly placed window.
+      function issuePreviewWindowizeGeometry(windowData) {
+        const geometry = windowData?.geometry;
+        if (geometry && Number.isFinite(Number(geometry.width)) && Number(geometry.width) > 0) {
+          return {
+            x: Number(geometry.x) || 0,
+            y: Number(geometry.y) || 0,
+            width: Number(geometry.width) || 1280,
+            height: Number(geometry.height) || 800,
+          };
+        }
+        const bounds = visibleBounds() || { x: 0, y: 0, width: 1280, height: 800 };
+        return {
+          x: (Number(bounds.x) || 0) + 48,
+          y: (Number(bounds.y) || 0) + 48,
+          width: 1280,
+          height: 800,
+        };
+      }
+
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window
       // surface (knowledge bridge state map, semantic search coalescing,
       // Kanban rendering, Kanban Drawer, Knowledge window mount, and the
@@ -4417,6 +4546,7 @@
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         closeKanbanDrawer,
         mountKnowledgeWindow,
@@ -4443,6 +4573,42 @@
         openIssueLaunchWizard,
         visibleBounds,
         launchPending,
+        // SPEC-3671 FR-007 / FR-008: the Issue preview mounts the shared terminal
+        // runtime read-only, so the live output streams but no input path exists.
+        createTerminalRuntime: (id, terminalRoot, options) =>
+          createTerminalRuntime(id, terminalRoot, options),
+        windowDisplayTitle,
+        windowRoleBadgeLabel,
+        // SPEC-3671 FR-010: Windowize is the same Canvas handoff the Agent Kanban
+        // undock control performs, plus focus.
+        windowizeIssuePreviewWindow: (id) => {
+          const windowData = workspaceWindowById(id);
+          send(undockAgentWindowMessage(id, issuePreviewWindowizeGeometry(windowData)));
+          focusWindowLocally(id);
+          socketTransport.send({ kind: "focus_window", id });
+        },
+        // Issue #3884: the Issue row status row (agent name / state / last
+        // activity line / elapsed time) reads the same live-activity sources the
+        // minimap tooltip and the runtime-state cache already use.
+        windowActivityDetail,
+        windowRuntimeStateSince: (id) => windowRuntimeStateSinceMap.get(id) ?? null,
+        // SPEC-3671 FR-012 / FR-013: the Issue row reads the active Work
+        // projection that is already broadcast, and reuses the Work surface's own
+        // derivations and action paths rather than re-deriving them.
+        getActiveWorkProjection: () => activeWorkProjection,
+        workAttentionFor: attentionForWorkspace,
+        formatWorkLifecycleLabel: formatLifecycleStateLabel,
+        continueWork: (workId, bounds) => continueWorkDispatcher.dispatch(workId, bounds),
+        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        // Lazy: the Branches & cleanup surface is constructed after this factory.
+        openWorkspaceCleanup: (candidate, sourceWindowId) =>
+          openWorkspaceCleanup(candidate, sourceWindowId),
+        getResumeBounds: () => visibleBounds(),
+        // SPEC #3206 FR-017: surface errors become notification-center error
+        // rows (dedup by key, occurrence count, auto-read on resolve). Lazy:
+        // the center is constructed after this factory.
+        reportSurfaceError: (error) => notificationCenter.recordError(error),
+        resolveSurfaceError: (key) => notificationCenter.resolveError(key),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
@@ -4482,8 +4648,12 @@
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
-        // stack. The arrow defers to the alertsToasts binding (created below).
-        pushAlertToast: (notice) => alertsToasts.push(notice),
+        // stack and are recorded into the notification center history
+        // (FR-011). Both bindings are created below; the arrow defers to them.
+        pushAlertToast: (notice) => {
+          notificationCenter.record({ kind: "board-mention", ...notice });
+          alertsToasts.push(notice);
+        },
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         activeWorkspace,
@@ -4547,7 +4717,7 @@
       // createAgentCompletionNotifier; this only renders. Singleton via id; the
       // whole card jumps to the project tab.
       function showAgentCompletionToast(notice) {
-        alertsToasts.push({
+        const alert = {
           id: "agent-completion",
           level: "neutral",
           title: notice.title || "Agent notification",
@@ -4560,7 +4730,11 @@
               send({ kind: "select_project_tab", tab_id: notice.projectId });
             }
           },
-        });
+        };
+        // FR-011: the history record is independent of the transient toast
+        // (the center drops id / timeoutMs, so singletons never collapse).
+        notificationCenter.record({ kind: "agent-completion", ...alert });
+        alertsToasts.push(alert);
       }
 
       // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
@@ -4572,7 +4746,7 @@
         const flavor = notice.flavor || "needs_input";
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
-        alertsToasts.push({
+        const alert = {
           id: `attention-${notice.windowId}`,
           level,
           title: notice.title || "Agent attention",
@@ -4580,7 +4754,11 @@
           dismissible: true,
           timeoutMs,
           onActivate: () => frameWindow(notice.windowId),
-        });
+        };
+        // FR-011: recorded regardless of the toast; the history row keeps the
+        // jump-to (Sc 7) and survives the window's toast being dismissed.
+        notificationCenter.record({ kind: "attention", ...alert });
+        alertsToasts.push(alert);
       }
 
       function handleContinueWorkOutcome(event) {
@@ -4689,11 +4867,6 @@
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
       });
-      const improvementInboxSurface = createImprovementInboxSurface({
-        createNode,
-        send,
-      });
-
       // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (wizard state,
       // interaction guard, field builders, state transitions,
       // renderLaunchWizard, chrome listeners, Esc-close path) moved to
@@ -4729,12 +4902,33 @@
       });
       pmSettingsPanel.mount();
 
-      // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
-      // scrollable side-toast stack so nothing is missed while the operator is
-      // away. Mounted to the body so it is visible regardless of which window
-      // or surface is focused.
-      const autonomousNotifications = createAutonomousNotifications({ document });
-      autonomousNotifications.mount(document.body);
+      // SPEC #3206 v2 — notification center: bell (rail System group) + unread
+      // badge + history drawer. The drawer mounts on <body>, never inside
+      // .op-rail (its stacking context would clamp the drawer under toasts and
+      // modals). It is a pure sink; firing/dedup/gating stay in the controllers.
+      const notificationCenter = createNotificationCenter({ document });
+      notificationCenter.mount(document.body);
+      const notificationBellButton = document.getElementById("op-notifications-button");
+      const notificationBellBadge =
+        notificationBellButton?.querySelector(".op-rail__badge") ?? null;
+      notificationCenter.onUnreadChange((count, hasError) => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count,
+          hasError,
+          open: notificationCenter.isOpen(),
+        });
+      });
+      notificationCenter.onOpenChange(() => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count: notificationCenter.unreadCount(),
+          hasError: notificationCenter.unreadHasError(),
+          open: notificationCenter.isOpen(),
+        });
+      });
 
       // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
       // notifications that used to be three hand-offset systems (agent
@@ -4866,7 +5060,6 @@
           "surface-knowledge",
           "surface-index",
           "surface-work",
-          "surface-improvement",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -4919,7 +5112,13 @@
             const runtime = terminalMap.get(windowData.id);
             runtime?.terminal.focus();
           });
-          frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
+          // SPEC-3671 FR-004: an off-canvas window's terminal belongs to the
+          // surface that hosts it (Agent Kanban card / Issue preview pane), not to
+          // this hidden canvas body. Mounting it here would steal the live terminal
+          // away from the visible host.
+          if (!isOffCanvasPlacement(windowData)) {
+            frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
+          }
           return;
         }
 
@@ -4969,14 +5168,6 @@
           // the surface stays a pure renderer and its unit tests keep their
           // exact-message contracts.
           send({ kind: "request_remote_start_work_branches", id: windowData.id });
-          return;
-        }
-
-        if (surface === "improvement") {
-          improvementInboxSurface.mount(body, {
-            ...windowData,
-            improvement_candidates: improvementCandidates,
-          });
           return;
         }
 
@@ -5044,18 +5235,6 @@
         }
       }
 
-      function refreshMountedImprovementInboxWindows() {
-        for (const element of document.querySelectorAll(
-          '.workspace-window[data-preset="improvement"]',
-        )) {
-          const body = element.querySelector(".window-body");
-          if (!body) continue;
-          improvementInboxSurface.mount(body, {
-            improvement_candidates: improvementCandidates,
-          });
-        }
-      }
-
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
       // Settings body, customAgentsState / agentBackendsState /
       // systemSettingsState, Teams channel converters, add-from-preset
@@ -5069,6 +5248,7 @@
         agentBackendsState,
         systemSettingsState,
         systemSettingsInteractionGuard,
+        applyAgentResourceSnapshot,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,
@@ -5310,6 +5490,28 @@
             renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
           }
         }
+        // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
+        // to the canvas without changing its preset, so `mountWindowBody` does not
+        // run again. Reclaim the live terminal into this window's own body.
+        if (surface === "terminal" && !isOffCanvasPlacement(windowData)) {
+          const terminalRoot = element.querySelector(".window-body .terminal-root");
+          if (
+            terminalRoot &&
+            terminalMap.get(windowData.id)?.terminalContainer !== terminalRoot
+          ) {
+            frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
+          }
+        }
+        // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
+        // state. Re-render the bridge (not the whole body) so list state, scroll,
+        // and the mounted terminal survive.
+        if (surface === "knowledge") {
+          const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
+          if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
+            renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
+            renderKnowledgeBridge(windowData.id);
+          }
+        }
 
         const nextWindowElementKey = windowElementRenderKey(windowData);
         if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey) {
@@ -5456,6 +5658,7 @@
                   decoderMap.delete(windowId);
                   detailMap.delete(windowId);
                   windowRuntimeStateMap.delete(windowId);
+                  windowRuntimeStateSinceMap.delete(windowId);
                   agentCompletionNotifier.forgetWindow(windowId);
                   agentAttentionToaster.forgetWindow(windowId);
                   // SPEC #3206: dismiss this window's attention toast from the shared
@@ -5464,6 +5667,7 @@
                   renderedWindowElementKeys.delete(windowId);
                   renderedRuntimeStatusKeys.delete(windowId);
                   renderedAgentKanbanBodyKeys.delete(windowId);
+                  renderedIssuePreviewBodyKeys.delete(windowId);
                   pendingOutputMap.delete(windowId);
                   pendingSnapshotMap.delete(windowId);
                   terminalOutputBatcher.clear(windowId);
@@ -5680,7 +5884,6 @@
         logsSurface,
         agentKanbanSurface,
         pmSettingsPanel,
-        autonomousNotifications,
         knowledgeSettingsSurface,
       });
 
@@ -5749,30 +5952,28 @@
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
+          case "active_work_projection_patch":
+            activeWorkProjection = mergeActiveWorkProjectionPatch(
+              activeWorkProjection,
+              event.projection || null,
+            );
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+            );
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
+            workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
+            recomputeOperatorTelemetry();
+            break;
           // SPEC-3064 Phase 3 (E7): window list entries and rendering live
           // in the project shell surface.
           case "window_list":
             applyWindowListEvent(event);
-            break;
-          case "improvement_candidates":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
-            improvementCandidatesProjectRoot = event.project_root || null;
-            improvementCandidatesRevision += 1;
-            {
-              const workspace = activeWorkspace() || emptyWorkspace();
-              renderWorkspace(workspace);
-              refreshMountedImprovementInboxWindows();
-            }
-            break;
-          case "improvement_action_result":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            // Candidate list refresh is delivered as a separate
-            // improvement_candidates snapshot; no extra UI state is needed here.
-            break;
-          case "improvement_action_error":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            window.alert(`Improvement action error: ${event.message}`);
             break;
           case "provider_usage":
             applyProviderUsageUi({
@@ -5799,12 +6000,16 @@
             scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_toast":
-            // SPEC #3200 FR-034: also surface as a persistent, scrollable side
-            // toast so unattended autonomous events accumulate where the
-            // operator can review them later.
-            frontendUnits.autonomousNotifications.push({
+            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+            // into the notification center history FIRST and independently of
+            // any display path, so events that fire while no Issue window is
+            // open (or while the operator is away) are never lost. The backend
+            // IssueMonitorToast carries {level, message, issue_number} only —
+            // the title is a literal.
+            notificationCenter.record({
+              kind: "issue-monitor",
               level: event?.level,
-              title: event?.title || "Issue Monitor",
+              title: "Issue Monitor",
               message: event?.message,
               issueNumber: event?.issue_number,
             });
@@ -5992,7 +6197,20 @@
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);
-            launchPending.settleAck(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh();
+              }
+            }
             break;
           // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
           // accepted — settle pending UI and dismiss the picker.
@@ -6147,6 +6365,7 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource: event.agent_resource,
               })
             ) {
               break;
@@ -6156,6 +6375,7 @@
               event.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(event.agent_resource);
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -6173,6 +6393,7 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource: event.agent_resource,
               })
             ) {
               break;
@@ -6182,6 +6403,7 @@
               event.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(event.agent_resource);
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
@@ -6801,6 +7023,19 @@
           systemSettingsInteractionGuard.activate();
         }
       });
+      // SPEC #1921 Phase 86 (#3813): numeric / text `.settings-input`
+      // fields get the same protection — a backend echo arriving while the
+      // user is typing a CPU limit would otherwise rebuild the panel and
+      // discard the half-typed value.
+      const isSettingsInput = (target) =>
+        Boolean(target)
+        && target.tagName === "INPUT"
+        && target.classList.contains("settings-input");
+      document.addEventListener("focusin", (event) => {
+        if (isSettingsInput(event.target)) {
+          systemSettingsInteractionGuard.activate();
+        }
+      });
       document.addEventListener("change", (event) => {
         const target = event.target;
         if (
@@ -6814,9 +7049,10 @@
       document.addEventListener("focusout", (event) => {
         const target = event.target;
         if (
-          target
-          && target.tagName === "SELECT"
-          && target.classList.contains("settings-select")
+          (target
+            && target.tagName === "SELECT"
+            && target.classList.contains("settings-select"))
+          || isSettingsInput(target)
         ) {
           systemSettingsInteractionGuard.release();
         }
@@ -6898,6 +7134,13 @@
         // preventDefaults and returns true when the modal consumed the
         // event.
         if (handleMigrationModalEscape(event)) {
+          return;
+        }
+        // SPEC #3206 v2 — Esc closes the notification center drawer through
+        // the same chain as the other modal surfaces.
+        if (notificationCenter.isOpen()) {
+          notificationCenter.close();
+          event.preventDefault();
           return;
         }
         // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
@@ -7067,6 +7310,9 @@
             // is the keyboard-only path to the same panel.
             frontendUnits.pmSettingsPanel.open();
             return;
+          case "toggle-notifications":
+            notificationCenter.toggle();
+            return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
             if (!tm) return;
@@ -7139,6 +7385,24 @@
             if (terminal && typeof terminal.scrollToBottom === "function") {
               terminal.scrollToBottom();
             }
+          },
+          // SPEC #1921 Phase 86 (#3813) T519: plain-text tail of a pane's
+          // xterm buffer so live specs can assert on agent output without
+          // scraping renderer DOM.
+          bufferText(windowId, maxLines = 400) {
+            const buffer = terminalMap.get(windowId)?.terminal?.buffer?.active;
+            if (!buffer) {
+              return "";
+            }
+            const lines = [];
+            const start = Math.max(0, buffer.length - maxLines);
+            for (let index = start; index < buffer.length; index += 1) {
+              const line = buffer.getLine(index);
+              if (line) {
+                lines.push(line.translateToString(true));
+              }
+            }
+            return lines.join("\n");
           },
         });
       }

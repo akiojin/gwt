@@ -619,3 +619,118 @@ fn run_edit_commands_cover_plain_and_structured_json_paths() {
         .to_string()
         .contains("structured JSON edit only supports section 'spec'"));
 }
+
+// Issue #3873 AC-2: the SPEC write paths apply the same acceptance-block
+// guard as `issue.create` whenever the Issue carries the auto-merge label.
+#[test]
+fn spec_create_with_auto_merge_refuses_body_without_acceptance_block() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Demo".to_string(),
+            body: "# SPEC: Demo\n\n## 成功基準\n\n- [ ] AC-1: misplaced\n".to_string(),
+            labels: vec!["auto-merge".to_string()],
+        },
+        &mut out,
+    )
+    .expect_err("auto-merge SPEC without a readable AC block must be refused");
+    assert!(err.to_string().contains("受け入れ基準"), "err = {err}");
+    assert!(
+        !env.client
+            .call_log()
+            .iter()
+            .any(|c| c.contains("create_issue")),
+        "no Issue may be created: {:?}",
+        env.client.call_log()
+    );
+
+    out.clear();
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Demo".to_string(),
+            body: "# SPEC: Demo\n\n## 受け入れ基準\n\n- [ ] AC-1: readable\n".to_string(),
+            labels: vec!["auto-merge".to_string()],
+        },
+        &mut out,
+    )
+    .expect("readable AC block is accepted");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn spec_edit_of_spec_section_on_auto_merge_issue_requires_acceptance_block() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    seed_issue(
+        &env,
+        9,
+        "SPEC: Guarded",
+        "# SPEC: Guarded\n\n## 受け入れ基準\n\n- [ ] AC-1: present\n",
+        "tasks",
+        &["gwt-spec", "auto-merge"],
+    );
+
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecEditSectionBody {
+            number: 9,
+            section: "spec".to_string(),
+            body: "# SPEC: Guarded\n\n## 成功基準\n\n- [ ] AC-1: misplaced\n".to_string(),
+        },
+        &mut out,
+    )
+    .expect_err("dropping the AC block from an auto-merge SPEC must be refused");
+    assert!(err.to_string().contains("受け入れ基準"), "err = {err}");
+    let body = Cache::new(env.cache_root())
+        .load_entry(IssueNumber(9))
+        .unwrap()
+        .snapshot
+        .body;
+    assert!(
+        body.contains("- [ ] AC-1: present"),
+        "body must be untouched: {body}"
+    );
+
+    // Non-spec sections and non-auto-merge issues are untouched by the guard.
+    out.clear();
+    assert_eq!(
+        run(
+            &mut env,
+            IssueCommand::SpecEditSectionBody {
+                number: 9,
+                section: "tasks".to_string(),
+                body: "- [ ] T-001: anything".to_string(),
+            },
+            &mut out,
+        )
+        .unwrap(),
+        0
+    );
+    seed_issue(
+        &env,
+        10,
+        "SPEC: Manual",
+        "spec body",
+        "tasks",
+        &["gwt-spec"],
+    );
+    out.clear();
+    assert_eq!(
+        run(
+            &mut env,
+            IssueCommand::SpecEditSectionBody {
+                number: 10,
+                section: "spec".to_string(),
+                body: "free text".to_string(),
+            },
+            &mut out,
+        )
+        .unwrap(),
+        0
+    );
+}

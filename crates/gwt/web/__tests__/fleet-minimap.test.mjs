@@ -624,3 +624,47 @@ test("renderCells repositions an existing cell after its window geometry changes
     "the moved window's cell must shift down with its new world y",
   );
 });
+
+// Issue #3884 AC-1: an `issue_preview` placement (SPEC-3671) is not drawn on the
+// canvas, so it must not be drawn on the minimap either — a radar rectangle with
+// no window behind it reads as "the window vanished". Windowize moves the
+// placement back to `canvas`, and only then does the cell appear.
+test("Issue #3884 AC-1: off-canvas placements are not drawn as minimap cells", () => {
+  const { container } = setupDom();
+  const issueWindow = windowAt("issue-1", 0, 0, 1400, 860, { preset: "issue" });
+  const inlineAgent = windowAt("agent-1", 120, 120, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  });
+  const kanbanAgent = windowAt("agent-2", 200, 200, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0 },
+  });
+  const windows = [issueWindow, inlineAgent, kanbanAgent];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+
+  const ids = [...container.querySelectorAll(".fleet-minimap__cell")].map(
+    (cell) => cell.dataset.windowId,
+  );
+  assert.deepEqual(ids, ["issue-1"], "only canvas-placed windows get a radar cell");
+  assert.equal(container.dataset.empty, "false");
+
+  // Windowize: the placement returns to the canvas and the cell appears.
+  inlineAgent.placement = { kind: "canvas" };
+  minimap.renderCells();
+  const afterWindowize = [...container.querySelectorAll(".fleet-minimap__cell")]
+    .map((cell) => cell.dataset.windowId)
+    .sort();
+  assert.deepEqual(afterWindowize, ["agent-1", "issue-1"]);
+
+  // A workspace whose only windows are inline agents is an empty radar.
+  windows.splice(0, windows.length, windowAt("agent-3", 0, 0, 100, 80, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  }));
+  minimap.renderCells();
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 0);
+  assert.equal(container.dataset.empty, "true");
+});

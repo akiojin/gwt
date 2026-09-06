@@ -7,18 +7,30 @@
 //! surfaces and derives the verification matrix from them, instead of
 //! trusting the agent to hand-pick commands:
 //!
-//! - **rust** (`crates/<name>/…`, workspace manifests): `cargo fmt --check`,
-//!   workspace clippy with `-D warnings`, and `cargo test -p <crate>` per
-//!   changed crate (`--lib` for the `gwt` crate — its integration tests
-//!   carry live-process families that the CI gate owns).
+//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt and clippy
+//!   gates verbatim, plus the CI Rust test gate scoped to each changed
+//!   crate (the whole workspace gate when a workspace manifest changed).
 //! - **skills / guidance** (`.claude/skills/`, `.codex/skills/`): the
 //!   `gwt-skills` test suite (managed-asset parity lives there).
 //! - **frontend** (`crates/gwt/web/` and js/ts/css/html): the embedded web
-//!   contract tests in the `gwt` lib suite.
+//!   contract tests, which live in the `gwt` crate.
 //! - **docs** (markdown outside the skill trees): `bunx markdownlint-cli2`
 //!   over the changed files (AGENTS markdown policy).
 //! - **anything else** (scripts, CI config, …): the conservative default —
-//!   workspace clippy + the `gwt` lib suite.
+//!   the CI lint gates + the `gwt` crate suite.
+//!
+//! # Package narrowing, never target narrowing
+//!
+//! The commands are CI's own gates ([`CI_RUST_TEST_GATE`], [`CI_FMT_GATE`],
+//! [`CI_CLIPPY_GATE`]) narrowed to the changed packages, and nothing else.
+//! Narrowing by *target* instead is what made this derivation unsound: the
+//! `gwt` crate's matrix used to be `cargo test -p gwt --lib`, which never
+//! ran the ~1300 unit tests living in its binary targets (`app_runtime` and
+//! the rest of `main.rs`'s module tree, plus `gwtd`) nor its integration
+//! tests. A change confined to those targets derived a matrix that could
+//! not fail, so `verify.run` reported GREEN on work that CI then rejected
+//! (#3640). Tests in this module pin the derived commands against the
+//! workflow files so CI cannot drift away from them unnoticed.
 //!
 //! The derived plan is a DEFAULT, not a cage: explicit `verify.plan`
 //! commands stay supported, and the recorded plan carries `derived: true`
@@ -28,6 +40,23 @@
 use std::{collections::BTreeSet, path::Path};
 
 use gwt_core::process::hidden_command;
+
+/// The Rust test gate CI runs on every pull request (`.github/workflows/
+/// test.yml`, job `test`). It is the single source of truth for the derived
+/// matrix: derivation narrows it by **package**, never by **target**.
+const CI_RUST_TEST_GATE: &str = "cargo test --workspace --all-features";
+/// CI's formatting gate (`.github/workflows/lint.yml`, job `lint`).
+const CI_FMT_GATE: &str = "cargo fmt --all -- --check";
+/// CI's clippy gate (`.github/workflows/lint.yml`, job `lint`).
+const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
+
+/// The CI Rust gate scoped to one package. Package selection is the only
+/// narrowing derivation is allowed to apply — a target filter such as
+/// `--lib` drops whole test families (the `gwt` crate's binary targets carry
+/// ~1300 unit tests) while still reporting a GREEN verification run (#3640).
+fn package_test_command(package: &str) -> String {
+    CI_RUST_TEST_GATE.replace("--workspace", &format!("-p {package}"))
+}
 
 /// A derived verification plan: the matrix plus the surface classification
 /// that produced it (echoed to the agent for transparency).
@@ -94,7 +123,7 @@ fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
 /// Resolve the integration base the committed span is diffed against.
 /// Fail-closed: without a resolvable base the committed branch work would
 /// silently vanish from the matrix, so derivation refuses instead.
-fn integration_merge_base(worktree: &Path) -> Option<String> {
+pub(crate) fn integration_merge_base(worktree: &Path) -> Option<String> {
     for base_ref in ["origin/develop", "origin/main", "origin/HEAD"] {
         if let Some(base) = git_lines(worktree, &["merge-base", base_ref, "HEAD"])
             .into_iter()
@@ -215,12 +244,12 @@ pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
 
     let code_changed = !rust_crates.is_empty() || workspace_rust || skills || frontend || other;
     if code_changed {
-        push_unique(&mut commands, "cargo fmt --check".to_string());
-        push_unique(
-            &mut commands,
-            "cargo clippy --all-targets --all-features -- -D warnings".to_string(),
-        );
+        push_unique(&mut commands, CI_FMT_GATE.to_string());
+        push_unique(&mut commands, CI_CLIPPY_GATE.to_string());
     }
+    // Which packages the changed surfaces put under test. Narrowing stops
+    // here: every package runs CI's whole gate, never a target subset.
+    let mut test_packages: BTreeSet<&str> = BTreeSet::new();
     if !rust_crates.is_empty() || workspace_rust {
         surfaces.push(format!(
             "rust({})",
@@ -230,28 +259,29 @@ pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
                 rust_crates.iter().cloned().collect::<Vec<_>>().join(",")
             }
         ));
-        for name in &rust_crates {
-            if name == "gwt" {
-                push_unique(&mut commands, "cargo test -p gwt --lib".to_string());
-            } else {
-                push_unique(&mut commands, format!("cargo test -p {name}"));
-            }
-        }
-        if workspace_rust && rust_crates.is_empty() {
-            push_unique(&mut commands, "cargo test -p gwt --lib".to_string());
-        }
+        test_packages.extend(rust_crates.iter().map(String::as_str));
     }
     if skills {
         surfaces.push("skills".to_string());
-        push_unique(&mut commands, "cargo test -p gwt-skills".to_string());
+        test_packages.insert("gwt-skills");
     }
     if frontend {
         surfaces.push("frontend".to_string());
-        push_unique(&mut commands, "cargo test -p gwt --lib".to_string());
+        test_packages.insert("gwt");
     }
     if other {
         surfaces.push("other".to_string());
-        push_unique(&mut commands, "cargo test -p gwt --lib".to_string());
+        test_packages.insert("gwt");
+    }
+    if workspace_rust {
+        // A workspace manifest change cannot be attributed to any single
+        // package, so it takes CI's gate unnarrowed — which subsumes every
+        // per-package command the surfaces above would have added.
+        push_unique(&mut commands, CI_RUST_TEST_GATE.to_string());
+    } else {
+        for package in test_packages {
+            push_unique(&mut commands, package_test_command(package));
+        }
     }
     // Only lint files that still exist — a deleted path would make
     // markdownlint-cli2 exit 0 on zero matches (a vacuous PASS), and paths
@@ -329,11 +359,11 @@ mod tests {
         assert_eq!(
             plan.commands,
             vec![
-                "cargo fmt --check".to_string(),
-                "cargo clippy --all-targets --all-features -- -D warnings".to_string(),
-                "cargo test -p gwt --lib".to_string(),
-                "cargo test -p gwt-core".to_string(),
-                "cargo test -p gwt-skills".to_string(),
+                CI_FMT_GATE.to_string(),
+                CI_CLIPPY_GATE.to_string(),
+                "cargo test -p gwt --all-features".to_string(),
+                "cargo test -p gwt-core --all-features".to_string(),
+                "cargo test -p gwt-skills --all-features".to_string(),
                 r#"bunx markdownlint-cli2 "README.md""#.to_string(),
             ],
             "{:?}",
@@ -375,13 +405,11 @@ mod tests {
         let plan = derive(dir.path()).unwrap();
         assert!(
             plan.commands
-                .contains(&"cargo test -p gwt-core".to_string()),
+                .contains(&"cargo test -p gwt-core --all-features".to_string()),
             "{:?}",
             plan.commands
         );
-        assert!(plan
-            .commands
-            .contains(&"cargo clippy --all-targets --all-features -- -D warnings".to_string()));
+        assert!(plan.commands.contains(&CI_CLIPPY_GATE.to_string()));
     }
 
     #[test]
@@ -443,6 +471,158 @@ mod tests {
         assert!(err.contains("git worktree"), "{err}");
     }
 
+    /// Every `run:` script the named job executes, in step order.
+    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root above crates/gwt")
+            .join(".github/workflows")
+            .join(workflow);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("workflow is valid YAML");
+        doc["jobs"][job]["steps"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{workflow} job `{job}` has steps"))
+            .iter()
+            .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
+            .collect()
+    }
+
+    /// Every cargo test invocation the job runs, one per script line.
+    fn workflow_cargo_tests(workflow: &str, job: &str) -> Vec<String> {
+        workflow_job_runs(workflow, job)
+            .iter()
+            .flat_map(|script| script.lines().collect::<Vec<_>>())
+            .map(str::trim)
+            .filter(|line| line.contains("cargo test"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The derived matrix for every surface, for invariant sweeps.
+    fn derive_for(files: &[&str]) -> DerivedPlan {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        for file in files {
+            write(dir.path(), file, "x\n");
+        }
+        derive(dir.path()).unwrap()
+    }
+
+    // #3640 AC-1: the `gwt` crate's binary targets carry ~1300 unit tests
+    // (`app_runtime` and the rest of main.rs's module tree, plus gwtd). The
+    // old `--lib`-only command never ran a single one of them, so a change
+    // living entirely in a bin-only module derived a matrix that could not
+    // fail — local GREEN, CI RED.
+    #[test]
+    fn gwt_bin_only_modules_are_covered_by_the_derived_matrix() {
+        let plan = derive_for(&["crates/gwt/src/app_runtime.rs"]);
+        assert!(
+            plan.commands
+                .contains(&"cargo test -p gwt --all-features".to_string()),
+            "{:?}",
+            plan.commands
+        );
+    }
+
+    // #3640 AC-2 / AC-4: derivation may narrow the CI gate by PACKAGE, never
+    // by TARGET. Any target filter silently drops a family of tests that CI
+    // still runs, which is exactly how `--bin gwt` went unverified.
+    #[test]
+    fn derived_cargo_tests_narrow_by_package_only() {
+        let surfaces: [(&str, &[&str]); 6] = [
+            ("gwt crate", &["crates/gwt/src/cli/verify_derivation.rs"]),
+            ("other crate", &["crates/gwt-core/src/lib.rs"]),
+            ("workspace manifest", &["Cargo.toml"]),
+            ("frontend", &["crates/gwt/web/styles/tokens.css"]),
+            ("skills", &[".claude/skills/gwt-verify/SKILL.md"]),
+            ("unknown", &["scripts/release.sh"]),
+        ];
+        for (label, files) in surfaces {
+            let plan = derive_for(files);
+            let tests: Vec<&String> = plan
+                .commands
+                .iter()
+                .filter(|command| command.starts_with("cargo test"))
+                .collect();
+            assert!(!tests.is_empty(), "{label}: {:?}", plan.commands);
+            for command in tests {
+                for filter in [
+                    "--lib",
+                    "--bins",
+                    "--bin ",
+                    "--tests",
+                    "--test ",
+                    "--examples",
+                    "--benches",
+                    "--doc",
+                ] {
+                    assert!(
+                        !command.contains(filter),
+                        "{label}: `{command}` narrows the CI gate by target ({filter})"
+                    );
+                }
+                assert!(
+                    command.contains("--all-features"),
+                    "{label}: `{command}` does not match the CI gate's feature selection"
+                );
+            }
+        }
+    }
+
+    // #3640 AC-3 / AC-4: the derived matrix is defined as the CI gate
+    // narrowed by package, so this test fails the moment CI's Rust job
+    // changes shape and the derivation is not updated with it.
+    #[test]
+    fn derived_rust_matrix_tracks_the_ci_rust_gate() {
+        assert_eq!(
+            workflow_cargo_tests("test.yml", "test"),
+            vec![
+                CI_RUST_TEST_GATE.to_string(),
+                // The xvfb `--ignored` real-binary family stays CI-owned:
+                // it needs a display server, so it is deliberately outside
+                // the locally derived matrix.
+                "xvfb-run -a cargo test -p gwt --all-features --test stable_server_port -- --ignored --test-threads=1"
+                    .to_string(),
+            ],
+            "CI's Rust gate changed — update verify.plan derivation with it (#3640)"
+        );
+        assert_eq!(
+            package_test_command("gwt-core"),
+            "cargo test -p gwt-core --all-features"
+        );
+        // A workspace-manifest change cannot be attributed to one package,
+        // so it derives the CI gate verbatim.
+        assert!(
+            derive_for(&["Cargo.toml"])
+                .commands
+                .contains(&CI_RUST_TEST_GATE.to_string()),
+            "workspace manifest change must derive the full CI gate"
+        );
+    }
+
+    // #3640 AC-3: `cargo fmt`/`cargo clippy` were narrowed to the workspace
+    // default member (`crates/gwt`), so a rustfmt or clippy violation in any
+    // other crate passed local verification and failed CI.
+    #[test]
+    fn derived_lint_commands_track_the_ci_lint_gate() {
+        let runs = workflow_job_runs("lint.yml", "lint");
+        for gate in [CI_CLIPPY_GATE, CI_FMT_GATE] {
+            assert!(
+                runs.iter().any(|run| run.trim() == gate),
+                "CI's lint gate no longer runs `{gate}` — update verify.plan derivation with it (#3640)"
+            );
+        }
+        let plan = derive_for(&["crates/gwt-core/src/lib.rs"]);
+        assert!(plan.commands.contains(&CI_FMT_GATE.to_string()), "{plan:?}");
+        assert!(
+            plan.commands.contains(&CI_CLIPPY_GATE.to_string()),
+            "{plan:?}"
+        );
+    }
+
     // Unknown surfaces (scripts, CI config) fall back to the conservative
     // default matrix.
     #[test]
@@ -452,12 +632,10 @@ mod tests {
         write(dir.path(), "scripts/release.sh", "#!/bin/sh\n");
 
         let plan = derive(dir.path()).unwrap();
+        assert!(plan.commands.contains(&CI_CLIPPY_GATE.to_string()));
         assert!(plan
             .commands
-            .contains(&"cargo clippy --all-targets --all-features -- -D warnings".to_string()));
-        assert!(plan
-            .commands
-            .contains(&"cargo test -p gwt --lib".to_string()));
+            .contains(&"cargo test -p gwt --all-features".to_string()));
         assert!(plan.surfaces.contains(&"other".to_string()));
     }
 }

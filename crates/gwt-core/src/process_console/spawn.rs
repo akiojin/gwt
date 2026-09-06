@@ -205,15 +205,37 @@ async fn spawn_logged_inner(
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return Err(deadline_error());
     }
+    // Issue #3675 AC-2: in test builds (armed via
+    // `forbid_unsandboxed_gh_spawns_for_tests`), a `gh` spawn with no sandbox
+    // marker in the environment is refused before it can reach the real
+    // GitHub API — and before the quota gate, so a refusal never depends on
+    // (or pollutes) quota state.
+    if matches!(kind, ProcessKind::Gh) {
+        if let Some(detail) = super::gh_guard::unsandboxed_gh_denial(&options.label) {
+            tracing::warn!(
+                target: SUMMARY_TARGET,
+                kind = kind.as_str(),
+                label = %options.label,
+                detail = %detail,
+                "gh call refused: unsandboxed spawn in a guarded test build"
+            );
+            return Err(std::io::Error::other(detail));
+        }
+    }
     // Issue #3604 AC-3: an exhausted GitHub budget refuses the call here, so a
     // rate-limited window stops producing spawns, log noise, and generic
-    // "network error" reports until its measured reset passes.
+    // "network error" reports until its measured reset passes. Issue #3928
+    // AC-1: the window another process persisted counts too, so a fresh
+    // gwtd does not re-spawn into the secondary limit the last one just hit.
     let gh_quota = matches!(kind, ProcessKind::Gh).then(|| gh_arg_strings(args));
     if let Some(args) = &gh_quota {
-        if let Some(detail) = crate::github_quota::suppressed_spawn_detail(
+        let ledger = crate::github_budget::BudgetLedger::global();
+        let now = chrono::Utc::now();
+        if let Some(detail) = crate::github_budget::suppressed_spawn_detail(
             crate::github_quota::global(),
+            &ledger,
             args,
-            chrono::Utc::now(),
+            now,
         ) {
             tracing::warn!(
                 target: SUMMARY_TARGET,
@@ -224,10 +246,24 @@ async fn spawn_logged_inner(
             );
             return Err(std::io::Error::other(detail));
         }
+        // Issue #3891 AC-3: count the spend in the machine-local ledger so
+        // the per-minute (secondary) limit can be approximated across the
+        // short-lived gwtd processes that share this account. Issue #3928
+        // AC-4: with its source, so the count can be broken down by caller.
+        ledger.record_spawn_from(
+            crate::github_quota::classify_gh_args(args),
+            &crate::github_budget::spawn_source(args),
+            now,
+        );
     }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
+    if matches!(kind, ProcessKind::Git) {
+        // Issue #3629 AC-7: feed the per-thread git spawn counter so "must
+        // not spawn git" regression assertions cover this route too.
+        crate::process::note_thread_git_spawn();
+    }
 
     trace_process_start(kind, spawn_id, &options, &program);
 
@@ -504,8 +540,10 @@ async fn reconcile_github_quota(
         return stderr;
     }
     if success {
-        // The budget answered, so any recorded block over-estimated its window.
+        // The budget answered, so any recorded block over-estimated its window
+        // — in this process and, Issue #3928, in the persisted schedule too.
         github_quota::global().record_success(quota);
+        crate::github_budget::BudgetLedger::global().clear_block(quota);
         return stderr;
     }
     if !github_quota::is_rate_limit_stderr(&stderr) {
@@ -514,7 +552,12 @@ async fn reconcile_github_quota(
 
     let now = chrono::Utc::now();
     let probe = probe_rate_limit(hub, program, options, quota, deadline).await;
-    let block = github_quota::block_from_probe(quota, probe, now);
+    // Issue #3891: the refusal is also visible to the next process, which can
+    // then throttle its non-essential reads instead of re-discovering it.
+    // Issue #3928 AC-1: the ledger owns the window's length (exponential per
+    // consecutive refusal), so the gate and the report use what it returns.
+    let block = crate::github_budget::BudgetLedger::global()
+        .record_block(&github_quota::block_from_probe(quota, probe, now), now);
     let annotated = github_quota::annotate_rate_limited_stderr(&block, &stderr, now);
     github_quota::global().record_exhaustion(block);
     annotated
@@ -546,6 +589,10 @@ async fn probe_rate_limit(
     .ok()?;
     if !output.success() {
         return None;
+    }
+    let now = chrono::Utc::now();
+    if let Some(snapshot) = crate::github_budget::parse_rate_limit_probe_all(&output.stdout, now) {
+        crate::github_budget::BudgetLedger::global().record_probe(&snapshot);
     }
     crate::github_quota::parse_rate_limit_probe(&output.stdout, quota)
 }
@@ -1024,6 +1071,24 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// Budget for a process that should finish immediately.
+    ///
+    /// The full Windows crate suite starts many subprocesses concurrently, and
+    /// llvm-cov adds enough startup overhead for a `cmd /C echo` fixture to
+    /// exceed the previous two-second budget. The observed full-suite failure
+    /// crossed two seconds while the focused fixture completed in 70ms. This
+    /// matches the process-tree fixtures below, whose measured parallel-load
+    /// budget already uses 15 seconds. The timeout behavior itself is covered
+    /// by dedicated tests with deliberately short deadlines.
+    const QUICK_PROCESS_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
+
+    /// Upper bound proving a 60-second fixture was stopped before it completed
+    /// naturally. This is intentionally much larger than the 150ms operation
+    /// deadline: synchronous process startup cannot be preempted and took 2.45s
+    /// in the full Windows suite, so a tighter wall-clock assertion tests host
+    /// load instead of scoped-deadline propagation.
+    const FINITE_SLEEP_TERMINATION_BOUND: Duration = Duration::from_secs(30);
 
     struct PostReapDelayGuard(u64);
 
@@ -1619,7 +1684,7 @@ mod tests {
             cmd,
             &args,
             SpawnOptions::new("test deadline echo"),
-            std::time::Instant::now() + Duration::from_secs(2),
+            std::time::Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
         )
         .await
         .expect("command before deadline");
@@ -1632,12 +1697,12 @@ mod tests {
         let (program, args) = if cfg!(windows) {
             (
                 "cmd".to_string(),
-                vec!["/C".to_string(), "ping -n 3 127.0.0.1 >NUL".to_string()],
+                vec!["/C".to_string(), "ping -n 61 127.0.0.1 >NUL".to_string()],
             )
         } else {
             (
                 "sh".to_string(),
-                vec!["-c".to_string(), "sleep 2".to_string()],
+                vec!["-c".to_string(), "sleep 60".to_string()],
             )
         };
         let started = std::time::Instant::now();
@@ -1656,7 +1721,7 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(
-            started.elapsed() < Duration::from_millis(1_500),
+            started.elapsed() < FINITE_SLEEP_TERMINATION_BOUND,
             "finite sleep outlived the scoped deadline: {:?}",
             started.elapsed()
         );

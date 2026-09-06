@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fmt, io,
     path::{Path, PathBuf},
@@ -9,6 +9,10 @@ use std::{
 
 use gwt_core::{
     index::{
+        broker::{
+            RefreshBroker, RefreshClaim, RefreshIntent, RefreshReason, RefreshResourceClass,
+            RefreshScope, RefreshTarget, RefreshTargetKind, REFRESH_INTENT_PROTOCOL_VERSION,
+        },
         paths::gwt_index_root,
         runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
     },
@@ -17,6 +21,8 @@ use gwt_core::{
     worktree_hash::compute_worktree_hash,
 };
 use serde::Serialize;
+
+use crate::index_status_projection;
 
 const DISABLE_BACKGROUND_INDEX_ENV: &str = "GWT_DISABLE_BACKGROUND_INDEX";
 
@@ -131,6 +137,11 @@ fn default_project_index_worktree_root_from_context(
     Ok(context.repo_root.clone())
 }
 
+/// Startup / FrontendReady / Agent launch admission (SPEC #1939 Phase 71
+/// FR-416 / AS-32). Registration only: one canonical repo base intent is
+/// submitted to the host-wide Refresh Broker. Nothing here ensures the Python
+/// runtime, spawns a runner, or mutates index metadata; the broker owner does
+/// that work later through [`execute_claimed_project_index_refresh`].
 pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), String> {
     if test_fixture_status_path().is_some() {
         tracing::info!(
@@ -140,19 +151,13 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
         );
         return Ok(());
     }
-    let runtime_started = Instant::now();
-    gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for bootstrap"
-    );
+    let broker =
+        RefreshBroker::open_default().map_err(|err| format!("open refresh broker: {err}"))?;
     let spawner = PythonRunnerSpawner {
         python_executable: project_index_python_path(),
         runner_script: gwt_core::runtime::project_index_runner_path(),
     };
-    bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
+    bootstrap_project_index_for_path_with_broker(project_root, &gwt_index_root(), &broker, &spawner)
 }
 
 /// Per-cell index rebuild scope used by the orchestrator, in-flight set, and
@@ -232,6 +237,10 @@ pub struct ScopeHealthView {
     pub repair_required: bool,
     pub document_count: u64,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legacy_residue_detected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +254,8 @@ impl ScopeHealthView {
             repair_required: false,
             document_count,
             reason: "ready".to_string(),
+            fallback_source: None,
+            view_id: None,
             legacy_residue_detected: None,
             last_repair_at: None,
         }
@@ -256,6 +267,8 @@ impl ScopeHealthView {
             repair_required: true,
             document_count: 0,
             reason: reason.into(),
+            fallback_source: None,
+            view_id: None,
             legacy_residue_detected: None,
             last_repair_at: None,
         }
@@ -415,6 +428,14 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    let fallback_source = obj
+        .get("fallback_source")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let view_id = obj
+        .get("view_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
     let legacy_residue_detected = obj
         .get("legacy_residue_detected")
         .and_then(serde_json::Value::as_bool);
@@ -428,6 +449,8 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
         repair_required,
         document_count,
         reason,
+        fallback_source,
+        view_id,
         legacy_residue_detected,
         last_repair_at,
     })
@@ -536,28 +559,41 @@ pub fn build_aggregated_status_view(
     }
 }
 
+fn scope_requires_repair(view: &ScopeHealthView) -> bool {
+    !view.healthy || view.repair_required
+}
+
+fn scope_requires_immediate_repair(view: &ScopeHealthView) -> bool {
+    scope_requires_repair(view)
+        && !(view.healthy && view.fallback_source.as_deref() == Some("legacy"))
+}
+
 fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
     let mut count = 0;
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    count += scopes.files.values().filter(|view| !view.healthy).count();
+    count += scopes
+        .files
+        .values()
+        .filter(|view| scope_requires_repair(view))
+        .count();
     count += scopes
         .files_docs
         .values()
-        .filter(|view| !view.healthy)
+        .filter(|view| scope_requires_repair(view))
         .count();
     count
 }
@@ -743,84 +779,8 @@ fn aggregate_project_index_status_for_path_inner(
         );
     }
 
-    let runtime_started = Instant::now();
-    let report =
-        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for aggregated status"
-    );
-
     let coverage = selection.coverage;
-    // Phase 70 FR-393 / AS-13: one batch status process covers every
-    // selected worktree instead of one serial Python spawn per worktree.
-    let worktree_hashes: Vec<String> = selection
-        .inputs
-        .iter()
-        .map(|input| input.worktree_hash.clone())
-        .collect();
-    let batch = probe_worktrees_status_batch(&repo_root, &repo_hash, &worktree_hashes);
-    let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(selection.inputs.len());
-    match batch {
-        Ok(payload) => {
-            let runtime = payload
-                .get("runtime")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let repo_status = payload
-                .get("status")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            let worktrees = payload
-                .get("worktrees")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            for input in selection.inputs {
-                let Some(worktree_obj) = worktrees
-                    .get(&input.worktree_hash)
-                    .and_then(serde_json::Value::as_object)
-                else {
-                    // PR #3301 review: a worktree the batch request asked for
-                    // but the response does not cover must degrade to an
-                    // error, never to a Ready view built from repo scopes.
-                    probes.push(WorktreeProbeOutcome {
-                        status_payload: Err(format!(
-                            "batch status response is missing worktree {}",
-                            input.worktree_hash
-                        )),
-                        input,
-                    });
-                    continue;
-                };
-                let mut status = repo_status.clone();
-                if let Some(status_obj) = status.as_object_mut() {
-                    for (key, value) in worktree_obj {
-                        status_obj.insert(key.clone(), value.clone());
-                    }
-                }
-                probes.push(WorktreeProbeOutcome {
-                    input,
-                    status_payload: Ok(serde_json::json!({
-                        "ok": true,
-                        "runtime": runtime.clone(),
-                        "status": status,
-                    })),
-                });
-            }
-        }
-        Err(error) => {
-            for input in selection.inputs {
-                probes.push(WorktreeProbeOutcome {
-                    input,
-                    status_payload: Err(error.clone()),
-                });
-            }
-        }
-    }
-
-    let mut view = build_aggregated_status_view(report.runner_hash.as_str(), &probes);
+    let mut view = project_disk_status_view(&repo_hash, selection.inputs);
     if coverage.truncated {
         view.detail = format!(
             "Partial status: probed {}/{} worktrees; {}",
@@ -829,6 +789,54 @@ fn aggregate_project_index_status_for_path_inner(
     }
     view.coverage = Some(coverage);
     Ok(view)
+}
+
+/// Model-free status projection (SPEC #1939 AS-32 / FR-416): every selected
+/// worktree is projected from on-disk metadata through
+/// [`crate::index_status_projection`]; no runtime ensure and no runner
+/// process. The payload keeps the runner `status` shape so
+/// [`build_aggregated_status_view`] and the GUI contract stay unchanged.
+fn project_disk_status_view(
+    repo_hash: &RepoHash,
+    inputs: Vec<WorktreeProbeInput>,
+) -> ProjectIndexStatusView {
+    let started = Instant::now();
+    let index_root = gwt_index_root();
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+    let repo_shared =
+        index_status_projection::repo_shared_status(&index_root, repo_hash.as_str(), &cache_root);
+    let probes: Vec<WorktreeProbeOutcome> = inputs
+        .into_iter()
+        .map(|input| {
+            let mut status = repo_shared.clone();
+            status.extend(index_status_projection::worktree_file_status(
+                &index_root,
+                repo_hash.as_str(),
+                &input.worktree_hash,
+            ));
+            WorktreeProbeOutcome {
+                input,
+                status_payload: Ok(serde_json::json!({
+                    "ok": true,
+                    "runtime": {"healthy": true},
+                    "status": status,
+                })),
+            }
+        })
+        .collect();
+    let view = build_aggregated_status_view(
+        &index_status_projection::runner_asset_hash_read_only(),
+        &probes,
+    );
+    tracing::debug!(
+        target: "gwt::index",
+        repo_hash = repo_hash.as_str(),
+        worktree_count = probes.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        state = %view.state,
+        "project index status projected from disk"
+    );
+    view
 }
 
 fn collect_current_worktree_probe_inputs(
@@ -961,52 +969,6 @@ fn push_worktree_probe_input(
         path,
     });
     Ok(())
-}
-
-/// One batch status process for every selected worktree (FR-393 / AS-13).
-fn probe_worktrees_status_batch(
-    repo_root: &Path,
-    repo_hash: &RepoHash,
-    worktree_hashes: &[String],
-) -> Result<serde_json::Value, String> {
-    let runner_started = Instant::now();
-    let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash.as_str())
-        .arg("--worktree-hashes")
-        .arg(worktree_hashes.join(","))
-        .current_dir(repo_root)
-        .output()
-        .map_err(|err| format!("run project index status: {err}"))?;
-    if !output.status.success() {
-        // FR-393: a failed runner invocation invalidates the positive probe
-        // cache so the next ensure re-verifies the runtime.
-        gwt_core::runtime::invalidate_project_index_probe_cache();
-        tracing::warn!(
-            target: "gwt::index",
-            project_root = %repo_root.display(),
-            worktree_count = worktree_hashes.len(),
-            elapsed_ms = runner_started.elapsed().as_millis() as u64,
-            exit_status = %output.status,
-            "project index batch status runner failed"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!("runner exit {}: {detail}", output.status));
-    }
-    tracing::debug!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        worktree_count = worktree_hashes.len(),
-        elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        "project index batch status runner completed"
-    );
-    serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("parse project index status: {err}"))
 }
 
 /// TTL cache for the aggregated status. Used to debounce repeated callers
@@ -1224,7 +1186,7 @@ pub fn default_rebuild_runner(
     rebuild_index_target(project_root, scope, worktree_hash, JobPriority::Background)
 }
 
-/// User-initiated rebuild runner (per-cell GUI rebuild, `gwt index rebuild`).
+/// User-initiated rebuild runner for the per-cell GUI/background worker path.
 pub fn manual_rebuild_runner(
     project_root: &Path,
     scope: IndexRebuildScope,
@@ -1238,12 +1200,31 @@ pub fn manual_rebuild_runner(
     )
 }
 
+fn rebuild_action_uses_file_index_v2(action: crate::cli::index::runtime::RebuildAction) -> bool {
+    matches!(action.scope, Some("files") | Some("files-docs"))
+}
+
+fn protocol_aware_rebuild_runner_args(
+    context: &crate::cli::index::runtime::IndexContext,
+    action: crate::cli::index::runtime::RebuildAction,
+    qos: &str,
+) -> Vec<OsString> {
+    let mut args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+    if rebuild_action_uses_file_index_v2(action) {
+        args.extend([
+            OsString::from("--file-index-protocol"),
+            OsString::from("v2"),
+        ]);
+    }
+    args
+}
+
 fn run_rebuild_runner_observing_deadline(
     context: &crate::cli::index::runtime::IndexContext,
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> io::Result<gwt_core::process_console::SpawnOutput> {
-    let args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+    let args = protocol_aware_rebuild_runner_args(context, action, qos);
 
     gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
     gwt_core::process_console::spawn_logged_blocking(
@@ -1304,6 +1285,15 @@ fn run_rebuild_runner_for_target(
     qos: &str,
 ) -> Result<RebuildRunnerOutput, String> {
     if gwt_core::operation_deadline::current().is_none() {
+        if rebuild_action_uses_file_index_v2(action) {
+            let args = protocol_aware_rebuild_runner_args(context, action, qos);
+            return gwt_core::process::hidden_command(&context.python)
+                .args(&args)
+                .current_dir(&context.project_root)
+                .output()
+                .map(RebuildRunnerOutput::Canonical)
+                .map_err(|error| error.to_string());
+        }
         return crate::cli::index::runtime::run_runner_rebuild(context, action, qos)
             .map(RebuildRunnerOutput::Canonical)
             .map_err(|error| error.to_string());
@@ -1452,6 +1442,9 @@ pub fn rebuild_index_target(
             if !output.success() {
                 return Err(output.failure());
             }
+            if let Some(failure) = runner_payload_failure(output.stdout()) {
+                return Err(failure);
+            }
             if runner_payload_yielded(output.stdout()) {
                 tracing::info!(
                     target: "gwt::index",
@@ -1482,33 +1475,66 @@ pub(crate) fn runner_payload_yielded(stdout: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// Convert an action-aware runner's structured failure into the build error
+/// consumed by the coordinator. File-index-v2 intentionally uses exit status
+/// 0 for typed action results, so process status alone cannot distinguish a
+/// published generation from a failed publication.
+fn runner_payload_failure(stdout: &[u8]) -> Option<String> {
+    let payload = serde_json::from_slice::<serde_json::Value>(stdout).ok()?;
+    if payload.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    let code = payload
+        .get("error_code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("RUNNER_FAILED");
+    let detail = ["error", "detail", "message"]
+        .into_iter()
+        .find_map(|field| payload.get(field).and_then(serde_json::Value::as_str));
+    Some(match detail {
+        Some(detail) if !detail.is_empty() => {
+            format!("runner structured failure: {code}: {detail}")
+        }
+        _ => format!("runner structured failure: {code}"),
+    })
+}
+
 /// Collect every unhealthy `(scope, worktree_hash?)` cell from an aggregated
 /// status payload, in a deterministic order: issues, specs, files, files-docs.
 pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<RebuildTarget> {
     let mut targets = Vec::new();
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Memory, None));
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Discussions, None));
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
-    for (wt_hash, view) in &scopes.files {
-        if !view.healthy {
-            targets.push((IndexRebuildScope::Files, Some(wt_hash.clone())));
-        }
-    }
-    for (wt_hash, view) in &scopes.files_docs {
-        if !view.healthy {
-            targets.push((IndexRebuildScope::FilesDocs, Some(wt_hash.clone())));
+    let worktree_hashes = scopes
+        .files
+        .keys()
+        .chain(scopes.files_docs.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for wt_hash in worktree_hashes {
+        let file_view_requires_repair = scopes
+            .files
+            .get(&wt_hash)
+            .is_some_and(scope_requires_immediate_repair)
+            || scopes
+                .files_docs
+                .get(&wt_hash)
+                .is_some_and(scope_requires_immediate_repair);
+        if file_view_requires_repair {
+            targets.push((IndexRebuildScope::Files, Some(wt_hash)));
         }
     }
     targets
@@ -1536,27 +1562,32 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     current_worktree_hash: Option<&str>,
 ) -> Vec<RebuildTarget> {
     let mut targets = Vec::new();
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Memory, None));
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Discussions, None));
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
     if let Some(current_hash) = current_worktree_hash {
-        if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
+        let file_view_requires_repair = scopes
+            .files
+            .get(current_hash)
+            .is_some_and(scope_requires_immediate_repair)
+            || scopes
+                .files_docs
+                .get(current_hash)
+                .is_some_and(scope_requires_immediate_repair);
+        if file_view_requires_repair {
             targets.push((IndexRebuildScope::Files, Some(current_hash.to_string())));
-        }
-        if matches!(scopes.files_docs.get(current_hash), Some(view) if !view.healthy) {
-            targets.push((IndexRebuildScope::FilesDocs, Some(current_hash.to_string())));
         }
     }
     targets
@@ -1703,73 +1734,21 @@ fn project_index_status_for_path_inner(
         .current_worktree_root
         .or_else(|| first_active_worktree_path(&repo_root))
         .unwrap_or_else(|| repo_root.clone());
-    let worktree_hash = compute_worktree_hash(&worktree_root)
-        .map_err(|err| format!("compute worktree hash: {err}"))?;
-    let runtime_started = Instant::now();
-    let report =
-        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for status"
+    let selection = select_probe_inputs_for_scope(
+        list_worktree_probe_inputs(&repo_root)?,
+        StatusProbeScope::CurrentWorktree,
+        Some(&worktree_root),
+        all_worktree_status_batch_limit(),
     );
-    let runner_started = Instant::now();
-    let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash.as_str())
-        .arg("--worktree-hash")
-        .arg(worktree_hash.as_str())
-        .current_dir(&repo_root)
-        .output()
-        .map_err(|err| format!("run project index status: {err}"))?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        exit_status = %output.status,
-        "project index status runner completed"
-    );
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
+    if selection.inputs.is_empty() {
         return Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Error,
-            format!("runner exit {}: {detail}", output.status),
-        ));
+            ProjectIndexStatusState::Skipped,
+            "No matching current worktree for project index status",
+        )
+        .with_coverage(selection.coverage));
     }
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("parse project index status: {err}"))?;
-    let unhealthy = payload
-        .get("status")
-        .and_then(serde_json::Value::as_object)
-        .map(|status| {
-            status
-                .values()
-                .filter(|scope| {
-                    !scope
-                        .get("healthy")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0);
-    if unhealthy == 0 {
-        Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Ready,
-            format!("Runtime ready; asset {}", report.runner_hash),
-        ))
-    } else {
-        Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::RepairRequired,
-            format!("{unhealthy} index scope(s) require repair"),
-        ))
-    }
+    let coverage = selection.coverage;
+    Ok(project_disk_status_view(&repo_hash, selection.inputs).with_coverage(coverage))
 }
 
 fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) -> Option<String> {
@@ -1802,16 +1781,248 @@ fn issue_index_needs_rebuild_for_cache(
     )
 }
 
-fn refresh_issue_cache_and_index_for_startup<S: RunnerSpawner + ?Sized>(
-    repo_root: &Path,
-    refresh_project_root: &Path,
+/// Project roots this process registered with the Refresh Broker, keyed by
+/// repo hash. Broker records carry only hashes, so the drain resolves an
+/// executable path here and leaves foreign targets to their own owner.
+#[derive(Debug, Clone)]
+pub struct RegisteredRefreshProject {
+    pub project_root: PathBuf,
+    pub index_root: PathBuf,
+}
+
+fn refresh_project_registry() -> &'static Mutex<HashMap<String, RegisteredRefreshProject>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, RegisteredRefreshProject>>> = OnceLock::new();
+    REGISTRY.get_or_init(Mutex::default)
+}
+
+fn register_refresh_project(repo_hash: &str, project_root: &Path, index_root: &Path) {
+    let mut registry = refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.insert(
+        repo_hash.to_string(),
+        RegisteredRefreshProject {
+            project_root: project_root.to_path_buf(),
+            index_root: index_root.to_path_buf(),
+        },
+    );
+}
+
+/// Project registered for `repo_hash` by a bootstrap in this process.
+pub fn registered_refresh_project(repo_hash: &str) -> Option<RegisteredRefreshProject> {
+    refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(repo_hash)
+        .cloned()
+}
+
+/// Both Files scopes always travel together so one View head publishes them
+/// atomically (SPEC #1939 AS-23).
+pub const REFRESH_FILE_SCOPES: [RefreshScope; 2] = [RefreshScope::Files, RefreshScope::FilesDocs];
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Canonical repo base intent for startup admission (Flow A). The desired
+/// snapshot pins the locally available canonical root tree without a fetch;
+/// the epoch is wall-clock so a newer startup supersedes an older one.
+fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> RefreshIntent {
+    let desired_epoch = unix_millis_now();
+    let desired_snapshot = match gwt_git::refs::resolve_canonical_root_tree(repo_root) {
+        Ok(Some(tree)) => format!("tree:{}", tree.root_tree_oid),
+        Ok(None) => "tree:unborn".to_string(),
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                project_root = %repo_root.display(),
+                error = %error,
+                "canonical root tree unavailable for startup refresh intent"
+            );
+            format!("epoch:{desired_epoch}")
+        }
+    };
+    RefreshIntent {
+        protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+        target: RefreshTarget::base(repo_hash.as_str(), REFRESH_FILE_SCOPES),
+        desired_epoch,
+        desired_snapshot,
+        priority: JobPriority::Background,
+        reason: RefreshReason::Startup,
+        resource_class: RefreshResourceClass::Embedding,
+    }
+}
+
+/// Injectable startup admission (SPEC #1939 FR-416). Registers the project
+/// root for the broker drain and submits one canonical base intent. Main plus
+/// N linked worktrees of one repository coalesce onto the same target; a
+/// replay only refreshes the desired epoch. The spawner is accepted for
+/// signature parity with the claim executor and is never invoked here:
+/// registration must not spawn a runner.
+pub fn bootstrap_project_index_for_path_with_broker<S: RunnerSpawner + ?Sized>(
+    project_root: &Path,
     index_root: &Path,
-    repo_hash: &RepoHash,
-    spawner: &S,
+    broker: &RefreshBroker,
+    _spawner: &S,
 ) -> Result<(), String> {
-    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+    if test_fixture_status_path().is_some() {
+        tracing::info!(
+            target: "gwt::index",
+            project_root = %project_root.display(),
+            "GWT_INDEX_TEST_FIXTURE applied: skipping project index bootstrap registration"
+        );
+        return Ok(());
+    }
+    let bootstrap_started = Instant::now();
+    let Some(context) = project_index_git_context(project_root) else {
+        return Ok(());
+    };
+    let repo_root = context.repo_root;
+    let refresh_project_root =
+        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
+    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
+        return Ok(());
+    };
+    register_refresh_project(repo_hash.as_str(), &refresh_project_root, index_root);
+    let intent = startup_base_refresh_intent(&repo_root, &repo_hash);
+    let snapshot = broker
+        .submit(intent)
+        .map_err(|err| format!("submit project index refresh intent: {err}"))?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        repo_hash = repo_hash.as_str(),
+        state = ?snapshot.state(),
+        desired_epoch = snapshot.desired_epoch(),
+        quiet_deadline_millis = snapshot.quiet_deadline_millis(),
+        elapsed_ms = bootstrap_started.elapsed().as_millis() as u64,
+        "project index base refresh intent registered"
+    );
+    Ok(())
+}
+
+/// Claim the next runnable target whose repository this process registered.
+pub fn claim_registered_project_index_refresh(
+    broker: &RefreshBroker,
+) -> Result<Option<RefreshClaim>, String> {
+    let registered: std::collections::HashSet<String> = refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .cloned()
+        .collect();
+    broker
+        .claim_next_where(|target| registered.contains(target.repo_hash()))
+        .map_err(|err| format!("claim project index refresh: {err}"))
+}
+
+/// Execute one claimed refresh for a registered project. Returns the project
+/// root so the caller can re-project status for it.
+pub fn execute_claimed_project_index_refresh(claim: RefreshClaim) -> Result<PathBuf, String> {
+    let Some(project) = registered_refresh_project(claim.target().repo_hash()) else {
+        let message = format!(
+            "no registered project root for repo {}",
+            claim.target().repo_hash()
+        );
+        let _ = claim.fail(message.clone());
+        return Err(message);
+    };
+    let spawner = PythonRunnerSpawner {
+        python_executable: project_index_python_path(),
+        runner_script: gwt_core::runtime::project_index_runner_path(),
+    };
+    execute_claimed_project_index_refresh_with(
+        claim,
+        &project.project_root,
+        &project.index_root,
+        &spawner,
+    )
+    .map(|()| project.project_root)
+}
+
+/// Broker-owned maintenance for one claimed target (SPEC #1939 Flow A). Only
+/// the claim owner reconciles legacy / orphan index state, checks the Issue
+/// source cache, and runs model work; all builds go through the host-wide
+/// coordinator at the claim priority. The spawner is accepted for signature
+/// parity and never invoked: there is no direct issue runner escape hatch.
+pub fn execute_claimed_project_index_refresh_with<S: RunnerSpawner + ?Sized>(
+    claim: RefreshClaim,
+    project_root: &Path,
+    index_root: &Path,
+    _spawner: &S,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let intent = claim.intent().clone();
+    match execute_claimed_refresh_inner(&intent, project_root, index_root) {
+        Ok(()) => {
+            tracing::info!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                desired_epoch = intent.desired_epoch,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh claim completed"
+            );
+            claim
+                .complete()
+                .map_err(|err| format!("complete project index refresh claim: {err}"))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                error = %error,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh claim failed"
+            );
+            let _ = claim.fail(error.clone());
+            Err(error)
+        }
+    }
+}
+
+fn execute_claimed_refresh_inner(
+    intent: &RefreshIntent,
+    project_root: &Path,
+    index_root: &Path,
+) -> Result<(), String> {
+    let Some(context) = project_index_git_context(project_root) else {
+        return Err(format!(
+            "no git worktree detected for claimed refresh at {}",
+            project_root.display()
+        ));
+    };
+    let repo_root = context.repo_root;
+    let refresh_project_root =
+        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
+    let repo_hash = detect_repo_hash(&repo_root)
+        .ok_or_else(|| "no origin remote configured for claimed refresh".to_string())?;
+    if repo_hash.as_str() != intent.target.repo_hash() {
+        return Err(format!(
+            "claimed target repo {} does not match project repo {}",
+            intent.target.repo_hash(),
+            repo_hash.as_str()
+        ));
+    }
+
+    let active_worktrees =
+        list_git_worktree_paths(&repo_root).unwrap_or_else(|_| vec![repo_root.clone()]);
+    reconcile_repo(&ReconcileOptions {
+        index_root: index_root.to_path_buf(),
+        repo_hash: repo_hash.clone(),
+        active_worktree_paths: active_worktrees.clone(),
+        legacy_worktree_dirs: active_worktrees.clone(),
+    })
+    .map_err(|err| err.to_string())?;
+
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
     match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
-        refresh_project_root,
+        &refresh_project_root,
         &cache_root,
         crate::issue_cache::ISSUE_CACHE_TTL,
     ) {
@@ -1834,84 +2045,40 @@ fn refresh_issue_cache_and_index_for_startup<S: RunnerSpawner + ?Sized>(
         }
     }
 
-    if issue_index_needs_rebuild_for_cache(index_root, repo_hash, &cache_root)? {
-        spawner
-            .spawn_index_issues(repo_hash.as_str(), refresh_project_root, false)
-            .map_err(|err| format!("spawn issue index: {err}"))?;
+    let priority = intent.priority;
+    if issue_index_needs_rebuild_for_cache(index_root, &repo_hash, &cache_root)? {
+        rebuild_index_target(
+            &refresh_project_root,
+            IndexRebuildScope::Issues,
+            None,
+            priority,
+        )?;
     }
-    Ok(())
-}
 
-pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
-    project_root: &Path,
-    index_root: &Path,
-    spawner: &S,
-) -> Result<(), String> {
-    if test_fixture_status_path().is_some() {
-        tracing::info!(
-            target: "gwt::index",
-            project_root = %project_root.display(),
-            "GWT_INDEX_TEST_FIXTURE applied: skipping project index bootstrap helper"
-        );
-        return Ok(());
+    let build_root = match intent.target.kind() {
+        RefreshTargetKind::Base => refresh_project_root,
+        RefreshTargetKind::Overlay => {
+            let wanted = intent.target.worktree_hash().unwrap_or_default();
+            active_worktrees
+                .into_iter()
+                .find(|path| {
+                    compute_worktree_hash(path)
+                        .map(|hash| hash.as_str() == wanted)
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| format!("overlay worktree {wanted} is not an active worktree"))?
+        }
+    };
+    let build_hash = compute_worktree_hash(&build_root)
+        .map_err(|err| format!("compute worktree hash: {err}"))?
+        .to_string();
+    for scope in intent.target.scopes() {
+        let rebuild_scope = match scope {
+            RefreshScope::Files => IndexRebuildScope::Files,
+            RefreshScope::FilesDocs => IndexRebuildScope::FilesDocs,
+        };
+        rebuild_index_target(&build_root, rebuild_scope, Some(&build_hash), priority)?;
     }
-    let bootstrap_started = Instant::now();
-    let Some(context) = project_index_git_context(project_root) else {
-        return Ok(());
-    };
-    let repo_root = context.repo_root;
-    let refresh_project_root =
-        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
-    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
-        return Ok(());
-    };
-
-    let worktree_list_started = Instant::now();
-    let active_worktrees =
-        list_git_worktree_paths(&repo_root).unwrap_or_else(|_| vec![repo_root.clone()]);
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = worktree_list_started.elapsed().as_millis() as u64,
-        worktree_count = active_worktrees.len(),
-        "project index active worktrees listed"
-    );
-    let reconcile_started = Instant::now();
-    reconcile_repo(&ReconcileOptions {
-        index_root: index_root.to_path_buf(),
-        repo_hash: repo_hash.clone(),
-        active_worktree_paths: active_worktrees.clone(),
-        legacy_worktree_dirs: active_worktrees,
-    })
-    .map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = reconcile_started.elapsed().as_millis() as u64,
-        "project index repository reconciled"
-    );
-
-    let refresh_started = Instant::now();
-    refresh_issue_cache_and_index_for_startup(
-        &repo_root,
-        &refresh_project_root,
-        index_root,
-        &repo_hash,
-        spawner,
-    )?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = refresh_started.elapsed().as_millis() as u64,
-        "project index issue source refresh checked"
-    );
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = bootstrap_started.elapsed().as_millis() as u64,
-        "project index bootstrap helper completed"
-    );
-
     Ok(())
 }
 
@@ -2124,6 +2291,105 @@ mod tests {
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn arg_pair_count(args: &[OsString], flag: &str, value: &str) -> usize {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag && pair[1] == value)
+            .count()
+    }
+
+    fn protocol_rebuild_context() -> crate::cli::index::runtime::IndexContext {
+        crate::cli::index::runtime::IndexContext {
+            project_root: PathBuf::from("project-root"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://example.com/protocol-aware-rebuild.git",
+            ),
+            worktree_hash: "wt-hash".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        }
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_request_v2_for_file_scopes() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            RebuildAction {
+                label: "files",
+                action: "index-files",
+                scope: Some("files"),
+                needs_worktree_hash: true,
+            },
+            RebuildAction {
+                label: "files-docs",
+                action: "index-files",
+                scope: Some("files-docs"),
+                needs_worktree_hash: true,
+            },
+        ];
+
+        for action in actions {
+            let args = protocol_aware_rebuild_runner_args(&context, action, "background");
+
+            assert_eq!(arg_pair_count(&args, "--action", action.action), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--worktree-hash", "wt-hash"), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--scope", action.scope.expect("file scope")),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "background"), 1);
+            assert_eq!(arg_pair_count(&args, "--file-index-protocol", "v2"), 1);
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                    .count(),
+                1,
+                "file rebuild protocol flag must appear exactly once: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_keep_non_file_scopes_legacy() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            ("issues", "index-issues"),
+            ("specs", "index-specs"),
+            ("memory", "index-memory"),
+            ("discussions", "index-discussions"),
+            ("board", "index-board"),
+            ("works", "index-works"),
+        ];
+
+        for (label, action_name) in actions {
+            let action = RebuildAction {
+                label,
+                action: action_name,
+                scope: None,
+                needs_worktree_hash: false,
+            };
+            let args = protocol_aware_rebuild_runner_args(&context, action, "interactive");
+
+            assert_eq!(arg_pair_count(&args, "--action", action_name), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "interactive"), 1);
+            assert!(
+                !args.iter().any(|arg| arg == "--file-index-protocol"),
+                "repo scope {label} must retain legacy/default argv: {args:?}"
+            );
+        }
+    }
+
     #[test]
     fn automatic_background_index_opt_out_is_exact() {
         assert!(automatic_background_index_disabled_value(Some(
@@ -2150,7 +2416,10 @@ mod tests {
             .map(PathBuf::from)
             .expect("rebuild marker path");
         std::fs::write(marker, b"started").expect("write rebuild marker");
-        std::thread::sleep(Duration::from_secs(12));
+        // Stay alive beyond the loaded-machine deadline used by the parent
+        // fixture so settlement proves process-tree termination, not a normal
+        // child exit.
+        std::thread::sleep(Duration::from_secs(15));
     }
 
     #[test]
@@ -2497,6 +2766,13 @@ detached
 
     #[test]
     fn deadline_aware_git_context_matches_public_resolver_path_semantics() {
+        // Sibling tests change process cwd under env_test_lock. Without the
+        // same lock, parallel `cargo test` can make the public resolver and
+        // the deadline-aware probe observe different worktree/standalone
+        // classifications for the same temp path.
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let (bare, linked_worktree) = make_bare_workspace_with_origin(temp.path());
         let standalone = temp.path().join("standalone");
@@ -2640,6 +2916,8 @@ detached
             "repair_required": true,
             "document_count": 42,
             "reason": "manifest_missing",
+            "fallback_source": "previous",
+            "view_id": "view-previous",
             "legacy_residue_detected": true,
             "last_repair_at": "2026-04-24T06:15:20Z"
         });
@@ -2650,10 +2928,104 @@ detached
         assert!(view.repair_required);
         assert_eq!(view.document_count, 42);
         assert_eq!(view.reason, "manifest_missing");
+        assert_eq!(view.fallback_source.as_deref(), Some("previous"));
+        assert_eq!(view.view_id.as_deref(), Some("view-previous"));
         assert_eq!(view.legacy_residue_detected, Some(true));
         assert_eq!(
             view.last_repair_at.expect("timestamp").to_rfc3339(),
             "2026-04-24T06:15:20+00:00"
+        );
+    }
+
+    fn fallback_serving_file_status_view() -> ProjectIndexStatusView {
+        build_aggregated_status_view(
+            "asset-hash-12",
+            &[WorktreeProbeOutcome {
+                input: WorktreeProbeInput {
+                    worktree_hash: "wtAhash".to_string(),
+                    branch: "develop".to_string(),
+                    path: PathBuf::from("/abs/wtA"),
+                },
+                status_payload: Ok(serde_json::json!({
+                    "status": {
+                        "files": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 310
+                        },
+                        "files-docs": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 16
+                        }
+                    }
+                })),
+            }],
+        )
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_still_requires_repair() {
+        // T-IDX-431 RED: a previous View can keep queries healthy while the
+        // corrupt active View still requires a coordinated repair.
+        let view = fallback_serving_file_status_view();
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert_eq!(view.detail, "2 index scope(s) require repair");
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_is_collected_as_rebuild_target() {
+        let view = fallback_serving_file_status_view();
+        let targets = collect_unhealthy_rebuild_targets(&view.scopes);
+
+        assert!(
+            targets.contains(&(IndexRebuildScope::Files, Some("wtAhash".to_string()))),
+            "healthy fallback serving must not hide the required Files repair: {targets:?}"
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|(_, worktree)| worktree.as_deref() == Some("wtAhash"))
+                .count(),
+            1,
+            "one atomic Files/FilesDocs View must map to one canonical rebuild: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn healthy_legacy_file_fallback_does_not_trigger_eager_auto_repair() {
+        let mut scopes = ProjectIndexScopes::default();
+        for target in [&mut scopes.files, &mut scopes.files_docs] {
+            target.insert(
+                "wtAhash".to_string(),
+                ScopeHealthView {
+                    healthy: true,
+                    repair_required: true,
+                    document_count: 1,
+                    reason: "view_head_missing".to_string(),
+                    fallback_source: Some("legacy".to_string()),
+                    view_id: None,
+                    legacy_residue_detected: None,
+                    last_repair_at: None,
+                },
+            );
+        }
+
+        assert!(
+            collect_unhealthy_rebuild_targets(&scopes).is_empty(),
+            "a readable legacy fallback migrates lazily on demand, not at startup"
+        );
+        assert!(
+            collect_unhealthy_rebuild_targets_for_worktree_hash(&scopes, Some("wtAhash"))
+                .is_empty(),
+            "the current worktree bootstrap must preserve lazy migration"
         );
     }
 
@@ -2924,12 +3296,76 @@ detached
         );
         let _fixture_env = FixtureEnvGuard::set(&fixture_path);
 
-        bootstrap_project_index_for_path_with(
+        let broker = RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30))
+            .expect("open refresh broker");
+        bootstrap_project_index_for_path_with_broker(
             &repo,
             &temp.path().join("index"),
+            &broker,
             &PanicRunnerSpawner,
         )
         .expect("fixture-backed bootstrap");
+        assert_eq!(
+            broker.inspect().expect("inspect").target_count(),
+            0,
+            "fixture-backed bootstrap must not register a refresh intent"
+        );
+    }
+
+    #[test]
+    fn bootstrap_with_broker_registers_one_quiet_base_target_without_touching_index_root() {
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo");
+        init_git_repo_with_origin(&repo);
+        let index_root = temp.path().join("index");
+        let broker = RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30))
+            .expect("open refresh broker");
+
+        for _ in 0..3 {
+            bootstrap_project_index_for_path_with_broker(
+                &repo,
+                &index_root,
+                &broker,
+                &PanicRunnerSpawner,
+            )
+            .expect("register startup intent");
+        }
+
+        let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+        let snapshot = broker.inspect().expect("inspect");
+        assert_eq!(
+            snapshot.target_count(),
+            1,
+            "replays coalesce onto one base target"
+        );
+        assert_eq!(snapshot.queue_depth(), 0);
+        assert_eq!(snapshot.running_count(), 0);
+        let expected = RefreshTarget::base(repo_hash.as_str(), REFRESH_FILE_SCOPES);
+        let pending = snapshot.target(&expected).expect("base target");
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.priority(), JobPriority::Background);
+        assert!(pending.quiet_deadline_millis().is_some());
+        assert!(
+            broker.claim_next().expect("probe").is_none(),
+            "startup target is not claimable before its quiet deadline"
+        );
+        assert!(
+            !index_root.exists(),
+            "registration must not create the index root"
+        );
+        assert_eq!(
+            registered_refresh_project(repo_hash.as_str())
+                .expect("registered project")
+                .index_root,
+            index_root
+        );
     }
 
     #[test]
@@ -3141,7 +3577,6 @@ detached
                 (IndexRebuildScope::Issues, None),
                 (IndexRebuildScope::Specs, None),
                 (IndexRebuildScope::Files, Some(current_hash.clone())),
-                (IndexRebuildScope::FilesDocs, Some(current_hash)),
             ]
         );
     }

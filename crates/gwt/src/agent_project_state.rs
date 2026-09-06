@@ -444,7 +444,15 @@ pub(crate) fn resolve_execution_recovery_context(
     let project_state_root = validated_project_state_root_for_session_recovery(&session)?;
     let declared_repo_hash = required_session_repo_hash(&session)?;
     let branch_identity = required_session_branch(&session)?;
-    validate_runtime_repo_and_branch(&worktree, declared_repo_hash, &branch_identity, &session)?;
+    let branch_authority =
+        resolve_session_branch_authority(&session, &project_state_root, &worktree);
+    validate_runtime_repo_and_branch(
+        &worktree,
+        declared_repo_hash,
+        &branch_identity,
+        branch_authority,
+        &session,
+    )?;
 
     let invocation = canonicalize_mutation_path(invocation_scope, "recovery invocation scope")?;
     if invocation != project_state_root {
@@ -468,6 +476,7 @@ pub(crate) fn resolve_execution_recovery_context(
             &invocation_git_root,
             declared_repo_hash,
             &branch_identity,
+            branch_authority,
             &session,
         )?;
     }
@@ -1263,20 +1272,35 @@ pub fn observe_agent_runtime(
     // reported a generic "branch identity is unavailable" that read like a
     // transient failure, leaving both the agent and the user with no way to
     // tell that a detached HEAD was the cause or what to do about it.
-    let branch = read_git_branch(&git_toplevel).map_err(|failure| {
-        AgentWorkspaceUpdateError::new(
-            AgentWorkspaceUpdateErrorCode::InvalidRequest,
-            format!(
-                "workspace.update runtime branch identity is unavailable: {}",
-                branch_identity_diagnosis(&failure, &git_toplevel)
-            ),
-        )
-    })?;
+    //
+    // SPEC-3431 FR-032 (Issue #3477) carves out exactly one exception: the
+    // resident PM's own worktree is detached by design, so it is reported
+    // branchlessly and the authority layer decides. The canonical-path shape
+    // alone grants nothing — the Work mutation paths still require a live
+    // `pm.json` registration naming this Session and this worktree. Every
+    // other detached worktree keeps the rejection above.
+    let branch = match read_git_branch(&git_toplevel) {
+        Ok(branch) => Some(branch),
+        Err(BranchIdentityFailure::DetachedHead)
+            if crate::pm_registry::is_canonical_pm_worktree(&git_toplevel) =>
+        {
+            None
+        }
+        Err(failure) => {
+            return Err(AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                format!(
+                    "workspace.update runtime branch identity is unavailable: {}",
+                    branch_identity_diagnosis(&failure, &git_toplevel)
+                ),
+            ))
+        }
+    };
     Ok(AgentRuntimeObservation {
         cwd: cwd.to_string_lossy().into_owned(),
         git_toplevel: git_toplevel.to_string_lossy().into_owned(),
         repo_hash,
-        branch: canonical_branch_identity(&branch),
+        branch: branch.map_or_else(String::new, |branch| canonical_branch_identity(&branch)),
     })
 }
 
@@ -1994,7 +2018,7 @@ fn resolve_authenticated_session_work_mutation_target(
         &authority.branch_identity,
         &authority.worktree_identity,
         SessionWorkAuthorityExpectation {
-            owner: &authority.owner,
+            owner: authority.owner.as_deref(),
             agent_id: &authority.agent_id,
             require_single_session_assignment,
             allow_terminal: false,
@@ -2052,26 +2076,37 @@ fn resolve_authenticated_session_terminal_target(
         .map_err(classify_target_error)?
         .to_string();
     let branch_identity = required_session_branch(&session).map_err(classify_target_error)?;
+    let branch_authority =
+        resolve_session_branch_authority(&session, &project_state_root, &session_worktree);
     validate_runtime_repo_and_branch(
         &session_git_root,
         &declared_repo_hash,
         &branch_identity,
+        branch_authority,
         &session,
     )
     .map_err(|_| relaunch_required_error())?;
     validate_visible_project_state_root(&project_state_root, &declared_repo_hash, session_id)
         .map_err(|_| relaunch_required_error())?;
 
-    if observation.repo_hash != declared_repo_hash
-        || canonical_branch_identity(&observation.branch) != branch_identity
-    {
+    // The resident PM observes no branch because its worktree has none. That
+    // is a positive requirement, not a waiver: an observation carrying a
+    // branch name from a worktree the authority just proved detached is a
+    // forged or stale observation.
+    let observed_branch_matches = match branch_authority {
+        SessionBranchAuthority::AttachedBranch => {
+            canonical_branch_identity(&observation.branch) == branch_identity
+        }
+        SessionBranchAuthority::DetachedResidentPm => observation.branch.trim().is_empty(),
+    };
+    if observation.repo_hash != declared_repo_hash || !observed_branch_matches {
         return Err(AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
             "workspace.update runtime repository or branch does not match the authenticated Session",
         ));
     }
-    let (owner, agent_id) =
-        durable_session_work_authority(&session).map_err(classify_target_error)?;
+    let (owner, agent_id) = durable_session_work_authority(&session, branch_authority)
+        .map_err(classify_target_error)?;
     match session.runtime_target {
         LaunchRuntimeTarget::Docker => {
             validate_docker_runtime_observation(&session, observation, &project_state_root)?;
@@ -2243,7 +2278,9 @@ pub(crate) struct SessionWorkMutationTarget {
     pub(crate) branch_identity: String,
     pub(crate) worktree_identity: PathBuf,
     pub(crate) work_id: String,
-    pub(crate) owner: String,
+    /// The durable Work owner, or `None` for the resident PM's ownerless
+    /// coordination Work (SPEC-3431 FR-042).
+    pub(crate) owner: Option<String>,
     pub(crate) agent_id: String,
 }
 
@@ -2290,6 +2327,7 @@ pub(crate) struct ValidatedWorkspaceRecoverySession {
     pub(crate) project_state_root: PathBuf,
     pub(crate) work_event_root: PathBuf,
     pub(crate) branch_identity: String,
+    branch_authority: SessionBranchAuthority,
     pub(crate) worktree_identity: PathBuf,
 }
 
@@ -2379,7 +2417,8 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
                 "durable Session {session_id} has no execution binding"
             ))
         })?;
-    let (owner, agent_id) = durable_session_work_authority(&recovery.session)?;
+    let (owner, agent_id) =
+        durable_session_work_authority(&recovery.session, recovery.branch_authority)?;
     let resolved_work = resolve_unique_existing_work(
         &recovery.project_state_root,
         &recovery.work_event_root,
@@ -2387,7 +2426,7 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
         &recovery.branch_identity,
         &recovery.worktree_identity,
         SessionWorkAuthorityExpectation {
-            owner: &owner,
+            owner: owner.as_deref(),
             agent_id: &agent_id,
             require_single_session_assignment: true,
             allow_terminal: true,
@@ -2438,9 +2477,46 @@ pub(crate) fn confirm_bound_terminal_compatibility_authority(
     Ok(())
 }
 
+pub(crate) fn confirm_bound_terminal_compatibility_authority_held_global_lease(
+    authority: &BoundTerminalCompatibilityAuthority,
+    request: AgentWorkTerminalizationRequest,
+    held_trusted_dir: &Path,
+) -> Result<()> {
+    let mut confirmation = authority.clone();
+    confirmation.disposition = BoundTerminalCompatibilityDisposition::ConfirmOnly;
+    let receipt = continue_bound_terminal_compatibility_held_global_lease(
+        &confirmation,
+        request,
+        held_trusted_dir,
+    )
+    .map_err(mutation_error)?;
+    if receipt.outcome != AgentWorkTerminalizationOutcome::AlreadyMatching {
+        return Err(mutation_error(
+            "canonical Work terminal readback does not match the pre-request authority",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn continue_bound_terminal_compatibility(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+    continue_bound_terminal_compatibility_inner(authority, request, None)
+}
+
+pub(crate) fn continue_bound_terminal_compatibility_held_global_lease(
+    authority: &BoundTerminalCompatibilityAuthority,
+    request: AgentWorkTerminalizationRequest,
+    held_trusted_dir: &Path,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+    continue_bound_terminal_compatibility_inner(authority, request, Some(held_trusted_dir))
+}
+
+fn continue_bound_terminal_compatibility_inner(
+    authority: &BoundTerminalCompatibilityAuthority,
+    request: AgentWorkTerminalizationRequest,
+    held_trusted_dir: Option<&Path>,
 ) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
     if request.claimed_session_id != authority.identity.session_id
         || request.terminal_kind != authority.requested_terminal
@@ -2471,6 +2547,24 @@ pub(crate) fn continue_bound_terminal_compatibility(
                     .to_string()
             })?;
     let result = if use_blocked_build_abort {
+        if let Some(held_trusted_dir) = held_trusted_dir {
+            crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_held_global_lease(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &expected_identity,
+                held_trusted_dir,
+                |_| {
+                    apply_terminal_compatibility_under_lease(
+                        &session_path,
+                        &expected_identity,
+                        &project_state_root,
+                        &work_id,
+                        policy,
+                        request,
+                        true,
+                    )
+                },
+            )
+        } else {
         crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &expected_identity,
@@ -2483,6 +2577,24 @@ pub(crate) fn continue_bound_terminal_compatibility(
                     policy,
                     request,
                     true,
+                )
+            },
+        )
+        }
+    } else if let Some(held_trusted_dir) = held_trusted_dir {
+        crate::cli::execution_state::with_current_active_session_execution_identity_held_global_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected_identity,
+            held_trusted_dir,
+            |_| {
+                apply_terminal_compatibility_under_lease(
+                    &session_path,
+                    &expected_identity,
+                    &project_state_root,
+                    &work_id,
+                    policy,
+                    request,
+                    false,
                 )
             },
         )
@@ -2658,6 +2770,7 @@ fn validated_workspace_recovery_session_with_terminal_kind(
                 project_state_root: identity.project_state_root,
                 work_event_root: identity.work_event_root,
                 branch_identity: identity.branch_identity,
+                branch_authority: identity.branch_authority,
                 worktree_identity: identity.worktree_identity,
             },
         )));
@@ -2668,6 +2781,7 @@ fn validated_workspace_recovery_session_with_terminal_kind(
             project_state_root: identity.project_state_root,
             work_event_root: identity.work_event_root,
             branch_identity: identity.branch_identity,
+            branch_authority: identity.branch_authority,
             worktree_identity: identity.worktree_identity,
         },
     )))
@@ -2802,7 +2916,7 @@ fn resolve_host_session_work_mutation_target(
 ) -> Result<SessionWorkMutationTarget> {
     let identity = validate_host_session_identity(invocation_cwd, &session)?;
     let session_id = session.id.as_str();
-    let (owner, agent_id) = durable_session_work_authority(&session)?;
+    let (owner, agent_id) = durable_session_work_authority(&session, identity.branch_authority)?;
     let work_id = resolve_unique_existing_work_id(
         &identity.project_state_root,
         &identity.work_event_root,
@@ -2810,7 +2924,7 @@ fn resolve_host_session_work_mutation_target(
         &identity.branch_identity,
         &identity.worktree_identity,
         SessionWorkAuthorityExpectation {
-            owner: &owner,
+            owner: owner.as_deref(),
             agent_id: &agent_id,
             require_single_session_assignment: false,
             allow_terminal: false,
@@ -2833,6 +2947,7 @@ struct ValidatedHostSessionIdentity {
     project_state_root: PathBuf,
     work_event_root: PathBuf,
     branch_identity: String,
+    branch_authority: SessionBranchAuthority,
     worktree_identity: PathBuf,
 }
 
@@ -2866,12 +2981,17 @@ fn validate_host_session_identity(
         validate_visible_project_state_root(&project_state_root, declared_repo_hash, session_id)?;
 
     let branch_identity = required_session_branch(session)?;
-    let session_branch = git_branch(&session_git_root, "worktree")?;
-    if canonical_branch_identity(&session_branch) != branch_identity {
-        return Err(mutation_error(format!(
-            "Session branch mismatch for Session {session_id}: ledger={}, worktree={session_branch}",
-            session.branch
-        )));
+    let branch_authority =
+        resolve_session_branch_authority(session, &project_state_root, &session_worktree);
+    if branch_authority == SessionBranchAuthority::AttachedBranch {
+        let session_branch =
+            attached_branch_for_mutation(session, &session_git_root, &branch_identity, "worktree")?;
+        if canonical_branch_identity(&session_branch) != branch_identity {
+            return Err(mutation_error(format!(
+                "Session branch mismatch for Session {session_id}: ledger={}, worktree={session_branch}",
+                session.branch
+            )));
+        }
     }
     let session_anchor = canonical_repository_anchor(&session_git_root).map_err(|error| {
         mutation_error(format!(
@@ -2891,6 +3011,7 @@ fn validate_host_session_identity(
         &invocation_git_root,
         declared_repo_hash,
         &branch_identity,
+        branch_authority,
         session,
     )?;
     if session_worktree != session_git_root {
@@ -2903,6 +3024,7 @@ fn validate_host_session_identity(
         project_state_root,
         work_event_root: invocation_git_root,
         branch_identity,
+        branch_authority,
         worktree_identity: session_worktree,
     })
 }
@@ -2932,10 +3054,78 @@ fn required_session_branch(session: &Session) -> Result<String> {
     Ok(branch_identity)
 }
 
+/// How a Session's branch identity is established for Work mutation.
+///
+/// SPEC-3431 FR-032 (Issue #3477). The Session ledger's branch value stays the
+/// container key in both forms — what differs is whether a *runtime* branch
+/// name has to agree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionBranchAuthority {
+    /// The ordinary form: the runtime worktree must be attached to exactly the
+    /// branch the Session ledger declares.
+    AttachedBranch,
+    /// The project's registered resident PM. Its worktree is detached by
+    /// design (SPEC-3431 research R-10 / T-016), so there is no branch name to
+    /// compare; identity comes from the live PM registration plus the Session
+    /// ledger and repo/project/worktree facts every form already validates.
+    DetachedResidentPm,
+}
+
+/// Decide which branch authority `session` holds in `worktree_identity`.
+///
+/// Deliberately degrades to [`SessionBranchAuthority::AttachedBranch`] instead
+/// of erroring: a Session that is not the registered PM, or a PM worktree that
+/// someone re-attached to a branch, simply keeps the original guard and fails
+/// on the branch mismatch it was always going to fail on. Nothing here grants
+/// authority — it only decides which check applies.
+fn resolve_session_branch_authority(
+    session: &Session,
+    project_state_root: &Path,
+    worktree_identity: &Path,
+) -> SessionBranchAuthority {
+    if !crate::pm_registry::registered_pm_worktree_authority(
+        project_state_root,
+        &session.id,
+        worktree_identity,
+    ) {
+        return SessionBranchAuthority::AttachedBranch;
+    }
+    // A positive fail-closed check, not an inference: the branchless authority
+    // is only granted to a worktree that really has no branch, so a PM worktree
+    // someone re-attached — or one whose HEAD cannot be read at all — goes back
+    // through the branch guard instead of silently keeping the privilege.
+    if !worktree_head_is_detached(worktree_identity) {
+        return SessionBranchAuthority::AttachedBranch;
+    }
+    SessionBranchAuthority::DetachedResidentPm
+}
+
+/// The attached branch at `worktree`, with a diagnosable refusal when HEAD is
+/// detached (Issue #3477 AC-6): a detached worktree only carries Work
+/// authority as the project's resident PM, so the error names the missing
+/// identity and both recovery routes instead of a bare git failure.
+fn attached_branch_for_mutation(
+    session: &Session,
+    worktree: &Path,
+    branch_identity: &str,
+    identity: &str,
+) -> Result<String> {
+    git_attached_branch(worktree, identity)?.ok_or_else(|| {
+        mutation_error(format!(
+            "Session branch mismatch for Session {}: {identity} {} has a detached HEAD but the Session ledger declares branch {branch_identity}. \
+A detached worktree carries Work authority only as this project's resident PM, and no PM registration names this Session and this worktree. \
+Recovery: relaunch the Session on branch {branch_identity}, or register the resident PM for this project so pm.json names them.",
+            session.id,
+            worktree.display()
+        ))
+    })
+}
+
 fn validate_runtime_repo_and_branch(
     git_root: &Path,
     declared_repo_hash: &str,
     branch_identity: &str,
+    branch_authority: SessionBranchAuthority,
     session: &Session,
 ) -> Result<()> {
     let observed_repo_hash = repo_hash_for_mutation(git_root, "repo hash")?;
@@ -2945,7 +3135,11 @@ fn validate_runtime_repo_and_branch(
             session.id
         )));
     }
-    let observed_branch = git_branch(git_root, "runtime")?;
+    if branch_authority == SessionBranchAuthority::DetachedResidentPm {
+        return Ok(());
+    }
+    let observed_branch =
+        attached_branch_for_mutation(session, git_root, branch_identity, "runtime")?;
     if canonical_branch_identity(&observed_branch) != branch_identity {
         return Err(mutation_error(format!(
             "Session branch mismatch for Session {}: ledger={}, runtime={observed_branch}",
@@ -3081,9 +3275,9 @@ fn git_toplevel(path: &Path, identity: &str) -> Result<PathBuf> {
 ///
 /// Issue #3491: the previous code collapsed every `git symbolic-ref` failure
 /// into "has no attached branch", so a detached HEAD — permanent, and a state
-/// gwt itself creates for ephemeral intake worktrees — was indistinguishable
-/// from an unreadable repository. Callers need the distinction: only the
-/// former is a settled fact about the worktree.
+/// gwt itself creates for ephemeral intake worktrees and for the resident PM —
+/// was indistinguishable from an unreadable repository. Callers need the
+/// distinction: only the former is a settled fact about the worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BranchIdentityFailure {
     /// `HEAD` is not a symbolic ref: the worktree is on a detached HEAD and
@@ -3130,6 +3324,24 @@ fn read_git_branch(path: &Path) -> std::result::Result<String, BranchIdentityFai
     Ok(branch)
 }
 
+/// The attached branch at `path`, or `None` when HEAD is detached.
+///
+/// Issue #3477 needs "detached" as a value rather than an error, because the
+/// resident PM's worktree is always one. An unreadable repository stays an
+/// error: the detached-PM authority must never mistake a broken repository for
+/// a branchless PM.
+fn git_attached_branch(path: &Path, identity: &str) -> Result<Option<String>> {
+    match read_git_branch(path) {
+        Ok(branch) => Ok(Some(branch)),
+        Err(BranchIdentityFailure::DetachedHead) => Ok(None),
+        Err(failure) => Err(mutation_error(format!(
+            "Session branch mismatch for {identity} {}: {}",
+            path.display(),
+            branch_identity_diagnosis(&failure, path)
+        ))),
+    }
+}
+
 /// The cause of a branch-identity failure plus the next action to take, so a
 /// rejection is actionable instead of merely final (Issue #3491).
 fn branch_identity_diagnosis(failure: &BranchIdentityFailure, path: &Path) -> String {
@@ -3159,15 +3371,6 @@ pub fn worktree_head_is_detached(worktree: &Path) -> bool {
         read_git_branch(worktree),
         Err(BranchIdentityFailure::DetachedHead)
     )
-}
-
-fn git_branch(path: &Path, identity: &str) -> Result<String> {
-    read_git_branch(path).map_err(|failure| {
-        mutation_error(format!(
-            "Session branch mismatch for {identity}: {}",
-            branch_identity_diagnosis(&failure, path)
-        ))
-    })
 }
 
 fn repo_hash_for_mutation(path: &Path, identity: &str) -> Result<String> {
@@ -3235,9 +3438,19 @@ pub(crate) fn canonical_branch_identity(branch: &str) -> String {
     branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
-fn durable_session_work_authority(session: &Session) -> Result<(String, String)> {
+/// The durable Work owner and agent identity a Session may mutate under.
+///
+/// The owner is `None` only for the resident PM: SPEC-3431 FR-042 defines its
+/// Work as a non-producing coordination projection with no Issue or SPEC
+/// owner, so demanding one would refuse the very Session the projection exists
+/// for. Every other Session still needs a durable owner, and `None` is matched
+/// exactly against the stored Work owner — it is not a wildcard.
+fn durable_session_work_authority(
+    session: &Session,
+    branch_authority: SessionBranchAuthority,
+) -> Result<(Option<String>, String)> {
     let owner = if let Some(binding) = session.execution_binding.as_ref() {
-        match binding.owner_kind.as_str() {
+        Some(match binding.owner_kind.as_str() {
             "spec" => format!("SPEC-{}", binding.owner_number),
             "issue" => format!("Issue #{}", binding.owner_number),
             _ => {
@@ -3246,9 +3459,11 @@ fn durable_session_work_authority(session: &Session) -> Result<(String, String)>
                     "durable execution owner kind is invalid",
                 ))
             }
-        }
+        })
     } else if let Some(number) = session.linked_issue_number {
-        format!("Issue #{number}")
+        Some(format!("Issue #{number}"))
+    } else if branch_authority == SessionBranchAuthority::DetachedResidentPm {
+        None
     } else {
         return Err(workspace_ensure_error(
             &session.id,
@@ -3259,7 +3474,9 @@ fn durable_session_work_authority(session: &Session) -> Result<(String, String)>
 }
 
 struct SessionWorkAuthorityExpectation<'a> {
-    owner: &'a str,
+    /// Matched exactly against the stored Work owner, `None` included. A
+    /// resident PM expecting `None` only ever resolves an ownerless Work.
+    owner: Option<&'a str>,
     agent_id: &'a str,
     require_single_session_assignment: bool,
     allow_terminal: bool,
@@ -3420,7 +3637,7 @@ fn resolve_unique_existing_work(
             &format!("assigned Work {work_id} is terminal"),
         ));
     }
-    if item.owner.as_deref() != Some(expected.owner) {
+    if item.owner.as_deref() != expected.owner {
         return Err(workspace_ensure_error(
             session_id,
             &format!("assigned Work {work_id} owner does not match durable authority"),
@@ -3966,6 +4183,7 @@ mod tests {
                 missing_verification: None,
                 launched_at: now,
                 settled_at: Some(now),
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
@@ -4346,6 +4564,428 @@ mod tests {
         );
 
         test(&workspace_home, &worktree, &nested, &sibling, &session);
+    }
+
+    /// SPEC-3431 FR-032 / Issue #3477: the production shape of a resident PM.
+    ///
+    /// A project repository, the canonical PM worktree under the gwt projects
+    /// dir checked out at a *detached* HEAD, the project-state `pm.json`
+    /// registration naming that Session, and a canonical assignment to the
+    /// PM's ownerless resident Work.
+    struct ResidentPmFixture {
+        project_state_root: PathBuf,
+        pm_worktree: PathBuf,
+        session: Session,
+        work_id: String,
+    }
+
+    fn write_pm_registration(project_state_root: &Path, session_id: &str, worktree: &Path) {
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(project_state_root);
+        std::fs::create_dir_all(prefs_path.parent().expect("pm prefs parent"))
+            .expect("create pm prefs dir");
+        let prefs = crate::pm_registry::PmPrefs {
+            registration: Some(crate::pm_registry::PmRegistration {
+                session_id: session_id.to_string(),
+                agent_id: "codex".to_string(),
+                worktree_path: worktree.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..crate::pm_registry::PmPrefs::default()
+        };
+        crate::pm_registry::save_pm_prefs(&prefs_path, &prefs).expect("save pm prefs fixture");
+    }
+
+    /// Materialize the canonical PM worktree for `repo` at a detached HEAD.
+    /// `attached_branch` re-attaches it instead, which the fail-closed matrix
+    /// uses to prove a re-attached PM worktree is not a detached PM.
+    fn add_pm_worktree(repo: &Path, attached_branch: Option<&str>) -> PathBuf {
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(repo);
+        std::fs::create_dir_all(pm_worktree.parent().expect("pm worktree parent"))
+            .expect("create pm worktree parent");
+        let path = pm_worktree.to_str().expect("pm worktree path").to_string();
+        match attached_branch {
+            Some(branch) => run_git(&["worktree", "add", "-b", branch, &path, "HEAD"], repo),
+            None => run_git(&["worktree", "add", "--detach", &path, "HEAD"], repo),
+        }
+        dunce::canonicalize(&pm_worktree).expect("canonical pm worktree")
+    }
+
+    /// The literal branch a PM launch persists into its Session ledger: the
+    /// PM carries no branch, so `spawn_agent_window` falls back to this fixed
+    /// string while the worktree itself stays detached.
+    const PM_LEDGER_BRANCH: &str = "work";
+
+    fn with_resident_pm_fixture(test: impl FnOnce(&ResidentPmFixture)) {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/resident-pm.git",
+            "develop",
+        );
+        let pm_worktree = add_pm_worktree(&repo, None);
+
+        let mut session = Session::new(&pm_worktree, PM_LEDGER_BRANCH, gwt_agent::AgentId::Codex);
+        session.id = "resident-pm-session".to_string();
+        session.project_state_root = Some(repo.clone());
+        // A PM is a conversational role: no producing execution binding and no
+        // linked Issue (`pm_launch_config` sets `suppress_execution_control`).
+        session.linked_issue_number = None;
+        session.execution_binding = None;
+        session.runtime_target = LaunchRuntimeTarget::Host;
+        save_session_fixture(&session);
+
+        write_pm_registration(&repo, &session.id, &pm_worktree);
+
+        let work_id = "work-resident-pm".to_string();
+        seed_work_mutation_surfaces(&repo, &pm_worktree);
+        seed_unique_mutation_target(&repo, &pm_worktree, &session, &work_id);
+
+        test(&ResidentPmFixture {
+            project_state_root: repo,
+            pm_worktree,
+            session,
+            work_id,
+        });
+    }
+
+    /// The PM's own Work as persisted in the project's WorkItems projection.
+    /// Work-level text (`summary` / `progress_summary`) lives there; only the
+    /// per-agent `title_summary` / `current_focus` land on the current
+    /// projection's agent row.
+    fn resident_pm_work_item(
+        fixture: &ResidentPmFixture,
+    ) -> gwt_core::workspace_projection::WorkItem {
+        let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+            &fixture.project_state_root,
+        );
+        load_workspace_work_items_from_path(&path)
+            .expect("load WorkItems projection")
+            .expect("WorkItems projection")
+            .work_items
+            .into_iter()
+            .find(|item| item.id == fixture.work_id)
+            .expect("resident PM Work")
+    }
+
+    #[test]
+    fn observe_agent_runtime_reports_detached_head_as_branchless() {
+        with_resident_pm_fixture(|fixture| {
+            let observation =
+                observe_agent_runtime(&fixture.pm_worktree).expect("detached runtime observation");
+            assert_eq!(observation.branch, "");
+            assert_eq!(
+                observation.git_toplevel,
+                fixture.pm_worktree.to_string_lossy()
+            );
+        });
+    }
+
+    #[test]
+    fn resident_pm_detached_worktree_resolves_work_mutation_target() {
+        with_resident_pm_fixture(|fixture| {
+            let target =
+                resolve_session_work_mutation_target(&fixture.pm_worktree, &fixture.session.id)
+                    .expect("resident PM Work mutation target");
+            assert_eq!(target.work_id, fixture.work_id);
+            assert_eq!(target.session_id, fixture.session.id);
+            assert_eq!(target.worktree_identity, fixture.pm_worktree);
+            assert_eq!(target.project_state_root, fixture.project_state_root);
+        });
+    }
+
+    #[test]
+    fn authenticated_workspace_update_persists_resident_pm_purpose_and_progress() {
+        with_resident_pm_fixture(|fixture| {
+            let request = AgentWorkspaceUpdateRequest {
+                schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: fixture.session.id.clone(),
+                observation: observe_agent_runtime(&fixture.pm_worktree)
+                    .expect("detached runtime observation"),
+                intent: AgentWorkspaceUpdateIntent {
+                    summary: Some("PM digest".to_string()),
+                    progress_summary: Some("reconciled the monitor inbox".to_string()),
+                    current_focus: Some("triaging needs_human".to_string()),
+                    title_summary: Some("常駐 PM 運用".to_string()),
+                    ..AgentWorkspaceUpdateIntent::default()
+                },
+            };
+            apply_authenticated_workspace_update(
+                &fixture.project_state_root,
+                &fixture.session.id,
+                request,
+            )
+            .expect("resident PM workspace.update");
+
+            let projection = gwt_core::workspace_projection::load_workspace_projection(
+                &fixture.project_state_root,
+            )
+            .expect("load projection")
+            .expect("projection");
+            let agent = projection
+                .latest_agent_for_session(&fixture.session.id)
+                .expect("resident PM assignment");
+            assert_eq!(agent.title_summary.as_deref(), Some("常駐 PM 運用"));
+            assert_eq!(agent.current_focus.as_deref(), Some("triaging needs_human"));
+
+            let work = resident_pm_work_item(fixture);
+            assert_eq!(work.summary.as_deref(), Some("PM digest"));
+            assert_eq!(
+                work.progress_summary.as_deref(),
+                Some("reconciled the monitor inbox")
+            );
+            // FR-042: the resident PM Work stays a non-producing projection —
+            // resolving it must not stamp an Issue or SPEC owner onto it.
+            assert_eq!(work.owner, None);
+        });
+    }
+
+    /// AC-4: a crash resume rebinds the same PM Session to the same worktree.
+    /// Reading the ledger back from disk and updating again must keep both the
+    /// title summary and the cumulative progress summary.
+    #[test]
+    fn resident_pm_workspace_update_survives_crash_resume() {
+        with_resident_pm_fixture(|fixture| {
+            let update = |title: &str, progress: &str| {
+                let request = AgentWorkspaceUpdateRequest {
+                    schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                    claimed_session_id: fixture.session.id.clone(),
+                    observation: observe_agent_runtime(&fixture.pm_worktree)
+                        .expect("detached runtime observation"),
+                    intent: AgentWorkspaceUpdateIntent {
+                        progress_summary: Some(progress.to_string()),
+                        title_summary: Some(title.to_string()),
+                        ..AgentWorkspaceUpdateIntent::default()
+                    },
+                };
+                apply_authenticated_workspace_update(
+                    &fixture.project_state_root,
+                    &fixture.session.id,
+                    request,
+                )
+                .expect("resident PM workspace.update")
+            };
+            update("常駐 PM 運用", "起動直後の照合を完了");
+
+            // Crash resume: the pane is gone but `pm.json` still names this
+            // Session, so the successor reloads the same ledger entry.
+            let resumed = load_session_for_mutation(&fixture.session.id).expect("resume ledger");
+            assert_eq!(resumed.id, fixture.session.id);
+            update("常駐 PM 運用", "resume 後も継続して照合");
+
+            let projection = gwt_core::workspace_projection::load_workspace_projection(
+                &fixture.project_state_root,
+            )
+            .expect("load projection")
+            .expect("projection");
+            assert_eq!(
+                projection
+                    .latest_agent_for_session(&fixture.session.id)
+                    .and_then(|agent| agent.title_summary.as_deref()),
+                Some("常駐 PM 運用")
+            );
+            assert_eq!(
+                resident_pm_work_item(fixture).progress_summary.as_deref(),
+                Some("resume 後も継続して照合")
+            );
+        });
+    }
+
+    /// AC-3 fail-closed matrix. Each case keeps the detached PM worktree but
+    /// breaks exactly one identity fact, and none of them may resolve a Work.
+    #[test]
+    fn detached_pm_authority_fails_closed_for_foreign_stale_and_ambiguous_identity() {
+        // Foreign Session: `pm.json` registers somebody else.
+        with_resident_pm_fixture(|fixture| {
+            write_pm_registration(
+                &fixture.project_state_root,
+                "some-other-session",
+                &fixture.pm_worktree,
+            );
+            let error =
+                resolve_session_work_mutation_target(&fixture.pm_worktree, &fixture.session.id)
+                    .expect_err("foreign PM registration must fail closed");
+            assert!(
+                error.to_string().contains("branch"),
+                "unregistered Session must fall back to the branch guard: {error}"
+            );
+        });
+
+        // Stale registration: the registered worktree is not this Session's.
+        with_resident_pm_fixture(|fixture| {
+            write_pm_registration(
+                &fixture.project_state_root,
+                &fixture.session.id,
+                &fixture.project_state_root.join("stale-pm-worktree"),
+            );
+            resolve_session_work_mutation_target(&fixture.pm_worktree, &fixture.session.id)
+                .expect_err("stale PM worktree registration must fail closed");
+        });
+
+        // Missing registration: a detached worktree alone grants nothing.
+        with_resident_pm_fixture(|fixture| {
+            let prefs_path =
+                crate::pm_registry::pm_prefs_path_for_repo_path(&fixture.project_state_root);
+            std::fs::remove_file(&prefs_path).expect("remove pm registration");
+            resolve_session_work_mutation_target(&fixture.pm_worktree, &fixture.session.id)
+                .expect_err("missing PM registration must fail closed");
+        });
+
+        // Foreign project: another project's `pm.json` names this Session, but
+        // authority is only ever read from the Session's own project.
+        with_resident_pm_fixture(|fixture| {
+            let prefs_path =
+                crate::pm_registry::pm_prefs_path_for_repo_path(&fixture.project_state_root);
+            std::fs::remove_file(&prefs_path).expect("remove pm registration");
+            let foreign = fixture
+                .project_state_root
+                .parent()
+                .expect("fixture parent")
+                .join("foreign-project");
+            std::fs::create_dir_all(&foreign).expect("foreign project dir");
+            run_git(&["init"], &foreign);
+            run_git(
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.invalid/acme/foreign-pm.git",
+                ],
+                &foreign,
+            );
+            write_pm_registration(&foreign, &fixture.session.id, &fixture.pm_worktree);
+            resolve_session_work_mutation_target(&fixture.pm_worktree, &fixture.session.id)
+                .expect_err("a foreign project's PM registration must fail closed");
+        });
+    }
+
+    /// AC-3: a PM worktree that has been re-attached to a branch is no longer
+    /// the detached PM form, so it must go back through the branch guard.
+    #[test]
+    fn reattached_pm_worktree_is_not_a_detached_pm_authority() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/reattached-pm.git",
+            "develop",
+        );
+        let pm_worktree = add_pm_worktree(&repo, Some("pm/attached"));
+
+        let mut session = Session::new(&pm_worktree, PM_LEDGER_BRANCH, gwt_agent::AgentId::Codex);
+        session.id = "reattached-pm-session".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = None;
+        session.execution_binding = None;
+        save_session_fixture(&session);
+        write_pm_registration(&repo, &session.id, &pm_worktree);
+        seed_work_mutation_surfaces(&repo, &pm_worktree);
+        seed_unique_mutation_target(&repo, &pm_worktree, &session, "work-reattached-pm");
+
+        let error = resolve_session_work_mutation_target(&pm_worktree, &session.id)
+            .expect_err("re-attached PM worktree must fail closed");
+        assert!(
+            error.to_string().contains("branch"),
+            "re-attached PM worktree must be refused by the branch guard: {error}"
+        );
+    }
+
+    /// AC-5: a detached worktree that is not the canonical PM worktree keeps
+    /// the existing provenance guard exactly as before.
+    #[test]
+    fn detached_non_pm_worktree_remains_fail_closed() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/detached-non-pm.git",
+            "develop",
+        );
+        let detached = temp.path().join("detached-worktree");
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                detached.to_str().expect("detached path"),
+                "HEAD",
+            ],
+            &repo,
+        );
+        let detached = dunce::canonicalize(&detached).expect("canonical detached worktree");
+
+        let mut session = Session::new(&detached, PM_LEDGER_BRANCH, gwt_agent::AgentId::Codex);
+        session.id = "detached-non-pm-session".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(3477);
+        save_session_fixture(&session);
+        // Even an explicit registration cannot promote a worktree outside the
+        // canonical PM path.
+        write_pm_registration(&repo, &session.id, &detached);
+        seed_work_mutation_surfaces(&repo, &detached);
+        seed_unique_mutation_target(&repo, &detached, &session, "work-detached-non-pm");
+
+        resolve_session_work_mutation_target(&detached, &session.id)
+            .expect_err("a non-PM detached worktree must stay fail closed");
+    }
+
+    /// AC-6: when no authority can be resolved the error must name the missing
+    /// identity and point at a recovery route rather than a bare git failure.
+    #[test]
+    fn detached_worktree_authority_error_is_diagnosable() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/diagnosable-pm.git",
+            "develop",
+        );
+        let pm_worktree = add_pm_worktree(&repo, None);
+
+        let mut session = Session::new(&pm_worktree, PM_LEDGER_BRANCH, gwt_agent::AgentId::Codex);
+        session.id = "diagnosable-pm-session".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = None;
+        session.execution_binding = None;
+        save_session_fixture(&session);
+
+        let error = resolve_session_work_mutation_target(&pm_worktree, &session.id)
+            .expect_err("unregistered detached Session must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("detached"),
+            "error must name the detached HEAD it observed: {message}"
+        );
+        assert!(
+            message.contains("PM registration"),
+            "error must name the missing PM registration: {message}"
+        );
     }
 
     fn bind_session_to_current_execution(

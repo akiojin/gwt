@@ -202,6 +202,7 @@ struct PreparedOutbound {
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
 
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
+    gwt::error_report::record_backend_event(event);
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id) = match event {
         gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone())),
@@ -1081,6 +1082,7 @@ struct AgentCapabilityRegistryState {
 struct ManualExecutionHandoffState {
     binding: gwt_agent::SessionExecutionBinding,
     suspended: Option<SuspendedManualExecutionCapability>,
+    restore_suspended_on_rollback: bool,
 }
 
 struct SuspendedManualExecutionCapability {
@@ -1490,6 +1492,7 @@ impl AgentCapabilityRegistry {
             ManualExecutionHandoffState {
                 binding: expected_binding.clone(),
                 suspended: None,
+                restore_suspended_on_rollback: false,
             },
         );
         Ok(ManualExecutionHandoffReservation {
@@ -1556,6 +1559,106 @@ impl AgentCapabilityRegistry {
                     principal,
                     principal_key,
                 }),
+                restore_suspended_on_rollback: true,
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn active_execution_binding_for_token(
+        &self,
+        token: &str,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.authenticate(token)?
+            .active_execution_binding()
+            .cloned()
+    }
+
+    fn self_close_active_execution_binding(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing_by_ticket
+            .get(ticket.id())
+            .filter(|closing| !closing.revoked)
+            .and_then(|closing| closing.principal.active_execution_binding().cloned())
+    }
+
+    /// Transfer one already-accepted correlated self-close into the same
+    /// exact-generation handoff used by a manual close. This is deliberately
+    /// one registry transaction: the direct ACK has already moved the bearer
+    /// out of `principals_by_token`, so trying to begin a token handoff would
+    /// always fail and leave the durable Session running.
+    fn begin_self_close_manual_execution_handoff(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("manual execution handoff is already reserved".to_string());
+        }
+        let closing = state
+            .closing_by_ticket
+            .get(ticket.id())
+            .ok_or_else(|| "self-close capability is missing or no longer current".to_string())?;
+        if closing.revoked {
+            return Err("self-close capability was revoked".to_string());
+        }
+        if closing.principal.active_execution_binding() != Some(expected_binding) {
+            return Err("self-close capability binding changed".to_string());
+        }
+
+        let closing = state
+            .closing_by_ticket
+            .remove(ticket.id())
+            .expect("validated self-close ticket remains present");
+        let principal_key = (
+            closing.principal.canonical_project_root().to_path_buf(),
+            closing.principal.session_id().to_string(),
+        );
+        if state
+            .closing_ticket_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| current == ticket.id())
+        {
+            state
+                .closing_ticket_by_project_session
+                .remove(&principal_key);
+        }
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: Some(SuspendedManualExecutionCapability {
+                    token: closing.token,
+                    principal: closing.principal,
+                    principal_key,
+                }),
+                // The direct self-close ACK is the bearer revocation commit
+                // point. Later PTY, persistence, or scheduling failures may
+                // release this fence, but must never authenticate the closed
+                // origin socket again.
+                restore_suspended_on_rollback: false,
             },
         );
         Ok(ManualExecutionHandoffReservation {
@@ -1596,6 +1699,9 @@ impl AgentCapabilityRegistry {
         let Some(suspended) = handoff.suspended.take() else {
             return true;
         };
+        if !handoff.restore_suspended_on_rollback {
+            return true;
+        }
         if state.principals_by_token.contains_key(&suspended.token)
             || state
                 .token_by_project_session
@@ -1931,6 +2037,25 @@ impl AgentCapabilityRegistry {
         Self::grant_is_current_in_state(&state, grant)
     }
 
+    /// Accept an operation from the exact current grant and return its
+    /// authenticated principal without carrying the registry lock into the
+    /// operation itself.
+    ///
+    /// This is the linearization boundary for an operation that may mutate a
+    /// different capability while it runs. Rotation before this snapshot is
+    /// rejected; rotation after it does not cancel the accepted operation.
+    fn accept_current_grant(&self, grant: &AgentCapabilityGrant) -> Option<AgentSessionPrincipal> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return None;
+        }
+
+        Some(grant.principal().clone())
+    }
+
     fn grant_is_current_in_state(
         state: &AgentCapabilityRegistryState,
         grant: &AgentCapabilityGrant,
@@ -2153,6 +2278,29 @@ impl AgentCapabilityIssuer {
             .begin_manual_execution_handoff(token, expected_binding)
     }
 
+    pub(crate) fn active_execution_binding_for_token(
+        &self,
+        token: &str,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.registry.active_execution_binding_for_token(token)
+    }
+
+    pub(crate) fn self_close_active_execution_binding(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.registry.self_close_active_execution_binding(ticket)
+    }
+
+    pub(crate) fn begin_self_close_manual_execution_handoff(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .begin_self_close_manual_execution_handoff(ticket, expected_binding)
+    }
+
     pub(crate) fn release_manual_execution_handoff(
         &self,
         reservation: &ManualExecutionHandoffReservation,
@@ -2180,6 +2328,13 @@ impl AgentCapabilityIssuer {
 
     pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         self.registry.grant_is_current(grant)
+    }
+
+    pub(crate) fn accept_current_grant(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentSessionPrincipal> {
+        self.registry.accept_current_grant(grant)
     }
 
     /// Linearize one operation commit against capability rotation/revocation
@@ -2899,13 +3054,12 @@ async fn agent_pane_websocket_handler(
     let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match durable_agent_execution_authority_async(grant.principal().clone()).await {
-        AgentDurableAuthority::ObservationOnly | AgentDurableAuthority::Current => {}
-        AgentDurableAuthority::Stale => return StatusCode::CONFLICT.into_response(),
-        AgentDurableAuthority::Unavailable => {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-    }
+    // Issue #3667: no durable-authority check at connect. The transport
+    // carries observation for every authenticated capability — including a
+    // settled session whose durable binding is no longer current, which must
+    // not hold less authority than a session that never had a binding.
+    // Producing mutation is re-checked per request by the in-session durable
+    // fence below and again at runtime dispatch.
     ws.on_upgrade(move |socket| agent_pane_client_session(socket, state, grant))
 }
 
@@ -3300,10 +3454,14 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            // Issue #3629 AC-9: closing a scoped peer pane is a window
+            // lifecycle operation, not a producing Work mutation — the PM
+            // holds only an observation grant and pane.close is its everyday
+            // recovery tool. Project scoping (`allowed_window_ids`) still
+            // applies, and an uncorrelated self-close is refused by the
+            // runtime dispatch.
             FrontendEvent::CloseWindow { id, request_id }
-                if self.allowed_window_ids.contains(&id)
-                    && (self.grant.principal().authorizes_producing_mutation()
-                        || request_id.is_some()) =>
+                if self.allowed_window_ids.contains(&id) =>
             {
                 Some(AgentFrontendRequest::CloseWindow {
                     id,
@@ -3352,12 +3510,30 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
+            "pane_sync_complete" => {
+                for field in [
+                    "empty_window_ids",
+                    "busy_window_ids",
+                    "unavailable_window_ids",
+                    "failed_window_ids",
+                ] {
+                    value.get_mut(field)?.as_array_mut()?.retain(|id| {
+                        id.as_str()
+                            .is_some_and(|id| self.allowed_window_ids.contains(id))
+                    });
+                }
+                serde_json::to_string(&value).ok()
+            }
             "pane_send_result" if self.grant.principal().authorizes_producing_mutation() => value
                 .get("window_id")
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            // Issue #3629 AC-12: the close reply is already client-scoped by
+            // its dispatch target; passing it through lets the requester hear
+            // the outcome even after the window left the projection.
+            "pane_close_result" => Some(payload),
             _ => None,
         }
     }
@@ -4038,6 +4214,7 @@ fn handle_frontend_message(
                 .send(UserEvent::RuntimeApprovalResolutionStarted { id: id.clone() });
             resolution_marked = true;
         }
+        let had_unsent = pty.has_unsent_user_input();
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
@@ -4050,6 +4227,11 @@ fn handle_frontend_message(
                     write_us = write_started.elapsed().as_micros() as u64,
                     "terminal_input written to PTY via WS fast-path"
                 );
+                if had_unsent && !pty.has_unsent_user_input() {
+                    state
+                        .proxy
+                        .send(UserEvent::FlushPendingPmWake { id: id.clone() });
+                }
                 return;
             }
             Err(_error) => {
@@ -4668,6 +4850,63 @@ mod tests {
     }
 
     #[test]
+    fn accepted_self_close_handoff_rollback_releases_fence_without_restoring_bearer() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-self-close-handoff".to_string(),
+            repo_hash: "repo-self-close-handoff".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3783,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-self-close-handoff".to_string(),
+                binding_id: "binding-self-close-handoff".to_string(),
+                ledger_head_hash: "head-self-close-handoff".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let active = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("issue exact active holder");
+        let grant = issuer
+            .grant_for_test(&active.token)
+            .expect("current capability grant");
+        let ticket = issuer
+            .begin_self_close_if_current(&grant)
+            .expect("accept correlated self-close");
+        let reservation = issuer
+            .begin_self_close_manual_execution_handoff(&ticket, &binding)
+            .expect("transfer accepted self-close into exact handoff");
+
+        assert!(!issuer.authenticates_token(&active.token));
+        assert!(
+            issuer
+                .issue_bound(project.path(), &binding.session_id, binding.clone())
+                .is_err(),
+            "the in-flight finalizer fence must block replacement capability issuance"
+        );
+
+        assert!(issuer.rollback_manual_execution_handoff(&reservation));
+        assert!(
+            !issuer.authenticates_token(&active.token),
+            "an accepted self-close bearer must stay revoked when finalization fails"
+        );
+        assert!(!issuer.grant_is_current(&grant));
+        let replacement = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("rollback releases only the finalizer fence");
+        assert_ne!(replacement.token, active.token);
+        assert!(issuer.active_token_is_current(&replacement.token, &binding));
+        assert!(!issuer.rollback_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
     fn agent_capability_registry_promotes_legacy_inspection_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
@@ -5061,6 +5300,89 @@ mod tests {
         assert!(!debug.contains(&project.path().display().to_string()));
     }
 
+    /// Issue #3629 AC-9/AC-12: an authenticated observation grant (the PM has
+    /// no Active execution binding) must be able to request close of a peer
+    /// pane inside its own project scope, and the close reply kind must pass
+    /// the outbound filter so the caller hears the outcome.
+    #[test]
+    fn agent_pane_scope_allows_observation_grant_close_and_passes_close_result() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let foreign = tempfile::tempdir().expect("foreign tempdir");
+        let principal =
+            AgentSessionPrincipal::new(project.path(), "session-pm").expect("agent principal");
+        assert!(
+            !principal.authorizes_producing_mutation(),
+            "test precondition: the PM-shaped principal is observation-only"
+        );
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        let workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "app_version": "test",
+                "active_tab_id": "tab-owned",
+                "recent_projects": [],
+                "tabs": [
+                    {
+                        "id": "tab-owned",
+                        "project_root": project.path(),
+                        "workspace": { "windows": [{
+                            "id": "tab-owned::agent-1",
+                            "preset": "codex",
+                            "status": "running",
+                            "session_id": "target-session"
+                        }] }
+                    },
+                    {
+                        "id": "tab-foreign",
+                        "project_root": foreign.path(),
+                        "workspace": { "windows": [{ "id": "tab-foreign::agent-2" }] }
+                    }
+                ]
+            }
+        });
+        scope
+            .filter_outbound(workspace.to_string())
+            .expect("workspace projection populates allowed ids");
+
+        assert!(
+            matches!(
+                scope.filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-owned::agent-1".to_string(),
+                    request_id: None,
+                }),
+                Some(super::AgentFrontendRequest::CloseWindow { .. })
+            ),
+            "an observation grant must be able to request a scoped peer close (Issue #3629 AC-9)"
+        );
+        assert!(
+            scope
+                .filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-foreign::agent-2".to_string(),
+                    request_id: None,
+                })
+                .is_none(),
+            "a foreign-project window stays out of reach"
+        );
+        assert!(
+            scope
+                .filter_outbound(
+                    serde_json::json!({
+                        "kind": "pane_close_result",
+                        "ok": true,
+                        "window_id": "tab-owned::agent-1",
+                        "reason": null
+                    })
+                    .to_string()
+                )
+                .is_some(),
+            "the close reply must reach the requesting client (Issue #3629 AC-12)"
+        );
+    }
+
     #[test]
     fn agent_pane_scope_filters_project_output_and_frontend_authority() {
         let project = tempfile::tempdir().expect("project tempdir");
@@ -5138,14 +5460,39 @@ mod tests {
                 .to_string()
             )
             .is_none());
+        let completion = scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "pane_sync_complete",
+                    "empty_window_ids": ["tab-owned::agent-1", "tab-foreign::agent-2"],
+                    "busy_window_ids": ["tab-foreign::agent-2"],
+                    "unavailable_window_ids": ["tab-owned::agent-1"],
+                    "failed_window_ids": ["tab-foreign::agent-2"]
+                })
+                .to_string(),
+            )
+            .expect("pane completion reaches its origin client");
+        let completion: serde_json::Value =
+            serde_json::from_str(&completion).expect("filtered pane completion");
+        assert_eq!(
+            completion["empty_window_ids"],
+            serde_json::json!(["tab-owned::agent-1"])
+        );
+        assert_eq!(completion["busy_window_ids"], serde_json::json!([]));
+        assert_eq!(
+            completion["unavailable_window_ids"],
+            serde_json::json!(["tab-owned::agent-1"])
+        );
+        assert_eq!(completion["failed_window_ids"], serde_json::json!([]));
         assert!(
             scope
                 .filter_inbound(FrontendEvent::CloseWindow {
                     id: "tab-owned::agent-1".to_string(),
                     request_id: None,
                 })
-                .is_none(),
-            "Inspection principal must not mutate peer pane lifecycle"
+                .is_some(),
+            "Issue #3629 AC-9: an inspection principal may request a scoped peer close; \
+             self-close correlation is enforced by the runtime dispatch"
         );
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
@@ -5248,6 +5595,20 @@ mod tests {
             }),
             Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
         ));
+        // Issue #3552 AC-4: unblocking peer *close* (Issue #3629 AC-9) must not
+        // leak into peer *injection*. An ordinary agent — even a fully bound,
+        // producing one — keeps the SPEC-3050 FR-002 self-only contract here;
+        // the only route into another pane's keyboard stays the registered-PM
+        // path of SPEC-3431 FR-111.
+        assert!(
+            bound_scope
+                .filter_inbound(FrontendEvent::PaneSendInput {
+                    session_id: "session-peer".to_string(),
+                    text: "hello".to_string(),
+                })
+                .is_none(),
+            "a producing ordinary agent still cannot inject into a peer Session's pane"
+        );
 
         let prepared_principal = AgentSessionPrincipal::new_prepared(
             project.path(),
@@ -5279,8 +5640,9 @@ mod tests {
                     id: "tab-owned::agent-1".to_string(),
                     request_id: None,
                 })
-                .is_none(),
-            "Prepared principal must not mutate peer pane lifecycle"
+                .is_some(),
+            "Issue #3629 AC-9: a scoped peer close is a window lifecycle \
+             operation available to every authenticated grant"
         );
         assert!(prepared_scope
             .filter_outbound(
@@ -6169,6 +6531,153 @@ mod tests {
         server.shutdown();
     }
 
+    /// Issue #3667 AC-1/AC-2/AC-3/AC-4: a settled session (in-memory Active
+    /// binding whose durable record no longer matches) keeps pane observation
+    /// on the agent WebSocket while producing mutation stays refused on the
+    /// very same connection.
+    #[test]
+    fn settled_session_pane_socket_allows_observation_and_refuses_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The durable authority check runs on spawn_blocking threads where the
+        // thread-local ScopedGwtHome does not apply, so isolate HOME itself.
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        // No durable session file exists for this id, so every durable check
+        // resolves Stale — the same authority a session holds right after its
+        // Execution Control Record settles.
+        let session_id = "session-issue-3667-settled";
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            repo_hash: "repo-3667".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3667,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-3667".to_string(),
+                binding_id: "binding-3667".to_string(),
+                ledger_head_hash: "head-3667".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(project.path(), session_id, binding)
+            .expect("settled capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, response) = connect_async(request)
+                .await
+                .expect("settled session must keep the pane observation transport");
+            assert_eq!(
+                response.status().as_u16(),
+                StatusCode::SWITCHING_PROTOCOLS.as_u16()
+            );
+
+            socket
+                .send(WebSocketMessage::Text(
+                    r#"{"kind":"list_windows"}"#.to_string().into(),
+                ))
+                .await
+                .expect("send list_windows on settled socket");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if events
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .any(|event| {
+                            matches!(
+                                event,
+                                UserEvent::AgentFrontend {
+                                    request: AgentFrontendRequest::ListWindows,
+                                    ..
+                                }
+                            )
+                        })
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("settled observation request must reach runtime dispatch");
+
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "pane_send_input",
+                        "session_id": session_id,
+                        "text": "must-not-dispatch"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send pane input on settled socket");
+            let close = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match socket.next().await {
+                        Some(Ok(WebSocketMessage::Close(frame))) => break frame,
+                        Some(Ok(_)) => continue,
+                        other => {
+                            panic!("settled mutation must end in a close frame, got {other:?}")
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("settled mutation must be fenced")
+            .expect("explicit close frame");
+            assert_eq!(u16::from(close.code), 1008);
+            assert_eq!(close.reason, "execution binding is no longer current");
+            assert!(
+                !events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .any(|event| {
+                        matches!(
+                            event,
+                            UserEvent::AgentFrontend {
+                                request: AgentFrontendRequest::SendInput { .. },
+                                ..
+                            }
+                        )
+                    }),
+                "settled mutation must not reach AgentFrontend dispatch"
+            );
+        });
+
+        server.shutdown();
+    }
+
     #[test]
     fn connected_agent_pane_socket_stops_dispatching_after_rotation_and_revoke() {
         let runtime = Runtime::new().expect("tokio runtime");
@@ -6664,6 +7173,7 @@ mod tests {
                 missing_verification: None,
                 launched_at: completed_at,
                 settled_at: Some(completed_at),
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
@@ -6953,13 +7463,43 @@ mod tests {
                 .parse()
                 .expect("stale Host bearer"),
         );
-        match runtime.block_on(connect_async(stale_handshake)) {
-            Err(WebSocketError::Http(response)) => {
-                assert_eq!(response.status(), HttpStatusCode::CONFLICT);
-            }
-            Ok(_) => panic!("durably stale Host capability must not upgrade"),
-            Err(error) => panic!("unexpected stale Host handshake error: {error}"),
-        }
+        // Issue #3667: a durably stale capability keeps the observation
+        // transport, so the handshake upgrades; producing mutation on that
+        // socket is still fenced by the per-request durable check.
+        let (mut stale_socket, _) = runtime
+            .block_on(connect_async(stale_handshake))
+            .expect("durably stale Host capability keeps the observation transport");
+        runtime.block_on(async {
+            stale_socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "pane_send_input",
+                        "session_id": &session.id,
+                        "text": "must-not-dispatch-after-reconnect"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send input through the stale reconnect socket");
+            let close = tokio::time::timeout(Duration::from_secs(2), stale_socket.next())
+                .await
+                .expect("stale reconnect socket must be fenced")
+                .expect("stale reconnect close frame")
+                .expect("valid stale reconnect close frame");
+            let WebSocketMessage::Close(Some(close)) = close else {
+                panic!("stale reconnect socket must receive an explicit policy close");
+            };
+            assert_eq!(u16::from(close.code), 1008);
+            assert_eq!(close.reason, "execution binding is no longer current");
+        });
+        assert!(
+            events_a
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "stale reconnect input must be rejected before AgentFrontend dispatch"
+        );
 
         let pane_url_b = server_b
             .agent_capability_issuer()
@@ -7625,6 +8165,59 @@ mod tests {
         drop(pane);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "test-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running test pane");
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::pm-window".to_string(), pane.shared_pty());
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::pm-window".to_string(),
+                data: "実行されてい".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(1),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::pm-window".to_string(),
+                data: "ますか？\r".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            recorded.iter().any(|event| matches!(
+                event,
+                UserEvent::FlushPendingPmWake { id } if id == "tab-1::pm-window"
+            )),
+            "submitting unsent composer text must ask the event loop to flush a held PM wake: {recorded:?}"
+        );
+        drop(recorded);
+        drop(pane);
+    }
+
     fn terminal_output(pane: &str, data: &str) -> BackendEvent {
         BackendEvent::TerminalOutput {
             id: pane.to_string(),
@@ -7649,10 +8242,10 @@ mod tests {
     fn index_status(message: &str) -> BackendEvent {
         BackendEvent::ProjectIndexStatus {
             project_root: "/tmp/project".to_string(),
-            status: gwt::ProjectIndexStatusView::new(
+            status: Box::new(gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 message,
-            ),
+            )),
         }
     }
 
@@ -8144,6 +8737,65 @@ mod tests {
         assert_eq!(payloads.len(), 2, "distinct windows must both be delivered");
         assert!(payloads.iter().any(|payload| payload.contains("window-1")));
         assert!(payloads.iter().any(|payload| payload.contains("window-2")));
+    }
+
+    /// Issue #3755 AC-2: pane hydration finishes with one lossless receipt.
+    /// Queue pressure may drop terminal output, but it must preserve both the
+    /// latest snapshot and the completion ordering observed by pane.read.
+    #[test]
+    fn client_queue_preserves_pane_snapshot_before_completion_under_pressure() {
+        let queue = ClientQueue::default();
+        let pane_id = "tab-1::agent-7";
+        for index in 0..(LOSSY_HIGH_WATER + 10) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                pane_id,
+                &format!("chunk-{index}"),
+            )));
+        }
+
+        assert!(
+            !queue.enqueue(&prepare_outbound(&BackendEvent::TerminalSnapshot {
+                id: pane_id.to_string(),
+                data_base64: "c25hcHNob3QK".to_string(),
+            }))
+        );
+        assert!(
+            !queue.enqueue(&prepare_outbound(&BackendEvent::PaneSyncComplete {
+                empty_window_ids: Vec::new(),
+                busy_window_ids: Vec::new(),
+                unavailable_window_ids: Vec::new(),
+                failed_window_ids: Vec::new(),
+            }))
+        );
+
+        let (payloads, _) = drain_all(&queue);
+        let kinds = payloads
+            .iter()
+            .map(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .expect("queued backend event json")
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("queued backend event kind")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let snapshot_index = kinds
+            .iter()
+            .position(|kind| kind == "terminal_snapshot")
+            .expect("terminal snapshot survives pressure");
+        let completion_index = kinds
+            .iter()
+            .position(|kind| kind == "pane_sync_complete")
+            .expect("pane completion survives pressure");
+        assert!(snapshot_index < completion_index);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| kind.as_str() == "pane_sync_complete")
+                .count(),
+            1
+        );
     }
 
     // Issue #3315: under a terminal-output flood that saturates the lossy

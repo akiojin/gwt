@@ -428,6 +428,20 @@ fn red_104_parse_pr_view() {
 }
 
 #[test]
+fn parse_pr_list() {
+    let cmd = parse_pr_args(&[s("list")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Pr(PrCommand::List {
+            stale_after_hours: None,
+            escalate_after_cycles: None,
+            refresh: false,
+            include: None,
+        })
+    );
+}
+
+#[test]
 fn red_104a_parse_pr_create() {
     let cmd = parse_pr_args(&[
         s("create"),
@@ -1038,9 +1052,11 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
         updated_at: UpdatedAt::new("cached"),
         comments: Vec::new(),
     };
-    Cache::new(tmp.path().to_path_buf())
-        .write_snapshot(&snapshot)
-        .unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap());
     env.client.seed(IssueSnapshot {
         title: "Fetched title".to_string(),
         updated_at: UpdatedAt::new("fetched"),
@@ -1121,9 +1137,11 @@ fn red_99_dispatch_issue_comments_prefers_cache() {
             updated_at: UpdatedAt::new("cached"),
         }],
     };
-    Cache::new(tmp.path().to_path_buf())
-        .write_snapshot(&snapshot)
-        .unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap());
 
     let code = dispatch(&mut env, &argv(&["gwt", "issue", "comments", "42"]));
     assert_eq!(code, 0);

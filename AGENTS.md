@@ -7,11 +7,13 @@
 - **この AGENTS.md は gwt リポジトリ専用**のローカル運用ルールであり、gwt が開く任意プロジェクト向けの汎用 Agent 指示ではない。
 - gwt を使って他プロジェクトを開発する場合、そのプロジェクト自身の `AGENTS.md` / `CLAUDE.md` / README 等を優先する。
 - gwt 共通の Agent 運用（Board/Work 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、3 つの注入経路で配信する: managed hooks（SessionStart/UserPromptSubmit/Stop reminder）+ generated guidance（`.claude/skills/gwt-coordination/SKILL.md` および `.codex/skills/gwt-coordination/SKILL.md`）+ launch context（`GWT_SESSION_ID` 等）。canonical source は `crates/gwt-skills/src/coordination_guidance.rs` の 1 箇所。重複ドリフト防止のため、Board/Work の operational content（kind taxonomy、audience selection、body template、tool-unit post 禁止など）を AGENTS.md に複製しない。詳細な投稿手順は generated guidance 経由で agent に届く。
+- **gwt 専用機能は「機能」として実装する。** gwt は他プロジェクトの開発にも利用される汎用ツールだが、gwt 専用の運用・挙動・ルールが必要になった場合、memory・session note・口頭運用などの一時的な手段でしのぎ続けない。気づいた時点で Issue として登録し、skill / hooks / runtime のいずれかの恒久機能として実装対象にする（memory は恒久実装が着地するまでのつなぎに限る）。
 
 ## エージェント運用原則
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd` JSON operation `memory.add` でマシンローカルの work-notes memory（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`、SPEC-3214）に記録し、同種の作業を始める前に確認する。repo-local `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は読み取り fallback / legacy alias として扱う。
+- **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは Board で PM に報告し、PM が `gwt-register-issue` で起票する。agent は自分で upstream に Issue を作らない（詳細な投稿手順は generated `gwt-coordination` SKILL.md が配信する）。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -27,6 +29,56 @@
   - 変更の下流影響（何が壊れるか）、上流前提（何が先に必要か）、同時変更境界（何を一緒に変えないと中間状態で壊れるか）を分析していない
 
   調査手順: コードを読む → 依存関係を洗い出す → 実行して試す → 結果をユーザーに提示 → 判断を仰ぐ。「進めて」と言われるまでは議論を続ける。明示的に議論モードに入りたい場合は `gwt-discussion` を使用する。
+
+## 最小十分アプローチ（Execution Discipline）
+
+現在のタスクを**最小十分なアプローチ**で完了させる。過剰設計をしない。計画は厚くてよいが、実行は軽くあること。必要だと証明できない設計は入れない。必要だと証明できないテストは足さない。
+
+### Workflow
+
+1. コードに触る前に要求を理解する。コードを変えてから意図を推測しない。
+2. 計画フェーズは高い推論を使ってよい。実行フェーズは軽量に保つ。**セッション全体を通して最大推論で走らせない。**
+3. 既定では複数エージェントを同時に立てない。まず単独で 1 タスクを終わらせ、その後で分割が有効かを判断する。
+4. タスクが実際に必要とするスキルだけを使う。重い手順を伴うスキルを不要に有効化しない。
+5. 実行前に最小限の Plan を作る。Plan には Goal / Non-goals / Acceptance criteria / What stays untouched を含める。
+
+### Failure Modes（避けるべき失敗）
+
+1. 意図を理解せず表面だけ直した。
+2. 1 つの根本修正で済むところに、パッチ・互換レイヤ・二重実装を積み上げた。
+3. 稀なケースのために過剰設計し、日常のメンテナンスを高くつかせた。
+4. 前提が誤ったまま推論を重ねた。誤った出発点は正しい推論では直らない。
+5. コードを直接読むべき場面で検索や推測に頼った。
+6. 「テスト追加」を口実にスコープ拡大・抽象化・見栄えの水増しをした。
+
+### Action Boundaries
+
+1. 着手前に「ユーザーが実際に求めていること / 今回のスコープ / 明示的なスコープ外 / 完了の定義」を言い直す。
+2. 不可逆な操作はユーザー確認を先に取る。可逆な操作（revert・restore・テスト実行・diff 確認・読み取り分析）は確認不要。
+3. 次を始めた自分に気づいたら止まり、より小さい Plan に切り替える: タスクに不要な抽象・設定レイヤの追加 / 将来の可能性のための先回り設計 / 制約を満たすための制約の積み増し / 無関係ファイルの広範な変更 / 旧ロジック温存のための二重実装 / テスト追加を理由にした作り込み。
+
+### テストの範囲規律
+
+テストは**今回の変更の受け入れ**に仕えるものであり、それ以外の目的で増やさない。TDD（RED を先に作る）・カバレッジ 90% 維持・GUI 変更の headed E2E といった本リポジトリの必須ゲートはそのまま適用した上で、次を守る:
+
+1. まず変更に関連する既存テストを走らせる。既存テストで変更の正しさが証明できるなら新規テストは足さない。
+2. 新規テストは「既存テストが覆えない挙動変更」または「ユーザーの明示要求」がある場合に限る。
+3. 完全網羅のためのテスト拡大・無関係モジュールへの後追いテスト・snapshot 行列やパラメタライズ格子の量産をしない。
+4. 今回の要求が求めていない境界をテストしない。緑のテストを更なる抽象化の口実にしない。
+5. テスト追加前に自問する: このテストはどの受け入れ要件を検証するか / 無ければ既存テストはこのリグレッションを見逃すか / 実装より単純か。テストコードが実装より長く複雑なら過剰設計として扱う。
+
+### モデル配分（Model Allocation）
+
+- 要求の明確化・Plan のレビュー: より強いモデルを使う。
+- コードの記述・変更・テスト実行: 中〜低推論、もしくは軽量な実行モデルを使う。
+- 実行モデルがアーキテクチャを積み上げ始めた、あるいはスコープを広げ始めたら止まる。最小の Plan を書き直してからやり直す。
+
+### 完了前チェック（最小十分の観点）
+
+- 意図と受け入れ条件を言い直したか / 解は最大ではなく最小十分か / Non-goals を明示したか
+- 推測でなくコードを直接読んだか / 変更ファイルは最小集合か / 関連する既存テストを走らせたか
+- 要求されていないシナリオのテストを足していないか / diff は小さく、余計なファイル・デバッグ残骸がないか
+- 「完了に見せるための余計な仕事」をしていないか
 
 ## 開発指針
 
@@ -113,11 +165,12 @@
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
 - SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は 1 release cycle の alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
-- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 7 セクション）:
+- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 8 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
   - 機能要件（FR-\*）
-  - 成功基準
+  - 成功基準（検証コマンドと期待結果。Issue Monitor は読まない）
+  - 受け入れ基準（`- [ ] AC-N:` 形式のチェックリスト。Issue Monitor の autonomous gate が読む唯一の場所。`auto-merge` ラベル付きで欠けていると `issue.create` / `issue.spec.create` / `issue.spec.edit` が拒否する）
   - Out of Scope / Related Artifacts
 - `gwt-plan-spec` で `plan` / `tasks` section も策定してから実装に入る
 - 新規 SPEC を作成した場合でも、エージェントは自分で新規ブランチや Worktree を作成しない。実装に進む場合は、承認済み SPEC と `gwt-plan-spec` の成果物に基づき、現在起動されている branch/worktree で作業する。

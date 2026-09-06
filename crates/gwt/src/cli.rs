@@ -17,13 +17,10 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
-pub mod improvement;
-pub mod improvement_contract;
-mod improvement_owner;
-mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -51,10 +48,7 @@ pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
 
-use std::{
-    io::{self},
-    path::PathBuf,
-};
+use std::{io, path::PathBuf};
 
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
@@ -64,7 +58,6 @@ pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
-pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
@@ -168,7 +161,6 @@ pub enum CliCommand {
     Actions(ActionsCommand),
     Board(BoardCommand),
     Hook(HookCommand),
-    Improvement(ImprovementCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
     Intake(intake_outcome::IntakeCommand),
@@ -196,6 +188,7 @@ pub enum CliCommand {
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
+    GithubBudget(github_budget::GithubBudgetCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -211,6 +204,9 @@ pub enum DaemonCommand {
     /// fan-out pipeline.
     Subscribe {
         channels: Vec<String>,
+        /// SPEC-3431 FR-141: optional explicit project daemon authority for the
+        /// event stream; `None` preserves the legacy cwd-derived scope.
+        project_root: Option<PathBuf>,
         /// SPEC-3431 FR-025: bound the read so an unattended caller can run
         /// subscribe → reconcile in a loop without an external supervisor.
         timeout_seconds: Option<u64>,
@@ -647,7 +643,6 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
-        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
@@ -656,6 +651,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
+        CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

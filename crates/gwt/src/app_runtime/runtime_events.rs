@@ -24,6 +24,19 @@ use super::{
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
 const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
+/// Issue #3616: how many trailing screen lines are searched for a provider
+/// quota notice. Wider than the error tail because a CLI can print a prompt or
+/// blank frame after the notice, and the notice itself soft-wraps.
+const QUOTA_NOTICE_TAIL_LINES: usize = 8;
+/// Issue #3616: how long a quota notice must sit on a *live* pane's screen,
+/// with no agent activity at all, before it is treated as a block.
+///
+/// A blocked pane produces nothing for days. A working agent runs a tool —
+/// and so fires a hook — far inside this window, and any hook abandons the
+/// candidate. The cost of waiting is a held slot for two minutes; the cost of
+/// not waiting is releasing a healthy launch because its own output quoted the
+/// provider's sentence.
+const PROVIDER_QUOTA_SETTLE_SECS: i64 = 120;
 /// Provider TUIs commonly clear and redraw the approval block after Enter.
 /// This bounded settle window avoids a false Running frame between the clear
 /// and the redraw without ever blocking the tao event loop.
@@ -78,9 +91,74 @@ fn resume_writer_conflict_outer_offset(line: &str) -> Option<usize> {
     })
 }
 
+/// Classify a typed failure out of an agent's exit detail.
+///
+/// Two causes are typed today, and they are checked in this order because they
+/// answer different questions. A provider quota block is a property of the
+/// account and applies to any session mode, so it is tested first; the
+/// late-resume writer race can only happen while resuming.
+pub(super) fn classify_issue_monitor_failure(
+    detail: &str,
+    session_mode: gwt_agent::SessionMode,
+) -> Option<gwt::IssueMonitorFailure> {
+    if let Some(failure) = classify_provider_usage_limit(detail) {
+        return Some(failure);
+    }
+    classify_resume_writer_conflict(detail, session_mode)
+}
+
+/// Issue #3616: the provider stated it is out of quota.
+///
+/// Detection lives in `gwt_core::usage` because the message formats and their
+/// reset clauses are provider domain knowledge, not runtime-event knowledge.
+/// `Local::now()` is the reference zone on purpose: both providers print a
+/// local wall clock with no offset, so the machine running the agent is the
+/// only anchor available.
+pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
+    let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
+    Some(provider_usage_limit_failure(&notice, None, None))
+}
+
+/// `pane_agent_id` is the agent the pane is actually running, and it wins over
+/// the notice's own wording: Claude's weekly-limit text names no provider at
+/// all, and mis-attributing the block would tell the PM the wrong account is
+/// out.
+pub(super) fn provider_usage_limit_failure(
+    notice: &gwt_core::usage::ProviderLimitNotice,
+    pane_agent_id: Option<&str>,
+    evidence: Option<gwt::IssueMonitorProviderQuotaHoldEvidence>,
+) -> gwt::IssueMonitorFailure {
+    gwt::IssueMonitorFailure::ProviderUsageLimit {
+        provider: provider_label(notice, pane_agent_id),
+        resets_at: notice
+            .resets_at
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        evidence,
+    }
+}
+
+/// The agent id to report as the exhausted account, falling back to the
+/// notice's hint and finally to `unknown` — never to a guess.
+pub(super) fn provider_label(
+    notice: &gwt_core::usage::ProviderLimitNotice,
+    pane_agent_id: Option<&str>,
+) -> String {
+    if let Some(agent_id) = pane_agent_id
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+    {
+        return agent_id.to_string();
+    }
+    match notice.provider {
+        Some(gwt_core::usage::UsageProvider::Codex) => "codex".to_string(),
+        Some(gwt_core::usage::UsageProvider::ClaudeCode) => "claude".to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
 /// Classify the provider's exact late-resume writer race without promoting
 /// unrelated launch failures that happen to mention a writer.
-pub(super) fn classify_issue_monitor_failure(
+fn classify_resume_writer_conflict(
     detail: &str,
     session_mode: gwt_agent::SessionMode,
 ) -> Option<gwt::IssueMonitorFailure> {
@@ -248,6 +326,12 @@ impl AppRuntime {
         if publish_to_daemon {
             let prompt = self.current_screen_approval_prompt(&output_id);
             events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
+            // Issue #3616: the only place a still-running quota-blocked pane can
+            // be recognized. Claude keeps its process alive and reports `idle`,
+            // so no exit or status event ever arrives to classify.
+            events.extend(
+                self.observe_provider_quota_notice_from_screen(&output_id, chrono::Utc::now()),
+            );
         }
         events
     }
@@ -517,7 +601,7 @@ impl AppRuntime {
         // Display and transport errors are not child-exit receipts. Callers
         // that observed `try_wait == Some` use `handle_runtime_status_event`
         // with the exact local incarnation and `exit_confirmed = true`.
-        self.handle_runtime_status_inner(id, status, detail, true, false)
+        self.handle_runtime_status_inner(id, status, detail, true, false, false)
     }
 
     #[cfg(test)]
@@ -532,7 +616,7 @@ impl AppRuntime {
         // live PTY incarnation. Production callers must use
         // `handle_runtime_status_event`, which also applies the incarnation
         // fence before accepting an exit receipt.
-        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, false)
     }
 
     pub(crate) fn handle_runtime_status_event(
@@ -546,7 +630,7 @@ impl AppRuntime {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, true)
     }
 
     fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
@@ -564,7 +648,7 @@ impl AppRuntime {
         // The daemon wire format has no exact local PTY incarnation or child
         // exit receipt. It may update diagnostics, but never terminalize a
         // producing Session in this process.
-        self.handle_runtime_status_inner(id, status, detail, false, false)
+        self.handle_runtime_status_inner(id, status, detail, false, false, false)
     }
 
     fn handle_runtime_status_inner(
@@ -574,6 +658,7 @@ impl AppRuntime {
         detail: Option<String>,
         publish_to_daemon: bool,
         exit_confirmed: bool,
+        exact_runtime_incarnation: bool,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             if !exit_confirmed {
@@ -600,6 +685,21 @@ impl AppRuntime {
             .active_agent_sessions
             .get(&id)
             .map(|session| session.session_id.clone());
+        // Issue #3341: the exit receipt lives only on the pane, and every
+        // terminal branch below drops the runtime (and the active session that
+        // names the durable Session). Persist it here, while both are still
+        // reachable, so an agent that vanished mid-turn leaves evidence that
+        // outlives the window. `exit_confirmed` gates it because a
+        // reader-thread read error reports Error without ever waiting on the
+        // child.
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+            )
+        {
+            self.persist_agent_session_exit_receipt(&id);
+        }
         let approval_was_active = self.window_approval_waiting.contains_key(&id)
             || (status == WindowProcessStatus::Error
                 && self.current_screen_approval_prompt(&id).is_some());
@@ -636,23 +736,68 @@ impl AppRuntime {
             }
         }
 
+        // Issue #3616: read the provider's own explanation before anything is
+        // torn down. A clean exit discards the screen entirely (the branch
+        // below only composes a detail for `Error`), which is exactly why a
+        // quota-dead Codex pane looked like finished work.
+        let quota_agent_id = self.pane_agent_id(&id);
+        // Issue #3923 AC-3: a notice left on the final screen is not a block
+        // while the poller reads the account as usable — the pane exited for
+        // some other reason and the text is stale.
+        let quota_notice = self
+            .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
+        match quota_notice.as_ref() {
+            Some(notice) => {
+                let recorded_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let screen_text = self
+                    .screen_tail(&id, QUOTA_NOTICE_TAIL_LINES, "\n")
+                    .or_else(|| detail.clone())
+                    .unwrap_or_default();
+                let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    &recorded_at,
+                    &id,
+                    &screen_text,
+                )
+                .with_poller(quota_agent_id.as_deref(), &self.provider_usage_accounts);
+                self.provider_quota_holds.insert(
+                    id.clone(),
+                    provider_usage_limit_failure(notice, quota_agent_id.as_deref(), Some(evidence)),
+                );
+            }
+            None => {
+                self.provider_quota_holds.remove(&id);
+            }
+        }
         let keep_active_agent_session_for_recovery = !exit_confirmed
+            || quota_notice.is_some()
             || self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
         // Issue #3274: an errored agent runtime is torn down below, dropping
         // its vt100 state — a client that reconnects later replays nothing and
         // an empty Error window gives no clue why. Capture the final screen
         // tail into the persistent detail before the state is gone; the raw
         // output stays available in logs.
-        let detail = if matches!(status, WindowProcessStatus::Error)
+        let detail = if let Some(notice) = quota_notice.as_ref() {
+            Some(gwt_core::usage::describe_provider_limit_notice(
+                notice,
+                Some(provider_label(notice, quota_agent_id.as_deref()).as_str()),
+            ))
+        } else if matches!(status, WindowProcessStatus::Error)
             && !approval_was_active
             && matches!(
                 self.window_preset(&id),
                 Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
-            ) {
+            )
+        {
             compose_agent_error_detail(detail, self.final_screen_tail(&id).as_deref())
         } else {
             detail
         };
+        // The hook state must still be dropped for a quota block. Keeping a
+        // live `Idle` would make `compose_window_state_with_active_session`
+        // resurrect the pane as Idle — a healthy-looking agent — and the quota
+        // overlay below only rewrites the two terminal states.
         if matches!(status, WindowProcessStatus::Error) {
             self.window_hook_states.remove(&id);
         }
@@ -664,19 +809,15 @@ impl AppRuntime {
         ) {
             self.clear_runtime_approval_latch_without_status(&id, publish_to_daemon);
         }
-        // The `window_hook_states == Some(Stopped)` condition is unreachable
-        // (`window_state_for_hook_event` only returns `Idle` / `Running`), so
-        // in practice an exiting agent window is never auto-closed. That is
-        // deliberate for the pane itself — a stopped agent window stays on the
-        // canvas so its final output remains readable
-        // (`app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics`,
-        // #3274). SPEC-3431 FR-067 keeps that behaviour and fixes the separate
-        // bug it was masking: the Issue Monitor was never told either, so the
-        // launch's slot stayed held. Visibility and accounting are decided
-        // independently below.
+        // Structural auto-close belongs to the exact local PTY receipt. Hook
+        // Stop and daemon status events have no process-local incarnation and
+        // can arrive after a same-address, same-Session successor exists.
+        // Reader/display errors also lack a confirmed child exit. Only
+        // `handle_runtime_status_event`, after its current-incarnation fence,
+        // sets both authority bits below.
         let should_auto_close = exit_confirmed
-            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
-            && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
+            && exact_runtime_incarnation
+            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
@@ -686,22 +827,22 @@ impl AppRuntime {
             }
         }
         if should_auto_close {
-            self.clear_agent_window_startup_restore(&id);
-            self.stop_window_runtime(&id);
-            self.remove_window_state_tracking(&id);
-            // SPEC-3214 FR-002: `stop_window_runtime` above killed and joined
-            // the PTY, so a pending intake worktree can be destroyed now.
-            let cleanup_events = self.take_ephemeral_worktree_cleanup_events();
             if !close_window_from_workspace(
                 &mut self.tabs,
                 &mut self.window_lookup,
                 &mut self.window_details,
                 &id,
             ) {
-                return cleanup_events;
+                return Vec::new();
             }
+            self.queue_accepted_window_close_finalizer(
+                &id,
+                issue_monitor_project_root.clone(),
+                false,
+                None,
+            );
             let _ = self.persist();
-            let mut events = cleanup_events;
+            let mut events = Vec::new();
             // SPEC-3431 FR-067: auto-close reaps the window itself instead of
             // going through `close_window_events`, so it also owes the Issue
             // Monitor the notification that path would have sent. Without it
@@ -720,7 +861,10 @@ impl AppRuntime {
                     ));
                 }
             }
-            self.push_workspace_and_active_work_projection_broadcasts(&mut events);
+            events.push(self.workspace_state_broadcast());
+            if let Some(event) = self.in_memory_active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
+            }
             return events;
         }
         if keep_active_agent_session_for_recovery {
@@ -779,12 +923,18 @@ impl AppRuntime {
         // the Monitor decides completion from the PR, not from an exit code,
         // so the only claim being made here is "this launch is over". Naming
         // it a success would be the lie, not naming it a failure.
+        //
+        // Issue #3616: a quota block composes to `Waiting` (the pane is not
+        // done), so it is named here explicitly. The slot still has to be
+        // released — the process is gone — but the Monitor receives it as a
+        // typed hold rather than an attempt-consuming failure.
         if exit_confirmed
             && is_agent_window
-            && matches!(
-                composed_status,
-                WindowProcessStatus::Error | WindowProcessStatus::Stopped
-            )
+            && (quota_notice.is_some()
+                || matches!(
+                    composed_status,
+                    WindowProcessStatus::Error | WindowProcessStatus::Stopped
+                ))
         {
             let default_message = if composed_status == WindowProcessStatus::Error {
                 "Agent entered error state"
@@ -839,17 +989,294 @@ impl AppRuntime {
     /// into one detail-sized string. `None` when the window has no runtime
     /// (already torn down) or the screen is blank (Issue #3274).
     fn final_screen_tail(&self, id: &str) -> Option<String> {
+        self.screen_tail(id, AGENT_ERROR_TAIL_LINES, " ")
+    }
+
+    fn screen_tail(&self, id: &str, lines: usize, separator: &str) -> Option<String> {
         let runtime = self.runtimes.get(id)?;
         let pane = runtime.pane.lock().ok()?;
         let contents = pane.screen().contents();
-        let lines: Vec<&str> = contents
+        let screen_lines: Vec<&str> = contents
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
-        let start = lines.len().saturating_sub(AGENT_ERROR_TAIL_LINES);
-        let tail = lines[start..].join(" ");
+        let start = screen_lines.len().saturating_sub(lines);
+        let tail = screen_lines[start..].join(separator);
         (!tail.is_empty()).then_some(tail)
+    }
+
+    /// Copy this window's PTY exit receipt onto its durable Session
+    /// (Issue #3341).
+    ///
+    /// Best effort by design: a window with no agent session, no installed
+    /// runtime, or no observed child exit simply has nothing to record, and a
+    /// failed write must never change how the exit itself is handled.
+    fn persist_agent_session_exit_receipt(&self, window_id: &str) {
+        let Some(session_id) = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|session| session.session_id.clone())
+        else {
+            return;
+        };
+        let Some(exit) = self
+            .runtimes
+            .get(window_id)
+            .and_then(|runtime| runtime.pane.lock().ok())
+            .and_then(|pane| pane.last_exit().cloned())
+        else {
+            return;
+        };
+        let receipt = gwt_agent::SessionExitReceipt {
+            exit_code: exit.exit_code,
+            signal: exit.signal,
+            exited_at: exit.observed_at.into(),
+        };
+        if let Err(error) =
+            gwt_agent::persist_session_exit(&self.sessions_dir, &session_id, &receipt)
+        {
+            tracing::warn!(
+                window_id = %window_id,
+                session_id = %session_id,
+                error = %error,
+                "failed to persist the agent PTY exit receipt"
+            );
+        }
+    }
+
+    /// Issue #3616: fold one live-screen observation into the quota state for
+    /// `window_id`, returning whatever the resulting state change must publish.
+    ///
+    /// `screen` is the pane's currently rendered screen, or `None` when it has
+    /// no runtime to read. Idempotent: a notice that is already a confirmed hold
+    /// produces nothing, so this can be called on every output chunk.
+    pub(crate) fn observe_provider_quota_notice(
+        &mut self,
+        window_id: &str,
+        screen: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        if self.provider_quota_holds.contains_key(window_id) {
+            return Vec::new();
+        }
+        if !matches!(
+            self.window_preset(window_id),
+            Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
+        ) {
+            return Vec::new();
+        }
+        let notice = screen.and_then(|screen| {
+            gwt_core::usage::detect_provider_limit_notice(
+                screen,
+                &now.with_timezone(&chrono::Local),
+            )
+        });
+        let Some(notice) = notice else {
+            self.provider_quota_candidates.remove(window_id);
+            return Vec::new();
+        };
+        let agent_id = self.pane_agent_id(window_id);
+        let first_seen = self
+            .provider_quota_candidates
+            .entry(window_id.to_string())
+            .or_insert_with(|| super::ProviderQuotaCandidate { first_seen: now })
+            .first_seen;
+        // Issue #3923 AC-3: the poller reading the account as usable
+        // contradicts the screen, so the settle window alone must not promote
+        // the notice. The candidate stays pending: a later poller reading can
+        // still corroborate it, and the notice leaving the screen abandons it.
+        if self.provider_reports_healthy_for_pane(agent_id.as_deref(), window_id) {
+            return Vec::new();
+        }
+        let corroborated = agent_id.as_deref().is_some_and(|agent_id| {
+            gwt::issue_monitor::provider_limit_reached_for_agent(
+                agent_id,
+                &self.provider_usage_accounts,
+            )
+        });
+        let settled = now
+            .signed_duration_since(first_seen)
+            .num_seconds()
+            .ge(&PROVIDER_QUOTA_SETTLE_SECS);
+        if !corroborated && !settled {
+            return Vec::new();
+        }
+        self.provider_quota_candidates.remove(window_id);
+        // Millisecond precision so a hold formed right after an operator's
+        // clear is ordered after that release instead of sharing its second.
+        let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+            &now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            window_id,
+            screen.unwrap_or_default(),
+        )
+        .with_poller(agent_id.as_deref(), &self.provider_usage_accounts);
+        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref(), evidence)
+    }
+
+    /// Issue #3923 AC-3: whether the usage poller currently contradicts a
+    /// quota notice on `window_id`'s screen. Logged when it does, because the
+    /// suppressed hold is itself the diagnosis of a stale notice.
+    fn provider_reports_healthy_for_pane(&self, agent_id: Option<&str>, window_id: &str) -> bool {
+        let healthy = agent_id.is_some_and(|agent_id| {
+            gwt::issue_monitor::provider_reports_healthy_for_agent(
+                agent_id,
+                &self.provider_usage_accounts,
+            )
+        });
+        if healthy {
+            tracing::info!(
+                window_id = %window_id,
+                agent_id = ?agent_id,
+                "provider limit notice on screen but the usage poller reads the account as usable; not holding (Issue #3923)"
+            );
+        }
+        healthy
+    }
+
+    /// Latch the block, project the pane as waiting, and tell the Monitor the
+    /// slot is free.
+    ///
+    /// The slot is released even though the process may still be alive: the
+    /// account is out for as long as the provider says, and holding a slot for
+    /// days stops the whole queue at the default `max_active = 1`. The pane
+    /// stays on screen with its session intact so the same conversation can be
+    /// resumed after the reset.
+    fn commit_provider_quota_hold(
+        &mut self,
+        window_id: &str,
+        notice: &gwt_core::usage::ProviderLimitNotice,
+        agent_id: Option<&str>,
+        evidence: gwt::IssueMonitorProviderQuotaHoldEvidence,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(
+            window_id = %window_id,
+            agent_id = ?agent_id,
+            screen_text = ?evidence.screen_text,
+            poller_state = ?evidence.poller_state,
+            poller_limit_reached = ?evidence.poller_limit_reached,
+            poller_windows = ?evidence.poller_windows,
+            "provider quota hold committed from the pane screen (Issue #3923)"
+        );
+        let failure = provider_usage_limit_failure(notice, agent_id, Some(evidence));
+        let detail = gwt_core::usage::describe_provider_limit_notice(
+            notice,
+            Some(provider_label(notice, agent_id).as_str()),
+        );
+        self.provider_quota_holds
+            .insert(window_id.to_string(), failure);
+        self.window_details
+            .insert(window_id.to_string(), detail.clone());
+        let mut events = Vec::new();
+        if self.window_preset(window_id) == Some(WindowPreset::Agent) {
+            let session_mode = self.issue_monitor_session_mode_for_window(window_id);
+            if let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) {
+                events.extend(self.issue_monitor_agent_failed_events_with_mode(
+                    &project_root,
+                    window_id,
+                    &detail,
+                    session_mode,
+                ));
+            }
+        }
+        let _ = self.persist();
+        if let Some(composed) = self.recompute_window_state(window_id) {
+            events.extend(Self::status_events(
+                window_id.to_string(),
+                composed,
+                Some(detail),
+            ));
+        }
+        events
+    }
+
+    /// Issue #3616: classify this pane's own live screen. The production entry
+    /// point — the output path and the poller sweep both go through here, so a
+    /// test can exercise the same read a real pty feeds.
+    pub(crate) fn observe_provider_quota_notice_from_screen(
+        &mut self,
+        window_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let screen = self.screen_tail(window_id, QUOTA_NOTICE_TAIL_LINES, "\n");
+        self.observe_provider_quota_notice(window_id, screen.as_deref(), now)
+    }
+
+    /// Issue #3616: re-check every pending candidate against its pane's current
+    /// screen.
+    ///
+    /// A blocked pane emits no further output, so the output path alone would
+    /// never reach the settle deadline. This runs on the usage-poller tick,
+    /// which is also where fresh corroboration arrives.
+    pub(crate) fn sweep_provider_quota_candidates(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let pending: Vec<String> = self.provider_quota_candidates.keys().cloned().collect();
+        let mut events = Vec::new();
+        for window_id in pending {
+            events.extend(self.observe_provider_quota_notice_from_screen(&window_id, now));
+        }
+        events
+    }
+
+    /// Issue #3616: the agent this pane is running, live entry first and the
+    /// persisted window second.
+    ///
+    /// PTY teardown removes the active session before the failure is published,
+    /// so the persisted fallback is what keeps the account attributable at the
+    /// moment it matters — the same ordering `approval_prompt_provider` uses.
+    fn pane_agent_id(&self, window_id: &str) -> Option<String> {
+        self.active_agent_sessions
+            .get(window_id)
+            .map(|session| session.agent_id.clone())
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                self.tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?
+                    .agent_id
+                    .clone()
+            })
+    }
+
+    /// Issue #3616: whether this exit is the provider saying it is out of
+    /// quota.
+    ///
+    /// Both the exit detail and the final screen are searched. The detail alone
+    /// is not enough (a clean exit carries only "Process exited"), and the
+    /// screen alone is not enough either (a launch-path failure reports through
+    /// the detail before a pane exists). Only a confirmed exit of an agent pane
+    /// qualifies — a live agent that merely *rendered* the sentence is still
+    /// working.
+    fn provider_quota_notice_for_exit(
+        &self,
+        id: &str,
+        status: WindowProcessStatus,
+        exit_confirmed: bool,
+        detail: &Option<String>,
+    ) -> Option<gwt_core::usage::ProviderLimitNotice> {
+        if !exit_confirmed
+            || !matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+            || !matches!(
+                self.window_preset(id),
+                Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
+            )
+        {
+            return None;
+        }
+        let mut haystack = String::new();
+        if let Some(detail) = detail.as_deref() {
+            haystack.push_str(detail);
+            haystack.push('\n');
+        }
+        if let Some(tail) = self.screen_tail(id, QUOTA_NOTICE_TAIL_LINES, "\n") {
+            haystack.push_str(&tail);
+        }
+        gwt_core::usage::detect_provider_limit_notice(&haystack, &chrono::Local::now())
     }
 
     pub(crate) fn handle_runtime_hook_event(
@@ -945,6 +1372,13 @@ impl AppRuntime {
             return events;
         };
         self.recoverable_agent_error_windows.remove(&window_id);
+        // Issue #3616: a hook arrival is proof the agent is running, so any
+        // quota hold or pending candidate for this pane is stale. This is also
+        // what makes the live-screen classifier safe: an agent whose own output
+        // quotes the provider's sentence keeps running tools, and every tool
+        // fires a hook well inside the settle window.
+        self.provider_quota_holds.remove(&window_id);
+        self.provider_quota_candidates.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         if !hook_state_changed && !approval_wait_cleared {
@@ -961,29 +1395,11 @@ impl AppRuntime {
             .map(str::trim)
             .filter(|message| !message.is_empty())
             .map(str::to_string);
-        let should_auto_close = should_auto_close_agent_window(
-            &self.active_agent_sessions,
-            &window_id,
-            &composed_state,
-        );
-        if should_auto_close {
-            self.clear_agent_window_startup_restore(&window_id);
-            self.stop_window_runtime(&window_id);
-            self.remove_window_state_tracking(&window_id);
-            // SPEC-3214 FR-002: PTY killed and joined above — safe to destroy
-            // a pending intake worktree.
-            events.extend(self.take_ephemeral_worktree_cleanup_events());
-            if close_window_from_workspace(
-                &mut self.tabs,
-                &mut self.window_lookup,
-                &mut self.window_details,
-                &window_id,
-            ) {
-                let _ = self.persist();
-                self.push_workspace_and_active_work_projection_broadcasts(&mut events);
-            }
-            return events;
-        }
+        // RuntimeHook events may carry a Host-issued Session id, but no exact
+        // process-local window lifecycle generation. A late predecessor Stop
+        // can therefore name a same-address, same-Session successor. Surface
+        // the terminal state, but leave destructive close to an
+        // incarnation-fenced PTY status or an explicit Host close.
         if gwt::window_state::is_live_agent_hook_state(hook_state) {
             self.window_details.remove(&window_id);
         } else if let Some(detail) = hook_detail.as_ref() {

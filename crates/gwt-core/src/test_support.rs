@@ -104,6 +104,40 @@ impl Drop for ScopedEnvVar {
     }
 }
 
+/// Materialize `contents` at `path` as an executable script (mode 0755)
+/// without this process ever holding a writable descriptor to it.
+///
+/// Issue #3521: a test binary writes a fake `git` / `gh` and executes it while
+/// sibling tests fork children of their own. A child forked while the
+/// writable descriptor is still open inherits it until its own exec, and on
+/// Linux `execve` of that file fails with `ETXTBSY` for as long as the
+/// descriptor exists. Unique names, explicit drops, and `sync_all` do not
+/// close that window; never opening the file for writing in this process
+/// does. The file is therefore written by a short-lived `/bin/sh` child that
+/// has exited before this call returns.
+///
+/// `contents` travels as one argument, so keep scripts well below the
+/// platform's single-argument limit (128 KiB on Linux).
+#[cfg(unix)]
+pub fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
+    let output = crate::process::hidden_command("/bin/sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(contents)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "/bin/sh could not materialize {} ({}): {}",
+        path.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
 /// Real executable fixture for Windows-only integration tests of the Bun
 /// global Claude Code layout reported in Issue #3290.
 #[cfg(windows)]
@@ -913,6 +947,78 @@ fn percent_decode_registry_path(path: &str) -> String {
     String::from_utf8_lossy(&decoded).to_ascii_lowercase()
 }
 
+/// Summarize raw PTY output for wait-timeout diagnostics (Issue #3656 AC-1).
+///
+/// Terminal output is dominated by ANSI escape sequences that make Debug
+/// output unreadable in CI logs. Strip CSI/OSC/escape sequences and
+/// non-printing control bytes, report the total received byte count, and
+/// bound the sanitized text to its newest tail so panic messages stay
+/// readable while still letting host saturation be distinguished from
+/// product bugs after the fact.
+pub fn summarize_pty_output_for_diagnostics(bytes: &[u8]) -> String {
+    const TAIL_CHARS: usize = 2_000;
+    if bytes.is_empty() {
+        return "no PTY output received".to_string();
+    }
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut sanitized = String::with_capacity(decoded.len());
+    let mut chars = decoded.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.next() {
+                // CSI: parameter and intermediate bytes end at a final byte.
+                Some('[') => {
+                    for follower in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&follower) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: terminated by BEL or ST (ESC \).
+                Some(']') => {
+                    while let Some(follower) = chars.next() {
+                        if follower == '\u{7}' {
+                            break;
+                        }
+                        if follower == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // nF escape (e.g. charset selection): intermediates then final.
+                Some(follower) if ('\u{20}'..='\u{2f}').contains(&follower) => {
+                    for next in chars.by_ref() {
+                        if !('\u{20}'..='\u{2f}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // Two-byte escape: the follower is consumed with the escape.
+                Some(_) | None => {}
+            }
+            continue;
+        }
+        if ch == '\n' || ch == '\t' || !ch.is_control() {
+            sanitized.push(ch);
+        }
+    }
+    let sanitized = sanitized.trim();
+    let total_chars = sanitized.chars().count();
+    if total_chars <= TAIL_CHARS {
+        format!(
+            "{} raw bytes received; sanitized output: {sanitized:?}",
+            bytes.len()
+        )
+    } else {
+        let tail: String = sanitized.chars().skip(total_chars - TAIL_CHARS).collect();
+        format!(
+            "{} raw bytes received; sanitized output (last {TAIL_CHARS} of {total_chars} chars): {tail:?}",
+            bytes.len()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +1030,65 @@ mod tests {
         assert_eq!(
             percent_decode_registry_path("/%40Scope%2FPackage?cache=1"),
             "/@scope/package"
+        );
+    }
+
+    #[test]
+    fn summarize_pty_output_for_diagnostics_strips_escape_sequences() {
+        let raw =
+            b"\x1b[2J\x1b[31mnpm http fetch GET 200\x1b[0m\r\n\x1b]0;title\x07next line\x1b[6n";
+        let summary = summarize_pty_output_for_diagnostics(raw);
+        assert!(
+            summary.contains("npm http fetch GET 200"),
+            "sanitized text must survive: {summary}"
+        );
+        assert!(
+            summary.contains("next line"),
+            "text after an OSC sequence must survive: {summary}"
+        );
+        assert!(
+            !summary.contains('\u{1b}'),
+            "escape bytes must be stripped: {summary:?}"
+        );
+        assert!(
+            !summary.contains("[31m") && !summary.contains("[2J") && !summary.contains("[6n"),
+            "CSI parameter/final bytes must be stripped with their sequence: {summary}"
+        );
+        assert!(
+            !summary.contains("0;title"),
+            "OSC payloads must be stripped: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("{} raw bytes", raw.len())),
+            "the summary must report the total received byte count: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_pty_output_for_diagnostics_bounds_long_output_to_a_tail() {
+        let mut raw = vec![b'a'; 10_000];
+        raw.extend_from_slice(b"phase75-tail-end");
+        let summary = summarize_pty_output_for_diagnostics(&raw);
+        assert!(
+            summary.contains("phase75-tail-end"),
+            "the newest output must stay visible in the tail: {summary}"
+        );
+        assert!(
+            summary.len() < 4_000,
+            "the summary must stay bounded, got {} chars",
+            summary.len()
+        );
+        assert!(
+            summary.contains("10016 raw bytes"),
+            "the summary must report the total received byte count: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_pty_output_for_diagnostics_reports_empty_input_explicitly() {
+        assert_eq!(
+            summarize_pty_output_for_diagnostics(b""),
+            "no PTY output received"
         );
     }
 
@@ -943,5 +1108,80 @@ mod tests {
         }
 
         assert!(gwt_home_override().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_executable_script_materializes_a_runnable_script() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("fake-tool");
+        let body = "#!/bin/sh\nprintf '%s %s\\n' \"issue-3521\" \"$1\"\n";
+
+        write_executable_script(&script, body).expect("write script");
+
+        assert_eq!(std::fs::read_to_string(&script).expect("read back"), body);
+        let output = crate::process::hidden_command(&script)
+            .arg("arg")
+            .output()
+            .expect("run script");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "issue-3521 arg\n");
+    }
+
+    /// Issue #3521: a child forked by another thread while this process holds
+    /// the script open for writing inherits that descriptor until its own
+    /// exec, and Linux refuses `execve` of the script with `ETXTBSY` for as
+    /// long as the descriptor exists. The helper must never open that window.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_executable_script_is_immediately_executable_under_concurrent_forks() {
+        use std::{
+            os::unix::process::CommandExt,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut command = crate::process::hidden_command("/bin/true");
+                        // Force the fork path and keep the child inside its
+                        // fork-to-exec window, holding every inherited
+                        // descriptor the way a slow child does under CI load.
+                        // SAFETY: `nanosleep` is async-signal-safe, so the
+                        // forked child only sleeps before it execs.
+                        unsafe {
+                            command.pre_exec(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                                Ok(())
+                            });
+                        }
+                        let _ = command.status();
+                    }
+                })
+            })
+            .collect();
+
+        for index in 0..120 {
+            let script = temp.path().join(format!("script-{index}"));
+            write_executable_script(&script, "#!/bin/sh\nexit 0\n").expect("write script");
+            let status = crate::process::hidden_command(&script)
+                .status()
+                .unwrap_or_else(|error| {
+                    panic!("script {index} must run right after it was written: {error}")
+                });
+            assert!(status.success(), "script {index} exited with {status}");
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for forker in forkers {
+            forker.join().expect("forker thread");
+        }
     }
 }

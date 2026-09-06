@@ -438,7 +438,29 @@ pub struct Session {
     pub last_hook_event_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_stop_at: Option<DateTime<Utc>>,
+    /// Exit code reported by the agent's PTY child the last time it was reaped
+    /// (Issue #3341). `1` alongside [`Self::last_exit_signal`] means signal
+    /// death; `0` with no signal means the agent shut itself down cleanly,
+    /// which is what a mid-turn disappearance looks like from gwt's side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_code: Option<u32>,
+    /// Platform signal name that terminated the last PTY child, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_signal: Option<String>,
+    /// When the exit was observed, not when it was persisted — the gap between
+    /// the two has already been misread as a much later death.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exited_at: Option<DateTime<Utc>>,
     pub display_name: String,
+}
+
+/// Durable receipt of one agent PTY child exit, mirroring
+/// `gwt_terminal::PaneExit` across the crate boundary (Issue #3341).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionExitReceipt {
+    pub exit_code: u32,
+    pub signal: Option<String>,
+    pub exited_at: DateTime<Utc>,
 }
 
 /// Lightweight runtime state updated by hook events while the PTY is alive.
@@ -537,6 +559,9 @@ impl Session {
             last_hook_event: None,
             last_hook_event_at: None,
             last_completed_stop_at: None,
+            last_exit_code: None,
+            last_exit_signal: None,
+            last_exited_at: None,
             display_name,
         }
     }
@@ -635,6 +660,19 @@ impl Session {
         ) {
             self.last_activity_at = now;
         }
+    }
+
+    /// Record how this session's PTY child ended (Issue #3341).
+    ///
+    /// Deliberately leaves [`Self::status`] alone: the exit receipt is
+    /// evidence about the child process, while the status is decided by the
+    /// teardown path that also classifies recovery. Writing both here would
+    /// let a late receipt overwrite a status the runtime already settled.
+    pub fn record_process_exit(&mut self, receipt: &SessionExitReceipt) {
+        self.last_exit_code = Some(receipt.exit_code);
+        self.last_exit_signal = receipt.signal.clone();
+        self.last_exited_at = Some(receipt.exited_at);
+        self.updated_at = Utc::now();
     }
 
     /// Persist that a managed runtime hook was observed for this session.
@@ -1286,6 +1324,60 @@ where
             write_session_toml_atomic(&path, &after)?;
         }
         Ok(session)
+    })
+}
+
+/// Mutate one Session only when its complete durable snapshot still matches
+/// the caller's preflight value.
+///
+/// The callback runs while the per-Session lock is held. Callers may use this
+/// to coordinate an owner-ledger commit with the Session publication, but
+/// must acquire the owner lease before calling this helper. The Session write
+/// happens only after the callback succeeds; a stale replacement reports
+/// [`SessionSnapshotUpdateOutcome::SnapshotChanged`] without invoking the
+/// callback or changing durable bytes.
+#[must_use]
+#[derive(Debug)]
+pub enum SessionSnapshotUpdateOutcome<T> {
+    SnapshotChanged,
+    SnapshotUnreadable(io::Error),
+    Updated(T),
+    MutationFailed(io::Error),
+}
+
+pub fn update_session_if_unchanged_with<T, F>(
+    sessions_dir: &Path,
+    expected: &Session,
+    mutate: F,
+) -> io::Result<SessionSnapshotUpdateOutcome<T>>
+where
+    F: FnOnce(&mut Session) -> io::Result<T>,
+{
+    validate_session_id_path_component(&expected.id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let expected_content = serialize_session_toml(expected)?;
+    with_session_path_lease(sessions_dir, &expected.id, |state| {
+        let path = session_file_path(sessions_dir, &expected.id);
+        let mut session = match state {
+            SessionPathState::Present(session) => *session,
+            SessionPathState::Missing => return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged),
+            SessionPathState::Error(error) => {
+                return Ok(SessionSnapshotUpdateOutcome::SnapshotUnreadable(error))
+            }
+        };
+        if serialize_session_toml(&session)? != expected_content {
+            return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged);
+        }
+        let before = serialize_session_toml(&session)?;
+        let value = match mutate(&mut session) {
+            Ok(value) => value,
+            Err(error) => return Ok(SessionSnapshotUpdateOutcome::MutationFailed(error)),
+        };
+        let after = serialize_session_toml(&session)?;
+        if after != before {
+            write_session_toml_atomic(&path, &after)?;
+        }
+        Ok(SessionSnapshotUpdateOutcome::Updated(value))
     })
 }
 
@@ -1955,6 +2047,24 @@ pub fn persist_session_status(
     runtime.save(&runtime_path)
 }
 
+/// Persist how one session's PTY child ended (Issue #3341).
+///
+/// Separate from [`persist_session_status`] on purpose: the status write is
+/// decided by the teardown path and happens for explicit stops too, while this
+/// receipt is only written when a child was actually reaped. Both use
+/// [`update_session`], so calling them in either order preserves both values.
+pub fn persist_session_exit(
+    sessions_dir: &Path,
+    session_id: &str,
+    receipt: &SessionExitReceipt,
+) -> std::io::Result<()> {
+    update_session(sessions_dir, session_id, |session| {
+        session.record_process_exit(receipt);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 fn validate_exact_runtime_proof_request(
     expected: &SessionExecutionIdentity,
     runtime_incarnation: u64,
@@ -2109,6 +2219,47 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
     )?;
     runtime.save(&runtime_path)?;
     Ok(true)
+}
+
+/// Clear or restore startup window recreation while the caller already holds
+/// the exact producing Session lease. A replaced or unreadable same-id Session
+/// is retained byte-for-byte and returns `false`.
+pub fn persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    restore: bool,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    let Some(mut session) = exact_durable_session_under_lease(sessions_dir, expected)? else {
+        return Ok(false);
+    };
+    if session.restore_window_on_startup == restore {
+        return Ok(true);
+    }
+    session.restore_window_on_startup = restore;
+    session.updated_at = Utc::now();
+    let content = serialize_session_toml(&session)?;
+    write_session_toml_atomic(
+        &session_file_path(sessions_dir, &expected.session_id),
+        &content,
+    )?;
+    Ok(true)
+}
+
+/// Process-local convenience wrapper for callers that do not already hold the
+/// Session lease.
+pub fn persist_session_restore_window_on_startup_if_execution_identity_matches(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    restore: bool,
+) -> io::Result<bool> {
+    with_session_path_lease(sessions_dir, &expected.session_id, |_| {
+        persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+            sessions_dir,
+            expected,
+            restore,
+        )
+    })
 }
 
 /// Persist terminal status for an exact runtime namespace while the caller
@@ -2458,6 +2609,105 @@ display_name = "Codex"
         session.repo_hash = Some("repo-hash-2359".to_string());
         session.linked_issue_number = Some(2359);
         session
+    }
+
+    /// Issue #3341: an agent that dies mid-turn leaves nothing behind once the
+    /// pane is gone. The exit receipt has to reach the durable Session so it
+    /// survives a gwt restart and can be read back during triage.
+    #[test]
+    fn record_process_exit_keeps_a_clean_exit_receipt() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let exited_at = Utc::now();
+
+        session.record_process_exit(&SessionExitReceipt {
+            exit_code: 0,
+            signal: None,
+            exited_at,
+        });
+
+        assert_eq!(session.last_exit_code, Some(0));
+        assert_eq!(session.last_exit_signal, None);
+        assert_eq!(session.last_exited_at, Some(exited_at));
+    }
+
+    #[test]
+    fn record_process_exit_keeps_the_terminating_signal() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+
+        session.record_process_exit(&SessionExitReceipt {
+            exit_code: 1,
+            signal: Some("Killed: 9".to_string()),
+            exited_at: Utc::now(),
+        });
+
+        assert_eq!(session.last_exit_signal.as_deref(), Some("Killed: 9"));
+    }
+
+    #[test]
+    fn new_session_has_no_exit_receipt() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+
+        assert_eq!(session.last_exit_code, None);
+        assert_eq!(session.last_exit_signal, None);
+        assert_eq!(session.last_exited_at, None);
+    }
+
+    /// Issue #3341: the receipt must round-trip through the TOML file, since
+    /// the whole point is evidence that outlives the process that observed it.
+    #[test]
+    fn persist_session_exit_round_trips_through_the_session_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = session_with_execution_owner();
+        session.save(dir.path()).expect("save Session");
+        let exited_at = Utc::now();
+
+        persist_session_exit(
+            dir.path(),
+            &session.id,
+            &SessionExitReceipt {
+                exit_code: 0,
+                signal: None,
+                exited_at,
+            },
+        )
+        .expect("persist exit receipt");
+
+        let reloaded = Session::load(&session_file_path(dir.path(), &session.id))
+            .expect("reload persisted Session");
+        assert_eq!(reloaded.last_exit_code, Some(0));
+        assert_eq!(reloaded.last_exit_signal, None);
+        assert_eq!(
+            reloaded.last_exited_at.map(|at| at.timestamp_millis()),
+            Some(exited_at.timestamp_millis())
+        );
+    }
+
+    /// Issue #3341: the exit receipt and the Stopped status are written by two
+    /// separate calls on the same teardown path, so neither may erase the
+    /// other.
+    #[test]
+    fn persist_session_exit_and_status_do_not_overwrite_each_other() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = session_with_execution_owner();
+        session.save(dir.path()).expect("save Session");
+
+        persist_session_exit(
+            dir.path(),
+            &session.id,
+            &SessionExitReceipt {
+                exit_code: 7,
+                signal: None,
+                exited_at: Utc::now(),
+            },
+        )
+        .expect("persist exit receipt");
+        persist_session_status(dir.path(), &session.id, AgentStatus::Stopped)
+            .expect("persist stopped status");
+
+        let reloaded = Session::load(&session_file_path(dir.path(), &session.id))
+            .expect("reload persisted Session");
+        assert_eq!(reloaded.status, AgentStatus::Stopped);
+        assert_eq!(reloaded.last_exit_code, Some(7));
     }
 
     #[test]
@@ -2931,6 +3181,90 @@ display_name = "Codex"
             .expect("inspect a genuinely missing Session under its lease");
 
         assert!(observed);
+    }
+
+    #[test]
+    fn exact_snapshot_update_is_atomic_fail_closed_and_preserves_noop_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::new(dir.path(), "work/exact-update", AgentId::Codex);
+        session.id = "exact-snapshot-update".to_string();
+        session.save(dir.path()).expect("save Session");
+        let path = dir.path().join(format!("{}.toml", session.id));
+        let original = fs::read_to_string(&path).expect("read Session");
+        fs::write(&path, format!("# retained comment\n{original}"))
+            .expect("add non-semantic formatting");
+        let expected = Session::load(&path).expect("load exact expected Session");
+        let no_op_bytes = fs::read(&path).expect("read no-op baseline");
+
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |_| Ok(()))
+                .expect("run exact no-op"),
+            SessionSnapshotUpdateOutcome::Updated(())
+        ));
+        assert_eq!(
+            fs::read(&path).expect("read no-op result"),
+            no_op_bytes,
+            "a semantic no-op must retain the original TOML bytes"
+        );
+
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |current| {
+                current.display_name = "Adopting Session".to_string();
+                Ok(())
+            })
+            .expect("persist exact mutation"),
+            SessionSnapshotUpdateOutcome::Updated(())
+        ));
+        let mutated = Session::load(&path).expect("load mutated Session");
+        assert_eq!(mutated.display_name, "Adopting Session");
+
+        let callback_ran = std::cell::Cell::new(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify stale snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotChanged
+        ));
+        assert!(!callback_ran.get());
+
+        let before_error = fs::read(&path).expect("read callback-error baseline");
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |current| {
+                current.display_name = "must not persist".to_string();
+                Err::<(), _>(io::Error::other("simulated mutation failure"))
+            })
+            .expect("surface callback error separately"),
+            SessionSnapshotUpdateOutcome::MutationFailed(error)
+                if error.to_string() == "simulated mutation failure"
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before_error);
+
+        fs::write(&path, b"broken = [").expect("corrupt Session");
+        callback_ran.set(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify unreadable snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotUnreadable(_)
+        ));
+        assert!(!callback_ran.get());
+        assert_eq!(fs::read(&path).unwrap(), b"broken = [");
+
+        fs::remove_file(&path).expect("remove Session");
+        callback_ran.set(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify missing snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotChanged
+        ));
+        assert!(!callback_ran.get());
     }
 
     #[test]
@@ -5114,6 +5448,52 @@ display_name = "Claude Code"
     }
 
     #[test]
+    fn exact_restore_persistence_updates_only_the_matching_execution_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.restore_window_on_startup = true;
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        assert!(
+            persist_session_restore_window_on_startup_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                false,
+            )
+            .expect("clear exact restore state")
+        );
+        let durable = Session::load(&dir.path().join(format!("{}.toml", session.id)))
+            .expect("load updated Session");
+        assert!(!durable.restore_window_on_startup);
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.restore_window_on_startup = true;
+        replacement.save(dir.path()).expect("save replacement");
+        let replacement_path = dir.path().join(format!("{}.toml", session.id));
+        let replacement_bytes = fs::read(&replacement_path).expect("read replacement bytes");
+
+        assert!(
+            !persist_session_restore_window_on_startup_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                false,
+            )
+            .expect("reject replacement")
+        );
+        assert_eq!(
+            fs::read(replacement_path).expect("retain replacement bytes"),
+            replacement_bytes
+        );
+    }
+
+    #[test]
     fn runtime_state_save_overwrites_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime").join("session-123.json");
@@ -5206,6 +5586,30 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn grok_build_session_roundtrips_launch_identity_and_resume_args() {
+        let config = crate::AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .working_dir("/tmp/worktree")
+            .branch("feature/grok")
+            .session_mode(crate::SessionMode::Resume)
+            .resume_session_id("grok-session-42")
+            .build();
+        let session = Session::from_launch_config("/tmp/worktree", "feature/grok", &config);
+
+        assert_eq!(session.agent_id, AgentId::GrokBuild);
+        assert_eq!(session.launch_command, "grok");
+        assert_eq!(
+            session.launch_args,
+            ["--no-alt-screen", "--resume", "grok-session-42"]
+        );
+        assert_eq!(session.session_mode, crate::SessionMode::Resume);
+
+        let encoded = toml::to_string(&session).expect("serialize Grok Build session");
+        let decoded: Session = toml::from_str(&encoded).expect("deserialize Grok Build session");
+        assert_eq!(decoded.agent_id, AgentId::GrokBuild);
+        assert_eq!(decoded.launch_args, session.launch_args);
     }
 
     #[cfg(windows)]
