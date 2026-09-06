@@ -7,9 +7,10 @@
 // never dedups the callers' singleton ids — the history is one row per notice.
 //
 // The list is the shared toast-host stack mounted inside the drawer body, so
-// cap / newest-on-top / dropped / per-item dismiss / clear-all / level rim
-// come from the primitive. The only new state is the unread set (FR-014):
-// rows recorded while the drawer is closed, cleared when it opens.
+// cap / newest-on-top / dropped / per-item dismiss / clear-all come from the
+// primitive; this module adds the triage decoration (severity marker + clock,
+// Issue #3979). The only new state is the unread set (FR-014): rows recorded
+// while the drawer is closed, cleared when it opens.
 //
 // History is session-scoped and in-memory (FR-013); rows leave only through
 // ×, clear-all or the retained-count cap.
@@ -20,6 +21,37 @@ import { createFocusTrap } from "./focus-trap.js";
 const DEFAULT_MAX_RETAINED = 100;
 const HISTORY_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
 const BADGE_MAX = 99;
+
+// Issue #3979 (user ruling 2026-09-05) — triage rows. The drawer is the surface
+// where unhandled notices get CLEARED, not read, so a row's first job is to say
+// how urgent it is. The six caller-facing levels collapse onto three actionable
+// severities plus a neutral rest state, and every severity is encoded twice:
+// a color (never the accent) and a marker shape + glyph, so the row stays
+// readable in grayscale and under forced-colors.
+const SEVERITY_BY_LEVEL = {
+  error: "critical",
+  warn: "warning",
+  success: "good",
+  info: "neutral",
+  done: "neutral",
+  neutral: "neutral",
+};
+const SEVERITY_GLYPH = {
+  critical: "!",
+  warning: "▲",
+  good: "✓",
+  neutral: "·",
+};
+const SEVERITY_LABEL = {
+  critical: "Critical",
+  warning: "Warning",
+  good: "Good",
+  neutral: "Neutral",
+};
+
+function severityForLevel(level) {
+  return SEVERITY_BY_LEVEL[level] || "neutral";
+}
 
 /**
  * Sync the rail bell with the unread model (FR-009). The badge is decorative
@@ -243,6 +275,20 @@ export function createNotificationCenter({
     if (notice.kind) {
       item.dataset.kind = String(notice.kind);
     }
+
+    // Triage marker leads the row in DOM order too, so the severity is the
+    // first thing a screen reader announces; the grid keeps it visually in the
+    // left gutter next to the severity stripe.
+    const severity = severityForLevel(item.dataset.level);
+    item.dataset.severity = severity;
+    const marker = document.createElement("span");
+    marker.className = "notification-center__severity";
+    marker.dataset.severity = severity;
+    marker.setAttribute("role", "img");
+    marker.setAttribute("aria-label", SEVERITY_LABEL[severity]);
+    marker.textContent = SEVERITY_GLYPH[severity];
+    item.insertBefore(marker, item.firstChild);
+
     const stamp = now();
     const time = document.createElement("time");
     time.className = "notification-center__time";
