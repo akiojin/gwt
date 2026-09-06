@@ -1121,8 +1121,9 @@ impl AppRuntime {
 
     /// Issue #4038 (AC-3): the projects to record in the resume marker when an
     /// update apply begins. `update_drain` reports whether the Issue Monitor
-    /// of that project holds new launches; the hold itself lands with #4037,
-    /// so until then every project reports `false`.
+    /// of that project holds new launches (#4037), read from the disk-owned
+    /// prefs so the settling bootstrap releases exactly the holds that were
+    /// raised.
     pub(crate) fn update_resume_projects(&self) -> Vec<gwt_core::update::UpdateResumeProject> {
         let mut seen = HashSet::new();
         self.tabs
@@ -1130,13 +1131,58 @@ impl AppRuntime {
             .filter(|tab| tab.kind == gwt::ProjectKind::Git)
             .filter_map(|tab| {
                 let hash = gwt_core::paths::project_scope_hash(&tab.project_root).to_string();
+                let update_drain = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root),
+                )
+                .map(|prefs| prefs.update_drain.is_some())
+                .unwrap_or(false);
                 seen.insert(hash.clone())
-                    .then_some(gwt_core::update::UpdateResumeProject {
-                        hash,
-                        update_drain: false,
-                    })
+                    .then_some(gwt_core::update::UpdateResumeProject { hash, update_drain })
             })
             .collect()
+    }
+
+    /// Issue #4038 (AC-4 / AC-5): clear the `update_drain` hold (#4037) of
+    /// every marker project that raised one, through the same disk-owned
+    /// prefs transaction the monitor controls use, so the Issue Monitor
+    /// admits launches again whether or not the update actually applied.
+    /// Returns the hashes whose hold was released.
+    fn release_update_drain_holds(
+        &self,
+        projects: &[gwt_core::update::UpdateResumeProject],
+    ) -> Vec<String> {
+        let recovery_baseline = gwt::IssueMonitorPrefs::recovery_default();
+        let mut released = Vec::new();
+        for project in projects.iter().filter(|project| project.update_drain) {
+            let Some(tab) = self.tabs.iter().find(|tab| {
+                tab.kind == gwt::ProjectKind::Git
+                    && gwt_core::paths::project_scope_hash(&tab.project_root).as_str()
+                        == project.hash
+            }) else {
+                tracing::warn!(
+                    target: "gwt::startup",
+                    project_hash = %project.hash,
+                    "update resume marker names a drained project that is no longer open; \
+                     its update_drain hold is left for issue.monitor.config.set"
+                );
+                continue;
+            };
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+            match gwt::mutate_issue_monitor_prefs_recovering(
+                &prefs_path,
+                &recovery_baseline,
+                |prefs| prefs.update_drain = None,
+            ) {
+                Ok(_) => released.push(project.hash.clone()),
+                Err(error) => tracing::warn!(
+                    target: "gwt::startup",
+                    project_hash = %project.hash,
+                    %error,
+                    "failed to release the update_drain hold after the update restart"
+                ),
+            }
+        }
+        released
     }
 
     /// Issue #4038 (AC-4 / AC-5): consume `~/.gwt/update-resume/marker.json`.
@@ -1156,13 +1202,8 @@ impl AppRuntime {
             .iter()
             .map(|project| project.hash.clone())
             .collect::<HashSet<_>>();
-        self.update_drain_released_projects = settlement
-            .marker
-            .projects
-            .iter()
-            .filter(|project| project.update_drain)
-            .map(|project| project.hash.clone())
-            .collect();
+        self.update_drain_released_projects =
+            self.release_update_drain_holds(&settlement.marker.projects);
         let applied = matches!(
             settlement.outcome,
             gwt_core::update::UpdateResumeOutcome::Applied

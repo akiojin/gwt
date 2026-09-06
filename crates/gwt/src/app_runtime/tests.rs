@@ -64800,7 +64800,25 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
     session
         .save(&runtime.sessions_dir)
         .expect("save stale resumable session");
+    // Issue #4037: the apply raised the update drain for this project; the
+    // settling bootstrap must release it whether or not the update landed.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&worktree);
+    fs::create_dir_all(prefs_path.parent().expect("prefs dir")).expect("create prefs dir");
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
+    prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+        version: "9.99.0".to_string(),
+        since: "2026-09-07T00:00:00Z".to_string(),
+        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+    });
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed update_drain hold");
     (worktree, runtime)
+}
+
+fn update_drain_is_raised(worktree: &Path) -> bool {
+    gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(worktree))
+        .map(|prefs| prefs.update_drain.is_some())
+        .unwrap_or(false)
 }
 
 fn update_resume_marker_for(
@@ -64843,9 +64861,20 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     let (worktree, mut runtime) = update_resume_fixture(temp.path(), "work/update-resume");
     let current_version = env!("CARGO_PKG_VERSION");
     let marker = update_resume_marker_for(&worktree, current_version);
+    assert_eq!(
+        runtime.update_resume_projects(),
+        marker.projects,
+        "the marker written at apply time records the raised drain per project"
+    );
     gwt_core::update::persist_update_resume_marker(&marker).expect("persist marker");
+    assert!(update_drain_is_raised(&worktree));
 
     runtime.bootstrap();
+
+    assert!(
+        !update_drain_is_raised(&worktree),
+        "the settling bootstrap releases the update_drain hold on disk"
+    );
 
     assert_eq!(
         runtime.pending_startup_auto_resume_sessions.len(),
@@ -64908,6 +64937,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-update"));
     restarted.bootstrap();
     assert!(restarted.update_drain_released_projects.is_empty());
+    assert!(!update_drain_is_raised(&worktree));
     let events = restarted.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::StartupAutoResumeReady {
@@ -64940,12 +64970,17 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
     let (worktree, mut runtime) = update_resume_fixture(temp.path(), "work/update-mismatch");
     let marker = update_resume_marker_for(&worktree, "0.0.1-never-installed");
     gwt_core::update::persist_update_resume_marker(&marker).expect("persist marker");
+    assert!(update_drain_is_raised(&worktree));
 
     runtime.bootstrap();
 
     assert!(
         runtime.pending_startup_auto_resume_sessions.is_empty(),
         "a failed apply does not bypass the freshness gate"
+    );
+    assert!(
+        !update_drain_is_raised(&worktree),
+        "a failed apply still releases the update_drain hold (AC-5)"
     );
     let remaining = gwt_core::update::load_update_resume_marker().expect("marker kept");
     assert_eq!(remaining.attempt, 2);
