@@ -1365,6 +1365,7 @@ fn sample_window(
         tab_group_id: None,
         tab_group_active: false,
         session_id: None,
+        linked_issue_number: None,
         is_pm: false,
     }
 }
@@ -6625,30 +6626,37 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
         .recv_timeout(Duration::from_secs(1))
         .expect("Session lease holder starts");
 
-    let started = Instant::now();
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::SendInput {
-            text: "must-not-block-tao\r".to_string(),
-        },
-    );
-    let elapsed = started.elapsed();
+    let (dispatch_done_tx, dispatch_done_rx) = std::sync::mpsc::sync_channel(1);
+    let dispatch = std::thread::spawn(move || {
+        let outcome = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            grant,
+            AgentFrontendRequest::SendInput {
+                text: "must-not-block-tao\r".to_string(),
+            },
+        );
+        dispatch_done_tx
+            .send(outcome)
+            .expect("report tao dispatch outcome");
+    });
 
+    // The holder cannot release its Session lease until this receive finishes
+    // and `release_lease_tx` fires below. A successful receive therefore proves
+    // dispatch completed while the lease was still contended. The generous
+    // timeout is only a deadlock guard; it is not the behavior contract.
+    let outcome = dispatch_done_rx.recv_timeout(Duration::from_secs(2));
     release_lease_tx
         .send(())
         .expect("release contended Session lease");
     holder.join().expect("join Session lease holder");
+    dispatch.join().expect("join tao dispatch");
+    let outcome = outcome.expect("tao dispatch must finish before the contended lease is released");
     assert!(
         matches!(
             outcome,
             super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
         ),
         "tao dispatch must fail closed when its pre-dispatch lease is no longer immediately available"
-    );
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "tao dispatch waited {elapsed:?} for a contended Session lease"
     );
 }
 
@@ -7384,35 +7392,51 @@ fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
     let (proxy, events) = AppEventProxy::stub();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let spawn_started = Instant::now();
     let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::new_for_test();
+    let project_root = temp.path().to_path_buf();
+    let (spawn_returned_tx, spawn_returned_rx) = mpsc::sync_channel(1);
 
-    let spawned = service.spawn_with(
-        proxy,
-        temp.path().to_path_buf(),
-        move |_project_root| {
-            started_tx.send(()).expect("signal bootstrap start");
-            release_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("release bootstrap");
-            Ok(())
-        },
-        |_project_root| {
-            gwt::ProjectIndexStatusView::new(
-                gwt::ProjectIndexStatusState::Ready,
-                "test bootstrap complete",
-            )
-        },
-    );
-    let spawn_elapsed = spawn_started.elapsed();
+    let spawn_caller = std::thread::spawn(move || {
+        let spawned = service.spawn_with(
+            proxy,
+            project_root,
+            move |_project_root| {
+                started_tx.send(()).expect("signal bootstrap start");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release bootstrap");
+                Ok(())
+            },
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(
+                    gwt::ProjectIndexStatusState::Ready,
+                    "test bootstrap complete",
+                )
+            },
+        );
+        spawn_returned_tx
+            .send(spawned)
+            .expect("report bootstrap spawn return");
+    });
+
+    // The bootstrap body cannot complete until `release_tx` fires below.
+    // Receiving the return value first proves launch is independent of the
+    // background bootstrap duration. This timeout only bounds a regression.
+    let spawned = match spawn_returned_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(spawned) => {
+            spawn_caller.join().expect("join bootstrap spawn caller");
+            spawned
+        }
+        Err(error) => {
+            let _ = release_tx.send(());
+            let _ = spawn_caller.join();
+            panic!("bootstrap spawn did not return before body release: {error}");
+        }
+    };
 
     assert_eq!(
         spawned,
         crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
-    );
-    assert!(
-        spawn_elapsed < Duration::from_millis(250),
-        "spawning bootstrap must return before the slow bootstrap body completes"
     );
     started_rx
         .recv_timeout(Duration::from_secs(1))
@@ -10540,6 +10564,7 @@ fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
         issue_monitor_session_mode: None,
         issue_monitor_autonomous_handoff: None,
         issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
     }
 }
 
@@ -10708,6 +10733,7 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
                 issue_monitor_session_mode: None,
                 issue_monitor_autonomous_handoff: None,
                 issue_monitor_autonomous_submit_started: false,
+                issue_monitor_review_dispatch: false,
             },
         )
         .expect("manual launch with feedback");
@@ -13560,6 +13586,7 @@ fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
             issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
     runtime.issue_monitor_launch_deliveries.insert(
@@ -13618,6 +13645,160 @@ fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
     assert!(
         !diagnostic_retained,
         "a stale result must not append the pre-PTY diagnostic"
+    );
+}
+
+#[test]
+fn review_dispatch_feedback_context_does_not_own_the_issue_launch_binding() {
+    // Issue #4041: the independent review window observes the Issue but never
+    // materializes its launch.
+    let mut context = issue_monitor_feedback(42);
+    assert_eq!(
+        context.issue_monitor_launch_binding_issue_number(),
+        Some(42)
+    );
+    context.issue_monitor_review_dispatch = true;
+    assert_eq!(context.issue_monitor_launch_binding_issue_number(), None);
+}
+
+fn issue_monitor_review_launch_completion(
+    repo: &Path,
+    session_id: &str,
+) -> super::launch::AgentLaunchCompletion {
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+    (
+        ProcessLaunch {
+            command,
+            args,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: Some(repo.to_path_buf()),
+            pending_tool_runtime_migration: None,
+            resource_policy: None,
+        },
+        session_id.to_string(),
+        "work/issue-42".to_string(),
+        "Codex".to_string(),
+        repo.to_path_buf(),
+        gwt_agent::AgentId::Codex,
+        Some(42),
+        Some("origin/develop".to_string()),
+        gwt_agent::LaunchRuntimeTarget::Host,
+        gwt_agent::SessionMode::Normal,
+        false,
+        repo.display().to_string().into(),
+    )
+}
+
+#[test]
+fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
+    // Issue #4041: on 2026-09-06 the review dispatches for #4037 / #4033 were
+    // ACKed as the Issues' launches, so `launched_issues` moved to the review
+    // windows, the implementation claims vanished, and the implementation
+    // windows lost their Work authority. A review window's launch completion
+    // must leave the Issue's binding, claim, and audit untouched; an ordinary
+    // launch completion for the same Issue still binds (and is audited as a
+    // replacement, AC-3).
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-review-dispatch-binding");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-impl".to_string(),
+            }],
+            launched_claims: std::collections::BTreeMap::from([(42, "claim-impl".to_string())]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed the running implementation launch");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-review",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let review_window_id = combined_window_id("tab-1", "agent-review");
+    runtime
+        .window_hook_states
+        .insert(review_window_id.clone(), WindowProcessStatus::Running);
+    runtime.pending_launch_feedback_contexts.insert(
+        review_window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root: Some(repo.clone()),
+            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: true,
+        },
+    );
+
+    let events = runtime.handle_launch_complete(
+        review_window_id.clone(),
+        Ok(issue_monitor_review_launch_completion(
+            &repo,
+            "review-session-42",
+        )),
+    );
+    runtime.stop_window_runtime_without_session_projection(&review_window_id);
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, status, .. }
+                if id == &review_window_id && *status == WindowProcessStatus::Error
+        )),
+        "the review window must spawn: {events:#?}"
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        prefs.launched_issues,
+        vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-impl".to_string(),
+        }],
+        "a review dispatch must not take over the implementation binding"
+    );
+    assert_eq!(
+        prefs.launched_claims.get(&42).map(String::as_str),
+        Some("claim-impl"),
+        "a review dispatch must not drop the implementation claim"
+    );
+    assert!(
+        prefs.requeue_audit.is_empty(),
+        "nothing was replaced, so nothing is audited: {:?}",
+        prefs.requeue_audit
     );
 }
 
@@ -16636,6 +16817,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
                 issue_monitor_session_mode: None,
                 issue_monitor_autonomous_handoff: None,
                 issue_monitor_autonomous_submit_started: false,
+                issue_monitor_review_dispatch: false,
             },
         )
         .expect("start gated launch");
@@ -21851,6 +22033,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
         issue_monitor_session_mode: None,
         issue_monitor_autonomous_handoff: None,
         issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
@@ -22072,6 +22255,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         issue_monitor_session_mode: None,
         issue_monitor_autonomous_handoff: None,
         issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
@@ -25930,6 +26114,7 @@ No viable candidates found in PATH \
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         }),
     );
 
@@ -26009,6 +26194,7 @@ No viable candidates found in PATH \
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         }),
     );
 
@@ -26034,6 +26220,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
         "tab-1",
@@ -26057,6 +26244,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         }),
     );
 
@@ -26087,6 +26275,7 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
         "tab-1",
@@ -26111,6 +26300,7 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         }),
     );
 
@@ -26186,6 +26376,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -26327,6 +26518,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -42779,6 +42971,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
 
@@ -42847,6 +43040,7 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
 
@@ -43005,6 +43199,7 @@ fn app_runtime_agent_failed_fallback_is_fail_closed_on_corrupt_prefs() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
 
@@ -44416,6 +44611,7 @@ fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -44500,6 +44696,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -45804,6 +46001,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
 
@@ -56987,6 +57185,7 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
             issue_monitor_session_mode: None,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         },
     );
 

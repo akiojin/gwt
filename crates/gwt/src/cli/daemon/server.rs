@@ -1616,6 +1616,8 @@ enum IssueMonitorControl {
         auto_close_merged_issues: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
+        /// Issue #4037 AC-5: raise or clear the non-destructive update drain.
+        update_drain: Option<bool>,
     },
     /// SPEC #3914 FR-011: replace the launch candidate pool whole.
     ProfilesSet {
@@ -1958,6 +1960,7 @@ fn try_apply_issue_monitor_control(
             max_active_agents,
             auto_close_merged_issues,
             launch_agent,
+            update_drain,
         } => {
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
@@ -1966,7 +1969,8 @@ fn try_apply_issue_monitor_control(
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
-                    && launch_agent.is_none())
+                    && launch_agent.is_none()
+                    && update_drain.is_none())
             {
                 return None;
             }
@@ -1990,6 +1994,9 @@ fn try_apply_issue_monitor_control(
                     auto_close_merged_issues,
                 ))?;
             }
+            // Issue #4037 AC-3: the drain touches admission only, so it needs
+            // no authority-epoch advance and revokes nothing.
+            crate::cli::issue::apply_update_drain(&mut candidate, update_drain);
             *monitor = candidate;
             Some(true)
         }
@@ -2595,6 +2602,11 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         Some(agent.to_string())
                     }
                 };
+                // Issue #4037 AC-5: the update drain, a plain bool.
+                let update_drain = match config.get("update_drain") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
                     || max_active_agents == Some(0)
@@ -2602,7 +2614,8 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
-                        && launch_agent.is_none())
+                        && launch_agent.is_none()
+                        && update_drain.is_none())
                 {
                     return None;
                 }
@@ -2612,6 +2625,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     max_active_agents,
                     auto_close_merged_issues,
                     launch_agent,
+                    update_drain,
                 });
             }
             if let Some(profiles_set) = payload
@@ -4896,6 +4910,7 @@ mod tests {
     };
 
     use fs2::FileExt;
+    use futures_util::FutureExt;
     use gwt_core::daemon::{
         ClientFrame, DaemonEndpoint, DaemonFrame, HookEnvelope, IpcHandshakeRequest, RuntimeScope,
         RuntimeTarget, DAEMON_PROTOCOL_VERSION,
@@ -8873,6 +8888,7 @@ exit 0
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
                 launch_agent: None,
+                update_drain: None,
             }
         );
 
@@ -8898,6 +8914,99 @@ exit 0
         assert!(!persisted.autonomous_mode);
         assert_eq!(persisted.max_active_agents, 4);
         assert_eq!(persisted.effect_authority_epoch, 9);
+    }
+
+    /// Issue #4037 AC-2 / AC-5: the daemon decodes `update_drain` as part of
+    /// the atomic `config_set` frame and applies it without disturbing the
+    /// launches it is draining.
+    #[test]
+    fn issue_monitor_config_set_update_drain_decodes_and_commits_non_destructively() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "config_set": {
+                    "update_drain": true,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("config control");
+        assert_eq!(
+            control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(true),
+            }
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            launch_bindings: std::collections::BTreeMap::from([("tab-1::agent-1".to_string(), 42)]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let before = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let ledgers = |prefs: &crate::IssueMonitorPrefs| {
+            (
+                prefs.enabled,
+                prefs.autonomous_mode,
+                prefs.max_active_agents,
+                prefs.launched_issues.clone(),
+                prefs.launch_bindings.clone(),
+                prefs.launched_claims.clone(),
+                prefs.launching_issues.clone(),
+                prefs.pending_effects.clone(),
+                prefs.pending_launch_deliveries.clone(),
+                prefs.effect_authority_epoch,
+            )
+        };
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            initial.clone(),
+        );
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let drain = persisted.update_drain.clone().expect("drain persisted");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Manual);
+        assert_eq!(
+            ledgers(&persisted),
+            ledgers(&before),
+            "the drain must not touch the launch ledgers"
+        );
+
+        let clear =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "config_set": { "update_drain": false } }),
+                std::process::id() + 1,
+            ))
+            .expect("clear control");
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            clear,
+        ));
+        assert!(monitor.update_drain().is_none());
+        let cleared = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(cleared.update_drain.is_none());
+        assert_eq!(ledgers(&cleared), ledgers(&before));
     }
 
     /// SPEC #3914 FR-011: `profiles_set` reaches the daemon as one atomic
@@ -8983,6 +9092,7 @@ exit 0
                 max_active_agents: None,
                 auto_close_merged_issues: None,
                 launch_agent: Some("claude".to_string()),
+                update_drain: None,
             }
         );
 
@@ -9188,6 +9298,7 @@ exit 0
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
                 launch_agent: None,
+                update_drain: None,
             },
         ));
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
@@ -11874,18 +11985,20 @@ exit 1
         ));
     }
 
-    #[tokio::test]
-    async fn daemon_shutdown_request_is_sticky_before_worker_wait_registration() {
+    #[test]
+    fn daemon_shutdown_request_is_sticky_before_worker_wait_registration() {
         let shutdown = DaemonShutdown::new();
         shutdown.request();
 
-        tokio::time::timeout(Duration::from_millis(50), shutdown.notified())
-            .await
-            .expect("a pre-registered shutdown request must remain observable");
+        assert_eq!(
+            shutdown.notified().now_or_never(),
+            Some(()),
+            "a pre-registered shutdown request must be immediately observable"
+        );
     }
 
-    #[tokio::test]
-    async fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
+    #[test]
+    fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
         let shutdown = DaemonShutdown::new();
         assert!(!shutdown.requested.load(Ordering::Acquire));
         let notified = shutdown.notify.notified();
@@ -11894,10 +12007,10 @@ exit 1
         // created, so a broadcast before its first poll remains observable.
         shutdown.request();
 
-        let observed = tokio::time::timeout(Duration::from_millis(50), notified).await;
-
-        observed.expect(
-            "Notified must observe notify_waiters after its generation snapshot and before polling",
+        assert_eq!(
+            notified.now_or_never(),
+            Some(()),
+            "Notified must immediately observe notify_waiters after its generation snapshot and before polling",
         );
     }
 
