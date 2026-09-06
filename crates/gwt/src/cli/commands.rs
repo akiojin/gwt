@@ -146,7 +146,7 @@ pub enum IssueCommand {
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
         /// clear (`false`) the non-destructive update drain.
-        update_drain: Option<bool>,
+        update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
     /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
     /// the usage threshold.

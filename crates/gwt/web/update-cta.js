@@ -181,9 +181,13 @@ export function createUpdateCtaController({
     const blocking = Array.isArray(drain.blocking) ? drain.blocking.length : 0;
     const minutes = drainMinutes(drain.since);
     const entering = status !== "draining";
+    // A manual drain (#4037 operator control) carries the running gwt
+    // version, not a staged one, so it is named as what it is.
+    const subject =
+      drain.reason === "manual" ? "Manual update drain" : `Update v${version} pending`;
     const cta = renderCta(
       "draining",
-      `Update v${version} pending — draining ${blocking} agents (${minutes} min)`,
+      `${subject} — draining ${blocking} agents (${minutes} min)`,
     );
     // issue_monitor_status ticks every scan; only the transition into the
     // draining state is worth a sidebar peek.

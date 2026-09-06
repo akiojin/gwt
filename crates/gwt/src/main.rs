@@ -9358,10 +9358,14 @@ fn main() -> std::io::Result<()> {
                 version,
                 asset_path,
             }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
-                    version,
+                // Issue #3906 AC-3: the manifest is persisted, so the update
+                // is staged; an unattended monitor now drains new launches.
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                    version: version.clone(),
                     asset_path: asset_path.to_string_lossy().to_string(),
-                })]);
+                })];
+                events.extend(app.update_staged_events(&version));
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::ApplyUpdateRestartNow { state, client_id }) => {
                 let apply_proxy = proxy.clone();

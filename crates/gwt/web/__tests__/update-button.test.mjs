@@ -798,12 +798,13 @@ test("issue #3906: update_drain in issue_monitor_status renders the draining CTA
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
 
   // Pre-#3906 daemons omit `blocking`; the count degrades to 0 instead of NaN.
+  // An operator drain carries the running version, so it is named as manual.
   controller.handleIssueMonitorStatus({
     update_drain: { version: "9.91.0", since: "2026-09-06T12:47:00Z", reason: "manual" },
   });
   assert.equal(
     fixture.document.getElementById("update-cta").textContent,
-    "Update v9.91.0 pending — draining 0 agents (0 min)",
+    "Manual update drain — draining 0 agents (0 min)",
   );
 });
 

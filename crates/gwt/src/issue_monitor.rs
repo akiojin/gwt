@@ -1944,13 +1944,34 @@ pub enum IssueMonitorUpdateDrainReason {
 /// `AcquireClaim` effect, exactly like a provider quota hold — but unlike
 /// `enabled:false` it never touches the launches already in flight, so the
 /// agents being drained stay attributable and are never relaunched after the
-/// restart. `version` is the gwt version that raised the drain and `since`
-/// the RFC3339 instant it was raised; re-raising keeps the original instant.
+/// restart. `version` is the gwt version the drain is about — the staged
+/// update version for an `Auto` drain (#3906 AC-3), the running gwt version
+/// for a `Manual` one — and `since` the RFC3339 instant it was raised;
+/// re-raising keeps the original instant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorUpdateDrain {
     pub version: String,
     pub since: String,
     pub reason: IssueMonitorUpdateDrainReason,
+    /// Issue #3906 AC-12: what still keeps the host from being quiescent.
+    /// Filled by the GUI process on the status view only (it is the one that
+    /// sees the panes); the persisted prefs copy stays empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<crate::update_drain::UpdateBlocker>,
+}
+
+/// Issue #3906 AC-3: how a `config_set` control asks for the drain.
+/// `true` / `false` (the #4037 operator form) raise a `Manual` drain stamped
+/// with the running gwt version or clear it; the object form lets the update
+/// mechanism raise an `Auto` drain for the staged update version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IssueMonitorUpdateDrainControl {
+    Toggle(bool),
+    Raise {
+        reason: IssueMonitorUpdateDrainReason,
+        version: String,
+    },
 }
 
 /// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
@@ -7855,6 +7876,7 @@ impl IssueMonitorState {
             version: version.to_string(),
             since: now.to_string(),
             reason,
+            blocking: Vec::new(),
         });
     }
 
@@ -14407,6 +14429,7 @@ mod tests {
                 version: "9.91.0".to_string(),
                 since: now.to_string(),
                 reason: IssueMonitorUpdateDrainReason::Manual,
+                blocking: Vec::new(),
             })
         );
         // Re-raising an already raised drain keeps the original instant.
@@ -23306,6 +23329,41 @@ mod tests {
                 )
             })
             .cloned()
+    }
+
+    #[test]
+    fn update_drain_blocking_defaults_empty_and_control_accepts_both_shapes() {
+        // Issue #3906 AC-3 / AC-12: a #4037-era drain without `blocking`
+        // still loads, and the control accepts the operator bool as well as
+        // the auto-drain object.
+        let legacy = r#"{"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}"#;
+        let drain: IssueMonitorUpdateDrain = serde_json::from_str(legacy).expect("legacy drain");
+        assert!(drain.blocking.is_empty());
+        assert_eq!(
+            serde_json::to_value(&drain).expect("serialize"),
+            serde_json::json!({"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}),
+            "an empty blocking list is not persisted"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(serde_json::json!(true))
+                .expect("bool control"),
+            IssueMonitorUpdateDrainControl::Toggle(true)
+        );
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+                serde_json::json!({"reason":"auto","version":"9.99.0"})
+            )
+            .expect("object control"),
+            IssueMonitorUpdateDrainControl::Raise {
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                version: "9.99.0".to_string(),
+            }
+        );
+        assert!(serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+            serde_json::json!({"reason":"auto"})
+        )
+        .is_err());
     }
 
     #[test]

@@ -44035,6 +44035,140 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     assert_eq!(persisted.effect_authority_epoch, 7);
 }
 
+/// Issue #3906 AC-3: a staged update raises the `Auto` drain for the staged
+/// version when the monitor is unattended and auto-apply is on (the default
+/// while autonomous); an explicit `auto_apply_updates:false` keeps the manual
+/// button path and raises nothing. Launch ledgers are untouched (#4037).
+#[test]
+fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let seed = |auto_apply_updates: Option<bool>| {
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                auto_apply_updates,
+                effect_authority_epoch: 7,
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+    };
+
+    seed(Some(false));
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    assert!(runtime.update_staged_events("9.99.0").is_empty());
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("reload")
+        .update_drain
+        .is_none());
+
+    seed(None);
+    let events = runtime.update_staged_events("9.99.0");
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("drain status broadcast");
+    let drain = status.update_drain.as_ref().expect("drain raised");
+    assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
+    assert_eq!(drain.version, "9.99.0");
+    assert!(
+        drain.blocking.is_empty(),
+        "no agent pane, claim, execution or lease"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let persisted_drain = persisted.update_drain.expect("drain persisted");
+    assert_eq!(persisted_drain.version, "9.99.0");
+    assert!(persisted.autonomous_mode);
+    assert_eq!(
+        persisted.effect_authority_epoch, 7,
+        "the drain revokes nothing"
+    );
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "launch ledger untouched"
+    );
+}
+
+/// Issue #3906 AC-8 / AC-12: the status view names the blockers this
+/// process observes — a Running agent pane and a pending `AcquireClaim` —
+/// and an Idle pane is not one of them.
+#[test]
+fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claims() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor
+        .prepare_pending_effect(
+            "claim-effect-42",
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-09-06T01:00:00Z".to_string(),
+                expires_at: "2026-09-06T01:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        )
+        .expect("prepare claim");
+    monitor.set_update_drain(
+        gwt::IssueMonitorUpdateDrainReason::Auto,
+        "9.99.0",
+        "2026-09-06T01:00:00Z",
+    );
+
+    // An Agent pane with a live PTY but no hook state yet composes to
+    // `Starting` (no agent session bound), which blocks just like Running.
+    let blocking = runtime.update_drain_blockers(&monitor);
+    assert_eq!(
+        blocking,
+        vec![
+            gwt::update_drain::UpdateBlocker::ActivePane {
+                window_id: "tab-1::agent-1".to_string(),
+                label: "Sample".to_string(),
+                state: WindowProcessStatus::Starting,
+            },
+            gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 },
+        ]
+    );
+
+    // A hook-reported Idle pane no longer blocks; the claim still does.
+    runtime
+        .window_hook_states
+        .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    assert_eq!(
+        runtime.update_drain_blockers(&monitor),
+        vec![gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 }]
+    );
+}
+
 #[test]
 fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
     let temp = tempdir().expect("tempdir");

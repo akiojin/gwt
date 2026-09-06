@@ -1570,7 +1570,7 @@ enum IssueMonitorControl {
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise or clear the non-destructive update drain.
-        update_drain: Option<bool>,
+        update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
     /// SPEC #3914 FR-011: replace the launch candidate pool whole.
     ProfilesSet {
@@ -2564,10 +2564,16 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         Some(agent.to_string())
                     }
                 };
-                // Issue #4037 AC-5: the update drain, a plain bool.
+                // Issue #4037 AC-5: the operator bool; #3906 AC-3: the auto
+                // drain object `{reason, version}`. Anything else is malformed.
                 let update_drain = match config.get("update_drain") {
                     None | Some(serde_json::Value::Null) => None,
-                    Some(value) => Some(value.as_bool()?),
+                    Some(value) => Some(
+                        serde_json::from_value::<crate::IssueMonitorUpdateDrainControl>(
+                            value.clone(),
+                        )
+                        .ok()?,
+                    ),
                 };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
@@ -8868,6 +8874,7 @@ exit 0
                 auto_close_merged_issues: None,
                 auto_apply_updates: Some(true),
                 launch_agent: None,
+                update_drain: None,
             }
         );
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
@@ -8877,6 +8884,42 @@ exit 0
         ));
         assert_eq!(monitor.auto_apply_updates(), Some(true));
         assert!(monitor.auto_apply_updates_enabled());
+        // Issue #3906 AC-3: the update mechanism raises an Auto drain for the
+        // staged version through the same control.
+        let raise_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "update_drain": { "reason": "auto", "version": "9.99.0" } } }),
+            std::process::id() + 1,
+        );
+        let raise_control = decode_issue_monitor_control(raise_payload).expect("raise control");
+        assert_eq!(
+            raise_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
+                    reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    version: "9.99.0".to_string(),
+                }),
+                launch_agent: None,
+            }
+        );
+        assert!(apply_issue_monitor_control(&mut monitor, raise_control));
+        let drain = monitor.update_drain().expect("auto drain raised");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Auto);
+        assert_eq!(drain.version, "9.99.0");
+        assert!(
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "config_set": { "update_drain": "soon" } }),
+                std::process::id() + 1,
+            ))
+            .is_none(),
+            "a malformed drain control is refused whole"
+        );
 
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -8925,7 +8968,8 @@ exit 0
                 max_active_agents: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             }
         );
 

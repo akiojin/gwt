@@ -1506,7 +1506,7 @@ fn apply_monitor_config_set(
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
         enabled,
@@ -1515,7 +1515,7 @@ fn apply_monitor_config_set(
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
-        update_drain,
+        update_drain.as_ref(),
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -1555,15 +1555,20 @@ fn apply_monitor_config_set(
 /// surface's question (#3906 wires that); the drain only pauses admission.
 pub(crate) fn apply_update_drain(
     monitor: &mut crate::IssueMonitorState,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     match update_drain {
-        Some(true) => monitor.set_update_drain(
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)) => monitor.set_update_drain(
             crate::IssueMonitorUpdateDrainReason::Manual,
             env!("CARGO_PKG_VERSION"),
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &now,
         ),
-        Some(false) => monitor.clear_update_drain(),
+        // Issue #3906 AC-3: the update mechanism names the staged version.
+        Some(crate::IssueMonitorUpdateDrainControl::Raise { reason, version }) => {
+            monitor.set_update_drain(reason, &version, &now)
+        }
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)) => monitor.clear_update_drain(),
         None => {}
     }
 }
@@ -1575,7 +1580,7 @@ fn validate_monitor_config_set(
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<&crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
         return Err(io::Error::new(
@@ -1626,7 +1631,7 @@ fn run_monitor_config_set<E: CliEnv>(
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -1637,7 +1642,7 @@ fn run_monitor_config_set<E: CliEnv>(
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
-        update_drain,
+        update_drain.as_ref(),
     )
     .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
@@ -1686,7 +1691,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
-                update_drain,
+                update_drain.clone(),
             )
         })
         .map_err(io_as_api_error)?;
@@ -4600,7 +4605,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -4630,7 +4636,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(false),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                auto_apply_updates: None,
             },
             &mut out,
         )
