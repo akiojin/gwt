@@ -141,6 +141,9 @@ pub enum IssueCommand {
         auto_close_merged_issues: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
+        /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
+        /// clear (`false`) the non-destructive update drain.
+        update_drain: Option<bool>,
     },
     /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
     /// the usage threshold.

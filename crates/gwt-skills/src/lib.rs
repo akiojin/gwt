@@ -46,8 +46,9 @@ pub use provider_hooks::{
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
-    codex_hooks_paths_for_codex_discovery, generate_codex_hooks, generate_codex_hooks_for_mode,
-    generate_settings_local, managed_hook_config_has_user_content, CodexHookDiscoveryMode,
+    build_output_owner_root, codex_hooks_paths_for_codex_discovery, generate_codex_hooks,
+    generate_codex_hooks_for_mode, generate_settings_local, managed_hook_config_has_user_content,
+    managed_hook_config_is_git_tracked, CodexHookDiscoveryMode, CANONICAL_HOOK_BIN,
 };
 
 #[cfg(test)]

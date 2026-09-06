@@ -29,8 +29,9 @@ use super::{
     combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
     plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
     workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
-    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession,
+    PreparedProjectWindowRestore, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -48,6 +49,55 @@ pub(super) struct StartupGenerationReaperSummary {
     pub protected: usize,
     pub unchanged: usize,
     pub failures: usize,
+}
+
+pub(super) fn prepare_open_project_window_restores(
+    workspace: &gwt::PersistedWindowCanvasState,
+    sessions_dir: &Path,
+    project_kind: gwt::ProjectKind,
+    migration_pending: bool,
+) -> Vec<PreparedProjectWindowRestore> {
+    if project_kind != gwt::ProjectKind::Git || migration_pending {
+        return Vec::new();
+    }
+
+    workspace
+        .windows
+        .iter()
+        .filter(|window| {
+            window.preset.requires_process() && window.status == WindowProcessStatus::Stopped
+        })
+        .filter_map(|window| {
+            if crate::runtime_support::window_is_agent_pane(window) {
+                let session_id = window.session_id.as_deref()?;
+                let path = sessions_dir.join(format!("{session_id}.toml"));
+                let session = gwt_agent::Session::load_and_migrate(&path).ok()?;
+                if !session.worktree_path.exists() {
+                    return None;
+                }
+                let project_state_root = session
+                    .project_state_root
+                    .as_deref()
+                    .unwrap_or(&session.worktree_path);
+                let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+                    project_state_root,
+                    Some(session.branch.as_str()),
+                    &session.worktree_path,
+                ));
+                Some(PreparedProjectWindowRestore::Agent {
+                    session: Box::new(session),
+                    workspace_resume_context,
+                    fallback_geometry: window.geometry.clone(),
+                })
+            } else {
+                Some(PreparedProjectWindowRestore::Process {
+                    window_id: window.id.clone(),
+                    preset: window.preset,
+                    geometry: window.geometry.clone(),
+                })
+            }
+        })
+        .collect()
 }
 
 pub(super) fn spawn_startup_orphan_intake_prune_with<T, F>(
@@ -885,7 +935,7 @@ impl AppRuntime {
     }
 
     /// Restore every process window the user did not explicitly close in a
-    /// freshly opened/restored project tab (Issue #2942). Closing a window
+    /// freshly opened/restored project tab in focused tests (Issue #2942). Closing a window
     /// removes it from the persisted workspace, so the persisted process
     /// windows are exactly the set to restart: agents resume via their native
     /// session id (or launch fresh when none exists), and non-agent process
@@ -894,25 +944,43 @@ impl AppRuntime {
     /// round-trip is required. The startup `bootstrap` queue only covers tabs
     /// open at launch, so projects opened via Open Project / Reopen Recent were
     /// never restored before this path existed.
+    #[cfg(test)]
     pub(super) fn restore_open_project_windows(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let windows = match self.tab(tab_id) {
-            Some(tab) if tab.kind == gwt::ProjectKind::Git && !tab.migration_pending => tab
-                .workspace
-                .persisted()
-                .windows
-                .iter()
-                .filter(|window| {
-                    window.preset.requires_process()
-                        && window.status == WindowProcessStatus::Stopped
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
+        let restores = match self.tab(tab_id) {
+            Some(tab) => prepare_open_project_window_restores(
+                tab.workspace.persisted(),
+                &self.sessions_dir,
+                tab.kind,
+                tab.migration_pending,
+            ),
             _ => return Vec::new(),
         };
 
+        self.restore_prepared_open_project_windows(tab_id, restores)
+    }
+
+    pub(super) fn restore_prepared_open_project_windows(
+        &mut self,
+        tab_id: &str,
+        restores: Vec<PreparedProjectWindowRestore>,
+    ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
-        for window in windows {
-            let combined = combined_window_id(tab_id, &window.id);
+        for restore in restores {
+            let window_id = match &restore {
+                PreparedProjectWindowRestore::Agent { session, .. } => {
+                    self.tab(tab_id).and_then(|tab| {
+                        tab.workspace.persisted().windows.iter().find_map(|window| {
+                            (window.session_id.as_deref() == Some(session.id.as_str()))
+                                .then(|| window.id.clone())
+                        })
+                    })
+                }
+                PreparedProjectWindowRestore::Process { window_id, .. } => Some(window_id.clone()),
+            };
+            let Some(window_id) = window_id else {
+                continue;
+            };
+            let combined = combined_window_id(tab_id, &window_id);
             // A window with a live PTY/runtime is already running (e.g. when an
             // already-open project tab is re-selected); only paused placeholders
             // should be restarted. `window_lookup` is the registry of known
@@ -920,61 +988,47 @@ impl AppRuntime {
             if self.runtimes.contains_key(&combined) {
                 continue;
             }
-            if crate::runtime_support::window_is_agent_pane(&window) {
-                let Some(session_id) = window.session_id.clone() else {
-                    continue;
-                };
-                let path = self.sessions_dir.join(format!("{session_id}.toml"));
-                let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
-                    continue;
-                };
-                if !session.worktree_path.exists() {
-                    continue;
-                }
-                if self
-                    .active_agent_sessions
-                    .values()
-                    .any(|active| active.session_id == session.id)
-                {
-                    continue;
-                }
-                // Issue #3927 (SPEC #3340 FR-047): same restore fence as
-                // startup auto-resume.
-                let project_root = self
-                    .tab(tab_id)
-                    .map(|tab| tab.project_root.clone())
-                    .unwrap_or_default();
-                if let Some(reason) =
-                    self.restore_admission_terminal_reason(&session, &project_root, Some(&combined))
-                {
-                    self.refuse_terminal_session_restore(tab_id, &session.id, reason);
-                    events.push(self.workspace_state_broadcast());
-                    continue;
-                }
-                let project_state_root = session
-                    .project_state_root
-                    .as_deref()
-                    .unwrap_or(&session.worktree_path);
-                let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                    project_state_root,
-                    Some(session.branch.as_str()),
-                    &session.worktree_path,
-                ));
-                let fallback_geometry = window.geometry.clone();
-                let mut spawned = self.spawn_restored_agent_session(
-                    tab_id,
+            match restore {
+                PreparedProjectWindowRestore::Agent {
                     session,
                     workspace_resume_context,
                     fallback_geometry,
-                );
-                events.append(&mut spawned);
-            } else {
-                events.extend(self.start_window(
-                    tab_id,
-                    &window.id,
-                    window.preset,
-                    window.geometry.clone(),
-                ));
+                } => {
+                    if self
+                        .active_agent_sessions
+                        .values()
+                        .any(|active| active.session_id == session.id)
+                    {
+                        continue;
+                    }
+                    // Issue #3927 (SPEC #3340 FR-047): same restore fence as
+                    // startup auto-resume.
+                    let project_root = self
+                        .tab(tab_id)
+                        .map(|tab| tab.project_root.clone())
+                        .unwrap_or_default();
+                    if let Some(reason) = self.restore_admission_terminal_reason(
+                        &session,
+                        &project_root,
+                        Some(&combined),
+                    ) {
+                        self.refuse_terminal_session_restore(tab_id, &session.id, reason);
+                        events.push(self.workspace_state_broadcast());
+                        continue;
+                    }
+                    let mut spawned = self.spawn_restored_agent_session(
+                        tab_id,
+                        *session,
+                        workspace_resume_context,
+                        fallback_geometry,
+                    );
+                    events.append(&mut spawned);
+                }
+                PreparedProjectWindowRestore::Process {
+                    window_id,
+                    preset,
+                    geometry,
+                } => events.extend(self.start_window(tab_id, &window_id, preset, geometry)),
             }
         }
         events

@@ -397,14 +397,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             let launch_agent = optional_string(params, "launch_agent")?;
+            // Issue #4037 AC-5: the non-destructive update drain.
+            let update_drain = optional_bool(params, "update_drain")?;
             if enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
                 && auto_close_merged_issues.is_none()
                 && launch_agent.is_none()
+                && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent",
+                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -422,6 +425,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 max_active,
                 auto_close_merged_issues,
                 launch_agent,
+                update_drain,
             })
         }
         "issue.monitor.profiles" => CliCommand::Issue(IssueCommand::MonitorProfiles {
@@ -469,6 +473,26 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
             refresh: optional_bool(params, "refresh")?.unwrap_or(false),
         }),
+        // Issue #3516: interrupted-release standing check. Read-only unless the
+        // caller explicitly opts into opening the missing Release PR.
+        "release.status" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "release_branch",
+                    "base_branch",
+                    "scan_commits",
+                    "ensure_release_pr",
+                ],
+                "release.status",
+            )?;
+            CliCommand::Release(super::release::ReleaseCommand::Status {
+                release_branch: optional_string(params, "release_branch")?,
+                base_branch: optional_string(params, "base_branch")?,
+                scan_commits: optional_u64(params, "scan_commits")?,
+                ensure_release_pr: optional_bool(params, "ensure_release_pr")?.unwrap_or(false),
+            })
+        }
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -2314,6 +2338,7 @@ mod tests {
                 max_active: Some(7),
                 auto_close_merged_issues: None,
                 launch_agent: None,
+                update_drain: None,
             })
         );
         assert_eq!(
@@ -2325,6 +2350,7 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
+                update_drain: None,
             })
         );
         assert_eq!(
@@ -2339,12 +2365,46 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: Some(false),
                 launch_agent: None,
+                update_drain: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
     }
 
     /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
+    /// Issue #4037 AC-5: the drain is settable on its own, as a plain bool.
+    #[test]
+    fn issue_monitor_config_set_accepts_update_drain_alone() {
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"update_drain": true})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(true),
+            })
+        );
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"update_drain": false})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(false),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({"update_drain": "yes"})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
     #[test]
     fn issue_monitor_config_set_accepts_launch_agent_alone() {
         assert_eq!(
@@ -2359,12 +2419,13 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: Some("claude".to_string()),
+                update_drain: None,
             })
         );
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent"
+                "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
             )
         ));
     }
@@ -2761,6 +2822,7 @@ mod tests {
                 max_active: Some(3),
                 auto_close_merged_issues: None,
                 launch_agent: None,
+                update_drain: None,
             })
         );
     }
@@ -3207,6 +3269,45 @@ mod tests {
         assert!(matches!(
             err("intake.outcome.record", json!({"number": 1})),
             CliParseError::MissingFlag("kind")
+        ));
+    }
+
+    /// Issue #3516: the standing check is read-only until the caller opts in.
+    #[test]
+    fn release_status_defaults_to_a_read_only_check() {
+        assert!(matches!(
+            ok("release.status", json!({})),
+            CliCommand::Release(crate::cli::release::ReleaseCommand::Status {
+                release_branch: None,
+                base_branch: None,
+                scan_commits: None,
+                ensure_release_pr: false,
+            })
+        ));
+    }
+
+    #[test]
+    fn release_status_accepts_the_reconcile_and_topology_params() {
+        let parsed = ok(
+            "release.status",
+            json!({
+                "release_branch": "develop",
+                "base_branch": "main",
+                "scan_commits": 50,
+                "ensure_release_pr": true,
+            }),
+        );
+        assert!(matches!(
+            parsed,
+            CliCommand::Release(crate::cli::release::ReleaseCommand::Status {
+                scan_commits: Some(50),
+                ensure_release_pr: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            err("release.status", json!({"ensure": true})),
+            CliParseError::InvalidJson(_)
         ));
     }
 
