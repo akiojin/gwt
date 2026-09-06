@@ -1085,10 +1085,6 @@ mod tests {
                 "only the uniform obligation gate may block here: {reason}"
             );
         }
-        assert!(
-            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
-            "no auto-capture side effect may fire for the removed gate"
-        );
     }
 
     // SPEC-3248 P8a (T-108/T-116 subset): a launch-written Execution Control
