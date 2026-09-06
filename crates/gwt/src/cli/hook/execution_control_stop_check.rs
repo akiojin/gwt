@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use super::{context::HookContext, envelope::stop_hook_active_from, HookOutput};
+use super::{envelope::stop_hook_active_from, HookOutput};
 use crate::cli::execution_state::{self, ExecutionControlStatus};
 
 pub fn handle_with_input(
@@ -28,11 +28,6 @@ pub fn handle_with_input(
         return HookOutput::Silent;
     }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
-        // Intake lanes settle through the intake artifact gate instead.
-        return HookOutput::Silent;
-    }
     let record = match execution_state::load(&resolved) {
         Ok(Some(record)) => record,
         // No record: pre-P8a worktree or unlinked launch — unchanged.
@@ -42,25 +37,11 @@ pub fn handle_with_input(
     };
     // P9a (T-122): a record edited outside the canonical operations must not
     // release the gate — block with the repair path instead of trusting the
-    // edited status. T-124: repeated tamper blocks feed one deduped
-    // self-improvement candidate (owner id + violation kind only).
+    // edited status.
     if !execution_state::integrity_ok(&record) {
-        let capture_note = if lane.policy_flags.self_improvement_capture {
-            crate::cli::improvement::execution_integrity_capture_note(
-                &resolved,
-                "Execution control record failed integrity validation at the Stop gate (edited outside the canonical operations)",
-                &format!(
-                    "{kind} #{number}: stop-gate tamper block (T-124)",
-                    kind = record.owner_kind.as_str(),
-                    number = record.owner_number,
-                ),
-            )
-        } else {
-            String::new()
-        };
         let repair = execution_state::integrity_repair_guidance(record.status);
         return HookOutput::stop_block(format!(
-            "Execution control record failed integrity validation: it was edited outside the canonical operations. {repair}{capture_note}",
+            "Execution control record failed integrity validation: it was edited outside the canonical operations. {repair}",
         ));
     }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
@@ -97,15 +78,10 @@ mod tests {
     use crate::cli::execution_state::{
         materialize_at_launch, settle, ExecutionOwnerKind, ExecutionSettlement,
     };
-    use gwt_core::test_support::ScopedEnvVar;
-    use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
 
-    fn mk_worktree(profile: Option<&gwt_skills::LaneProfile>) -> tempfile::TempDir {
+    fn mk_worktree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-        if let Some(profile) = profile {
-            write_lane_file(dir.path(), profile).unwrap();
-        }
         dir
     }
 
@@ -113,7 +89,7 @@ mod tests {
     // build.start was never called.
     #[test]
     fn active_record_blocks_stop_without_skill_state() {
-        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
             ExecutionOwnerKind::Issue,
@@ -137,7 +113,7 @@ mod tests {
     // Settlement (completed or blocked) passes Stop.
     #[test]
     fn settled_record_passes_stop() {
-        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
             ExecutionOwnerKind::Spec,
@@ -182,7 +158,7 @@ mod tests {
     // malformed records fail open.
     #[test]
     fn missing_or_malformed_record_fails_open() {
-        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
             HookOutput::Silent
@@ -198,7 +174,7 @@ mod tests {
 
     #[test]
     fn stop_hook_active_and_session_mismatch_stay_silent() {
-        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
             ExecutionOwnerKind::Issue,
@@ -224,17 +200,12 @@ mod tests {
         );
     }
 
-    // T-124: a tampered record does not just block — repeated tamper blocks
-    // auto-capture one deduped issue-spec-workflow improvement candidate
-    // (same dedupe key across repeats, no secrets in the summary).
+    // T-122: a tampered record blocks Stop with the repair path. Repeated
+    // blocks stay identical — the retired self-improvement capture note
+    // (T-124) must not reappear in the reason (AC-R4).
     #[test]
-    fn tampered_record_block_captures_improvement_candidate() {
-        // The capture store lives under gwt home; scope it thread-locally so
-        // parallel tests flipping HOME cannot split the two captures across
-        // different stores (ScopedGwtHome doc convention).
-        let home = tempfile::tempdir().unwrap();
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
-        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+    fn tampered_record_block_reports_repair_guidance_without_capture_note() {
+        let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
             ExecutionOwnerKind::Spec,
@@ -250,27 +221,21 @@ mod tests {
             .replace("$gwt-execute", "$gwt-forged");
         std::fs::write(&path, tampered).unwrap();
 
-        for expected_occurrences in [1u64, 2u64] {
+        for _ in 0..2 {
             let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
             let HookOutput::StopBlock { reason } = output else {
                 panic!("expected StopBlock, got {output:?}");
             };
             assert!(reason.contains("integrity validation"), "{reason}");
-            assert!(reason.contains("Self-improvement candidate"), "{reason}");
-            let candidates = crate::cli::improvement::candidate_public_values(dir.path());
-            assert_eq!(candidates.len(), 1, "one deduped candidate expected");
-            assert_eq!(
-                candidates[0]
-                    .get("legacy_occurrence_count")
-                    .and_then(|v| v.as_u64()),
-                Some(expected_occurrences)
-            );
+            assert!(reason.contains("execution.repair"), "{reason}");
+            assert!(reason.contains("quarantines"), "{reason}");
+            assert!(!reason.contains("Self-improvement"), "{reason}");
         }
     }
 
     #[test]
     fn tampered_terminal_record_routes_to_fresh_launch_not_adopt() {
-        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
             ExecutionOwnerKind::Issue,
@@ -307,14 +272,14 @@ mod tests {
         );
     }
 
-    // Intake lanes are excluded — the intake artifact gate owns them.
+    // SPEC #3245 FR-007: the former intake-lane exclusion is gone — a
+    // launch-written record gates Stop uniformly in every worktree.
     #[test]
-    fn intake_lane_stays_silent_even_with_record() {
+    fn former_intake_worktree_gates_like_any_other() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
-        let dir = mk_worktree(Some(&INTAKE_PROFILE));
+        let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
             ExecutionOwnerKind::Issue,
@@ -324,9 +289,12 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(
-            handle_with_input(dir.path(), "{}", Some("sess-1")),
-            HookOutput::Silent
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the execution control record gates uniformly after the lane removal"
         );
     }
 }

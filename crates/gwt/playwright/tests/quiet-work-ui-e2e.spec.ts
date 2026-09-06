@@ -84,8 +84,9 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
       "Workspace",
     );
-    // Producing continuation lives on the Work. A Session-level Resume remains
-    // a history/Inspection action and carries no execution authority.
+    // Producing continuation lives on the Work. A Session-level Resume
+    // reopens the conversation with input enabled; producing authority is
+    // recovered by the backend continuation coordinator when applicable.
     await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
     await expect(page.locator("[data-action='resume-work']")).toHaveCount(0);
     const continueWork = page.locator("[data-action='continue-work']");
@@ -98,7 +99,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
       "data-agent-session-id",
       "conv-bbbb2222",
     );
-    await expect(sessionResume).toHaveText("Inspect session");
+    await expect(sessionResume).toHaveText("Open session");
   });
 
   test("Workspace detail exposes blocked execution recovery without replacing purpose", async ({
@@ -149,7 +150,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     const guidance = group.locator(".workspace-detail-session-guidance");
     await expect(guidance).toHaveCount(1);
     await expect(guidance).toHaveText(
-      "No previous session to inspect. Continue work can start a new one.",
+      "No previous session to open. Continue work can start a new one.",
     );
   });
 

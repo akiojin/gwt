@@ -166,66 +166,134 @@ test("cells carry agent color and telemetry datasets only when present", () => {
   assert.equal(plainCell.dataset.telemetry, undefined, "non-agent cell omits telemetry");
 });
 
-test("cells carry lane identity separately from agent color", () => {
+test("cells carry worktree form separately from agent color", () => {
   const { container } = setupDom();
   const windows = [
-    windowAt("w-intake", 0, 0, 100, 80, {
+    windowAt("w-ephemeral", 0, 0, 100, 80, {
       agent_color: "cyan",
       lane_kind: "intake",
     }),
-    windowAt("w-exec", 300, 0, 100, 80, {
+    windowAt("w-branch-backed", 300, 0, 100, 80, {
       agent_color: "cyan",
       lane_kind: "execution",
     }),
   ];
   const { minimap } = makeMinimap(container, windows, {
-    cellLaneKind: (w) => w.lane_kind,
-    cellLaneBadge: (w) =>
+    cellWorktreeForm: (w) =>
+      w.lane_kind === "intake" ? "ephemeral" : "branch-backed",
+    cellWorktreeBadge: (w) =>
       w.lane_kind === "intake"
-        ? { kind: "intake", symbol: "I", ariaLabel: "Intake lane" }
-        : { kind: "execution", symbol: "E", ariaLabel: "Execution lane" },
+        ? {
+            form: "ephemeral",
+            label: "Ephemeral",
+            symbol: "Ø",
+            ariaLabel: "Ephemeral branchless worktree",
+          }
+        : {
+            form: "branch-backed",
+            label: "Branch-backed",
+            symbol: "B",
+            ariaLabel: "Branch-backed worktree",
+          },
   });
 
   minimap.renderCells();
 
-  const intake = container.querySelector('[data-window-id="w-intake"]');
-  const execution = container.querySelector('[data-window-id="w-exec"]');
-  assert.equal(intake.dataset.agentColor, "cyan");
-  assert.equal(execution.dataset.agentColor, "cyan");
-  assert.equal(intake.dataset.laneKind, "intake");
-  assert.equal(execution.dataset.laneKind, "execution");
-  assert.equal(intake.dataset.laneSymbol, "I");
-  assert.equal(execution.dataset.laneSymbol, "E");
-  assert.match(intake.getAttribute("aria-label"), /Intake lane/);
-  assert.match(execution.getAttribute("aria-label"), /Execution lane/);
+  const ephemeral = container.querySelector('[data-window-id="w-ephemeral"]');
+  const branchBacked = container.querySelector(
+    '[data-window-id="w-branch-backed"]',
+  );
+  assert.equal(ephemeral.dataset.agentColor, "cyan");
+  assert.equal(branchBacked.dataset.agentColor, "cyan");
+  assert.equal(ephemeral.dataset.worktreeForm, "ephemeral");
+  assert.equal(branchBacked.dataset.worktreeForm, "branch-backed");
+  assert.equal(ephemeral.dataset.worktreeLabel, "Ephemeral");
+  assert.equal(branchBacked.dataset.worktreeLabel, "Branch-backed");
+  assert.equal(ephemeral.dataset.worktreeSymbol, "Ø");
+  assert.equal(branchBacked.dataset.worktreeSymbol, "B");
+  assert.match(
+    ephemeral.getAttribute("aria-label"),
+    /Ephemeral branchless worktree/,
+  );
+  assert.match(branchBacked.getAttribute("aria-label"), /Branch-backed worktree/);
 });
 
-test("lane marker is suppressed when the minimap cell is too small to contain it", () => {
+test("worktree marker is suppressed when the minimap cell is too small to contain it", () => {
   const { container } = setupDom();
   const windows = [
-    windowAt("w-intake", 0, 0, 100, 80, {
+    windowAt("w-ephemeral", 0, 0, 100, 80, {
       lane_kind: "intake",
     }),
   ];
   const { minimap } = makeMinimap(container, windows, {
     getVisibleBounds: () => ({ x: 0, y: 0, width: 3000, height: 1800 }),
-    cellLaneKind: (w) => w.lane_kind,
-    cellLaneBadge: () => ({ kind: "intake", symbol: "I", ariaLabel: "Intake lane" }),
+    cellWorktreeForm: () => "ephemeral",
+    cellWorktreeBadge: () => ({
+      form: "ephemeral",
+      label: "Ephemeral",
+      symbol: "Ø",
+      ariaLabel: "Ephemeral branchless worktree",
+    }),
   });
 
   minimap.renderCells();
 
-  const intake = container.querySelector('[data-window-id="w-intake"]');
-  assert.equal(intake.dataset.laneKind, "intake");
+  const ephemeral = container.querySelector('[data-window-id="w-ephemeral"]');
+  assert.equal(ephemeral.dataset.worktreeForm, "ephemeral");
+  assert.equal(ephemeral.dataset.worktreeLabel, "Ephemeral");
   assert.equal(
-    intake.dataset.laneSymbol,
+    ephemeral.dataset.worktreeSymbol,
     undefined,
     "compact minimap cells must not render a marker that can overlap neighbors",
   );
-  assert.match(intake.getAttribute("aria-label"), /Intake lane/);
+  assert.match(
+    ephemeral.getAttribute("aria-label"),
+    /Ephemeral branchless worktree/,
+  );
 });
 
-test("unknown lane identity does not alter the minimap tooltip", () => {
+test("worktree marker appears only when a cell reaches the full 17px footprint", () => {
+  function renderMarkerAtCellSize(cellSize) {
+    const { container } = setupDom();
+    const windows = [
+      windowAt(`w-${cellSize}`, 0, 0, 100, 100, {
+        lane_kind: "intake",
+      }),
+    ];
+    const scale = cellSize / 100;
+    const { minimap } = makeMinimap(container, windows, {
+      getVisibleBounds: () => ({
+        x: 0,
+        y: 0,
+        width: (0.45 * 200) / scale,
+        height: (0.45 * 120) / scale,
+      }),
+      cellWorktreeForm: () => "ephemeral",
+      cellWorktreeBadge: () => ({
+        form: "ephemeral",
+        label: "Ephemeral",
+        symbol: "Ø",
+        ariaLabel: "Ephemeral branchless worktree",
+      }),
+    });
+
+    minimap.renderCells();
+
+    return container.querySelector(`[data-window-id="w-${cellSize}"]`);
+  }
+
+  const sixteenPixelCell = renderMarkerAtCellSize(16);
+  assert.equal(Number.parseFloat(sixteenPixelCell.style.width), 16);
+  assert.equal(Number.parseFloat(sixteenPixelCell.style.height), 16);
+  assert.equal(sixteenPixelCell.dataset.worktreeSymbol, undefined);
+
+  const seventeenPixelCell = renderMarkerAtCellSize(17);
+  assert.equal(Number.parseFloat(seventeenPixelCell.style.width), 17);
+  assert.equal(Number.parseFloat(seventeenPixelCell.style.height), 17);
+  assert.equal(seventeenPixelCell.dataset.worktreeSymbol, "Ø");
+});
+
+test("unknown agent worktree form propagates to the minimap", () => {
   const { container } = setupDom();
   const windows = [
     windowAt("w-agent", 0, 0, 100, 80, {
@@ -233,18 +301,44 @@ test("unknown lane identity does not alter the minimap tooltip", () => {
     }),
   ];
   const { minimap } = makeMinimap(container, windows, {
-    cellLaneKind: (w) => w.lane_kind,
-    cellLaneBadge: () => ({ kind: "unknown", symbol: "?", ariaLabel: "Unknown lane" }),
+    cellWorktreeForm: () => "unknown",
+    cellWorktreeBadge: () => ({
+      form: "unknown",
+      label: "Unknown worktree form",
+      symbol: "?",
+      ariaLabel: "Unknown worktree form",
+    }),
   });
 
   minimap.renderCells();
 
   const cell = container.querySelector('[data-window-id="w-agent"]');
-  assert.equal(cell.dataset.laneKind, "unknown");
-  assert.equal(cell.dataset.laneSymbol, undefined);
-  assert.equal(cell.dataset.laneLabel, undefined);
-  assert.equal(cell.title, "Title w-agent");
-  assert.equal(cell.getAttribute("aria-label"), "Title w-agent");
+  assert.equal(cell.dataset.worktreeForm, "unknown");
+  assert.equal(cell.dataset.worktreeLabel, "Unknown worktree form");
+  assert.equal(cell.dataset.worktreeSymbol, "?");
+  assert.equal(cell.title, "Title w-agent - Unknown worktree form");
+  assert.equal(
+    cell.getAttribute("aria-label"),
+    "Title w-agent - Unknown worktree form",
+  );
+});
+
+test("ordinary panels omit the worktree badge presentation", () => {
+  const { container } = setupDom();
+  const windows = [windowAt("w-panel", 0, 0, 100, 80, { preset: "file_tree" })];
+  const { minimap } = makeMinimap(container, windows, {
+    cellWorktreeForm: () => "unknown",
+    cellWorktreeBadge: () => null,
+  });
+
+  minimap.renderCells();
+
+  const cell = container.querySelector('[data-window-id="w-panel"]');
+  assert.equal(cell.dataset.worktreeForm, "unknown");
+  assert.equal(cell.dataset.worktreeLabel, undefined);
+  assert.equal(cell.dataset.worktreeSymbol, undefined);
+  assert.equal(cell.title, "Title w-panel");
+  assert.equal(cell.getAttribute("aria-label"), "Title w-panel");
 });
 
 test("FR-039 (安心): a waiting telemetry surfaces as its own minimap dataset", () => {
@@ -503,4 +597,74 @@ test("the camera frame hides when there are no framable windows", () => {
   const frame = container.querySelector(".fleet-minimap__camera");
   assert.ok(frame, "the camera frame element persists across empties");
   assert.equal(frame.hidden, true, "camera frame hides when nothing is framable");
+});
+
+// Issue #3364 — the "window moved → its minimap cell follows" scenario was
+// uncovered: renderCells() must re-lay an EXISTING cell when only its window's
+// geometry changed (same window set, same scale inputs).
+test("renderCells repositions an existing cell after its window geometry changes", () => {
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 120, 100), windowAt("w-2", 400, 300)];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  const leftBefore = parseFloat(cell.style.left);
+  const topBefore = parseFloat(cell.style.top);
+
+  windows[0].geometry = { ...windows[0].geometry, x: 320, y: 250 };
+  minimap.renderCells();
+
+  assert.ok(
+    parseFloat(cell.style.left) > leftBefore,
+    "the moved window's cell must shift right with its new world x",
+  );
+  assert.ok(
+    parseFloat(cell.style.top) > topBefore,
+    "the moved window's cell must shift down with its new world y",
+  );
+});
+
+// Issue #3884 AC-1: an `issue_preview` placement (SPEC-3671) is not drawn on the
+// canvas, so it must not be drawn on the minimap either — a radar rectangle with
+// no window behind it reads as "the window vanished". Windowize moves the
+// placement back to `canvas`, and only then does the cell appear.
+test("Issue #3884 AC-1: off-canvas placements are not drawn as minimap cells", () => {
+  const { container } = setupDom();
+  const issueWindow = windowAt("issue-1", 0, 0, 1400, 860, { preset: "issue" });
+  const inlineAgent = windowAt("agent-1", 120, 120, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  });
+  const kanbanAgent = windowAt("agent-2", 200, 200, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0 },
+  });
+  const windows = [issueWindow, inlineAgent, kanbanAgent];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+
+  const ids = [...container.querySelectorAll(".fleet-minimap__cell")].map(
+    (cell) => cell.dataset.windowId,
+  );
+  assert.deepEqual(ids, ["issue-1"], "only canvas-placed windows get a radar cell");
+  assert.equal(container.dataset.empty, "false");
+
+  // Windowize: the placement returns to the canvas and the cell appears.
+  inlineAgent.placement = { kind: "canvas" };
+  minimap.renderCells();
+  const afterWindowize = [...container.querySelectorAll(".fleet-minimap__cell")]
+    .map((cell) => cell.dataset.windowId)
+    .sort();
+  assert.deepEqual(afterWindowize, ["agent-1", "issue-1"]);
+
+  // A workspace whose only windows are inline agents is an empty radar.
+  windows.splice(0, windows.length, windowAt("agent-3", 0, 0, 100, 80, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  }));
+  minimap.renderCells();
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 0);
+  assert.equal(container.dataset.empty, "true");
 });

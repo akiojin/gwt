@@ -268,6 +268,12 @@ impl AppRuntime {
                 // their agent panes stayed `Stopped`.
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
                     events.extend(self.restore_open_project_windows(&active_tab_id));
+                    // SPEC-3431 FR-002: the resident PM pane follows the same
+                    // "open the project, get the pane" rule as window restore.
+                    events.extend(self.ensure_pm_agent_for_tab(
+                        &active_tab_id,
+                        crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+                    ));
                 }
                 // SPEC-2359 W-16 (FR-387): run the cross-machine intake for
                 // the opened project; its completion event reconciles the
@@ -508,7 +514,6 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
@@ -527,18 +532,14 @@ impl AppRuntime {
             })
             .unwrap_or_default();
         for window_id in &window_ids {
-            self.clear_agent_window_startup_restore(window_id);
-            self.stop_window_runtime(window_id);
-            self.remove_window_state_tracking(window_id);
+            self.queue_accepted_window_close_finalizer(
+                window_id,
+                Some(closing_project_root.clone()),
+                true,
+                None,
+            );
             self.window_lookup.remove(window_id);
-            self.profile_selections.remove(window_id);
         }
-
-        // Return any Issue Monitor launched windows to pending before the tab is
-        // removed. The closing tab owns this lifecycle even when another tab is
-        // active. Closing a project pauses (does not complete) its in-flight work.
-        let issue_monitor_events =
-            self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {
@@ -555,9 +556,6 @@ impl AppRuntime {
         if wizard_closed {
             self.launch_wizard = None;
         }
-        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
-            self.schedule_active_improvement_candidates_refresh();
-        }
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];
@@ -567,7 +565,6 @@ impl AppRuntime {
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
-        events.extend(issue_monitor_events);
         events
     }
 }

@@ -24,6 +24,7 @@ const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
 const CSS_CONTENT_TYPE: &str = "text/css; charset=utf-8";
 const FONT_CONTENT_TYPE: &str = "font/woff2";
+const ICON_CONTENT_TYPE: &str = "image/x-icon";
 
 /// First-party sources change on every build; never serve them stale.
 const MUTABLE_CACHE_CONTROL: &str = "no-store, max-age=0";
@@ -88,7 +89,6 @@ root_js_modules! {
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
     "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
-    "improvement-inbox-surface.js" => "createImprovementInboxSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",
@@ -113,11 +113,20 @@ root_js_modules! {
     "index-settings-panel.js" => "renderIndexSettingsPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
-    // SPEC-2008 Phase 25 — revision-aware window geometry sync primitives.
-    "window-geometry-sync.js" => "shouldApplyWorkspaceGeometry",
+    // SPEC-2008 Phase 25 — window geometry sync primitives (Issue #3364:
+    // the revision-arithmetic guard became the content-matched
+    // resolveIncomingGeometry).
+    "window-geometry-sync.js" => "resolveIncomingGeometry",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
+    // Issue #3365 — render-key lifecycle with per-window exception isolation
+    // (a failed sync retries on the next workspace_state instead of freezing
+    // the minimap / window list / telemetry behind a committed key).
+    "workspace-render-sync.js" => "createWorkspaceRenderSync",
+    // Issue #3365 — user-visible degradation notice for swallowed
+    // render/receive failures.
+    "render-degradation-banner.js" => "createRenderDegradationBanner",
     // SPEC-1939 Phase 24 — per-window terminal output batching before xterm
     // write.
     "terminal-output-buffer.js" => "createTerminalOutputBatcher",
@@ -158,9 +167,9 @@ root_js_modules! {
     "protocol-enums.js" => "WINDOW_RUNTIME_STATES",
     // SPEC-3015 — window runtime state normalization extracted from app.js.
     "window-runtime-state.js" => "normalizeWindowRuntimeState",
-    // SPEC-3214 — Intake/Execution lane identity shared by window
+    // SPEC-3245 — semantic worktree form presentation shared by window
     // titlebar, window list, and fleet minimap.
-    "window-lane-identity.js" => "windowLaneKind",
+    "window-worktree-form.js" => "windowWorktreeForm",
     // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface
     // (SPEC-2970) extracted from app.js.
     "provider-usage-surface.js" => "createProviderUsageSurface",
@@ -178,15 +187,17 @@ root_js_modules! {
     // interaction guard, field builders, transitions, renderLaunchWizard,
     // chrome listeners) extracted from app.js.
     "launch-wizard-surface.js" => "createLaunchWizardSurface",
-    // SPEC-3165 — Issue auto-improve monitor card, inbox, and toast surface.
-    "issue-monitor-surface.js" => "createIssueMonitorSurface",
-    // SPEC #3200 FR-034/FR-035 — autonomous Issue Monitor scrollable side-toast
-    // notification stack. app.js imports this at module top level, so the asset
-    // MUST be registered or the ES module load fails and the splash hangs.
-    "autonomous-notifications.js" => "createAutonomousNotifications",
-    // SPEC #3206 — shared floating-toast primitive imported by
-    // autonomous-notifications.js (and later the bottom-right alerts trio).
+    // SPEC-3431 FR-026 — PM settings panel anchored to the rail launcher.
+    // app.js imports this at module top level, so the asset MUST be registered
+    // or the ES module load 404s and the splash hangs.
+    "pm-settings-panel.js" => "createPmSettingsPanel",
+    // SPEC #3206 — shared floating-toast primitive behind the bottom-right
+    // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",
+    // SPEC #3206 v2 — notification center (bell + unread badge + history
+    // drawer). app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load fails and the splash hangs.
+    "notification-center.js" => "createNotificationCenter",
     // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
     // worktree picker + text/hex viewer + window mount) extracted from
     // app.js.
@@ -259,6 +270,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: JS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/app.js")),
+    },
+    StaticAsset {
+        route: "/favicon.ico",
+        content_type: ICON_CONTENT_TYPE,
+        cache_control: Some(IMMUTABLE_CACHE_CONTROL),
+        body: AssetBody::Bytes(include_bytes!("../../../assets/icons/icon.ico")),
     },
     // Vendored xterm.js — pinned versions bundled so the terminal works
     // offline without CDN reach.

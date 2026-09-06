@@ -1,10 +1,17 @@
-use std::{collections::BTreeSet, env, fs, io::Write, path::Path, process::Stdio};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 use chrono::Utc;
 use gwt_agent::{AgentId, Session};
 use gwt_core::process::hidden_command;
 use gwt_core::{
     paths::project_scope_hash,
+    repo_hash::{compute_path_hash, compute_repo_hash},
     workspace_projection::{
         append_workspace_work_event_to_path, load_workspace_projection_from_path,
         save_workspace_projection_to_path, save_workspace_work_items_projection_to_path, WorkEvent,
@@ -119,6 +126,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let mut session = Session::new(&project_root, branch, AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(project_root.clone());
+    session.linked_issue_number = Some(3412);
     assert!(
         session.repo_hash.is_some(),
         "fixture origin must set repo hash"
@@ -160,6 +168,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let mut event = WorkEvent::new(WorkEventKind::Start, work_id, now);
     event.title = Some("Fixture Work".to_string());
     event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = Some("Issue #3412".to_string());
     event.agent_session_id = Some(session_id.to_string());
     event.agent_id = Some("codex".to_string());
     event.display_name = Some("Codex".to_string());
@@ -399,105 +408,8 @@ fn gwtd_provider_hook_event_remains_argv_transport_exception() {
     );
 }
 
-#[test]
-fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
-    let home = tempfile::tempdir().expect("home tempdir");
-    let repo = tempfile::tempdir().expect("repo tempdir");
-    assert!(hidden_command("git")
-        .arg("init")
-        .arg("-q")
-        .arg(repo.path())
-        .status()
-        .expect("git init")
-        .success());
-    assert!(hidden_command("git")
-        .arg("-C")
-        .arg(repo.path())
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/example/project.git"
-        ])
-        .status()
-        .expect("git remote add")
-        .success());
-
-    let output = isolated_gwtd_command()
-        .current_dir(repo.path())
-        .args(["hook", "gwt-self-improvement-stop"])
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("run gwtd gwt self-improvement hook");
-
-    assert!(
-        output.status.success(),
-        "direct self-improvement hook should exit 0 outside akiojin/gwt, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "non-gwt repos must receive no hook output, got: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn gwtd_direct_self_improvement_stop_bypasses_repo_coordinate_bootstrap() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let home = tempfile::tempdir().expect("home tempdir");
-    let repo = tempfile::tempdir().expect("repo tempdir");
-    let fake_bin = tempfile::tempdir().expect("fake bin tempdir");
-    let marker = fake_bin.path().join("remote-v-called");
-    let real_git = env::split_paths(&env::var_os("PATH").expect("PATH"))
-        .map(|directory| directory.join("git"))
-        .find(|path| path.is_file())
-        .expect("real git executable");
-    let fake_git = fake_bin.path().join("git");
-    fs::write(
-        &fake_git,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = \"remote\" ] && [ \"$2\" = \"-v\" ]; then\n  : > \"$GWT_REMOTE_PROBE_MARKER\"\nfi\nexec \"{}\" \"$@\"\n",
-            real_git.display()
-        ),
-    )
-    .expect("write fake git");
-    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
-        .expect("make fake git executable");
-    let path = env::join_paths(
-        std::iter::once(fake_bin.path().to_path_buf())
-            .chain(env::split_paths(&env::var_os("PATH").expect("PATH"))),
-    )
-    .expect("compose PATH");
-
-    let output = isolated_gwtd_command()
-        .current_dir(repo.path())
-        .args(["hook", "gwt-self-improvement-stop"])
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env("PATH", path)
-        .env("GWT_REMOTE_PROBE_MARKER", &marker)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run direct self-improvement Stop hook");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !marker.exists(),
-        "direct Stop must not run the unbounded repo-coordinate `git remote -v` bootstrap"
-    );
-}
-
-/// Initialize a worktree whose `origin` is `akiojin/gwt` so generation emits the
-/// repo-owned self-improvement Stop hook alongside the shared managed hooks.
+/// Initialize a worktree whose `origin` is `akiojin/gwt`, the repository whose
+/// generated hook assets this suite inspects.
 fn init_gwt_origin_repo(worktree: &Path) {
     assert!(hidden_command("git")
         .arg("init")
@@ -558,7 +470,11 @@ fn generated_hook_subcommands(corpus: &str) -> BTreeSet<String> {
         .collect();
     let tokens: Vec<&str> = flattened.split_whitespace().collect();
     let references_hook_bin = |token: &str| {
-        token.contains("gwtd") || token.contains("gwt_bin") || token.contains("GWT_HOOK_BIN")
+        let normalized = token.to_ascii_lowercase();
+        normalized.contains("gwtd")
+            || normalized.contains("gwt_bin")
+            || normalized.contains("gwtbin")
+            || normalized.contains("gwt_hook_bin")
     };
     let is_subcommand = |token: &str| {
         let mut chars = token.chars();
@@ -607,13 +523,12 @@ fn gwtd_hook_argv_rejected(args: &[&str], stdin: &str) -> (bool, String) {
 }
 
 /// Regression guard for issue #3178: every managed-hook command that generation
-/// emits must stay inside gwtd's argv transport allowlist. The self-improvement
-/// Stop hook regressed because its generated `hook gwt-self-improvement-stop`
-/// command had no matching `is_allowed_argv_exception` entry, so each Stop hit
-/// the legacy-argv rejection. This test derives the subcommands from the actual
-/// generated artifacts (not a hard-coded list) and runs each through the real
-/// binary, so a new generation site that drifts ahead of the allowlist fails
-/// here instead of silently at runtime.
+/// emits must stay inside gwtd's argv transport allowlist. A generated command
+/// with no matching `is_allowed_argv_exception` entry hits the legacy-argv
+/// rejection on every hook invocation. This test derives the subcommands from
+/// the actual generated artifacts (not a hard-coded list) and runs each through
+/// the real binary, so a new generation site that drifts ahead of the allowlist
+/// fails here instead of silently at runtime.
 #[test]
 fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
     let worktree = tempfile::tempdir().expect("worktree tempdir");
@@ -629,7 +544,7 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
     collect_generated_text(worktree.path(), &mut corpus);
     let subcommands = generated_hook_subcommands(&corpus);
 
-    for expected in ["event", "provider-event", "gwt-self-improvement-stop"] {
+    for expected in ["event", "provider-event"] {
         assert!(
             subcommands.contains(expected),
             "generation must still emit the `hook {expected}` managed-hook command; \
@@ -644,7 +559,6 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
                 vec!["hook", "provider-event", "opencode", "session.created"],
                 "{\"sessionId\":\"guard\"}",
             ),
-            "gwt-self-improvement-stop" => (vec!["hook", "gwt-self-improvement-stop"], ""),
             other => panic!(
                 "generation emits an unmapped gwtd hook subcommand `{other}`. Add a representative \
                  argv here and confirm gwtd's is_allowed_argv_exception accepts it, or the same \
@@ -660,107 +574,361 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
     }
 }
 
-/// Walk up from the gwt crate dir to the repository root that owns the
-/// committed managed-hook settings (`.claude/settings.json`).
-fn repo_root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|dir| dir.join(".claude/settings.json").is_file())
-        .map(Path::to_path_buf)
-        .expect("locate repository root containing .claude/settings.json")
-}
-
-/// Collect every committed managed-hook `command` string that invokes the
-/// repo-owned `gwt-self-improvement-stop` hook (Claude + Codex transports).
-fn committed_self_improvement_stop_commands() -> Vec<String> {
-    let root = repo_root();
-    let mut commands = Vec::new();
-    for relative in [".claude/settings.json", ".codex/hooks.json"] {
-        let path = root.join(relative);
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let value: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or_else(|err| panic!("parse {relative}: {err}"));
-        let Some(events) = value.get("hooks").and_then(|hooks| hooks.as_object()) else {
-            continue;
-        };
-        for matchers in events.values() {
-            for matcher in matchers.as_array().into_iter().flatten() {
-                for hook in matcher
-                    .get("hooks")
-                    .and_then(|hooks| hooks.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                        if command.contains("gwt-self-improvement-stop") {
-                            commands.push(command.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    commands
-}
-
-/// Regression guard for issue #3178's actual harm: the committed self-improvement
-/// Stop hook command must NOT leak gwtd's legacy-argv rejection into the agent's
-/// Stop loop when the installed gwtd predates the `gwt-self-improvement-stop`
-/// transport exception (e.g. v9.61.0). The command is repo-committed, so it runs
-/// against whatever gwtd a developer has installed; it must degrade silently on
-/// older binaries the same way the OpenCode/OpenClaw JS bridges already do
-/// (stderr/exit ignored). A `HookOutput::StopBlock` from a current binary exits 0
-/// and writes its decision JSON to stdout, so a graceful wrapper that drops
-/// stderr and forces exit 0 still surfaces a real block.
+/// SPEC #3164 AC-R2: the retired `improvement.*` operations are gone from the
+/// envelope dispatcher, so they must land on the pre-existing unknown-operation
+/// rejection rather than on a bespoke refusal code.
 #[test]
-fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
-    let commands = committed_self_improvement_stop_commands();
-    assert!(
-        !commands.is_empty(),
-        "expected at least one committed gwt-self-improvement-stop hook command to guard"
-    );
+fn retired_improvement_operations_hit_the_unknown_operation_rejection() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
 
-    // A fake gwtd that mimics a pre-v9.63.0 binary: it rejects the unknown argv
-    // with the legacy-argv error on stderr and a non-zero exit.
-    let fake_dir = tempfile::tempdir().expect("fake bin dir");
-    let fake_gwtd = fake_dir.path().join("gwtd");
-    fs::write(
-        &fake_gwtd,
-        "#!/bin/sh\n\
-         echo 'gwtd hook: legacy argv invocation is disabled; use stdin JSON envelope.' >&2\n\
-         exit 2\n",
-    )
-    .expect("write fake gwtd");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
-            .expect("chmod fake gwtd");
-    }
+    for operation in ["improvement.list", "improvement.capture"] {
+        let mut child = isolated_gwtd_command()
+            .current_dir(repo.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn gwtd");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(
+                format!("{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}")
+                    .as_bytes(),
+            )
+            .expect("write envelope");
+        let output = child.wait_with_output().expect("wait gwtd");
 
-    for command in &commands {
-        let output = hidden_command("sh")
-            .arg("-c")
-            .arg(command)
-            .env("GWT_BIN_PATH", &fake_gwtd)
-            .stdin(Stdio::null())
-            .output()
-            .expect("run committed self-improvement stop command");
-
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "committed self-improvement Stop command must exit 0 on an unsupported gwtd so it \
-             does not block the agent's Stop loop (issue #3178); command: {command}; stderr: {}",
+        assert!(
+            !output.status.success(),
+            "`{operation}` must be refused after the improvement subsystem retirement"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            output.stderr.is_empty(),
-            "committed self-improvement Stop command must not leak gwtd's legacy-argv rejection \
-             into the agent's Stop feedback (issue #3178); command: {command}; stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            combined.contains("unknown"),
+            "`{operation}` must be refused through the existing unknown-operation path, got: {combined}"
         );
     }
+}
+
+/// SPEC #3164 AC-R3: `gwtd hook gwt-self-improvement-stop` lost its argv
+/// transport exception along with the hook, so the binary must refuse it
+/// instead of running a retired gate.
+#[test]
+fn retired_self_improvement_stop_hook_is_no_longer_an_argv_exception() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
+
+    let output = isolated_gwtd_command()
+        .current_dir(repo.path())
+        .args(["hook", "gwt-self-improvement-stop"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run retired self-improvement hook");
+
+    assert!(
+        !output.status.success(),
+        "the retired self-improvement Stop hook must not be dispatched"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "the retired hook must emit no hook decision, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("gwt-self-improvement-stop"),
+        "the retired hook must not be advertised as a transport exception, got: {stderr}"
+    );
+}
+
+/// Issue #3606: a JSON operation that acts on the project store must name the
+/// store it landed in.
+///
+/// The PM ran `issue.monitor.priority.move` against a `project_root` whose
+/// identity did not resolve, got `ok: true` plus a successful readback, and
+/// nearly reported the wrong queue state to the user — the write had gone to an
+/// isolated path-fallback store no running gwt reads. `ok: true` proves the
+/// operation ran; it never proved *where*. These tests pin the proof onto the
+/// envelope so the landing is checkable instead of inferable from file mtimes.
+const STORE_LANDING_ORIGIN: &str = "https://example.invalid/acme/store-landing.git";
+
+struct StoreLandingFixture {
+    home: TempDir,
+    _temp: TempDir,
+    layout_root: PathBuf,
+    worktree: PathBuf,
+}
+
+fn store_landing_git(cwd: &Path, args: &[&str]) {
+    let output = hidden_command("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git store-landing fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A Nested Bare + Worktree layout: `<root>/gwt.git` plus `<root>/work/develop`.
+/// This is the shape `E:/gwt` has in the report, where the layout root itself is
+/// not a repository but still scopes exactly one project.
+fn store_landing_fixture() -> StoreLandingFixture {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let temp = tempfile::tempdir().expect("layout tempdir");
+    let layout_root = temp.path().join("workbench");
+    let bare = layout_root.join("gwt.git");
+    let bootstrap = layout_root.join(".bootstrap");
+    let worktree = layout_root.join("work").join("develop");
+    fs::create_dir_all(worktree.parent().expect("work dir")).expect("create work dir");
+
+    store_landing_git(
+        temp.path(),
+        &["init", "--bare", bare.to_str().expect("bare path utf8")],
+    );
+    store_landing_git(&bare, &["remote", "add", "origin", STORE_LANDING_ORIGIN]);
+    store_landing_git(
+        &layout_root,
+        &[
+            "clone",
+            bare.to_str().expect("bare path utf8"),
+            ".bootstrap",
+        ],
+    );
+    store_landing_git(&bootstrap, &["checkout", "-b", "develop"]);
+    store_landing_git(
+        &bootstrap,
+        &[
+            "-c",
+            "user.name=gwt-test",
+            "-c",
+            "user.email=gwt-test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    store_landing_git(&bootstrap, &["push", "origin", "develop"]);
+    fs::remove_dir_all(&bootstrap).expect("remove bootstrap clone");
+    store_landing_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().expect("worktree path utf8"),
+            "develop",
+        ],
+    );
+
+    StoreLandingFixture {
+        home,
+        _temp: temp,
+        layout_root,
+        worktree,
+    }
+}
+
+fn run_store_landing_envelope(
+    home: &Path,
+    cwd: &Path,
+    envelope: &serde_json::Value,
+) -> serde_json::Value {
+    let mut child = isolated_gwtd_command()
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gwtd");
+    write!(child.stdin.take().expect("stdin"), "{envelope}").expect("write JSON envelope");
+    let output = child.wait_with_output().expect("wait gwtd");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "gwtd stdout must be a JSON envelope ({error}); stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+#[test]
+fn issue_monitor_status_names_the_project_store_it_resolved() {
+    let fixture = store_landing_fixture();
+    let expected = compute_repo_hash(STORE_LANDING_ORIGIN);
+
+    let response = run_store_landing_envelope(
+        fixture.home.path(),
+        &fixture.layout_root,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.status",
+            "params": { "project_root": fixture.layout_root.to_str().expect("layout path utf8") },
+        }),
+    );
+
+    assert_eq!(response["ok"].as_bool(), Some(true), "response: {response}");
+    let store = &response["project_store"];
+    assert_eq!(
+        store["hash"].as_str(),
+        Some(expected.as_str()),
+        "the envelope must name the store the operation resolved; response: {response}"
+    );
+    assert_eq!(
+        store["identity_resolved"].as_bool(),
+        Some(true),
+        "a Nested Bare + Worktree layout root resolves a repository identity; response: {response}"
+    );
+    assert_eq!(
+        store["source"].as_str(),
+        Some("nested_bare_repository"),
+        "response: {response}"
+    );
+    let store_path = store["store_path"].as_str().expect("store_path");
+    assert!(
+        Path::new(store_path).ends_with(expected.as_str()),
+        "store_path must point at the store directory the caller can inspect, got {store_path}"
+    );
+}
+
+#[test]
+fn issue_monitor_status_reports_the_same_store_from_a_linked_worktree() {
+    let fixture = store_landing_fixture();
+    let expected = compute_repo_hash(STORE_LANDING_ORIGIN);
+
+    // Issue #3606 AC-5': a linked worktree — the shape of a gwt `work/` checkout
+    // and of the PM's `~/.gwt/projects/<hash>/pm/worktree` — must converge on the
+    // same store as the layout root it was materialized from.
+    let response = run_store_landing_envelope(
+        fixture.home.path(),
+        &fixture.worktree,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.status",
+            "params": { "project_root": fixture.worktree.to_str().expect("worktree path utf8") },
+        }),
+    );
+
+    assert_eq!(response["ok"].as_bool(), Some(true), "response: {response}");
+    assert_eq!(
+        response["project_store"]["hash"].as_str(),
+        Some(expected.as_str()),
+        "a linked worktree must resolve the repository identity store; response: {response}"
+    );
+    assert_eq!(
+        response["project_store"]["source"].as_str(),
+        Some("origin"),
+        "response: {response}"
+    );
+}
+
+#[test]
+fn issue_monitor_write_reports_an_isolated_path_fallback_landing() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let unresolvable = tempfile::tempdir().expect("project tempdir");
+    let expected = compute_path_hash(unresolvable.path());
+
+    let response = run_store_landing_envelope(
+        home.path(),
+        unresolvable.path(),
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.config.set",
+            "params": {
+                "project_root": unresolvable.path().to_str().expect("project path utf8"),
+                "max_active": 7,
+            },
+        }),
+    );
+
+    // The write still succeeds — the store is simply isolated. What must change
+    // is that the caller can see that from the response alone.
+    assert_eq!(response["ok"].as_bool(), Some(true), "response: {response}");
+    let store = &response["project_store"];
+    assert_eq!(
+        store["identity_resolved"].as_bool(),
+        Some(false),
+        "a path-fallback landing must be visible without reading store mtimes; response: {response}"
+    );
+    assert_eq!(
+        store["source"].as_str(),
+        Some("path_fallback"),
+        "response: {response}"
+    );
+    assert_eq!(
+        store["hash"].as_str(),
+        Some(expected.as_str()),
+        "response: {response}"
+    );
+}
+
+#[test]
+fn issue_monitor_status_lists_the_candidates_of_an_ambiguous_layout_root() {
+    let fixture = store_landing_fixture();
+    let second = fixture.layout_root.join("aa-other.git");
+    store_landing_git(
+        &fixture.layout_root,
+        &["init", "--bare", second.to_str().expect("second path utf8")],
+    );
+    store_landing_git(
+        &second,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/acme/other.git",
+        ],
+    );
+
+    let response = run_store_landing_envelope(
+        fixture.home.path(),
+        &fixture.layout_root,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.status",
+            "params": { "project_root": fixture.layout_root.to_str().expect("layout path utf8") },
+        }),
+    );
+
+    let store = &response["project_store"];
+    assert_eq!(
+        store["source"].as_str(),
+        Some("ambiguous_nested_bare_repositories"),
+        "response: {response}"
+    );
+    assert_eq!(
+        store["identity_resolved"].as_bool(),
+        Some(false),
+        "response: {response}"
+    );
+    let origins: BTreeSet<&str> = store["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .filter_map(|candidate| candidate["normalized_origin"].as_str())
+        .collect();
+    assert_eq!(
+        origins,
+        BTreeSet::from([
+            "example.invalid/acme/other",
+            "example.invalid/acme/store-landing"
+        ]),
+        "an ambiguous layout root must say which origins it refused to choose between; \
+         response: {response}"
+    );
 }

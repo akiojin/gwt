@@ -32,7 +32,15 @@ use sha2::{Digest, Sha256};
 /// mode).
 #[must_use]
 pub fn trusted_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let repo_hash = crate::index_worker::detect_repo_hash(worktree)?;
+    // A trusted-store key is defined only for an actual Git worktree (or bare
+    // repository). Do not use the project-index resolver here: its
+    // workspace-home compatibility fallback shells out to `git rev-parse`.
+    // Diagnosis is projected for every historical Work on the GUI event
+    // loop, so one non-Git/stale directory would otherwise spawn Git
+    // repeatedly and freeze the Workspace surface. The core resolver reads
+    // `.git` / config files directly and returns `None` for those rows,
+    // preserving the documented mirror-only degenerate mode.
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)?;
     Some(
         gwt_core::paths::gwt_projects_dir()
             .join(repo_hash.as_str())
@@ -424,8 +432,9 @@ pub fn store_health_error(context: &str, err: &std::io::Error) -> String {
         "trusted state unhealthy while {context}: {err}. The execution/verification records \
          under the repo-scoped trusted store (`~/.gwt/projects/<repo-hash>/trusted/<worktree-key>/`) \
          or their worktree mirrors (`.gwt/skill-state/`) could not be read or parsed. Repair by \
-         rerunning the canonical writer: `execution.adopt` with a non-empty `params.reason` rewrites \
-         the execution control record; `verify.plan` / `verify.run` rewrite verification state; \
+         rerunning the canonical writer: `execution.repair` quarantines an unreadable execution \
+         control record and materializes a fresh Active one (`execution.adopt` takes over only \
+         records that still pass integrity); `verify.plan` / `verify.run` rewrite verification state; \
          `intake.outcome.record` rewrites the intake outcome. If the failure persists, inspect the \
          store directory for filesystem problems."
     )

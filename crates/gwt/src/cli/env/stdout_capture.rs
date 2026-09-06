@@ -1,10 +1,7 @@
 use std::io;
 
 use gwt_git::PrStatus;
-use gwt_github::{
-    client::{ApiError, ResolutionDeadline},
-    IssueNumber, IssueSnapshot,
-};
+use gwt_github::{IssueNumber, IssueSnapshot};
 
 use super::{CliEnv, InternalCommandOutput};
 use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
@@ -16,21 +13,9 @@ pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
-    type OwnerClient = E::OwnerClient;
 
     fn client(&self) -> &Self::Client {
         self.inner.client()
-    }
-
-    fn improvement_owner_client(
-        &self,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&Self::OwnerClient, ApiError> {
-        self.inner.improvement_owner_client(deadline)
-    }
-
-    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
-        self.inner.improvement_source_scope_nonce()
     }
 
     fn cache_root(&self) -> std::path::PathBuf {
@@ -101,6 +86,24 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
         self.inner.fetch_pr(number)
+    }
+
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.inner.fetch_pr_quarantine_context(number)
+    }
+
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        self.inner.list_open_prs(options)
+    }
+
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        self.inner.probe_github_rate_limit()
     }
 
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {

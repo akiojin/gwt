@@ -29,11 +29,12 @@ use std::thread;
 use super::{
     active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, cleanup_selected_branches_with_progress,
-    list_branch_entries_with_active_sessions, non_empty_workspace_text, work_session_index,
-    workspace_journal_entry_view_from_entry, workspace_work_item_view_from_item,
-    ActiveAgentSession, AppEventProxy, AppRuntime, BackendEvent, BranchCleanupOptions,
-    BranchEntriesPhase, ClientId, OutboundEvent, UserEvent, WindowPreset, WorkspaceResumeContext,
-    WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    list_branch_entries_with_active_sessions, non_empty_workspace_text,
+    resume_branch_refs_snapshot, work_session_index, workspace_journal_entry_view_from_entry,
+    workspace_work_item_view_from_item, ActiveAgentSession, AppEventProxy, AppRuntime,
+    BackendEvent, BranchCleanupOptions, BranchEntriesPhase, ClientId, OutboundEvent,
+    ResumeBranchIndex, UserEvent, WindowPreset, WorkspaceResumeContext, WORKSPACE_CLEANUP_EVENT_ID,
+    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 
 pub(super) fn active_agent_summary_from_session(
@@ -192,10 +193,26 @@ pub(super) struct WorkspaceLaunchTransition<'a> {
     pub(super) work_id: Option<String>,
     pub(super) base_branch: Option<&'a str>,
     pub(super) linked_issue_number: Option<u64>,
+    /// Trusted execution owner (#3426). When present it overrides any
+    /// presentation-derived `resume_context.owner` so the Work projection can
+    /// never fork from the ECR/ledger owner kind.
+    pub(super) canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     pub(super) resume_context: Option<&'a WorkspaceResumeContext>,
     pub(super) kind: WorkspaceLaunchProjectionKind,
     pub(super) live_session_ids: &'a std::collections::HashSet<String>,
     pub(super) now: chrono::DateTime<chrono::Utc>,
+}
+
+/// Canonical Work owner label for a trusted execution owner key.
+pub(super) fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
+    match owner.kind {
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
+            format!("SPEC-{}", owner.number)
+        }
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
+            format!("Issue #{}", owner.number)
+        }
+    }
 }
 
 impl WorkspaceLaunchProjectionKind {
@@ -216,11 +233,13 @@ impl WorkspaceLaunchProjectionKind {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn save_workspace_launch_projection(
     project_root: &Path,
     session: &ActiveAgentSession,
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
+    canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     launch_kind: WorkspaceLaunchProjectionKind,
     live_session_ids: &std::collections::HashSet<String>,
@@ -231,8 +250,9 @@ pub(super) fn save_workspace_launch_projection(
         Some(session.branch_name.as_str()),
         Some(session.worktree_path.as_path()),
     );
-    gwt_core::workspace_projection::transact_workspace_state(
+    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
         project_root,
+        &session.worktree_path,
         |projection, _work_items, _work_items_persisted| {
             let work_event = apply_workspace_launch_transition(
                 projection,
@@ -241,6 +261,7 @@ pub(super) fn save_workspace_launch_projection(
                     work_id,
                     base_branch,
                     linked_issue_number,
+                    canonical_owner,
                     resume_context: workspace_resume_context,
                     kind: launch_kind,
                     live_session_ids,
@@ -259,8 +280,13 @@ pub(super) fn apply_workspace_launch_transition(
     transition: WorkspaceLaunchTransition<'_>,
 ) -> gwt_core::workspace_projection::WorkEvent {
     let owner = transition
-        .resume_context
-        .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
+        .canonical_owner
+        .map(workspace_owner_label)
+        .or_else(|| {
+            transition
+                .resume_context
+                .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
+        })
         .or_else(|| {
             transition
                 .linked_issue_number
@@ -444,6 +470,11 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     let agent_sessions = crate::session_ledger_cache::SessionLedgerCache::new()
         .load(&gwt_core::paths::gwt_sessions_dir());
     let session_index = work_session_index(&agent_sessions);
+    // Issue #3611: this runs on the branch-cleanup worker, so one bulk ref
+    // snapshot is affordable — but a per-Session Git probe is not, and the
+    // event loop must never inherit one through this view builder.
+    let known_branch_refs = resume_branch_refs_snapshot(project_root);
+    let resume_branches = ResumeBranchIndex::scanned(Some(&known_branch_refs));
     let workspaces =
         gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
             .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
@@ -452,7 +483,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
             })
             .work_items
             .iter()
-            .map(|item| workspace_work_item_view_from_item(item, &session_index, project_root))
+            .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
             .collect::<Vec<_>>();
     Some(OutboundEvent::broadcast(
         BackendEvent::ActiveWorkProjection {

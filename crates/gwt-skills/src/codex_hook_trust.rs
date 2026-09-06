@@ -573,9 +573,10 @@ mod tests {
         let codex_dir = dir.path().join(".codex");
         fs::create_dir_all(&codex_dir).unwrap();
         let expected_fallback = "C:/Program Files/GWT/gwtd.exe";
-        let powershell_stop_command = format!(
-            "powershell -NoProfile -Command \"& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ '{expected_fallback}' }}; & $gwtBin hook event Stop }}\""
-        );
+        let powershell_stop_command = codex_event_hook_commands_with_bin(expected_fallback, "Stop")
+            .into_iter()
+            .nth(1)
+            .expect("PowerShell generated command");
         fs::write(
             codex_dir.join("hooks.json"),
             serde_json::to_string_pretty(&json!({

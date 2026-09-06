@@ -66,9 +66,11 @@ pub struct Screen {
 
 impl Screen {
     pub(crate) fn new(
-        size: crate::grid::Size,
+        mut size: crate::grid::Size,
         scrollback_len: usize,
     ) -> Self {
+        size.rows = size.rows.max(1);
+        size.cols = size.cols.max(1);
         let mut grid = crate::grid::Grid::new(size, scrollback_len);
         grid.allocate_rows();
         Self {
@@ -86,6 +88,8 @@ impl Screen {
 
     /// Resizes the terminal.
     pub fn set_size(&mut self, rows: u16, cols: u16) {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
         self.grid.set_size(crate::grid::Size { rows, cols });
         self.alternate_grid
             .set_size(crate::grid::Size { rows, cols });
@@ -771,11 +775,12 @@ impl Screen {
             // don't even try to draw control characters
             return;
         }
-        let width = width
+        let width: u16 = width
             .unwrap_or(1)
             .try_into()
             // width() can only return 0, 1, or 2
             .unwrap();
+        let width = width.min(size.cols);
 
         // it doesn't make any sense to wrap if the last column in a row
         // didn't already have contents. don't try to handle the case where a
@@ -939,6 +944,7 @@ impl Screen {
                 // that self.grid().pos().col has a valid value.
                 .unwrap();
             cell.set(c, attrs);
+            cell.set_effective_width(width);
             self.grid_mut().col_inc(1);
             if width > 1 {
                 let pos = self.grid().pos();

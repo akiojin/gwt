@@ -14,19 +14,44 @@
 
 use std::path::Path;
 
-use super::{context::HookContext, envelope::stop_hook_active_from, HookOutput};
+use super::{envelope::stop_hook_active_from, HookOutput};
 use crate::cli::action_obligation;
 
-/// UserPromptSubmit entry: arm typed obligations for producing prompts in
-/// execution lanes (intake lanes have their own artifact gate). A missing
-/// or unparsable prompt arms nothing — unclassifiable input must not
-/// over-block (conservative bias, opposite of the intake dirty marker).
+/// UserPromptSubmit entry: arm typed obligations for producing prompts. A
+/// missing or unparsable prompt arms nothing — unclassifiable input must not
+/// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
-    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
+    handle_user_prompt_submit_with_context(
+        worktree,
+        input,
+        crate::issue_monitor_review::review_dispatch_session_active(),
+    );
+}
+
+pub(crate) fn handle_user_prompt_submit_with_context(
+    worktree: &Path,
+    input: &str,
+    review_dispatch_session: bool,
+) {
+    // Issue #3984 (AC-3): an independent-review dispatch session is subject to
+    // the same structural trap as the resident PM below. Its review prompt
+    // reads as a producing request ("verify AC-3 against the PR"), but every
+    // settlement path — `verify.run`, `pr.*`, `issue.spec.edit` — belongs to
+    // the implementing session and is refused in a review window, so an armed
+    // obligation could only ever be discharged by a false `execution.blocked`
+    // and would strand the finished verdict at Stop.
+    if review_dispatch_session {
         return;
     }
+    // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
+    // Every settlement path (all-passing `verify.run`, `pr.*`) requires
+    // production artifacts the PM's contract forbids it from creating, so
+    // arming one leaves it blocked at Stop with no exit but a false
+    // `execution.blocked`. Never arm rather than block-then-excuse.
+    if super::is_resident_pm_worktree(worktree) {
+        return;
+    }
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -55,14 +80,32 @@ pub fn handle_with_input(
     input: &str,
     current_session: Option<&str>,
 ) -> HookOutput {
+    handle_with_input_with_context(
+        worktree,
+        input,
+        current_session,
+        crate::issue_monitor_review::review_dispatch_session_active(),
+    )
+}
+
+pub(crate) fn handle_with_input_with_context(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+    review_dispatch_session: bool,
+) -> HookOutput {
     if stop_hook_active_from(input) {
         return HookOutput::Silent;
     }
-    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
+    // Issue #3984 (AC-3): not arming is the primary fix, but an obligation
+    // already on record for this session id (state written before this gate
+    // existed, or a session id reused after a crash) must not strand a
+    // finished verdict at Stop either — the review window has no settlement
+    // path other than a false `execution.blocked`.
+    if review_dispatch_session {
         return HookOutput::Silent;
     }
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Some(session) = current_session else {
         return HookOutput::Silent;
     };
@@ -80,8 +123,8 @@ pub fn handle_with_input(
          Settle them with the canonical operations before stopping:\n\
          - issue_update: JSON operations `issue.comment` / `issue.spec.edit`\n\
          - implementation / verification: an all-passing JSON operation `verify.run` (register the matrix with `verify.plan` first)\n\
-         - pr: JSON operations `pr.create` / `pr.edit` / `pr.ready`\n\
-         Blocked instead? Run JSON operation `execution.blocked` with a non-empty `params.reason` — it defers the open obligations with the blocker on record.\n\
+         - pr: JSON operation `pr.edit` (any PR state, including MERGED), `pr.ready` (open draft only), or `pr.create` (only while no PR exists); a PR readied or merged on your behalf is settled by `pr.edit` on it\n\
+         Genuinely blocked? JSON operation `execution.blocked` with a non-empty `params.reason` defers the open obligations with the blocker on record — but it is terminal, and recovery costs `execution.reopen` plus a fresh derived-plan `verify.run`, so it is never the easy way out.\n\
          Prose, Board posts, and PR body text do not settle obligations."
     ))
 }
@@ -89,12 +132,10 @@ pub fn handle_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
 
-    fn mk_worktree(profile: &gwt_skills::LaneProfile) -> tempfile::TempDir {
+    fn mk_worktree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-        write_lane_file(dir.path(), profile).unwrap();
         dir
     }
 
@@ -102,7 +143,7 @@ mod tests {
     // the block routes to canonical operations and the deferral path.
     #[test]
     fn open_obligations_block_until_settled() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
 
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
@@ -128,12 +169,135 @@ mod tests {
         );
     }
 
+    /// SPEC-3431 FR-064: the resident PM never arms a producing obligation.
+    ///
+    /// The settlement paths are an all-passing `verify.run`, `issue.comment` /
+    /// `issue.spec.edit`, or `pr.*`. The PM's contract forbids it from touching
+    /// production code or PRs at all — implementation is always performed by
+    /// agents the Issue Monitor launches — so an implementation obligation is
+    /// **structurally unsettleable** for the PM and its only exit is filing a
+    /// false `execution.blocked` every turn. Observed live: the gate was
+    /// already arming against the running PM session.
+    #[test]
+    fn the_resident_pm_never_arms_a_producing_obligation() {
+        // GWT_SESSION_ID is process-global; without this these two tests race
+        // each other and whichever loses reads the other's session id.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(pm_worktree.join(".gwt")).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        handle_user_prompt_submit(
+            &pm_worktree,
+            &serde_json::json!({ "prompt": "#3457 を修正して" }).to_string(),
+        );
+
+        assert_eq!(
+            handle_with_input(&pm_worktree, "{}", Some("pm-session")),
+            HookOutput::Silent,
+            "the PM must not be blocked by an obligation it cannot settle"
+        );
+    }
+
+    /// Issue #3984 (AC-3): an independent-review dispatch session never arms a
+    /// producing obligation, and Stop stays open even when one is already on
+    /// record for it. Every settlement path (`verify.run`, `pr.*`,
+    /// `issue.spec.edit`) belongs to the implementing session and is refused in
+    /// a review window, so an armed obligation would strand the finished
+    /// verdict behind a false `execution.blocked`.
+    #[test]
+    fn a_review_dispatch_session_never_blocks_on_producing_obligations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "review-sess");
+        // A review request reads as a producing `pr` prompt to the classifier —
+        // which is exactly the trap: the review window cannot run `pr.*`.
+        let prompt = serde_json::json!({ "prompt": "PR #4000 の AC を検証して verdict を返して" })
+            .to_string();
+
+        handle_user_prompt_submit_with_context(dir.path(), &prompt, true);
+        assert_eq!(
+            handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), true),
+            HookOutput::Silent,
+            "the review window must not arm an obligation it cannot settle"
+        );
+
+        // An obligation already persisted for this session id — state written
+        // before this gate existed, or a reused id — must not strand the
+        // verdict at Stop either.
+        action_obligation::mark_from_prompt(dir.path(), "review-sess", "実装して").unwrap();
+        assert_eq!(
+            handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), true),
+            HookOutput::Silent,
+            "a persisted obligation must not gate a review window's Stop"
+        );
+        assert!(
+            matches!(
+                handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), false),
+                HookOutput::StopBlock { .. }
+            ),
+            "the same persisted obligation still gates a producing session"
+        );
+
+        // Non-regression: the exemption is keyed on the review marker alone —
+        // the same prompt in an implementing session still arms and blocks.
+        handle_user_prompt_submit_with_context(dir.path(), &prompt, false);
+        assert!(
+            matches!(
+                handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), false),
+                HookOutput::StopBlock { .. }
+            ),
+            "a producing session keeps the prompt-to-action gate"
+        );
+    }
+
+    /// The exemption is keyed on the PM worktree alone: an ordinary agent in
+    /// any other worktree keeps the gate exactly as it was.
+    #[test]
+    fn an_ordinary_worktree_still_arms_obligations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree();
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "sess-ordinary",
+        );
+
+        handle_user_prompt_submit(
+            dir.path(),
+            &serde_json::json!({ "prompt": "バグを修正して" }).to_string(),
+        );
+
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-ordinary")),
+                HookOutput::StopBlock { .. }
+            ),
+            "non-PM sessions must keep the prompt-to-action gate"
+        );
+    }
+
     // SPEC-3393 P4: assistant prose is not gate state. Historical summaries
     // and legitimate completion reports pass when no structured obligation is
     // open, even when they contain completion keywords.
     #[test]
     fn completion_prose_does_not_create_an_obligation() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
         action_obligation::settle_kinds_best_effort(
             dir.path(),
@@ -161,7 +325,7 @@ mod tests {
     // stop_hook_active, and intake lanes stay silent.
     #[test]
     fn fail_open_contracts_hold() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
             HookOutput::Silent
@@ -180,15 +344,16 @@ mod tests {
             HookOutput::Silent
         );
 
-        let intake = mk_worktree(&INTAKE_PROFILE);
-        action_obligation::mark_from_prompt(intake.path(), "sess-1", "実装して").unwrap();
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _kind = gwt_core::test_support::ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
-        assert_eq!(
-            handle_with_input(intake.path(), "{}", Some("sess-1")),
-            HookOutput::Silent
+        // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
+        // armed obligation blocks Stop in every worktree the same way.
+        let former_intake = mk_worktree();
+        action_obligation::mark_from_prompt(former_intake.path(), "sess-1", "実装して").unwrap();
+        assert!(
+            matches!(
+                handle_with_input(former_intake.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "obligations gate uniformly after the lane removal"
         );
     }
 }

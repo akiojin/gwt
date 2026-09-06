@@ -5,7 +5,88 @@ import {
 } from "../launch-pending-controller.js";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
-import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
+import {
+  createWorkspaceKanbanSurface,
+  mergeActiveWorkProjectionPatch,
+} from "../workspace-kanban-surface.js";
+
+test("bounded Active Work patches preserve history while replacing live membership", () => {
+  const previousSession = {
+    agent_session_id: "conversation-old",
+    started_at: "2026-08-29T00:00:00Z",
+  };
+  const previous = {
+    id: "work-1",
+    title: "Previous title",
+    journal_entries: [{ id: "journal-old" }],
+    works: [{ id: "history-old" }],
+    agents: [{ session_id: "session-old", sessions: [previousSession] }],
+    unassigned_agents: [],
+    active_works: [{
+      id: "workspace-1",
+      agents: [{ session_id: "session-old", sessions: [previousSession] }],
+      works: [{
+        id: "child-1",
+        agents: [{ session_id: "session-old", sessions: [previousSession] }],
+      }],
+    }],
+  };
+  const patch = {
+    id: "work-1",
+    title: "Fresh title",
+    journal_entries: [],
+    works: [],
+    agents: [{ session_id: "session-old", sessions: [] }],
+    unassigned_agents: [{ session_id: "session-new", sessions: [] }],
+    active_works: [{
+      id: "workspace-1",
+      agents: [{ session_id: "session-old", sessions: [] }],
+      works: [{
+        id: "child-1",
+        agents: [{ session_id: "session-old", sessions: [] }],
+      }],
+    }],
+  };
+
+  const merged = mergeActiveWorkProjectionPatch(previous, patch);
+
+  assert.equal(merged.title, "Fresh title", "patch fields stay authoritative");
+  assert.deepEqual(merged.journal_entries, previous.journal_entries);
+  assert.deepEqual(merged.works, previous.works);
+  assert.deepEqual(merged.agents[0].sessions, [previousSession]);
+  assert.deepEqual(merged.active_works[0].agents[0].sessions, [previousSession]);
+  assert.deepEqual(
+    merged.active_works[0].works[0].agents[0].sessions,
+    [previousSession],
+  );
+  assert.deepEqual(merged.unassigned_agents[0].sessions, []);
+  assert.equal(
+    merged.agents.some((agent) => agent.session_id === "session-removed"),
+    false,
+    "the patch owns current membership rather than retaining vanished agents",
+  );
+});
+
+test("Active Work patches never graft history across project identities", () => {
+  const patch = {
+    id: "work-new",
+    journal_entries: [],
+    works: [],
+    agents: [{ session_id: "session-old", sessions: [] }],
+    unassigned_agents: [],
+    active_works: [],
+  };
+
+  assert.deepEqual(
+    mergeActiveWorkProjectionPatch({
+      id: "work-old",
+      journal_entries: [{ id: "foreign" }],
+      works: [{ id: "foreign" }],
+      agents: [{ session_id: "session-old", sessions: [{ agent_session_id: "foreign" }] }],
+    }, patch),
+    patch,
+  );
+});
 
 test("Workspace Overview renders a readable Workspace list with compact filters", () => {
   const fixture = createFixture();
@@ -943,7 +1024,7 @@ test("Work without Session history keeps one Continue work action and renders on
   assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 1);
   assert.equal(
     group.querySelector(".workspace-detail-session-guidance").textContent,
-    "No previous session to inspect. Continue work can start a new one.",
+    "No previous session to open. Continue work can start a new one.",
   );
 });
 
@@ -1026,7 +1107,7 @@ test("Task-first Work layout separates purpose, producing intent, and lifecycle 
   );
   assert.equal(
     group.querySelector('[data-action="resume-session"]').textContent,
-    "Inspect session",
+    "Open session",
     "Session history does not compete with the producing Continue work intent",
   );
   assert.deepEqual(
@@ -1137,7 +1218,56 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
   );
 });
 
-test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-581)", () => {
+test("Work detail collapses Grok Build builtin aliases into one Agent identity", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "grok-empty-command",
+      agent_id: "grok",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "grok-usable-display",
+      agent_id: "Grok Build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "grok-conversation",
+        started_at: "2026-08-13T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "grok-empty-hyphen",
+      agent_id: "grok-build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "grok-usable-display",
+  );
+});
+
+test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", () => {
   const projection = continuationProjection({ sessions: [{
     agent_session_id: "inspect-conversation",
     started_at: "2026-07-26T03:00:00Z",
@@ -1169,7 +1299,7 @@ test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-5
   assert.equal(begins.length, 1);
   assert.equal(
     begins[0].label,
-    "Inspect session",
+    "Open session",
     "timeout notices must not regress to the old Resume wording",
   );
 });
@@ -1234,7 +1364,7 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
-test("Non-resumable Sessions stay Inspection-only while Continue work owns fallback (SPEC-2359)", () => {
+test("Non-resumable Sessions show no Resume control while Continue work owns fallback (SPEC-2359)", () => {
   const projection = continuationProjection({ sessions: [
     { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
     { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },
@@ -3360,4 +3490,165 @@ test("a pending Work renders focusable disabled semantics with progress label", 
   assert.equal(continueButton.getAttribute("aria-disabled"), "true");
   assert.equal(continueButton.getAttribute("aria-busy"), "true");
   assert.match(continueButton.textContent, /Continuing/);
+});
+
+// Issue #3455: `workspacesFromProjection` normalized every child Work with the
+// whole projection as the per-item fallback, so a Work with no owner inherited
+// the CURRENT Work's owner. On real data 648 of 783 works had no owner and all
+// of them rendered the current owner ("3410") — June date-branches showed a
+// July-created Issue number. The projection is the container, never the
+// identity of its children.
+test("child Work with no owner does not inherit the projection owner (#3455)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-owner-bleed",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-20260621-2342-3c84198a",
+          title: "work/20260621-2342",
+          owner: null,
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260621-2342",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-work-20260621-2342-3c84198a"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `an ownerless Work must not show the projection owner: ${row.textContent}`,
+  );
+  assert.match(
+    row.textContent,
+    /work\/20260621-2342/,
+    "the branch stays visible as the row heading",
+  );
+});
+
+// Issue #3455: the same fallback leaked agents and board_refs. 536 of 783 works
+// had no agents and rendered the current Work's agent list instead of their own.
+test("child Work does not inherit projection agents or board_refs (#3455)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-agent-bleed",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      session_agent_total: 4,
+      board_refs: [{ id: "board-parent", kind: "status", body: "parent board entry" }],
+      active_works: [
+        {
+          id: "work-no-agents",
+          title: "Refactor command palette",
+          owner: null,
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260620-0114",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+          board_refs: [],
+        },
+      ],
+      agents: [
+        { session_id: "s1", agent_id: "codex", display_name: "Codex", status_category: "active" },
+        { session_id: "s2", agent_id: "codex", display_name: "Codex", status_category: "active" },
+        { session_id: "s3", agent_id: "claude", display_name: "Claude", status_category: "active" },
+        { session_id: "s4", agent_id: "claude", display_name: "Claude", status_category: "active" },
+      ],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-no-agents"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `owner must not bleed into the agent-less row: ${row.textContent}`,
+  );
+  assert.ok(
+    !/\+\s*\d+\s*more session/i.test(row.textContent),
+    `a Work with no agents must not surface the projection's sessions: ${row.textContent}`,
+  );
+});
+
+// Issue #3455 AC-3: the fix must not over-block. A Work carrying its own owner
+// keeps showing it.
+test("child Work with its own owner still renders it (#3455 regression)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-own-owner",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-with-owner",
+          title: "Coordination domain",
+          owner: "SPEC-2359",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/issue-2359",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-with-owner"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.match(
+    row.textContent,
+    /SPEC-2359/,
+    "a Work that declares its own owner keeps showing it",
+  );
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `the projection owner must never replace a declared owner: ${row.textContent}`,
+  );
 });

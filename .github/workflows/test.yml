@@ -12,8 +12,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install tray + GTK dependencies (Linux)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+          sudo bash scripts/ci-apt.sh update
+          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
@@ -91,6 +92,85 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
+      - name: Run managed hook self-heal regressions
+        shell: bash
+        run: |
+          cargo test -p gwt --bin gwt app_runtime::tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
+          cargo test -p gwt --test hook_health_test codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
+        timeout-minutes: 15
+      - name: Run shared Windows process resolver tests
+        run: cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity
+        timeout-minutes: 15
+      - name: Run real Claude probe caller regressions
+        shell: bash
+        run: |
+          cargo test -p gwt-core --lib real_bun_global_placeholder_fixture
+          cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture
+          cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary
+          cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture
+          cargo test -p gwt --bin gwt command_prompt_agent_wrapper
+        timeout-minutes: 15
+      - name: Run Windows PTY resolver adapter tests
+        run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
+        timeout-minutes: 15
+      # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
+      # pane's pseudoconsole, so the released agent renders in an external
+      # Windows Terminal window. Both guards are Windows-only and would be
+      # skipped by the Linux workspace run.
+      - name: Run Windows PTY start-gate console contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --test windows_binary_subsystem_test -- --test-threads=1
+          cargo test -p gwt --test pty_start_gate_console_test -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Issue Monitor scheduled driver contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
+          cargo test -p gwt --bin gwt scheduled_tick_drives_disabled_claim_cleanup_without_scanning -- --test-threads=1
+          cargo test -p gwt --bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1
+          cargo test -p gwt --bin gwt app_runtime_local_driver_ -- --test-threads=1
+          cargo test -p gwt --lib local_fallback_lease -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Issue Monitor launch_now control-path contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --lib cli::issue::tests::windows_launch_now_ -- --test-threads=1
+          cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1
+          cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
+          cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
+          cargo test -p gwt --bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
+          cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1
+          cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1
+          cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
+          cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run agent process resolver caller contracts
+        run: cargo test -p gwt --test agent_process_resolution_contract_test
+        timeout-minutes: 15
+      - name: Run release asset contract tests
+        run: node scripts/test_release_assets.cjs
+        timeout-minutes: 15
+
+  # Issue #3404 AC-3. The targeted Windows steps above pin --test-threads=1 per
+  # fixture because they own external resources (a real PTY, a real probe
+  # binary, a console subsystem). That serialization is a fixture contract, not
+  # a suite-wide requirement, so it cannot prove the deadline-sensitive suites
+  # survive Windows' default parallelism. This job removes RUST_TEST_THREADS
+  # entirely and runs the suites that hold the inventoried deadline tests three
+  # times in a row on one SHA: a single green run cannot distinguish a
+  # deterministic suite from a flake that happened to win the race.
+  test-windows-default-parallel:
+    name: Test (Rust default parallelism, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
       - name: Prove default-parallel Rust suites are stable
         shell: pwsh
         run: |
@@ -103,27 +183,38 @@ jobs:
               exit $LASTEXITCODE
             }
           }
-        timeout-minutes: 45
-      - name: Run shared Windows process resolver tests
-        run: cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity
-        timeout-minutes: 15
-      - name: Run real Claude probe caller regressions
-        run: |
-          cargo test -p gwt-core --lib real_bun_global_placeholder_fixture
-          cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture
-          cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary
-          cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture
-          cargo test -p gwt --bin gwt command_prompt_agent_wrapper
-        timeout-minutes: 15
-      - name: Run Windows PTY resolver adapter tests
-        run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
-        timeout-minutes: 15
-      - name: Run agent process resolver caller contracts
-        run: cargo test -p gwt --test agent_process_resolution_contract_test
-        timeout-minutes: 15
-      - name: Run release asset contract tests
-        run: node scripts/test_release_assets.cjs
-        timeout-minutes: 15
+        timeout-minutes: 60
+
+  test-windows-agent-launch-e2e:
+    name: Test (Windows agent launch, ${{ matrix.provider }}/${{ matrix.selector }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: codex
+            selector: latest
+          - provider: codex
+            selector: exact
+          - provider: claude
+            selector: latest
+          - provider: claude
+            selector: exact
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      - name: Run credential-free deterministic Windows agent launch E2E
+        env:
+          GWT_WINDOWS_AGENT_PROVIDER: ${{ matrix.provider }}
+          GWT_WINDOWS_AGENT_SELECTOR: ${{ matrix.selector }}
+          GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
+        run: cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture
+        timeout-minutes: 30
 
   test-frontend:
     name: Test (Frontend + WebView E2E)
@@ -140,11 +231,26 @@ jobs:
       - name: Run frontend smoke tests
         run: bash scripts/run-frontend-smoke-tests.sh
         timeout-minutes: 10
-      # Browsers must match run-visual-tests.sh's pinned Playwright version
-      # (GWT_PLAYWRIGHT_VERSION default). The shared ~/.cache/ms-playwright is
-      # reused by the script's temp-dir Playwright install of the same version.
-      - name: Install Playwright chromium + system deps
-        run: npx --yes playwright@1.49.1 install --with-deps chromium
+      # Browser bootstrap is split three ways on purpose (#3659). A single
+      # `playwright install --with-deps` hid an unbounded apt transaction
+      # behind a browser download, so a stalled mirror surfaced only as an
+      # opaque 10-minute step timeout. scripts/playwright-version.txt is the
+      # one pin shared with run-visual-tests.sh, so the cache key cannot drift
+      # from the revision the specs resolve, and the shared
+      # ~/.cache/ms-playwright is reused by the script's temp-dir install.
+      - name: Resolve pinned Playwright version
+        id: playwright
+        run: echo "version=$(cat scripts/playwright-version.txt)" >>"$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install Playwright system dependencies (apt)
+        run: bash scripts/install-playwright-browsers.sh system-deps
+        timeout-minutes: 10
+      - name: Install Playwright chromium browser
+        run: bash scripts/install-playwright-browsers.sh browsers
         timeout-minutes: 10
       # Embedded-frontend specs stub WebSocket + serve crates/gwt/web via
       # page.route, so they run without a live gwt. live-gwt specs self-skip

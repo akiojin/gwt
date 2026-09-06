@@ -80,7 +80,7 @@ test("native picker entries are labelled separately from fresh starts", () => {
   assert.equal(tag?.textContent, "Open picker");
 });
 
-test("Resume picker exposes only inspection-capable Sessions, never a fresh-start fallback", () => {
+test("Resume picker exposes only resumable Sessions, never a fresh-start fallback", () => {
   const fixture = createFixture();
   const picker = createPicker(fixture, {});
 
@@ -96,12 +96,12 @@ test("Resume picker exposes only inspection-capable Sessions, never a fresh-star
   const rows = fixture.dialogEl.querySelectorAll(".workspace-resume-picker-row");
   assert.equal(rows.length, 1, "metadata-only entries must fall back through Continue work");
   assert.equal(rows[0].dataset.sessionId, "conversation");
-  assert.equal(rows[0].dataset.executionIntent, "inspection");
+  assert.equal(rows[0].dataset.executionIntent, "resume");
   assert.doesNotMatch(fixture.dialogEl.textContent, /Fresh start/);
   assert.match(
     fixture.dialogEl.textContent,
-    /does not continue the Work/i,
-    "the modal must explain that Resume is history-only",
+    /Use Continue work to start a new linked execution/i,
+    "the modal must point Work-level continuation to Continue work",
   );
 });
 
@@ -134,7 +134,7 @@ test("pick keeps the modal open in a pending state instead of closing", () => {
   );
   assert.match(
     fixture.dialogEl.textContent,
-    /Opening for inspection/,
+    /Opening session/,
     "pending state is visible to the user",
   );
 });

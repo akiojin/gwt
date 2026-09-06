@@ -1,7 +1,29 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+// Issue #3675: unit tests must never reach the real GitHub API. Armed before
+// any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
+// SAFETY(pre-main): only stores a relaxed AtomicBool.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn forbid_real_gh_in_tests() {
+    gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    // Issue #3631: bound launches host their PTY start gate here rather than in
+    // the GUI front door, because only a console subsystem image is attached to
+    // the pane's pseudoconsole. Handle it before anything else touches stdio.
+    if argv.get(1).map(String::as_str) == Some(gwt::pty_start_gate::PTY_START_GATE_ARG) {
+        let exit_code = match gwt_terminal::pty::run_start_gate_from_env() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("PTY start gate failed: {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code.clamp(0, 255));
+    }
     match argv.get(1).map(String::as_str) {
         Some("-V" | "--version" | "version") => {
             println!("gwtd {}", env!("CARGO_PKG_VERSION"));
@@ -64,9 +86,11 @@ fn print_help() {
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
+    println!("  pm          PM agent diagnostics (SPEC-3431)");
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
+    println!("  errors      List host-wide persistent error ledger rows");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -89,9 +113,11 @@ fn family_help(family: &str) -> Option<String> {
         "verify" => Some(format_verify_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
+        "pm" => Some(format_pm_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
+        "errors" => Some(format_errors_help()),
         _ => None,
     }
 }
@@ -119,6 +145,29 @@ fn format_workspace_help() -> String {
     .join("\n")
 }
 
+fn format_errors_help() -> String {
+    [
+        "errors.* — Host-wide persistent error ledger via JSON envelope.",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"errors.list\",\"params\":{\"since\":\"2026-08-30T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  errors.list                             List errors recorded at or after `since`",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 timestamp; omitted lists all",
+        "",
+        "Notes:",
+        "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
+        "  - Live rows are also published on the daemon `errors` channel.",
+        "",
+    ]
+    .join("\n")
+}
+
 fn format_daemon_help() -> String {
     [
         "daemon.* — Long-running runtime daemon operations via JSON envelope.",
@@ -135,10 +184,16 @@ fn format_daemon_help() -> String {
         "",
         "Key params:",
         "  channels                                Required for daemon.subscribe",
+        "  project_root                            Optional for daemon.subscribe; selects the",
+        "                                          project authority instead of caller cwd",
+        "  timeout_seconds                         Optional for daemon.subscribe; ends the",
+        "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
+        "  - An explicit project_root must resolve to an existing directory; invalid roots",
+        "    fail closed and never fall back to cwd. Omitting it preserves cwd resolution.",
         "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
         "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
         "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
@@ -163,12 +218,40 @@ fn format_issue_help() -> String {
         "  issue.spec.read | issue.spec.section | issue.spec.edit",
         "  issue.spec.create | issue.spec.list | issue.spec.pull",
         "  issue.spec.repair | issue.spec.rename",
+        "  issue.monitor.status | issue.monitor.priority.move",
+        "  issue.monitor.priority.set | issue.monitor.config.set",
+        "  issue.monitor.profiles | issue.monitor.profiles.set",
+        "  issue.monitor.launch_now | issue.monitor.stop",
+        "  issue.monitor.failover | issue.monitor.requeue",
+        "  issue.monitor.questions | issue.monitor.question.answer",
+        "  issue.monitor.wait",
+        "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
+        "  issue.monitor.reconcile",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
         "  structured                             Treat issue.spec body as structured JSON",
         "  replace                                Replace structured SPEC section instead of merging",
         "  all, numbers                           Controls issue.spec.pull",
+        "  project_root                          Optional Issue Monitor project scope",
+        "  number, position                      Move one priority (head or numeric index)",
+        "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
+        "  number, reason                        issue.monitor.requeue releases a dead",
+        "                                        agent_failed / launch_failed hold, or a",
+        "                                        daemon-reported blocked_by_claim hold",
+        "  reason, resume_condition, clear       issue.monitor.wait declares that the",
+        "                                        current launch is waiting (stuck detection",
+        "                                        pauses, max 3h); clear=true when resumed",
+        "  provider, reason                      issue.monitor.quota_hold.clear releases a",
+        "                                        provider-wide quota hold (e.g. codex / claude;",
+        "                                        any agent id the hold is keyed by)",
+        "  issue_numbers                         Replace the complete priority order",
+        "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
+        "  max_active                            Positive concurrent-agent limit",
+        "  launch_agent                          Switch the saved launch profile's agent",
+        "                                        (codex / claude); model resets to default",
+        "  handoff_id, answer                    Answer one parked autonomous question",
+        "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
     ]
     .join("\n")
@@ -184,7 +267,7 @@ fn format_pr_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  pr.current | pr.view | pr.checks | pr.reviews | pr.review_threads",
+        "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
         "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
         "  pr.review_threads.reply_and_resolve",
         "",
@@ -230,12 +313,18 @@ fn format_board_help() -> String {
         "",
         "Key params:",
         "  kind, body, title, topics, owners, targets, mentions, parent, broadcast",
+        "  resolves                                 Blocked entry id(s) this post closes",
         "  workspace, all                           board.show filters",
         "",
         "Note: board.post does not accept purpose/title_summary; update Agent title",
         "      through workspace.update params.purpose.",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
+        "",
+        "A `blocked` post is an unblock request to the PM and must state 事象 / 原因 /",
+        "依頼 / 再開条件 (or Symptom / Cause / Request / Resume), one per line. It is",
+        "mirrored onto the owning Issue and lands that Issue in issue.monitor.status",
+        "needs_human until a later post names its entry id in params.resolves.",
         "",
     ]
     .join("\n")
@@ -418,18 +507,38 @@ fn format_verify_help() -> String {
         "",
         "Usage:",
         "  gwtd <<'JSON'",
-        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt -- --check\",\"cargo test -p gwt --lib\"]}}",
+        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
+        "  JSON",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"verify.adjudicate\",\"params\":{\"record_id\":\"vrr-...\",\"command\":\"cargo test -p gwt --all-features\",\"board_entry_id\":\"...\"}}",
         "  JSON",
         "",
         "Operations:",
-        "  verify.plan | verify.run",
+        "  verify.plan | verify.run | verify.adjudicate",
+        "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
+        "  verify.lease.status",
         "",
         "Notes:",
         "  Register the derived matrix with verify.plan first; a run must cover it.",
         "  gwtd executes each command itself (one plain command per entry, no",
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
-        "  evidence. execution.complete and Ready PR handoffs require a fresh,",
-        "  all-passing record.",
+        "  evidence. execution.complete and non-adjudicated Ready PR handoffs",
+        "  require a fresh, all-passing record. verify.adjudicate attaches one",
+        "  exact Board decision to one exact failing command for pr.ready only;",
+        "  raw completion and obligation evidence remains failing.",
+        "  The referenced kind=decision Board body must contain these exact",
+        "  non-empty lines:",
+        "    Verification record: <id>",
+        "    Failing command: <command>",
+        "    Reason: <reason>",
+        "",
+        "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
+        "  take the lease before cargo test --all-features / cargo llvm-cov /",
+        "  headed Playwright, then release it. acquire answers immediately —",
+        "  granted, or unavailable with the current holder and its remaining",
+        "  TTL, so no agent polls another agent's process. Default TTL is 45",
+        "  minutes (params.ttl_minutes); the holder self-releases when it",
+        "  lapses, and a killed holder releases at once.",
         "",
     ]
     .join("
@@ -451,6 +560,36 @@ fn format_register_help() -> String {
         "Key params:",
         "  spec, label, reason",
         "",
+    ]
+    .join("\n")
+}
+
+fn format_pm_help() -> String {
+    [
+        "pm.* — PM agent diagnostics and control via JSON envelope (SPEC-3431).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  pm.status    Report the per-project PM registration, auto-start setting,",
+        "               a stale hint from the durable session store, and every PM",
+        "               registration in this repository including other project",
+        "               stores (read-only, ownerless-safe).",
+        "  pm.stop      Clear a PM registration in this repository and mark its",
+        "               Session unrestorable. Only a registered PM of the same",
+        "               repository may call it; `session_id` defaults to the",
+        "               caller's own registration (Issue #3607).",
+        "",
+        "Key params:",
+        "  project_root (optional; defaults to the current repository path)",
+        "  session_id   (pm.stop; defaults to the calling PM's own Session)",
+        "",
+        "Notes:",
+        "  - pm.stop ends PM authority and the resident loop; it does not close",
+        "    the pane. Take the session_id from pm.status repository_registrations.",
     ]
     .join("\n")
 }
@@ -606,14 +745,6 @@ fn is_allowed_argv_exception(argv: &[String]) -> bool {
                 argv.get(1).map(String::as_str),
                 argv.get(2).map(String::as_str),
                 argv.get(3),
-            ),
-            (Some("hook"), Some("gwt-self-improvement-stop"), None)
-        )
-        || matches!(
-            (
-                argv.get(1).map(String::as_str),
-                argv.get(2).map(String::as_str),
-                argv.get(3),
                 argv.get(4),
                 argv.get(5),
             ),
@@ -638,9 +769,7 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message.push_str(
         "Example: {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}\n",
     );
-    message.push_str(
-        "Hook transport exceptions: gwtd hook event <Event>; gwtd hook gwt-self-improvement-stop\n",
-    );
+    message.push_str("Hook transport exceptions: gwtd hook event <Event>\n");
     message
 }
 
@@ -809,6 +938,31 @@ mod tests {
     }
 
     #[test]
+    fn family_help_resolves_errors_and_documents_list() {
+        let help = family_help("errors").expect("errors help");
+        assert!(help.contains("errors.list"));
+        assert!(help.contains("since"));
+        assert!(help.contains("errors"));
+    }
+
+    #[test]
+    fn format_daemon_help_documents_project_root_authority_contract() {
+        let help = format_daemon_help();
+        for expected in [
+            "project_root",
+            "project authority instead of caller cwd",
+            "existing directory",
+            "fail closed",
+            "Omitting it preserves cwd resolution",
+        ] {
+            assert!(
+                help.contains(expected),
+                "daemon help must document {expected}. help:\n{help}"
+            );
+        }
+    }
+
+    #[test]
     fn format_execution_help_documents_same_session_recovery() {
         let help = format_execution_help();
         for expected in [
@@ -832,6 +986,25 @@ mod tests {
     }
 
     #[test]
+    fn format_verify_help_documents_pr_ready_adjudication_contract() {
+        let help = format_verify_help();
+        for expected in [
+            "verify.adjudicate",
+            "pr.ready only",
+            "kind=decision",
+            "Verification record: <id>",
+            "Failing command:",
+            "Reason: <reason>",
+            "raw completion and obligation evidence remains failing",
+        ] {
+            assert!(
+                help.contains(expected),
+                "verify help must document adjudication contract {expected}. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
     fn format_board_help_documents_mentions_param() {
         let help = format_board_help();
         assert!(
@@ -847,6 +1020,70 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "board help must document {expected} JSON param. help:\n{help}",
+            );
+        }
+    }
+
+    /// Issue #3655: the escalation contract has to be discoverable from the
+    /// tool itself, not only from a skill body an agent may never load.
+    #[test]
+    fn format_board_help_documents_the_blocked_escalation_contract() {
+        let help = format_board_help();
+        for expected in [
+            "resolves",
+            "事象",
+            "原因",
+            "依頼",
+            "再開条件",
+            "needs_human",
+        ] {
+            assert!(
+                help.contains(expected),
+                "board help must document {expected}. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
+    fn format_issue_help_documents_issue_monitor_queue_operations() {
+        let help = format_issue_help();
+        for expected in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            // SPEC #3914 FR-011: the launch candidate pool.
+            "issue.monitor.profiles",
+            "issue.monitor.profiles.set",
+            "issue.monitor.launch_now",
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            // Issue #3645 / #3628: the only recovery for a row with no live
+            // launch. If it is not discoverable here, the operator falls back
+            // to hand-editing the state file, which is the bug.
+            "issue.monitor.requeue",
+            // Issue #3844: the only way a waiting agent can tell the monitor it
+            // is waiting rather than stuck.
+            "issue.monitor.wait",
+            // Issue #3923: the only release for a provider-wide quota hold.
+            "issue.monitor.quota_hold.list",
+            "issue.monitor.quota_hold.clear",
+            // Issue #3883 AC-6: the only recovery for launches that are still
+            // running but no longer tracked. Undiscoverable here means the
+            // operator hand-edits the state file, which is the bug.
+            "issue.monitor.reconcile",
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            "launch_agent",
+            "project_root",
+            "enabled=false",
+            "autonomous_mode=false",
+            "enabled=true",
+            "autonomous_mode=true",
+            "explicit GUI action",
+        ] {
+            assert!(
+                help.contains(expected),
+                "issue help must document {expected}. help:\n{help}"
             );
         }
     }

@@ -12,7 +12,6 @@
 
 use std::{io, path::Path};
 
-use crate::session_kind::SessionKind;
 use crate::settings_local::write_text_atomically;
 
 /// Skill identifier (matches the `.claude/skills/<name>/` directory
@@ -77,6 +76,105 @@ Primary kinds:
 - `kind:"blocked"` - unblock request
 - `kind:"handoff"` - concrete handoff
 
+### Blocked: escalating to the PM
+
+The moment you conclude you cannot proceed in this window - a refused
+operation, a decision only the owner can make, a missing tool, an
+environment you cannot repair - post `kind:"blocked"` immediately. Do
+not wait for the Stop gate. The routine
+"ready for the next instruction" notice does not stand in for it: that
+notice is a `status` post, it cannot say why you stopped, and while an
+unblock request is open gwt withholds it entirely.
+
+A blocked body MUST carry these four labelled lines, or `board.post`
+refuses it:
+
+    事象: <what happened; paste the refused operation and its exact error text>
+    原因: <why you cannot proceed; say so plainly if the cause is unknown>
+    依頼: <what you need from the PM: fresh launch / spec ruling / tool fix / ...>
+    再開条件: <what has to be true before work can resume>
+
+`Symptom:` / `Cause:` / `Request:` / `Resume:` are accepted in place of
+the Japanese labels. Attach the owning Issue with `params.owners`; a
+blocked post inherits your session's Issue when you omit it, and an
+escalation with no owner cannot reach `issue.monitor.status`
+`needs_human`.
+
+Posting `blocked` also mirrors the same text onto the owning Issue as a
+comment, because the Board scrolls and a closed pane takes its
+transcript with it. If the mirror fails, the output tells you so - record
+it yourself with `issue.comment`, so the next agent does not repeat your
+investigation.
+
+gwt files a `blocked` post on your behalf in two cases: when an
+operation is refused on permission, immutability, or authority grounds
+(for example `execution.reopen` on a completed record, or
+`workspace.ensure` with a mismatched authority), and when you settle the
+execution with `execution.blocked`, whose `params.reason` becomes the
+escalation. Add the context gwt could not know; do not post a second
+escalation for the same operation.
+
+When the blocker clears, close the escalation explicitly - nothing else
+does. Post with `params.resolves` naming the blocked entry id, which the
+posting output and every PM-facing surface repeat back to you:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
+    JSON
+
+### Waiting is not a stall: declare it
+
+The Issue Monitor judges a launched agent stuck when it sees no activity
+for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
+costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
+serialization ruling, or on a long verification run you must not touch
+produces no activity either, so before you go quiet for that long,
+declare the wait:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` defaults to the owner Issue of this launch. While the
+declaration is in force stuck detection skips your issue and the PM reads
+`reason` / `resume_condition` / `expires_at` from the `waiting` field of
+your row in `issue.monitor.status`. It is capped (`max_wait_secs` in the
+response, 3 hours): re-declaring refreshes the text but never the cap, and
+past it the ordinary rule applies again. Clear it the moment you resume:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+Do not fake activity instead (periodic `workspace.update` or Board posts
+to look alive) - a declared wait is the honest signal.
+
+### Proposing new Issues to the PM
+
+Do not call `issue.create`. When you find something that deserves its own
+Issue, post `kind:"decision"` mentioning the PM and let the PM register it,
+so duplicates are caught before two Issues exist rather than after. The
+proposal body MUST carry four items: 事象 (with primary evidence), 既存
+Issue で扱えない根拠 (including your duplicate-search result), 提案 AC,
+and 緊急度 (whether it blocks another PR or agent). The PM replies on the
+Board with the registered Issue number, threaded under your proposal via
+`params.parent`, so watch for a reply carrying your proposal's entry id.
+
+Commenting on an existing Issue with `issue.comment` is never restricted
+- add evidence, propose acceptance criteria, and share analysis freely.
+Only creating a new Issue routes through the PM.
+
+### Friction in gwt itself takes the same route
+
+Friction and capability gaps in gwt itself - a hook, launch, skill, index,
+verification, coordination, or Issue/SPEC workflow that contradicts what gwt
+told you to do - is reported the same way: post it to the Board for the PM,
+who registers it with `gwt-register-issue`. Never file an Issue upstream in
+the gwt repository yourself, and never work around it silently. Include the
+contract you were following, what you observed instead, and the primary
+evidence (command, output, file and line). gwt has no automatic capture for
+this; the Board post is the intake.
+
 ## Work (current state)
 
 The Board is history; Work is current state. Update Work with a JSON
@@ -123,10 +221,14 @@ blocker/recovery coordination on the Board or in a Draft PR comment instead.
 Set `params.status:"done"` on that explicit final update; its successful event
 append opens the machine-local delivery obligation used by Stop and final gates.
 
-Include `.gwt/work/events.jsonl` in the related source commit. If no source
-change remains and the event log is the only bookkeeping change, use a scoped
-Conventional Commit whose subject starts with the exact `chore(work):` prefix.
-gwt never commits or pushes this event automatically. Completion and PR
+Include new immutable event shards under
+`.gwt/work/events/<digest-prefix>/*.jsonl` in the
+related source commit. Writer temp files matching
+`.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` remain untracked and must never be
+committed. If no source change remains and the event shard is the only
+bookkeeping change, use a scoped Conventional Commit whose subject starts with
+the exact `chore(work):` prefix. gwt never commits or pushes this event
+automatically. Completion and PR
 mutations remain blocked until the current HEAD is confirmed on the configured
 upstream, and verification must be run fresh after that commit/push.
 
@@ -157,17 +259,49 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
+## Heavy commands
+
+`cargo test`, `cargo clippy`, `cargo build`, coverage, and headed browser
+runs compile on a host shared with every other agent worktree. Take the
+host-wide lease before any of them, even a single focused test, and
+release it afterwards:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
+    JSON
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
+    JSON
+
+A refused acquire names the current holder; declare the wait with
+`issue.monitor.wait` (see "Waiting is not a stall") and retry on the
+cadence the gwt-verify skill defines instead of running without it.
+`verify.run` admits itself: it honors a lease this worktree holds,
+otherwise claims one and waits for other worktrees' heavy processes to
+drain, and answers `deferred` when its bounded wait runs out — rerun it.
+
 ## Persisted Work files
 
 The tracked `.gwt/work/` directory is the persistent Work core
-(SPEC-2359 W-15, FR-383). When you commit your work, include the
-changed tracked files under `.gwt/work/` (`events.jsonl`) in the
+(SPEC-2359 W-33). When you commit your work, include the new tracked
+immutable event shard under `.gwt/work/events/<digest-prefix>/*.jsonl` in the
 regular commit so they reach the base branch through the PR:
 
-- `.gwt/work/events.jsonl` is an append-only log joined across branches
-  via the `merge=union` gitattribute. Never hand-edit, truncate, or
-  revert it
-- Do not commit it separately from the work it describes; ride the
+- Each `.gwt/work/events/<digest-prefix>/*.jsonl` file is an immutable event shard. Never hand-edit, append to, delete, truncate, overwrite, or revert a shard
+- `.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` is untracked writer temp residue,
+  not Work history and not a delivery target
+- Existing flat `.gwt/work/events/*.jsonl` shards are frozen read-only
+  compatibility history and are never a new-write target
+- `.gwt/work/events.jsonl` is frozen read-only compatibility history. Its
+  existing `merge=union` behavior is retained only for legacy lines. Never hand-edit, append to, delete, truncate, overwrite, or revert this file
+- If the target repository broadly ignores `.gwt/`, stage every exact new
+  shard individually. Discover ignored candidates with
+  `git ls-files --others --ignored --exclude-standard -- .gwt/work/events`,
+  select only canonical `<2hex>/<64hex>.jsonl` paths, and repeat
+  `git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl`. Never
+  force-add the event directory or another managed subtree
+- Do not commit a shard separately from the work it describes; ride the
   normal work commit
 
 Project memory and discussion notes are machine-local scratch
@@ -252,6 +386,97 @@ mentions 由来の audience に scope されます。mention 省略を broadcast
 - `kind:"blocked"` — unblock 要請
 - `kind:"handoff"` — 具体的な引き継ぎ
 
+### Blocked: PM へのエスカレーション
+
+この window では進められないと結論した瞬間（operation の拒否、owner に
+しかできない判断、欠けているツール、自力で直せない環境）に
+`kind:"blocked"` を投稿します。Stop gate を待たないでください。定型の
+"ready for the next instruction" は `status` 投稿であり停止理由を表現
+できないため代用になりません。未解決の unblock 要請がある間、gwt はその
+定型投稿自体を抑止します。
+
+blocked の本文には次の 4 項目を必ずラベル行として含めます。欠けている
+場合 `board.post` は投稿を拒否します:
+
+    事象: <何が起きたか。拒否された operation とエラー文言をそのまま貼る>
+    原因: <なぜ進めないのか。未判明ならそう書く>
+    依頼: <PM に何をしてほしいか: fresh launch / 仕様裁定 / ツール修正 など>
+    再開条件: <何が満たされれば作業を再開できるか>
+
+`Symptom:` / `Cause:` / `Request:` / `Resume:` も受け付けます。担当 Issue
+は `params.owners` で付けます（省略時は session の Issue を継承）。owner の
+無い escalation は `issue.monitor.status` の `needs_human` に届きません。
+
+blocked 投稿は同じ本文を担当 Issue のコメントにも自動でミラーします。
+Board は流れ、pane は閉じれば transcript ごと消えるためです。ミラーに
+失敗した場合は出力にその旨が出るので、`issue.comment` で自分で記録し、
+次の担当が同じ調査をやり直さないようにします。
+
+次の 2 つのケースでは gwt が代わりに `blocked` を起票します: permission /
+immutability / authority 由来で operation が拒否された場合（例: 完了済み
+record への `execution.reopen`、authority 不整合の `workspace.ensure`）と、
+`execution.blocked` で execution を終端させた場合（`params.reason` が
+escalation 本文になります）。gwt が知り得ない文脈を補足し、同じ operation
+について二重に起票しないでください。
+
+blocker が解消したら、必ず明示的に escalation を閉じます（他の投稿では
+閉じません）。投稿出力と PM 向けの各面が entry id を提示するので、
+`params.resolves` にその id を指定して投稿します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
+    JSON
+
+### 待機は停滞ではない: 申告する
+
+Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
+排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
+の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` は省略するとこの launch の担当 Issue になります。申告が有効な間は
+stuck 判定が自分の Issue をスキップし、PM は `issue.monitor.status` の自分の
+行の `waiting` フィールドから `reason` / `resume_condition` / `expires_at` を
+読めます。申告には上限があります（応答の `max_wait_secs`、3 時間）。再申告は
+本文を更新しますが上限は延びず、超過後は通常の判定に戻ります。再開したら
+すぐ解除します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
+でください。待機の申告が正直なシグナルです。
+
+### Issue 化は PM へ提案する
+
+`issue.create` を直接呼ばないでください。Issue 化すべき事象を見つけたら
+PM を mention した `kind:"decision"` を投稿し、登録は PM が行います。
+登録主体を 1 つにすることで、重複を「登録後」ではなく「登録前」に検出
+できます。提案本文には 4 項目を必ず含めます: 事象（一次証拠つき）、既存
+Issue で扱えない根拠（重複検索の結果を含む）、提案 AC、緊急度（他の PR /
+agent をブロックしているか）。PM は登録した Issue 番号を返すので、Board
+の返信を確認してください。
+
+既存 Issue への `issue.comment` は一切制限しません。証拠の追記、AC の提案、
+分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
+PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
+指定した Board 返信で返します。
+
+### gwt 自体の摩擦・機能ギャップも同じ経路
+
+gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
+扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
+起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
+回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
+一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
+無く、この Board 投稿が唯一の intake です。
+
 ## Work (current state)
 
 Board が history なら Work は current state です。現在の task、
@@ -298,10 +523,12 @@ explicit final update では `params.status:"done"` を設定します。event a
 が成功すると、Stop と final gate が使用する machine-local delivery obligation
 が開きます。
 
-`.gwt/work/events.jsonl` は関連 source commit に含めます。source change が残らず
-event log だけが bookkeeping change の場合は、subject が exact `chore(work):`
-prefix で始まる scoped Conventional Commit を使用します。gwt は event を自動
-commit / push しません。current HEAD が configured upstream に存在することを
+新しい immutable event shard `.gwt/work/events/<digest-prefix>/*.jsonl` は関連 source commit に
+含めます。`.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` に一致する writer temp は未追跡の
+ままとし、commit してはいけません。source change が残らず event shard だけが
+bookkeeping change の場合は、subject が exact `chore(work):` prefix で始まる
+scoped Conventional Commit を使用します。gwt は event を自動 commit / push
+しません。current HEAD が configured upstream に存在することを
 確認するまで completion / PR mutation は block され、その commit / push 後に
 fresh verification を実行します。
 
@@ -329,17 +556,49 @@ binary の `search` JSON operation で実行します:
 
 `gwt-search` という単体の実行ファイルは存在しません。
 
+## Heavy commands
+
+`cargo test`、`cargo clippy`、`cargo build`、coverage、headed browser 実行は、
+他のすべての agent worktree と共有する host 上でコンパイルします。単発の
+focused test でも、開始前に host 全体の lease を取り、終わったら解放します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
+    JSON
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
+    JSON
+
+拒否された acquire は現在の保持者を返します。lease 無しで実行せず、
+`issue.monitor.wait` で待機を申告して（「待機は停滞ではない」参照）、
+gwt-verify skill が定める間隔で再試行してください。`verify.run` は
+自分で admission を取ります: この worktree が保持する lease はそのまま使い、
+無ければ取得して他 worktree の heavy プロセスが捌けるまで待ち、bounded な
+待機を使い切ると `deferred` を返します。その場合は再実行してください。
+
 ## Persisted Work files
 
 追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
-（SPEC-2359 W-15, FR-383）。作業を commit する際は、`.gwt/work/` 配下の
-追跡ファイル（`events.jsonl`）の変更を通常の commit に含め、PR 経由で
+（SPEC-2359 W-33）。作業を commit する際は、新しい追跡対象の
+immutable event shard `.gwt/work/events/<digest-prefix>/*.jsonl` を通常の commit に含め、PR 経由で
 base branch に届けます:
 
-- `.gwt/work/events.jsonl` は append-only ログで、`merge=union`
-  gitattribute により branch を跨いで結合されます。手編集・切詰め・
-  revert をしないでください
-- 作業内容と切り離して単独 commit にせず、通常の作業 commit に乗せます
+- `.gwt/work/events/<digest-prefix>/*.jsonl` の各ファイルは immutable event shard です。
+  shard の手編集・追記・削除・切詰め・上書き・revert を禁止します
+- `.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` は未追跡の writer temp residue であり、
+  Work history でも delivery 対象でもありません
+- 既存の flat `.gwt/work/events/*.jsonl` shard は frozen な read-only
+  compatibility history であり、新規書込先にはしません
+- `.gwt/work/events.jsonl` は frozen な read-only compatibility history です。
+  既存の `merge=union` は legacy 行の互換性のためだけに維持します。この
+  ファイルの手編集・追記・削除・切詰め・上書き・revert を禁止します
+- target repository が `.gwt/` を広く ignore している場合は、すべての exact な新規
+  shard を1つずつ stage します。`git ls-files --others --ignored --exclude-standard -- .gwt/work/events`
+  で候補を列挙し、canonical な `<2hex>/<64hex>.jsonl` path だけを選び、
+  `git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl` を各 path で繰り返します。
+  events directory や他の managed subtree 全体を force-add してはいけません
+- shard は作業内容と切り離して単独 commit にせず、通常の作業 commit に乗せます
 
 プロジェクト memory と discussion notes はマシンローカルの scratch です
 （SPEC-3214 FR-007/FR-008）。`memory.add` と discussion 系 operation は
@@ -375,112 +634,18 @@ English のまま。
     JSON
 "#;
 
-/// Curate-lane replacement for the producing-work `## Work (current state)`
-/// section. An intake session is branchless and ephemeral and owns no Work,
-/// so it is never told to run `workspace.update` (SPEC-3247 FR-002). Ends with
-/// a blank line so it slots in ahead of `## Git environment`.
-const INTAKE_WORK_SECTION_EN: &str = r#"## Work (intake sessions produce no Work)
-
-This is a Curate-lane **intake** session: branchless and ephemeral. It owns no
-Work, so there is no Work state to maintain. Do not run `workspace.update` —
-the ephemeral worktree is discarded when the session ends, and Work state
-belongs to Execute-lane sessions.
-
-Coordinate through curation, not Work updates:
-
-- Register Issues/SPECs, discuss, and plan through the `gwt-*` skills
-  (`gwt-register-issue`, `gwt-discussion`, `gwt-plan-spec`, `gwt-search`).
-- Use the Board (above) to share status, claim scope, and hand off. Board
-  posts are how an intake session externalizes state — not `workspace.update`.
-- Leave implementation, verification, and PRs to Execute-lane sessions, opened
-  from a Workspace or picked up by the Issue Monitor.
-
-Every curation prompt must settle in a durable artifact outcome before the
-session stops — the intake artifact gate blocks Stop otherwise (SPEC-3248
-FR-016/FR-017):
-
-- Create or update the owner Issue/SPEC via JSON operations `issue.create`,
-  `issue.comment`, `issue.spec.create`, or `issue.spec.edit` (successful
-  operations record the outcome automatically), or record an explicit
-  decision with JSON operation `intake.outcome.record` — `kind:"no_action"`
-  requires a non-empty `reason`; Issue/SPEC kinds require `number`. Board
-  posts and prose answers never satisfy the gate.
-- When curated work spans multiple Issues/SPECs, select exactly one Primary
-  Execution Owner and classify every related owner before completing the
-  artifact: `bundled-required` (must ship in the Primary's PR — copy its
-  tasks/acceptance into the Primary), `dependent-follow-up` (separate PR with
-  explicit ordering, never a Primary completion blocker), or
-  `reference-only`. A single-Issue Execution launch must be able to implement
-  the full bundled scope from the Primary owner alone.
-
-"#;
-
-/// Render the full SKILL.md content (frontmatter + managed markers + body) for
-/// a target worktree and [`SessionKind`]. Idempotent and pure.
-///
-/// - [`SessionKind::Execution`] emits the canonical producing-work body
-///   ([`SKILL_BODY_EN`]) unchanged.
-/// - [`SessionKind::Intake`] swaps the `## Work (current state)` section for a
-///   curation-framed one and drops the trailing `workspace.update` example, so
-///   an intake session is never asked to maintain Work state.
-pub fn render_skill_md(kind: SessionKind) -> String {
+/// Render the full SKILL.md content (frontmatter + managed markers + body).
+/// Idempotent and pure. Since SPEC #3245 the guidance is a single body for
+/// every session (FR-004) and the lane mechanism itself is gone (FR-007).
+pub fn render_skill_md() -> String {
     format!(
         "---\nname: {name}\ndescription: {description}\n---\n\n{begin}\n\n{body}\n{end}\n",
         name = SKILL_NAME,
         description = SKILL_DESCRIPTION,
         begin = MANAGED_BEGIN,
-        body = render_body(kind),
+        body = SKILL_BODY_EN,
         end = MANAGED_END,
     )
-}
-
-/// Assemble the lane-specific guidance body. For [`SessionKind::Execution`]
-/// this is [`SKILL_BODY_EN`] verbatim; for [`SessionKind::Intake`] the Work
-/// section and the trailing `workspace.update` example are removed.
-fn render_body(kind: SessionKind) -> String {
-    match kind {
-        SessionKind::Execution => SKILL_BODY_EN.to_string(),
-        SessionKind::Intake => intake_body(),
-    }
-}
-
-fn intake_body() -> String {
-    let work_start = SKILL_BODY_EN
-        .find("## Work (current state)")
-        .expect("execution guidance must contain the Work (current state) section");
-    let git_start = SKILL_BODY_EN
-        .find("## Git environment")
-        .expect("execution guidance must contain the Git environment section");
-    debug_assert!(
-        work_start < git_start,
-        "Work section must precede Git environment section"
-    );
-    let mut body = String::with_capacity(SKILL_BODY_EN.len());
-    body.push_str(&SKILL_BODY_EN[..work_start]);
-    body.push_str(INTAKE_WORK_SECTION_EN);
-    body.push_str(&SKILL_BODY_EN[git_start..]);
-    // After swapping the Work section, the only remaining
-    // `"operation":"workspace.update"` JSON reference is the trailing example
-    // (INTAKE_WORK_SECTION_EN names workspace.update only in backtick prose, not
-    // the JSON operation string). Guard that invariant so a future edit that
-    // reintroduces a workspace.update example earlier in the body — which would
-    // make the position-based truncation over-delete — trips in debug builds.
-    debug_assert_eq!(
-        body.matches("\"operation\":\"workspace.update\"").count(),
-        1,
-        "intake body must have exactly one workspace.update JSON reference (the trailing example) before truncation"
-    );
-    // Drop that trailing example so an intake session never sees a Work-state
-    // example (SPEC-3247 FR-002).
-    if let Some(op_pos) = body.find("\"operation\":\"workspace.update\"") {
-        if let Some(fence) = body[..op_pos].rfind("    gwtd <<'JSON'") {
-            body.truncate(fence);
-            let trimmed_len = body.trim_end().len();
-            body.truncate(trimmed_len);
-            body.push('\n');
-        }
-    }
-    body
 }
 
 /// Materialize the gwt-coordination SKILL.md under both `.claude/skills/`
@@ -493,35 +658,29 @@ fn intake_body() -> String {
 /// - Idempotent: subsequent calls produce byte-identical files.
 /// - User-edited content is overwritten by design — this is a gwt-managed
 ///   asset.
-pub fn generate_coordination_guidance(worktree: &Path, kind: SessionKind) -> io::Result<()> {
-    generate_coordination_guidance_for_claude(worktree, kind)?;
-    generate_coordination_guidance_for_codex(worktree, kind)?;
+pub fn generate_coordination_guidance(worktree: &Path) -> io::Result<()> {
+    generate_coordination_guidance_for_claude(worktree)?;
+    generate_coordination_guidance_for_codex(worktree)?;
     Ok(())
 }
 
 /// Materialize the gwt-coordination SKILL.md under `.claude/skills/` only.
 /// Used by the orchestrator when the target set includes `ClaudeCode` but
-/// may exclude `Codex`. The [`SessionKind`] selects the lane-specific body.
-pub fn generate_coordination_guidance_for_claude(
-    worktree: &Path,
-    kind: SessionKind,
-) -> io::Result<()> {
-    write_skill_md(&worktree.join(".claude").join("skills"), kind)
+/// may exclude `Codex`.
+pub fn generate_coordination_guidance_for_claude(worktree: &Path) -> io::Result<()> {
+    write_skill_md(&worktree.join(".claude").join("skills"))
 }
 
 /// Materialize the gwt-coordination SKILL.md under `.codex/skills/` only.
 /// Used by the orchestrator when the target set includes `Codex` but may
-/// exclude `ClaudeCode`. The [`SessionKind`] selects the lane-specific body.
-pub fn generate_coordination_guidance_for_codex(
-    worktree: &Path,
-    kind: SessionKind,
-) -> io::Result<()> {
-    write_skill_md(&worktree.join(".codex").join("skills"), kind)
+/// exclude `ClaudeCode`.
+pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<()> {
+    write_skill_md(&worktree.join(".codex").join("skills"))
 }
 
-fn write_skill_md(skills_root: &Path, kind: SessionKind) -> io::Result<()> {
+fn write_skill_md(skills_root: &Path) -> io::Result<()> {
     let path = skills_root.join(SKILL_NAME).join("SKILL.md");
-    write_text_atomically(&path, &render_skill_md(kind))
+    write_text_atomically(&path, &render_skill_md())
 }
 
 #[cfg(test)]
@@ -566,12 +725,125 @@ mod tests {
             "`params.status:\"done\"`",
             "exact `chore(work):` prefix",
             "gwt never commits or pushes",
+            // Issue #3655 AC-7: the escalation contract is only as reliable as
+            // its presence in the guidance every gwt-managed session loads.
+            "事象:",
+            "原因:",
+            "依頼:",
+            "再開条件:",
+            "params.resolves",
+            "issue.monitor.status",
+            "needs_human",
+            "Do not call `issue.create`",
         ]
+    }
+
+    /// Issue #3655 AC-7 / AC-10 / AC-12: both bodies and the generated file
+    /// must carry the escalation and Issue-proposal contracts, or an agent
+    /// reading only the skill has no way to know either rule exists.
+    #[test]
+    fn escalation_and_issue_proposal_contracts_are_in_both_bodies_and_the_generated_file() {
+        for phrase in [
+            "事象:",
+            "原因:",
+            "依頼:",
+            "再開条件:",
+            "params.resolves",
+            "needs_human",
+            "issue.comment",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3913 AC-2: the hook-delivered guidance tells every agent that
+    /// raw `cargo test` / `cargo clippy` runs take the host-wide lease, in
+    /// both languages and in the generated file.
+    #[test]
+    fn heavy_command_serialization_is_in_both_bodies_and_the_generated_file() {
+        for phrase in [
+            "## Heavy commands",
+            "verify.lease.acquire",
+            "verify.lease.release",
+            "`cargo test`",
+            "`cargo clippy`",
+            "verify.run",
+            "deferred",
+            "issue.monitor.wait",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn guidance_states_that_the_routine_stop_notice_is_not_an_escalation() {
+        let rendered = render_skill_md();
+        assert!(
+            rendered.contains("ready for the next instruction"),
+            "the guidance must name the notice agents mistook for an escalation"
+        );
+        assert!(
+            rendered.contains("gwt withholds it entirely"),
+            "the guidance must state that an open escalation suppresses the routine notice"
+        );
+    }
+
+    #[test]
+    fn guidance_routes_new_issue_registration_through_the_pm() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(
+                body.contains("issue.create"),
+                "the guidance must name the operation it is redirecting"
+            );
+        }
+        assert!(
+            SKILL_BODY_EN.contains("Do not call `issue.create`"),
+            "English guidance must state the prohibition"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("`issue.create` を直接呼ばないでください"),
+            "Japanese guidance must state the prohibition"
+        );
+        // AC-12: the prohibition covers registration only.
+        assert!(
+            SKILL_BODY_EN.contains("is never restricted"),
+            "English guidance must keep issue.comment unrestricted"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("一切制限しません"),
+            "Japanese guidance must keep issue.comment unrestricted"
+        );
+    }
+
+    #[test]
+    fn guidance_requires_an_explicit_resolution_to_close_an_escalation() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(
+                body.contains("\"resolves\":[\"<blocked-entry-id>\"]"),
+                "the guidance must show the exact resolution envelope"
+            );
+        }
     }
 
     #[test]
     fn render_skill_md_contains_required_canonical_phrases() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         for phrase in required_phrases() {
             assert!(
                 rendered.contains(phrase),
@@ -586,110 +858,65 @@ mod tests {
         for phrase in [
             "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion",
             "`chore(work):`",
-            ".gwt/work/events.jsonl",
+            ".gwt/work/events/<digest-prefix>/*.jsonl",
+            "git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl",
+            "git ls-files --others --ignored --exclude-standard -- .gwt/work/events",
         ] {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
             assert!(
-                render_skill_md(SessionKind::Execution).contains(phrase),
+                render_skill_md().contains(phrase),
                 "generated guidance: {phrase}"
             );
         }
     }
 
-    // SPEC-3248 P7A (T-088/T-091 guidance contract): the intake variant
-    // carries the artifact-outcome gate contract and the multi-owner
-    // classification rules, so a curation session can settle its prompts and
-    // a single-Issue Execution launch can rely on bundled scope living in
-    // the Primary owner.
     #[test]
-    fn intake_guidance_carries_artifact_outcome_and_owner_classification() {
-        let intake = render_skill_md(SessionKind::Intake);
-        for required in [
-            "intake.outcome.record",
-            "no_action",
-            "Board\n  posts and prose answers never satisfy the gate",
-            "Primary\n  Execution Owner",
-            "bundled-required",
-            "dependent-follow-up",
-            "reference-only",
+    fn guidance_commits_immutable_shards_and_freezes_the_legacy_monolith() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            for phrase in [
+                ".gwt/work/events/<digest-prefix>/*.jsonl",
+                ".gwt/work/events/<digest-prefix>/.*.jsonl.create-*",
+                ".gwt/work/events/*.jsonl",
+                ".gwt/work/events.jsonl",
+                "git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl",
+            ] {
+                assert!(body.contains(phrase), "guidance is missing {phrase:?}");
+            }
+        }
+
+        for phrase in [
+            "immutable event shard",
+            "frozen read-only compatibility history",
+            "Never hand-edit, append to, delete, truncate, overwrite, or revert",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+        }
+        for phrase in [
+            "immutable event shard",
+            "read-only compatibility history",
+            "手編集・追記・削除・切詰め・上書き・revert を禁止",
         ] {
             assert!(
-                intake.contains(required),
-                "intake guidance must contain '{required}'"
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
             );
         }
-    }
 
-    #[test]
-    fn intake_guidance_omits_work_state_instructions_execution_keeps_them() {
-        // SPEC-3247 FR-002 / AS-2 / AS-3: the intake (Curate) variant must not
-        // instruct or exemplify `workspace.update` (an intake session owns no
-        // Work), while the execution variant keeps the full producing-work
-        // Work-state guidance unchanged.
-        let intake = render_skill_md(SessionKind::Intake);
-        let execution = render_skill_md(SessionKind::Execution);
-
-        // Execution keeps the Work-state section and workspace.update.
         assert!(
-            execution.contains("## Work (current state)"),
-            "execution guidance must keep the producing-work Work section"
+            !SKILL_BODY_EN
+                .contains("Include `.gwt/work/events.jsonl` in the related source commit"),
+            "terminal delivery must not direct new writes to the frozen legacy monolith"
         );
         assert!(
-            execution.contains("\"operation\":\"workspace.update\""),
-            "execution guidance must keep the workspace.update instruction"
+            !SKILL_BODY_JA.contains("`.gwt/work/events.jsonl` は関連 source commit に含めます"),
+            "Japanese terminal delivery must not direct new writes to the frozen legacy monolith"
         );
-
-        // Intake drops the workspace.update *instruction* and example (the
-        // JSON operation) and the producing-work Work section. It may still
-        // name workspace.update in prose to forbid it, which is intentional.
-        assert!(
-            !intake.contains("\"operation\":\"workspace.update\""),
-            "intake guidance must not instruct or exemplify workspace.update"
-        );
-        assert!(
-            !intake.contains("## Work (current state)"),
-            "intake guidance must not carry the producing-work Work section"
-        );
-        assert!(
-            intake.contains("intake sessions produce no Work"),
-            "intake guidance must state that intake produces no Work"
-        );
-        assert!(
-            intake.contains("Do not run `workspace.update`"),
-            "intake guidance should explicitly forbid workspace.update"
-        );
-        assert!(
-            intake.contains("gwt-register-issue"),
-            "intake guidance must point at the curation skills"
-        );
-
-        // Shared contract stays intact in both lanes (Board audience, branch
-        // prohibition), so intake is not a stripped-down guidance. Assert the
-        // downstream sections that follow the Work section all survive, so an
-        // over-truncation regression in intake_body() would be caught here.
-        for shared in [
-            "## Board (coordination history)",
-            "git worktree add/remove",
-            "Do not post tool-level updates",
-            "## Git environment",
-            "## Skills",
-            "\"operation\":\"search\"",
-            "## Persisted Work files",
-            "## Language",
-            "## Examples",
-            "kind\":\"handoff\"",
-        ] {
-            assert!(
-                intake.contains(shared),
-                "intake guidance must keep shared contract phrase: {shared}"
-            );
-        }
     }
 
     #[test]
     fn render_skill_md_uses_json_envelope_for_work_identity_examples() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("gwtd <<'JSON'"),
             "Work update examples must use the JSON envelope entrypoint"
@@ -724,7 +951,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_uses_english_canonical_body() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("When you cross a reasoning milestone"),
             "generated SKILL.md must use English canonical prose"
@@ -737,7 +964,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_documents_broadcast_param_contract() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("params.broadcast:true"),
             "generated SKILL.md must document the explicit repo-wide broadcast parameter"
@@ -752,9 +979,25 @@ mod tests {
         );
     }
 
+    // SPEC #3245 FR-004/FR-007: one guidance body for every session — the
+    // Work-state instruction is always present and the curation framing is
+    // gone (#3379 contradiction resolved by unification).
+    #[test]
+    fn guidance_is_a_single_body_with_work_state_instructions() {
+        let body = render_skill_md();
+        assert!(
+            body.contains("\"operation\":\"workspace.update\""),
+            "the single guidance keeps the workspace.update instruction"
+        );
+        assert!(
+            !body.contains("intake sessions produce no Work"),
+            "curation framing must be gone"
+        );
+    }
+
     #[test]
     fn render_skill_md_starts_with_yaml_frontmatter() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.starts_with("---\n"),
             "SKILL.md must start with YAML frontmatter delimiter (---\\n)"
@@ -775,7 +1018,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_wraps_body_in_managed_markers() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         let begin_idx = rendered
             .find(MANAGED_BEGIN)
             .expect("managed begin marker missing");
@@ -791,7 +1034,7 @@ mod tests {
     #[test]
     fn generate_writes_skill_md_to_claude_and_codex_paths() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
 
         let claude = tmp
             .path()
@@ -825,7 +1068,7 @@ mod tests {
     #[test]
     fn generate_for_claude_only_does_not_touch_codex_path() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance_for_claude(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance_for_claude(tmp.path()).unwrap();
 
         assert!(
             tmp.path()
@@ -848,7 +1091,7 @@ mod tests {
     #[test]
     fn generate_for_codex_only_does_not_touch_claude_path() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance_for_codex(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance_for_codex(tmp.path()).unwrap();
 
         assert!(
             tmp.path()
@@ -871,7 +1114,7 @@ mod tests {
     #[test]
     fn generate_is_idempotent() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
         let first = std::fs::read_to_string(
             tmp.path()
                 .join(".claude/skills")
@@ -880,7 +1123,7 @@ mod tests {
         )
         .unwrap();
 
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
         let second = std::fs::read_to_string(
             tmp.path()
                 .join(".claude/skills")
@@ -906,7 +1149,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "stale content from prior version\n").unwrap();
 
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(
@@ -957,7 +1200,7 @@ mod tests {
 
     #[test]
     fn rendered_skill_md_propagates_activity_rule_to_emitted_file() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         for phrase in [
             "PR check in progress",
             "verifying tests",
@@ -966,7 +1209,7 @@ mod tests {
         ] {
             assert!(
                 rendered.contains(phrase),
-                "render_skill_md(SessionKind::Execution) must propagate activity Bad example / rule: {phrase}"
+                "render_skill_md() must propagate activity Bad example / rule: {phrase}"
             );
         }
     }
@@ -974,7 +1217,7 @@ mod tests {
     #[test]
     fn generate_writes_byte_identical_skill_md_with_activity_rule_to_both_targets() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
 
         let claude = tmp
             .path()
@@ -1032,7 +1275,7 @@ mod tests {
         // name must be "Work", not "Workspace". The public gwtd argv
         // subcommand has since been replaced by JSON envelopes, so generated
         // guidance must not reintroduce the legacy CLI form.
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("## Work (current state)"),
             "current-state section heading must use the Work concept name"

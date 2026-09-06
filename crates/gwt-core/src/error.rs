@@ -68,6 +68,13 @@ pub enum GwtError {
         message: String,
     },
 
+    /// An externally coordinated Workspace operation was resolved through a
+    /// different current/WorkItems storage pair than the one it prepared.
+    #[error(
+        "external workspace operation {operation_id} is bound to a different current/work-items path pair"
+    )]
+    ExternalWorkspacePathPairMismatch { operation_id: String },
+
     /// Skill execution error.
     #[error("Skill error: {0}")]
     Skill(String),

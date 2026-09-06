@@ -11,6 +11,11 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
+const workspaceRenderSyncSource = readFileSync(
+  resolve(here, "../workspace-render-sync.js"),
+  "utf8",
+);
 // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (state, interaction
 // guard, builders, renderLaunchWizard, chrome listeners) moved from app.js
 // to launch-wizard-surface.js; wizard render/source patterns are pinned
@@ -57,6 +62,11 @@ const projectShellSurfaceSource = readFileSync(
   resolve(here, "../project-shell-surface.js"),
   "utf8",
 );
+const fleetMinimapSource = readFileSync(resolve(here, "../fleet-minimap.js"), "utf8");
+const windowWorktreeFormPath = resolve(here, "../window-worktree-form.js");
+const windowWorktreeFormSource = existsSync(windowWorktreeFormPath)
+  ? readFileSync(windowWorktreeFormPath, "utf8")
+  : "";
 const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
@@ -555,53 +565,112 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
   );
 });
 
-test("workspace windows expose lane badges as a separate contract from agent color", () => {
-  assert.match(
-    appSource,
-    /from "\/window-lane-identity\.js"/,
-    "app.js must import lane identity helpers",
+test("workspace windows expose semantic worktree badges separately from agent color", () => {
+  assert.ok(
+    existsSync(windowWorktreeFormPath),
+    "semantic worktree form adapter must exist as its own module",
   );
   assert.match(
     appSource,
-    /class="window-lane-badge"/,
-    "titlebar template must include a lane badge separate from the role badge",
+    /from "\/window-worktree-form\.js"/,
+    "app.js must import worktree form helpers",
   );
   assert.match(
     appSource,
-    /applyWindowLaneData\(element,\s*windowData\)/,
-    "window root must carry data-lane-kind",
+    /class="window-worktree-badge"/,
+    "titlebar template must include a worktree badge separate from the role badge",
   );
   assert.match(
     appSource,
-    /appendRenderKeyPart\(parts,\s*windowLaneKind\(windowData\)\)/,
-    "workspace window render keys must use the same lane normalization as the badge",
+    /applyWindowWorktreeData\(element,\s*windowData\)/,
+    "window root must carry data-worktree-form",
+  );
+  assert.match(
+    appSource,
+    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(windowData\)\)/,
+    "workspace window render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     projectShellSurfaceSource,
-    /window-list-lane/,
-    "window list rows must include the same lane badge contract",
+    /window-list-worktree/,
+    "window list rows must include the same worktree badge contract",
   );
   assert.match(
     projectShellSurfaceSource,
-    /appendRenderKeyPart\(parts,\s*windowLaneKind\(entry\)\)/,
-    "window list render keys must use the same lane normalization as the badge",
+    /class="window-worktree-badge window-list-worktree"[^>]*role="img"/,
+    "window list worktree badges must expose an image role for their accessible name",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /badgeElement\.setAttribute\("role",\s*"img"\)/,
+    "visible titlebar worktree badges must expose an image role",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /badgeElement\.removeAttribute\("role"\)/,
+    "hidden titlebar worktree badges must remove their image role",
+  );
+  assert.match(
+    projectShellSurfaceSource,
+    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(entry\)\)/,
+    "window list render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     inlineStyle,
-    /\.window-lane-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
-    "lane badges must use Operator tokens, not raw colors",
+    /\.window-worktree-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
+    "worktree badges must use Operator tokens, not raw colors",
   );
   assert.match(
     frontendStyle,
-    /\.fleet-minimap__cell\[data-lane-symbol\]::before/,
-    "minimap cells must render a compact lane marker",
+    /\.fleet-minimap__cell\[data-worktree-symbol\]::before/,
+    "minimap cells must render a compact worktree marker",
+  );
+  assert.match(
+    fleetMinimapSource,
+    /const WORKTREE_MARKER_MIN_CELL_SIZE = 17;/,
+    "minimap marker footprint must have one semantic 17px boundary",
+  );
+  assert.match(
+    fleetMinimapSource,
+    /width >= WORKTREE_MARKER_MIN_CELL_SIZE[\s\S]*height >= WORKTREE_MARKER_MIN_CELL_SIZE/,
+    "minimap cells must apply the marker boundary on both dimensions",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /lane_kind[\s\S]*laneKind[\s\S]*"intake"[\s\S]*"execution"/,
+    "only the adapter must understand the legacy backend wire vocabulary",
+  );
+});
+
+test("old lane identity vocabulary is absent from production presentation wiring", () => {
+  const consumerSource = `${appSource}\n${projectShellSurfaceSource}\n${fleetMinimapSource}`;
+  const presentationSource = `${consumerSource}\n${frontendStyle}`;
+  assert.equal(
+    existsSync(resolve(here, "../window-lane-identity.js")),
+    false,
+    "the retired lane identity module must not return during base merges",
+  );
+  assert.doesNotMatch(
+    consumerSource,
+    /window-lane-identity|WindowLane|windowLane|cellLane|lane_kind|laneKind/,
+    "legacy lane wiring must be confined to the worktree-form adapter",
+  );
+  assert.doesNotMatch(
+    presentationSource,
+    /window-lane-badge|window-list-lane|data-lane-(?:kind|label|symbol)/,
+    "old lane classes and data attributes must leave production presentation wiring",
+  );
+  assert.doesNotMatch(
+    presentationSource,
+    /Intake lane|Execution lane|Unknown lane/,
+    "old user-facing lane copy must leave production presentation wiring",
   );
 });
 
 test("Agent title role badges resolve runtime identity instead of generic presets", () => {
   assert.match(
     appSource,
-    /const\s+AGENT_ROLE_LABELS\s*=\s*Object\.freeze\(\{[\s\S]*claude:\s*"Claude Code"[\s\S]*codex:\s*"Codex"/,
+    /const\s+AGENT_ROLE_LABELS\s*=\s*Object\.freeze\(\{[\s\S]*claude:\s*"Claude Code"[\s\S]*codex:\s*"Codex"[\s\S]*grok:\s*"Grok Build"/,
     "expected Agent role badges to map runtime ids to display names",
   );
   assert.match(
@@ -1653,80 +1722,13 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
 
 test("renderWorkspace refreshes operator telemetry when windows mount/unmount (SPEC-3038)", () => {
   const body = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the recompute is the render guard's `recompute` hook, which
+  // runs even when a per-window sync step throws — the badge / empty state /
+  // minimap must not freeze behind a poisoned window.
   assert.match(
     body,
-    /recomputeOperatorTelemetry\(\)/,
+    /recompute:\s*recomputeOperatorTelemetry/,
     "window-count badge + empty state must update when windows mount/unmount",
-  );
-});
-
-test("Improvement candidates refresh already-mounted inbox windows without workspace_state", () => {
-  const refreshBody = extractFunctionBody(appSource, "refreshMountedImprovementInboxWindows");
-  assert.match(
-    refreshBody,
-    /querySelectorAll\(\s*["']\.workspace-window\[data-preset="improvement"\]["']\s*,?\s*\)/,
-    "refresh helper must target already-mounted Improvement Inbox windows",
-  );
-  assert.match(
-    refreshBody,
-    /querySelector\(\s*["']\.window-body["']\s*\)/,
-    "refresh helper must remount the existing window body",
-  );
-  assert.match(
-    refreshBody,
-    /improvementInboxSurface\.mount\(\s*body\s*,\s*\{\s*improvement_candidates:\s*improvementCandidates\s*,?\s*\}/,
-    "refresh helper must pass the latest candidate snapshot into the mounted surface",
-  );
-
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  const caseIndex = receiveBody.indexOf('case "improvement_candidates":');
-  const revisionIndex = receiveBody.indexOf("improvementCandidatesRevision += 1;", caseIndex);
-  const refreshIndex = receiveBody.indexOf("refreshMountedImprovementInboxWindows();", caseIndex);
-  assert.ok(
-    caseIndex >= 0 && revisionIndex > caseIndex && refreshIndex > revisionIndex,
-    "improvement_candidates receive path must refresh mounted inbox windows after recording the new revision",
-  );
-});
-
-test("Improvement async replies are scoped to the active project", () => {
-  const scopeBody = extractFunctionBody(appSource, "improvementEventMatchesActiveProject");
-  assert.match(
-    scopeBody,
-    /event\?\.project_root/,
-    "improvement replies must carry their source project root",
-  );
-  assert.match(
-    scopeBody,
-    /activeProjectTab\(\)\?\.project_root/,
-    "improvement replies must compare against the active project",
-  );
-
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  for (const kind of [
-    "improvement_candidates",
-    "improvement_action_result",
-    "improvement_action_error",
-  ]) {
-    const start = receiveBody.indexOf(`case "${kind}":`);
-    const end = receiveBody.indexOf("case ", start + 5);
-    const arm = receiveBody.slice(start, end);
-    assert.match(
-      arm,
-      /improvementEventMatchesActiveProject\(event\)/,
-      `${kind} must ignore a delayed reply from another project`,
-    );
-  }
-
-  const renderBody = extractFunctionBody(appSource, "renderAppState");
-  assert.match(
-    renderBody,
-    /improvementCandidatesProjectRoot\s*!==\s*activeProjectRoot/,
-    "project switching must clear the prior project's candidate snapshot",
-  );
-  assert.match(
-    renderBody,
-    /improvementCandidates\s*=\s*\[\]/,
-    "stale candidate rows must not remain visible while the new project refresh loads",
   );
 });
 
@@ -3671,10 +3673,10 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
   // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
-  // Console / Mock / Profile / Improvement) must keep tracking the active theme via --color-surface so tabbed windows
+  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile|improvement)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3698,7 +3700,6 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
-    "surface-improvement",
     "surface-console",
     "surface-mock",
   ]) {
@@ -3720,7 +3721,6 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
-    "improvement",
     "console",
     "mock",
   ]) {
@@ -3794,11 +3794,15 @@ test("FR-392: surface entry points are labelled 'Workspace' (3-layer model)", ()
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
   assert.equal(sidebarAria.getAttribute("aria-label"), "Workspace");
 
+  // SPEC-3671 FR-015 supersedes FR-392 for the ADD WINDOW card only: the card
+  // opens the surface that lists Works (launches), and its window title already
+  // said "Work", so the card now matches the window instead of the place. The
+  // rail entry above still names the place, which FR-392 owns.
   const paletteEntry = Array.from(document.querySelectorAll(".preset-button strong"))
     .find((btn) => /^Work(space)?$/.test(btn.textContent.trim()));
   if (paletteEntry) {
-    assert.equal(paletteEntry.textContent.trim(), "Workspace",
-      "palette surface entry must say 'Workspace'");
+    assert.equal(paletteEntry.textContent.trim(), "Work",
+      "the ADD WINDOW card must match the window title of the surface it opens");
   }
 
   const hotkeyRows = Array.from(document.querySelectorAll(".op-hotkey-card__row span"))
@@ -4198,10 +4202,23 @@ test("Recent Projects render key ignores workspace state", () => {
 
 test("viewport-only workspace_state skips unchanged window reconciliation", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the rendered-key slot lives inside workspaceRenderSync so an
+  // exception mid-sync leaves the key uncommitted (the next workspace_state
+  // retries instead of freezing behind the diff skip).
   assert.match(
     appSource,
-    /let\s+renderedWorkspaceWindowsKey\s*=/,
-    "app.js must track the last reconciled Workspace Windows shell key",
+    /import\s*\{\s*createWorkspaceRenderSync\s*\}\s*from\s*"\/workspace-render-sync\.js"/,
+    "app.js must import the render-key sync guard",
+  );
+  assert.match(
+    appSource,
+    /const\s+workspaceRenderSync\s*=\s*createWorkspaceRenderSync\s*\(/,
+    "app.js must own one workspace render sync guard instance",
+  );
+  assert.match(
+    workspaceRenderSyncSource,
+    /if\s*\(\s*renderedKey\s*===\s*key\s*\)\s*\{\s*return\s*\{\s*skipped:\s*true/,
+    "the render guard must skip an unchanged window key before any sync work",
   );
   assert.match(
     appSource,
@@ -4222,11 +4239,9 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
   const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
   const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
-  const keyIndex = renderWorkspaceBody.indexOf(
-    "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
-  );
+  const keyIndex = renderWorkspaceBody.indexOf("workspaceRenderSync.render({");
   const guardIndex = renderWorkspaceBody.indexOf(
-    "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
+    "key: workspaceWindowsRenderKey(workspace)",
   );
   const classifyIndex = renderWorkspaceBody.indexOf(
     "classifyProjectWindowVisibility",
@@ -4234,6 +4249,12 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
   const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
+  const syncGuardIndex = workspaceRenderSyncSource.indexOf('guard("sync"');
+  const recomputeGuardIndex = workspaceRenderSyncSource.indexOf('guard("recompute"');
+  const afterSyncGuardIndex = workspaceRenderSyncSource.indexOf('guard("after_sync"');
+  const commitWindowKeyIndex = workspaceRenderSyncSource.indexOf(
+    "renderedKey = key;",
+  );
 
   assert.notEqual(
     nextViewportIndex,
@@ -4266,12 +4287,13 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
   assert.ok(
     guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
-    "unchanged window key must return before reconciliation and focus activation",
+    "reconciliation and focus activation must run inside the guarded render call",
   );
-  assert.match(
-    renderWorkspaceBody.slice(guardIndex, classifyIndex),
-    /return\s*;/,
-    "unchanged window key guard must return before reconciliation",
+  assert.ok(
+    commitWindowKeyIndex > syncGuardIndex &&
+      commitWindowKeyIndex > recomputeGuardIndex &&
+      commitWindowKeyIndex > afterSyncGuardIndex,
+    "workspace render sync must commit the window key only after reconciliation, telemetry, and focus all succeed",
   );
 });
 
@@ -5153,13 +5175,19 @@ test("titlebar click focuses on single click and only frames on double click", (
 });
 
 test("body and terminal single click focus the window without moving the camera", () => {
-  // focusWindowRemotely without {center:true} sends focus_window WITHOUT bounds
-  // (camera unchanged); the body/terminal mousedown handlers use that path.
+  // focusWindowRemotely is highlight + z-order only and never moves the
+  // camera; the body/terminal mousedown handlers use that path.
+  //
+  // It used to take a `{center}` option that attached `bounds` so the backend
+  // would compute a viewport. That viewport never arrived: viewport-sync
+  // adopts a server viewport once per scope and discards the rest (SPEC-2008
+  // FR-095, per-viewer camera), so the option was dead and three affordances
+  // silently did nothing. Camera moves now go through `requestWindowFrame`.
   const focusRemoteBody = extractFunctionBody(appSource, "focusWindowRemotely");
-  assert.match(
+  assert.doesNotMatch(
     focusRemoteBody,
-    /if\s*\(\s*center\s*\)\s*payload\.bounds\s*=\s*visibleBounds\(\)/,
-    "focusWindowRemotely must only attach bounds when explicitly centering",
+    /bounds/,
+    "focusWindowRemotely must never attach bounds",
   );
   // The non-terminal body click and terminal-root / overlay click all focus
   // only (no center → no camera move). Pinned as source patterns since these
@@ -5243,9 +5271,12 @@ test("Workspace visibility classification reuses direct id sets", () => {
     /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
     "renderWorkspace must not allocate an active window id array before classification",
   );
+  // Issue #3365: the set is assigned inside the guarded sync callback (the
+  // declaration lives outside so afterSync can reuse it), and topmost focus
+  // reads it optionally because a failed sync may have left it unset.
   assert.match(
     renderWorkspaceBody,
-    /const\s+activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
+    /activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
     "renderWorkspace must derive active window ids as a Set once",
   );
   assert.match(
@@ -5255,7 +5286,7 @@ test("Workspace visibility classification reuses direct id sets", () => {
   );
   assert.match(
     renderWorkspaceBody,
-    /topmostId\s*&&\s*activeWindowIdSet\.has\s*\(\s*topmostId\s*\)/,
+    /topmostId\s*&&\s*activeWindowIdSet\?\.has\s*\(\s*topmostId\s*\)/,
     "renderWorkspace must reuse the active id set for topmost focus membership",
   );
 });
@@ -5612,4 +5643,112 @@ test("app.css must not redeclare display for the Workspace overview shell", () =
   const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const shellBlock = componentsCss.match(/\.workspace-overview-shell\s*\{[^}]*\}/)?.[0] ?? "";
   assert.match(shellBlock, /display\s*:\s*grid/, "components.css owns the grid layout");
+});
+
+// --- SPEC #3206 v2: notification center (bell + unread badge + drawer) ---
+
+test("SPEC #3206 v2: the System rail group carries the notification bell with an unread badge (FR-009)", () => {
+  const system = document.querySelector(".op-rail__group--system");
+  assert.ok(system, "System rail group exists");
+  const bell = system.querySelector('.op-rail__item[data-cmd="toggle-notifications"]');
+  assert.ok(bell, "bell lives in the System group and dispatches through data-cmd");
+  assert.equal(bell.id, "op-notifications-button");
+  assert.equal(bell.getAttribute("type"), "button");
+  assert.ok(bell.getAttribute("aria-label"), "icon-only button carries an aria-label");
+  assert.equal(bell.getAttribute("aria-controls"), "notification-center");
+  assert.equal(bell.getAttribute("aria-expanded"), "false", "drawer closed at rest");
+  const icon = bell.querySelector(".op-rail__icon");
+  assert.equal(icon?.getAttribute("aria-hidden"), "true");
+  const flyout = bell.querySelector(".op-rail__flyout");
+  assert.equal(flyout?.getAttribute("aria-hidden"), "true");
+  assert.ok(flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim());
+  const badge = bell.querySelector(".op-rail__badge");
+  assert.ok(badge, "unread badge element is part of the bell");
+  assert.equal(badge.hidden, true, "badge hidden at rest (0 unread)");
+  assert.equal(badge.getAttribute("aria-hidden"), "true", "count is mirrored into the aria-label instead");
+  // FR-009 keeps the rail group order intact (no new group).
+  const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
+    (group) => group.getAttribute("aria-label"),
+  );
+  assert.deepEqual(groups, ["Navigate", "Windows", "Agents", "System"]);
+});
+
+test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle, Esc closes, badge is wired (FR-009 / FR-014)", () => {
+  assert.match(
+    appSource,
+    /case "toggle-notifications":\s*\n\s*notificationCenter\.toggle\(\);/,
+    "app.js must route toggle-notifications to the center (otherwise the bell is a no-op)",
+  );
+  assert.match(
+    appSource,
+    /if \(notificationCenter\.isOpen\(\)\) \{\s*\n\s*notificationCenter\.close\(\);\s*\n\s*event\.preventDefault\(\);/,
+    "Esc closes the drawer through the shared keydown chain",
+  );
+  assert.match(appSource, /import \{ createNotificationCenter, renderNotificationBell \} from "\/notification-center\.js";/);
+  assert.match(appSource, /const notificationCenter = createNotificationCenter\(\{\s*document/);
+  assert.match(
+    appSource,
+    /notificationCenter\.mount\(document\.body\)/,
+    "drawer mounts on body, never inside the rail stacking context",
+  );
+  assert.match(
+    appSource,
+    /notificationCenter\.onUnreadChange\(\(count, hasError\) =>[\s\S]{0,400}renderNotificationBell\(\{/,
+    "unread changes re-render the bell badge",
+  );
+});
+
+test("SPEC #3206 v2: notification-center / badge CSS only references defined Operator tokens (FR-015)", () => {
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const typographyCss = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+  const defined = new Set();
+  for (const source of [tokensCss, typographyCss, frontendStyle]) {
+    for (const m of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      defined.add(m[1]);
+    }
+  }
+  const blocks = frontendStyle.match(/\.(?:notification-center|op-rail__badge)[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 8, `expected the .notification-center / .op-rail__badge rule family (got ${blocks.length})`);
+  for (const block of blocks) {
+    assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/, `raw hex in ${block.split("\n")[0]}`);
+    assert.doesNotMatch(block, /\brgba?\(/, `raw rgb in ${block.split("\n")[0]}`);
+    for (const m of block.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+      assert.ok(defined.has(m[1]), `notification center references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`);
+    }
+  }
+  // level → accent rim via state tokens
+  assert.match(frontendStyle, /\.notification-center__item\[data-level="error"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(frontendStyle, /\.notification-center__item\[data-level="warn"\]\s*\{[^}]*--color-state-needs-input/);
+  assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
+  // history scrolls inside the drawer body
+  assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);
+  // User ruling 2026-09-04: errors are read in ONE place, so the Issue
+  // surface carries no indicator of its own — its CSS must not ship.
+  assert.doesNotMatch(frontendStyle, /surface-error-indicator/);
+});
+
+test("SPEC #3206 v2: the --z-* ladder keeps the persistent drawer below the transient notice stack (FR-015)", () => {
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const bareRoot = tokensCss.match(/(?:^|\n):root\s*\{([^}]*)\}/)?.[1] ?? "";
+  const z = {};
+  for (const m of bareRoot.matchAll(/(--z-[a-z0-9-]+)\s*:\s*(\d+)\s*;/g)) {
+    z[m[1]] = Number(m[2]);
+  }
+  for (const name of ["--z-rail", "--z-notification-center", "--z-modal", "--z-notice-stack"]) {
+    assert.ok(Number.isFinite(z[name]), `${name} must be defined as a number in the bare :root block`);
+  }
+  assert.ok(z["--z-rail"] < z["--z-notification-center"], "drawer sits above the rail");
+  assert.ok(z["--z-notification-center"] < z["--z-modal"], "modals still cover the drawer");
+  assert.ok(z["--z-notification-center"] < z["--z-notice-stack"], "persistent UI never covers transient alerts");
+  assert.match(
+    frontendStyle,
+    /\.notification-center-drawer\s*\{[^}]*z-index:\s*var\(--z-notification-center\)/,
+    "the drawer takes its tier from the token, not a raw number",
+  );
+  assert.match(
+    frontendStyle,
+    /\.operator-notice-stack\s*\{[^}]*z-index:\s*var\(--z-notice-stack\)/,
+    "the notice stack takes its tier from the token",
+  );
+  assert.match(frontendStyle, /\.op-rail\s*\{[^}]*z-index:\s*var\(--z-rail\)/);
 });

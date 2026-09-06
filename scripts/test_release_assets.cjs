@@ -318,9 +318,16 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
     path.join(__dirname, "..", ".github", "workflows", "test.yml"),
     "utf8"
   );
+  assert.match(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
   assert.match(testWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
   assert.match(testWorkflow, /1\.\.3 \| ForEach-Object/);
   assert.match(testWorkflow, /cargo test -p gwt-core -p gwt --all-features/);
+  // The three runs must share one job so they share one SHA and one runner.
+  // Splitting them across jobs would let a green run and a red run coexist.
+  const defaultParallelJob = testWorkflow.slice(
+    testWorkflow.indexOf("  test-windows-default-parallel:")
+  );
+  assert.match(defaultParallelJob, /1\.\.3 \| ForEach-Object/);
   for (const command of [
     "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
     "cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary",

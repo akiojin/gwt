@@ -25,9 +25,298 @@
 // - visibleBounds(): current canvas bounds for resume placement.
 // - launchPending: shared Resume/Launch pending controller.
 import { createFocusTrap } from "/focus-trap.js";
+import { createLaunchOperationId } from "./launch-pending-controller.js";
+
+const MONITOR_STATE_VIEWS = Object.freeze({
+  queued: Object.freeze({ label: "Queued", tone: "idle" }),
+  not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
+  hold_excluded: Object.freeze({ label: "On hold", tone: "needs-input" }),
+  launching: Object.freeze({ label: "Launching", tone: "active" }),
+  launched: Object.freeze({ label: "Launched", tone: "active" }),
+  merged: Object.freeze({ label: "Merged", tone: "done" }),
+  released: Object.freeze({ label: "Released", tone: "done" }),
+  launch_failed: Object.freeze({ label: "Launch failed", tone: "blocked" }),
+  agent_failed: Object.freeze({ label: "Agent failed", tone: "blocked" }),
+  blocked_by_claim: Object.freeze({ label: "Blocked by claim", tone: "needs-input" }),
+  skipped: Object.freeze({ label: "Skipped", tone: "idle" }),
+  needs_human: Object.freeze({ label: "Needs human", tone: "needs-input" }),
+});
+
+export function monitorStateView(value) {
+  const state = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!state) return null;
+  const known = MONITOR_STATE_VIEWS[state];
+  return known
+    ? { state, label: known.label, tone: known.tone }
+    : { state, label: `Unknown (${state})`, tone: "needs-input" };
+}
+
+// SPEC-3671 FR-011: an auto-launched agent that errors or waits for a human ruling
+// announces itself through this badge. It never opens a canvas window.
+const ISSUE_PREVIEW_STATUS_VIEWS = Object.freeze({
+  running: Object.freeze({ label: "Running", tone: "active" }),
+  starting: Object.freeze({ label: "Starting", tone: "active" }),
+  idle: Object.freeze({ label: "Idle", tone: "idle" }),
+  waiting: Object.freeze({ label: "Needs input", tone: "needs-input" }),
+  stopped: Object.freeze({ label: "Stopped", tone: "idle" }),
+  error: Object.freeze({ label: "Error", tone: "blocked" }),
+});
+
+// Issue #3884: compact elapsed-time label for the Issue row status row
+// ("<1m", "7m", "1h 05m", "1d 2h"); empty when the duration is unknown.
+export function formatAgentElapsed(ms) {
+  if (ms === null || ms === undefined || ms === "") return "";
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value < 0) return "";
+  const minutes = Math.floor(value / 60000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+export function issuePreviewStatusView(windowData) {
+  const status = String(windowData?.status || "").trim().toLowerCase();
+  const known = ISSUE_PREVIEW_STATUS_VIEWS[status];
+  return known
+    ? { status, label: known.label, tone: known.tone }
+    : { status, label: status ? `Unknown (${status})` : "Unknown", tone: "needs-input" };
+}
+
+function normalizeWorkBranch(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replace(/^refs\/heads\//, "").replace(/^origin\//, "");
+}
+
+// SPEC-3671 FR-012: join an Issue row to the active Work projection the frontend
+// already receives. The Issue row carries only the backend's correlation
+// (`related_work_refs`); every displayed field stays owned by the projection, so
+// there is no second derivation of Work state and no new data path.
+export function issueWorkRowForEntry(projection, entry) {
+  const refs = Array.isArray(entry?.related_work_refs) ? entry.related_work_refs : [];
+  if (refs.length === 0) return null;
+  const works = Array.isArray(projection?.active_works) ? projection.active_works : [];
+  if (works.length === 0) return null;
+  const refIds = new Set(refs.map((ref) => ref?.id).filter(Boolean));
+  const byId = works.find((work) => refIds.has(work?.id));
+  if (byId) return byId;
+  const refBranches = new Set(
+    refs.map((ref) => normalizeWorkBranch(ref?.branch)).filter(Boolean),
+  );
+  if (refBranches.size === 0) return null;
+  return works.find((work) => refBranches.has(normalizeWorkBranch(work?.branch))) || null;
+}
+
+// SPEC-3671 FR-007 / FR-009: the previews the given Issue window is responsible for
+// mirroring. A preview whose host Issue window no longer exists is adopted by any Issue
+// window so an auto-launched agent is never left unreachable.
+export function issuePreviewWindowsForIssue(windows, issueWindowId, issueNumber) {
+  const number = Number(issueNumber);
+  if (!Number.isFinite(number)) return [];
+  const list = Array.isArray(windows) ? windows : [];
+  const knownIds = new Set(list.map((windowData) => windowData?.id).filter(Boolean));
+  return list.filter((windowData) => {
+    const placement = windowData?.placement;
+    if (placement?.kind !== "issue_preview") return false;
+    if (Number(placement.issue_number) !== number) return false;
+    return (
+      placement.issue_window_id === issueWindowId ||
+      !knownIds.has(placement.issue_window_id)
+    );
+  });
+}
+
+// SPEC #3885 Phase 2 (T-004 / FR-006): the Issue row state model. A row shows
+// exactly one primary badge, at most two pieces of secondary information, and at
+// most two visible actions; the remaining actions go to the row's overflow menu.
+// The model is pure so the limits are testable without the DOM.
+const ISSUE_ROW_SECONDARY_LIMIT = 2;
+const ISSUE_ROW_ACTION_LIMIT = 2;
+const ISSUE_ROW_LIVE_AGENT_STATUSES = new Set(["running", "starting", "idle", "waiting", "error"]);
+const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_failed"]);
+const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
+  closed: Object.freeze({ label: "Done", tone: "done" }),
+  remote: Object.freeze({ label: "Remote", tone: "remote" }),
+  needs_attention: Object.freeze({ label: "Needs attention", tone: "needs-input" }),
+  running: Object.freeze({ label: "Active", tone: "active" }),
+  paused: Object.freeze({ label: "Paused", tone: "idle" }),
+});
+
+function issueEntryStateKey(entry) {
+  return String(entry?.state || "open").toLowerCase() === "closed" ? "closed" : "open";
+}
+
+function issueEntryHasLabel(entry, name) {
+  const labels = Array.isArray(entry?.labels) ? entry.labels : [];
+  return labels.some((label) => String(label || "").trim().toLowerCase() === name);
+}
+
+function issueRowPrimaryView({ entry, attention, inlineWindow, canvasWindow }) {
+  const live = inlineWindow || canvasWindow;
+  if (live) {
+    const view = issuePreviewStatusView(live);
+    if (ISSUE_ROW_LIVE_AGENT_STATUSES.has(view.status)) {
+      return { key: `agent:${view.status}`, label: view.label, tone: view.tone };
+    }
+  }
+  const monitor = monitorStateView(entry?.monitor_state);
+  if (monitor) {
+    return { key: `monitor:${monitor.state}`, label: monitor.label, tone: monitor.tone };
+  }
+  const lane = ISSUE_ROW_WORK_LANE_VIEWS[attention?.lane];
+  if (lane) {
+    return { key: `work:${attention.lane}`, label: lane.label, tone: lane.tone };
+  }
+  return issueEntryStateKey(entry) === "closed"
+    ? { key: "issue:closed", label: "Closed", tone: "done" }
+    : { key: "issue:open", label: "Open", tone: "idle" };
+}
+
+function issueRowSecondaryItems({ entry, work, attention, primary }) {
+  const items = [];
+  if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
+    items.push({ kind: "chip", key: "closed", label: "Closed" });
+  }
+  const exclusion = String(entry?.exclusion_reason || "").trim();
+  const attentionReason =
+    attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
+  const reason = exclusion || attentionReason;
+  if (reason) {
+    items.push({ kind: "reason", key: "reason", label: reason });
+  }
+  if (Number.isFinite(entry?.queue_position)) {
+    items.push({ kind: "chip", key: "queue", label: `Queue ${entry.queue_position}` });
+  }
+  if (work?.pr_number) {
+    const prState = String(work.pr_state || "").trim();
+    items.push({
+      kind: "chip",
+      key: "pr",
+      label: prState ? `PR #${work.pr_number} · ${prState}` : `PR #${work.pr_number}`,
+      title: work.pr_url || "",
+    });
+  }
+  if (entry?.is_spec || issueEntryHasLabel(entry, "gwt-spec")) {
+    items.push({ kind: "chip", key: "spec", label: "Spec" });
+  }
+  if (issueEntryHasLabel(entry, "auto-merge")) {
+    items.push({ kind: "chip", key: "auto-merge", label: "Auto-merge" });
+  }
+  return items.slice(0, ISSUE_ROW_SECONDARY_LIMIT);
+}
+
+function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindow }) {
+  const workActions = ["continue-work", "resume-work", "cleanup-work"];
+  if (inlineWindow) {
+    return { order: ["windowize-issue-preview", "configure-issue", ...workActions], limit: 1 };
+  }
+  if (canvasWindow) {
+    return { order: ["focus-canvas-window", "configure-issue", ...workActions], limit: 1 };
+  }
+  const monitor = monitorStateView(entry?.monitor_state);
+  switch (monitor?.state) {
+    case "queued":
+      return {
+        order: ["launch-now", "configure-issue", "move-up", "move-down", ...workActions],
+      };
+    case "launch_failed":
+    case "agent_failed":
+      return {
+        order: ["launch-now", "continue-work", "resume-work", "configure-issue", "cleanup-work"],
+      };
+    case "merged":
+    case "released":
+      return { order: ["cleanup-work", "resume-work", "continue-work", "configure-issue"] };
+    case "needs_human":
+    case "launching":
+    case "launched":
+      return { order: ["continue-work", "resume-work", "configure-issue", "cleanup-work"] };
+    default:
+      break;
+  }
+  if (monitor) {
+    return { order: ["configure-issue", ...workActions] };
+  }
+  if (work) {
+    return {
+      order:
+        attention?.lane === "closed"
+          ? ["cleanup-work", "resume-work", "continue-work"]
+          : workActions,
+    };
+  }
+  return { order: issueEntryStateKey(entry) === "open" ? ["launch-agent"] : [] };
+}
+
+function issueRowActionAvailable(action, { entry, work, queue }) {
+  const monitor = monitorStateView(entry?.monitor_state);
+  switch (action) {
+    case "launch-now":
+      return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "configure-issue":
+      return Boolean(monitor);
+    case "move-up":
+    case "move-down":
+      return Boolean(queue) && Number.isFinite(queue.index) && queue.index >= 0;
+    case "continue-work":
+    case "resume-work":
+      return Boolean(work);
+    case "cleanup-work":
+      return Boolean(work && (work.cleanup_candidate || work.cleanup_blocked_reason));
+    default:
+      return true;
+  }
+}
+
+export function issueRowStateModel({
+  entry,
+  work = null,
+  attention = null,
+  inlineWindow = null,
+  canvasWindow = null,
+  queue = null,
+} = {}) {
+  const context = { entry, work, attention, inlineWindow, canvasWindow, queue };
+  const primary = issueRowPrimaryView(context);
+  const secondary = issueRowSecondaryItems({ ...context, primary });
+  const { order, limit = ISSUE_ROW_ACTION_LIMIT } = issueRowActionOrder(context);
+  const available = order.filter((action) => issueRowActionAvailable(action, context));
+  return {
+    primary,
+    secondary,
+    actions: available.slice(0, limit),
+    overflow: available.slice(limit),
+  };
+}
+
+// SPEC #3885 T-005 / FR-003a: the canvas face of a Windowized agent. The link back
+// to the Issue comes from the Work projection's agent rows (window id or session
+// id) or from the ids this surface itself Windowized; only windows that are on
+// the canvas count, so a preview that returned to the row is never doubled.
+export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds) {
+  const list = Array.isArray(windows) ? windows : [];
+  const agents = Array.isArray(work?.agents) ? work.agents : [];
+  const windowIds = new Set(agents.map((agent) => agent?.window_id).filter(Boolean));
+  const sessionIds = new Set(agents.map((agent) => agent?.session_id).filter(Boolean));
+  const remembered =
+    rememberedIds instanceof Set ? rememberedIds : new Set(rememberedIds || []);
+  return list.filter((windowData) => {
+    if (!windowData?.id) return false;
+    const kind = windowData.placement?.kind || "canvas";
+    if (kind !== "canvas") return false;
+    if (remembered.has(windowData.id) || windowIds.has(windowData.id)) return true;
+    return Boolean(windowData.session_id) && sessionIds.has(windowData.session_id);
+  });
+}
 
 export function createKnowledgeKanbanSurface({
   send,
+  // Semantic search must never use the reconnect queue. This dependency
+  // performs one atomic OPEN check + socket.send and reports whether the
+  // frame was written; a false result is owned by the retry lifecycle.
+  sendKnowledgeSemanticSearchNow = () => false,
   createNode,
   createKnowledgeMarkdownBody,
   windowMap,
@@ -41,12 +330,298 @@ export function createKnowledgeKanbanSurface({
   openIssueLaunchWizard,
   visibleBounds,
   launchPending,
+  // SPEC-3671 FR-007 / FR-008 / FR-010: the Issue preview pane. The terminal
+  // runtime factory is the shared one from app.js; `readOnly` keeps every input
+  // path unattached. `windowizeIssuePreviewWindow` performs the Canvas handoff.
+  createTerminalRuntime,
+  windowDisplayTitle,
+  windowRoleBadgeLabel,
+  windowizeIssuePreviewWindow,
+  // Issue #3884: the Issue row status row reads the agent's live activity line
+  // (backend dynamic title detail / status detail) and the instant its runtime
+  // state was last observed to change.
+  windowActivityDetail,
+  windowRuntimeStateSince,
+  // SPEC-3671 FR-012 / FR-013: Work state and Work actions on the Issue row. The
+  // projection and the derivation helpers are the Work surface's own — the Issue
+  // surface never re-derives lifecycle or attention rules.
+  getActiveWorkProjection,
+  workAttentionFor,
+  formatWorkLifecycleLabel,
+  continueWork,
+  openWorkspaceResumePicker,
+  openWorkspaceCleanup,
+  getResumeBounds,
+  // SPEC #3206 FR-017: surface errors (Issue Monitor last_error, Issue window
+  // load/search failures) are reported to the notification center as error
+  // rows and are NOT rendered in this surface at all — the bell + drawer are
+  // the single place errors are read (user ruling 2026-09-04; a per-surface
+  // indicator re-fragments the very thing v2 consolidated). Pure seams: the
+  // surface never learns the center's shape.
+  reportSurfaceError = () => {},
+  resolveSurfaceError = () => {},
 }) {
       const knowledgeBridgeStateMap = new Map();
+      // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
+      // is re-broadcast constantly, so only a CHANGED text is a new event) and
+      // remember which of the two sources changed last for the summary line.
+      const ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
+      let reportedIssueMonitorError = "";
+      let issueMonitorErrorSequence = 0;
+      let surfaceErrorSequence = 0;
+
+      function issueMonitorErrorText() {
+        return typeof issueMonitorStatus?.last_error === "string"
+          ? issueMonitorStatus.last_error.trim()
+          : "";
+      }
+
+      function syncIssueMonitorErrorReport() {
+        const lastError = issueMonitorErrorText();
+        if (lastError === reportedIssueMonitorError) return;
+        reportedIssueMonitorError = lastError;
+        if (lastError) {
+          surfaceErrorSequence += 1;
+          issueMonitorErrorSequence = surfaceErrorSequence;
+          reportSurfaceError({ key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: lastError });
+        } else {
+          resolveSurfaceError(ISSUE_MONITOR_ERROR_KEY);
+        }
+      }
+
+      function issueWindowErrorKey(windowId) {
+        return `issue-window:${windowId}:load`;
+      }
+
+      function syncIssueWindowErrorReport(windowId, state) {
+        const message = typeof state?.error === "string" ? state.error : "";
+        if (message === (state.reportedError || "")) return;
+        state.reportedError = message;
+        if (message) {
+          surfaceErrorSequence += 1;
+          state.errorSequence = surfaceErrorSequence;
+          reportSurfaceError({ key: issueWindowErrorKey(windowId), title: "Issue window", message });
+        } else {
+          resolveSurfaceError(issueWindowErrorKey(windowId));
+        }
+      }
+
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       let relatedWorkRefreshTimer = null;
+      let monitorProjectionRefreshTimer = null;
+      let issueMonitorStatus = {
+        enabled: false,
+        state: "disabled",
+        queue_len: 0,
+        active_count: 0,
+        max_active_agents: 1,
+        total_candidates: 0,
+        autonomous_mode: false,
+        quota_hold: null,
+      };
+
+      function issueMonitorStateText(state) {
+        switch (String(state || "")) {
+          case "disabled":
+            return "Stopped";
+          case "auth_required":
+            return "Auth required";
+          case "settings_required":
+            return "Settings required";
+          case "quota_hold":
+            return "Quota hold";
+          default: {
+            const value = String(state || (issueMonitorStatus.enabled ? "idle" : "disabled"));
+            return value.charAt(0).toUpperCase() + value.slice(1);
+          }
+        }
+      }
+
+      function issueMonitorSettingsSourceLabel(source) {
+        switch (source) {
+          case "saved":
+            return "Saved";
+          case "last_settings":
+            return "Last settings";
+          default:
+            return "Missing saved profile";
+        }
+      }
+
+      function normalizedIssueMonitorQuotaHold(status) {
+        const quotaHold = status?.quota_hold;
+        if (!quotaHold || typeof quotaHold !== "object" || Array.isArray(quotaHold)) {
+          return null;
+        }
+        const provider =
+          typeof quotaHold.provider === "string" ? quotaHold.provider.trim() : "";
+        const resetAt =
+          typeof quotaHold.reset_at === "string" ? quotaHold.reset_at.trim() : "";
+        return provider && resetAt ? { provider, reset_at: resetAt } : null;
+      }
+
+      function effectiveIssueMonitorState(status, quotaHold) {
+        if (!status.enabled) return "disabled";
+        const state = String(status.state || "idle");
+        if (["disabled", "error", "auth_required"].includes(state)) {
+          return state;
+        }
+        if (
+          quotaHold &&
+          ["quota_hold", "active", "launching", "settings_required", "idle"].includes(state)
+        ) {
+          return "quota_hold";
+        }
+        return state === "quota_hold" ? "idle" : state;
+      }
+
+      function renderIssueMonitorControls(element) {
+        const panel = element?.querySelector(".knowledge-monitor-panel");
+        if (!panel) return;
+        const maxActive = Math.max(
+          1,
+          Number.parseInt(String(issueMonitorStatus.max_active_agents || 1), 10) || 1,
+        );
+        const summary = panel.querySelector(".knowledge-monitor-summary");
+        if (summary) {
+          const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorStatus);
+          const state = effectiveIssueMonitorState(issueMonitorStatus, quotaHold);
+          const parts = [
+            issueMonitorStateText(state),
+            `Queue ${issueMonitorStatus.queue_len || 0}`,
+            `Active ${issueMonitorStatus.active_count || 0}/${maxActive}`,
+          ];
+          if (state === "quota_hold") {
+            parts.push(`Provider ${quotaHold.provider}`);
+            parts.push(`Reset ${quotaHold.reset_at}`);
+          }
+          if (issueMonitorStatus.total_candidates) {
+            parts.push(`Total ${issueMonitorStatus.total_candidates}`);
+          }
+          summary.textContent = parts.join(" | ");
+        }
+        const settings = panel.querySelector(".knowledge-monitor-settings-copy");
+        if (settings) {
+          const source = issueMonitorSettingsSourceLabel(
+            issueMonitorStatus.launch_profile_source,
+          );
+          const profile =
+            issueMonitorStatus.launch_profile_summary || "configure before auto start";
+          settings.textContent = `Agent settings ${source}: ${profile}`;
+        }
+        const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
+        if (maxActiveInput && document.activeElement !== maxActiveInput) {
+          maxActiveInput.value = String(maxActive);
+        }
+        const toggle = panel.querySelector('[data-action="monitor-toggle"]');
+        if (toggle) {
+          const enabled = Boolean(issueMonitorStatus.enabled);
+          toggle.textContent = enabled ? "Stop" : "Start";
+          toggle.dataset.enabled = enabled ? "true" : "false";
+          toggle.classList.toggle("primary", !enabled);
+        }
+        const autonomous = panel.querySelector('[data-action="monitor-autonomous"]');
+        if (autonomous) {
+          const enabled = Boolean(issueMonitorStatus.autonomous_mode);
+          autonomous.textContent = enabled ? "Autonomous: ON" : "Autonomous: OFF";
+          autonomous.dataset.enabled = enabled ? "true" : "false";
+          autonomous.classList.toggle("primary", enabled);
+        }
+      }
+
+      function renderAllIssueMonitorControls() {
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (normalizeKnowledgeKind(state.kind) !== "issue") continue;
+          renderIssueMonitorControls(windowMap.get(windowId));
+        }
+      }
+
+      function applyIssueMonitorStatus(nextStatus) {
+        issueMonitorStatus = {
+          ...issueMonitorStatus,
+          ...(nextStatus || {}),
+          quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+        };
+        // FR-017: the monitor's last_error is a notification-center error
+        // row, not a banner. Report once per changed text; resolve on clear.
+        syncIssueMonitorErrorReport();
+        renderAllIssueMonitorControls();
+      }
+
+      function scheduleIssueMonitorProjectionRefresh() {
+        if (monitorProjectionRefreshTimer !== null) {
+          clearTimeout(monitorProjectionRefreshTimer);
+        }
+        monitorProjectionRefreshTimer = setTimeout(() => {
+          monitorProjectionRefreshTimer = null;
+          for (const [windowId, state] of knowledgeBridgeStateMap) {
+            if (
+              normalizeKnowledgeKind(state.kind) === "issue" &&
+              workspaceWindowById(windowId)
+            ) {
+              requestKnowledgeBridge(windowId, "issue", false);
+            }
+          }
+        }, 75);
+      }
+
+      function wireIssueMonitorControls(body) {
+        const panel = body.querySelector(".knowledge-monitor-panel");
+        if (!panel) return;
+        panel.addEventListener("mousedown", (event) => event.stopPropagation());
+        panel
+          .querySelector('[data-action="monitor-settings"]')
+          ?.addEventListener("click", () => {
+            send({ kind: "issue_monitor_configure_profile" });
+          });
+        const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
+        maxActiveInput?.addEventListener("change", () => {
+          const value = Math.max(
+            1,
+            Number.parseInt(String(maxActiveInput.value || "1"), 10) || 1,
+          );
+          maxActiveInput.value = String(value);
+          send({
+            kind: "set_issue_monitor_max_active_agents",
+            max_active_agents: value,
+          });
+        });
+        panel
+          .querySelector('[data-action="monitor-toggle"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_enabled",
+              enabled: !Boolean(issueMonitorStatus.enabled),
+            });
+          });
+        panel
+          .querySelector('[data-action="monitor-autonomous"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_autonomous_mode",
+              enabled: !Boolean(issueMonitorStatus.autonomous_mode),
+            });
+          });
+        const quickTitle = panel.querySelector(".knowledge-monitor-quick-title");
+        const submitQuickIssue = (launch) => {
+          const title = String(quickTitle?.value || "").trim();
+          if (!title) return;
+          send({ kind: "quick_register_issue", title, launch });
+          quickTitle.value = "";
+        };
+        quickTitle?.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          submitQuickIssue(false);
+        });
+        panel
+          .querySelector('[data-action="quick-register-launch"]')
+          ?.addEventListener("click", () => submitQuickIssue(true));
+        renderIssueMonitorControls(body);
+        send({ kind: "list_issue_monitor" });
+      }
 
 
       // SPEC-2017 US-9 — Kanban Drawer (slide-over detail). Reuses the
@@ -178,10 +753,27 @@ export function createKnowledgeKanbanSurface({
       function ensureKnowledgeBridgeState(windowId, knowledgeKind) {
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
-            kind: knowledgeKind,
+            kind: normalizeKnowledgeKind(knowledgeKind),
             entries: [],
             baseEntries: [],
             selectedNumber: null,
+            // SPEC #3170 FR-101: independent monotonically increasing
+            // explicit-selection generation; 0 means no explicit selection.
+            selectionGeneration: 0,
+            // SPEC #3170 FR-099: silent semantic retry window (frontend
+            // owned). generation invalidates stale timers; index walks the
+            // fixed 5/10/20/30/30… ladder; active marks a degraded query so
+            // reconnect can restart the sequence at 5 seconds.
+            semanticRetryTimer: null,
+            semanticRetryIndex: 0,
+            semanticRetryGeneration: 0,
+            semanticRetryActive: false,
+            semanticRetryTyped: false,
+            searchGeneration: 0,
+            searchIntentKind: normalizeKnowledgeKind(knowledgeKind),
+            searchIntentQuery: "",
+            inFlightSearchIntent: null,
+            queuedSearchIntent: null,
             detail: null,
             query: "",
             loading: false,
@@ -190,7 +782,12 @@ export function createKnowledgeKanbanSurface({
             detailLoading: false,
             pendingSearchTimer: null,
             loadRequestId: 0,
+            ownedLoadRequestIds: new Set(),
+            loadSelectionGeneration: 0,
+            loadSelectedNumber: null,
             detailRequestId: 0,
+            detailRequestSelectionGeneration: 0,
+            detailRequestNumber: null,
             searchRequestId: 0,
             inFlightSearchRequestId: 0,
             searchInFlight: false,
@@ -216,7 +813,11 @@ export function createKnowledgeKanbanSurface({
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
-        state.kind = knowledgeKind || state.kind;
+        const nextKind = normalizeKnowledgeKind(knowledgeKind || state.kind);
+        if (state.kind && nextKind && state.kind !== nextKind) {
+          invalidateKnowledgeSearchOwner(state, nextKind, state.query.trim());
+        }
+        state.kind = nextKind || state.kind;
         if (state.hideDone === undefined) {
           state.hideDone = readKanbanHideDonePreference();
         }
@@ -234,17 +835,25 @@ export function createKnowledgeKanbanSurface({
           state.loading ||
           state.refreshing ||
           state.searching ||
-          state.searchInFlight
+          state.searchInFlight ||
+          state.pendingSearchTimer !== null ||
+          state.semanticRetryTimer !== null ||
+          Boolean(state.inFlightSearchIntent) ||
+          Boolean(state.queuedSearchIntent) ||
+          state.semanticRetryActive === true
         );
       }
 
       function ensureKnowledgeAutoRefresh(windowId, knowledgeKind) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        if (state.autoRefreshTimer) {
+        if (state.autoRefreshTimer !== null) {
           return;
         }
         state.autoRefreshTimer = setInterval(() => {
-          if (!windowMap.get(windowId)) {
+          if (
+            knowledgeBridgeStateMap.get(windowId) !== state ||
+            !windowMap.get(windowId)
+          ) {
             clearInterval(state.autoRefreshTimer);
             state.autoRefreshTimer = null;
             return;
@@ -280,25 +889,46 @@ export function createKnowledgeKanbanSurface({
 
       function clearKnowledgeBridgeState(windowId) {
         const state = knowledgeBridgeStateMap.get(windowId);
-        if (state?.pendingSearchTimer) {
+        if (state?.reportedError) {
+          // FR-017: a closed window's load error is no longer actionable.
+          resolveSurfaceError(issueWindowErrorKey(windowId));
+          state.reportedError = "";
+        }
+        if (state?.pendingSearchTimer !== null && state?.pendingSearchTimer !== undefined) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        // AS-17.2: window destroy invalidates the silent retry owner.
+        invalidateKnowledgeSemanticRetry(state);
         if (state) {
           state.queuedSearchQuery = "";
+          state.queuedSearchIntent = null;
+          state.inFlightSearchIntent = null;
+          state.searchGeneration = (state.searchGeneration || 0) + 1;
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
           state.queuedLoadRefresh = false;
           state.loadRecoveryRetryCount = 0;
-          if (state.loadRecoveryTimer) {
+          if (state.loadRecoveryTimer !== null) {
             clearTimeout(state.loadRecoveryTimer);
             state.loadRecoveryTimer = null;
           }
           state.pendingPhaseUpdates?.clear();
           state.dndSnapshot = null;
+          if (state.autoRefreshTimer !== null) {
+            clearInterval(state.autoRefreshTimer);
+            state.autoRefreshTimer = null;
+          }
         }
         knowledgeBridgeStateMap.delete(windowId);
+        if (
+          knowledgeBridgeStateMap.size === 0 &&
+          monitorProjectionRefreshTimer !== null
+        ) {
+          clearTimeout(monitorProjectionRefreshTimer);
+          monitorProjectionRefreshTimer = null;
+        }
       }
 
       function knowledgeEntriesAreEmpty(state) {
@@ -309,7 +939,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeLoadRecoveryTimer(state) {
-        if (!state.loadRecoveryTimer) {
+        if (state.loadRecoveryTimer === null) {
           return;
         }
         clearTimeout(state.loadRecoveryTimer);
@@ -321,7 +951,10 @@ export function createKnowledgeKanbanSurface({
         clearKnowledgeLoadRecoveryTimer(state);
         state.loadRecoveryTimer = setTimeout(() => {
           state.loadRecoveryTimer = null;
-          if (!workspaceWindowById(windowId)) {
+          if (
+            knowledgeBridgeStateMap.get(windowId) !== state ||
+            !workspaceWindowById(windowId)
+          ) {
             return;
           }
           if (
@@ -376,21 +1009,30 @@ export function createKnowledgeKanbanSurface({
             return;
           }
         }
-        if (state.pendingSearchTimer) {
+        if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
-        state.detailRequestId = 0;
+        if (normalizeKnowledgeKind(state.kind) === "pr") {
+          // PR selection still completes through the legacy full-view path.
+          // A newer PR load supersedes that selection owner just as it did
+          // before Issue/SPEC detail requests gained independent ownership.
+          state.detailRequestId = 0;
+        }
+        state.ownedLoadRequestIds.add(requestId);
+        while (state.ownedLoadRequestIds.size > 4) {
+          state.ownedLoadRequestIds.delete(
+            state.ownedLoadRequestIds.values().next().value,
+          );
+        }
+        state.loadSelectionGeneration = state.selectionGeneration;
+        state.loadSelectedNumber = state.selectedNumber;
         state.loading = true;
         state.refreshing = Boolean(refresh);
         state.searching = false;
-        state.searchInFlight = false;
-        state.inFlightSearchRequestId = 0;
-        state.queuedSearchQuery = "";
         state.queuedLoadRefresh = false;
-        state.searchRequestId += 1;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
         send({
@@ -405,7 +1047,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function scheduleKnowledgeRelatedWorkRefresh() {
-        if (relatedWorkRefreshTimer) {
+        if (relatedWorkRefreshTimer !== null) {
           clearTimeout(relatedWorkRefreshTimer);
         }
         relatedWorkRefreshTimer = setTimeout(() => {
@@ -424,12 +1066,39 @@ export function createKnowledgeKanbanSurface({
         }, 150);
       }
 
+      // AS-17.7 (T-953): immediate local fallback rows for a query — match
+      // by number, title, metadata line, or label, case-insensitively.
+      function applyLocalKnowledgeFilter(state, query) {
+        const queryLower = query.toLowerCase();
+        const numberQuery = queryLower.replace(/^#/, "");
+        const matches = (entry) => {
+          if (!entry) {
+            return false;
+          }
+          if (numberQuery && String(entry.number ?? "").includes(numberQuery)) {
+            return true;
+          }
+          if ((entry.title || "").toLowerCase().includes(queryLower)) {
+            return true;
+          }
+          if ((entry.meta || "").toLowerCase().includes(queryLower)) {
+            return true;
+          }
+          const labels = Array.isArray(entry.labels) ? entry.labels : [];
+          return labels.some((label) =>
+            String(label).toLowerCase().includes(queryLower),
+          );
+        };
+        state.entries = (state.baseEntries || []).filter(matches);
+      }
+
       function restoreKnowledgeBaseEntries(state) {
         state.entries = Array.isArray(state.baseEntries)
           ? state.baseEntries.slice()
           : [];
         state.emptyMessage = state.baseEmptyMessage || "";
         if (
+          state.selectionGeneration === 0 &&
           state.selectedNumber &&
           !state.entries.some((entry) => entry.number === state.selectedNumber)
         ) {
@@ -451,55 +1120,343 @@ export function createKnowledgeKanbanSurface({
       }
 
       function knowledgeDetailRequestMatches(state, event) {
+        if (normalizeKnowledgeKind(state.kind) === "pr") {
+          if (!event.request_id) {
+            return event.detail?.number === state.selectedNumber;
+          }
+          return (
+            event.request_id === state.loadRequestId ||
+            event.request_id === state.detailRequestId
+          );
+        }
+        if (!event.request_id) {
+          // ID-less compatibility is restricted to generation zero. Once a
+          // user has selected anything explicitly, identity cannot be proven
+          // even if an A→B→A sequence happens to end on the same number.
+          return (
+            state.selectionGeneration === 0 &&
+            event.detail?.number === state.selectedNumber
+          );
+        }
+        if (event.request_id === state.detailRequestId) {
+          return (
+            state.detailRequestSelectionGeneration === state.selectionGeneration &&
+            state.detailRequestNumber === state.selectedNumber &&
+            event.detail?.number === state.selectedNumber
+          );
+        }
+        if (event.request_id === state.loadRequestId) {
+          if (state.loadSelectionGeneration !== state.selectionGeneration) {
+            return false;
+          }
+          if (state.selectionGeneration === 0 && state.loadSelectedNumber === null) {
+            return event.detail?.number === state.selectedNumber;
+          }
+          return (
+            state.loadSelectedNumber === state.selectedNumber &&
+            event.detail?.number === state.selectedNumber
+          );
+        }
+        return false;
+      }
+
+      function normalizeKnowledgeKind(value) {
+        return typeof value === "string" ? value.trim().toLowerCase() : "";
+      }
+
+      function isSilentSemanticKind(kind) {
+        // Both Issue and SPEC presets normalize to the backend `issue` kind.
+        // PR intentionally retains its pre-SPEC-3170 behavior.
+        return normalizeKnowledgeKind(kind) === "issue";
+      }
+
+      function isKnowledgeSemanticRetryDirective(value) {
+        if (typeof value !== "object" || value === null) {
+          return false;
+        }
+        const fields = Object.keys(value);
         return (
-          !event.request_id ||
-          event.request_id === state.loadRequestId ||
-          event.request_id === state.detailRequestId
+          fields.length === 3 &&
+          Object.prototype.hasOwnProperty.call(value, "error_code") &&
+          Object.prototype.hasOwnProperty.call(value, "retryable") &&
+          Object.prototype.hasOwnProperty.call(value, "retry_after_ms") &&
+          value.retryable === true &&
+          value.retry_after_ms === 5000 &&
+          (value.error_code === "INDEX_NOT_READY" ||
+            value.error_code === "SEARCH_UNAVAILABLE")
         );
       }
 
-      function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
-        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        const effectiveKind = knowledgeKind || state.kind;
+      // SPEC #3170 FR-099: fixed silent retry ladder for typed transient
+      // semantic failures — 5s, 10s, 20s, 30s, then 30s indefinitely.
+      const KNOWLEDGE_SEMANTIC_RETRY_DELAYS = [5000, 10000, 20000, 30000];
+
+      function invalidateKnowledgeSemanticRetry(state) {
+        if (!state) {
+          return;
+        }
+        if (state.semanticRetryTimer !== null) {
+          clearTimeout(state.semanticRetryTimer);
+          state.semanticRetryTimer = null;
+        }
+        state.semanticRetryIndex = 0;
+        state.semanticRetryActive = false;
+        state.semanticRetryTyped = false;
+        state.semanticRetryGeneration = (state.semanticRetryGeneration || 0) + 1;
+      }
+
+      function invalidateKnowledgeSearchOwner(state, nextKind, nextQuery) {
+        if (state.pendingSearchTimer !== null) {
+          clearTimeout(state.pendingSearchTimer);
+          state.pendingSearchTimer = null;
+        }
+        invalidateKnowledgeSemanticRetry(state);
+        state.searchGeneration = (state.searchGeneration || 0) + 1;
+        state.searchIntentKind = normalizeKnowledgeKind(nextKind);
+        state.searchIntentQuery = String(nextQuery || "").trim();
+        state.queuedSearchIntent = state.inFlightSearchIntent && state.searchIntentQuery
+          ? {
+              generation: state.searchGeneration,
+              kind: state.searchIntentKind,
+              query: state.searchIntentQuery,
+              selectionGeneration: state.selectionGeneration,
+            }
+          : null;
+      }
+
+      function updateKnowledgeSearchIntent(state, knowledgeKind, query) {
+        const kind = normalizeKnowledgeKind(knowledgeKind || state.kind);
+        const normalizedQuery = String(query || "").trim();
+        if (
+          state.searchIntentKind !== kind ||
+          state.searchIntentQuery !== normalizedQuery
+        ) {
+          invalidateKnowledgeSearchOwner(state, kind, normalizedQuery);
+        }
+        return {
+          generation: state.searchGeneration,
+          kind,
+          query: normalizedQuery,
+          selectionGeneration: state.selectionGeneration,
+        };
+      }
+
+      function knowledgeSearchIntentIsCurrent(state, intent) {
+        return Boolean(
+          intent &&
+          intent.generation === state.searchGeneration &&
+          intent.kind === normalizeKnowledgeKind(state.kind) &&
+          intent.kind === state.searchIntentKind &&
+          intent.query === state.query.trim() &&
+          intent.query === state.searchIntentQuery,
+        );
+      }
+
+      function scheduleKnowledgeSemanticRetry(windowId, knowledgeKind, state) {
+        if (state.semanticRetryTimer !== null) {
+          clearTimeout(state.semanticRetryTimer);
+          state.semanticRetryTimer = null;
+        }
+        const delay =
+          KNOWLEDGE_SEMANTIC_RETRY_DELAYS[
+            Math.min(
+              state.semanticRetryIndex,
+              KNOWLEDGE_SEMANTIC_RETRY_DELAYS.length - 1,
+            )
+          ];
+        state.semanticRetryIndex += 1;
+        state.semanticRetryActive = true;
+        const retryGeneration = state.semanticRetryGeneration || 0;
+        const intent = updateKnowledgeSearchIntent(
+          state,
+          knowledgeKind || state.kind,
+          state.query,
+        );
+        state.semanticRetryTimer = setTimeout(() => {
+          state.semanticRetryTimer = null;
+          const liveState = knowledgeBridgeStateMap.get(windowId);
+          if (liveState !== state) {
+            return;
+          }
+          if (retryGeneration !== (state.semanticRetryGeneration || 0)) {
+            // Stale timer from an invalidated retry window (AS-17.2).
+            return;
+          }
+          if (!workspaceWindowById(windowId) || !knowledgeSearchIntentIsCurrent(state, intent)) {
+            return;
+          }
+          const latestIntent = {
+            ...intent,
+            selectionGeneration: state.selectionGeneration,
+          };
+          if (state.inFlightSearchIntent) {
+            // One in-flight attempt, one latest queued intent.
+            state.queuedSearchIntent = latestIntent;
+            state.queuedSearchQuery = latestIntent.query;
+            return;
+          }
+          const sentNow = sendKnowledgeSemanticSearch(windowId, latestIntent);
+          if (!sentNow && state.semanticRetryTyped === true) {
+            scheduleKnowledgeSemanticRetry(windowId, latestIntent.kind, state);
+          }
+        }, delay);
+      }
+
+      // SPEC #3170 AS-17.2: disconnect invalidates every retry owner;
+      // reconnect restarts a degraded still-open window/query at 5 seconds.
+      function handleKnowledgeTransportChange(online) {
+        for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (!isSilentSemanticKind(state.kind)) {
+            continue;
+          }
+          if (!online) {
+            const query = state.query.trim();
+            const wasActive = Boolean(query) && Boolean(
+              state.semanticRetryActive ||
+              state.searchInFlight ||
+              state.inFlightSearchIntent ||
+              state.pendingSearchTimer !== null
+            );
+            const wasTyped = state.semanticRetryTyped === true;
+            if (state.pendingSearchTimer !== null) {
+              clearTimeout(state.pendingSearchTimer);
+              state.pendingSearchTimer = null;
+            }
+            invalidateKnowledgeSemanticRetry(state);
+            state.semanticRetryActive = wasActive;
+            state.semanticRetryTyped = wasActive && wasTyped;
+            state.searchGeneration = (state.searchGeneration || 0) + 1;
+            state.searchIntentKind = normalizeKnowledgeKind(state.kind);
+            state.searchIntentQuery = query;
+            state.queuedSearchIntent = query
+              ? {
+                  generation: state.searchGeneration,
+                  kind: state.searchIntentKind,
+                  query,
+                  selectionGeneration: state.selectionGeneration,
+                }
+              : null;
+            state.queuedSearchQuery = query;
+            state.inFlightSearchIntent = null;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            state.searching = false;
+            continue;
+          }
+          if (!state.semanticRetryActive) {
+            continue;
+          }
+          if (!workspaceWindowById(windowId)) {
+            continue;
+          }
+          if (!state.query.trim()) {
+            continue;
+          }
+          state.semanticRetryIndex = 0;
+          scheduleKnowledgeSemanticRetry(windowId, state.kind, state);
+        }
+      }
+
+      function sendKnowledgeSemanticSearch(windowId, intent) {
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (
+          !state ||
+          !workspaceWindowById(windowId) ||
+          state.inFlightSearchIntent ||
+          !knowledgeSearchIntentIsCurrent(state, intent)
+        ) {
+          return false;
+        }
         const requestId = nextKnowledgeSearchRequestId++;
+        const message = {
+          kind: "search_knowledge_bridge",
+          id: windowId,
+          knowledge_kind: intent.kind,
+          query: intent.query,
+          request_id: requestId,
+          selected_number: state.selectedNumber ?? null,
+        };
         state.searchRequestId = requestId;
         state.inFlightSearchRequestId = requestId;
         state.searchInFlight = true;
         state.searching = true;
-        send({
-          kind: "search_knowledge_bridge",
-          id: windowId,
-          knowledge_kind: effectiveKind,
-          query,
-          request_id: requestId,
-          selected_number: state.selectedNumber ?? null,
-        });
+        state.inFlightSearchIntent = { ...intent, requestId };
+        const sentNow = isSilentSemanticKind(intent.kind)
+          ? sendKnowledgeSemanticSearchNow(message)
+          : (send(message), true);
+        if (!sentNow) {
+          if (state.inFlightSearchIntent?.requestId === requestId) {
+            state.searching = false;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            state.inFlightSearchIntent = null;
+          }
+          state.semanticRetryActive = true;
+          return false;
+        }
+        if (
+          state.queuedSearchIntent?.generation === intent.generation &&
+          state.queuedSearchIntent?.kind === intent.kind &&
+          state.queuedSearchIntent?.query === intent.query
+        ) {
+          state.queuedSearchIntent = null;
+          state.queuedSearchQuery = "";
+        }
+        return true;
+      }
+
+      function dispatchLatestKnowledgeSearchIntent(windowId, state) {
+        const nextIntent = state.queuedSearchIntent;
+        state.queuedSearchIntent = null;
+        state.queuedSearchQuery = "";
+        if (knowledgeSearchIntentIsCurrent(state, nextIntent)) {
+          return sendKnowledgeSemanticSearch(windowId, {
+            ...nextIntent,
+            selectionGeneration: state.selectionGeneration,
+          });
+        }
+        state.searching = false;
+        return false;
       }
 
       function scheduleKnowledgeSearch(windowId, knowledgeKind) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        if (state.pendingSearchTimer) {
+        if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
         const query = state.query.trim();
+        const intent = updateKnowledgeSearchIntent(state, knowledgeKind, query);
         state.error = "";
         if (!query) {
           state.searching = false;
-          state.searchInFlight = false;
-          state.inFlightSearchRequestId = 0;
           state.queuedSearchQuery = "";
-          state.searchRequestId += 1;
+          state.queuedSearchIntent = null;
           restoreKnowledgeBaseEntries(state);
           renderKnowledgeBridge(windowId);
           return;
         }
+        // AS-17.7: local number/title/metadata/label filtering from
+        // baseEntries is visible immediately; the semantic completion later
+        // replaces it with authoritative rows.
+        applyLocalKnowledgeFilter(state, query);
         if (state.loading && state.baseEntries.length === 0) {
           state.searching = true;
           renderKnowledgeBridge(windowId);
           return;
         }
-        if (state.searchInFlight) {
+        if (
+          isSilentSemanticKind(intent.kind) &&
+          state.semanticRetryActive &&
+          state.semanticRetryTimer !== null &&
+          !state.inFlightSearchIntent
+        ) {
+          state.searching = false;
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        if (state.inFlightSearchIntent) {
+          state.queuedSearchIntent = intent;
           state.queuedSearchQuery = query;
           state.searching = true;
           renderKnowledgeBridge(windowId);
@@ -508,33 +1465,91 @@ export function createKnowledgeKanbanSurface({
         state.searching = true;
         state.pendingSearchTimer = setTimeout(() => {
           state.pendingSearchTimer = null;
-          if (!workspaceWindowById(windowId)) {
+          const liveState = knowledgeBridgeStateMap.get(windowId);
+          if (liveState !== state || !workspaceWindowById(windowId)) {
             return;
           }
-          const latestQuery = state.query.trim();
-          if (!latestQuery) {
+          if (!knowledgeSearchIntentIsCurrent(state, intent)) {
+            return;
+          }
+          if (!intent.query) {
             state.searching = false;
             restoreKnowledgeBaseEntries(state);
             renderKnowledgeBridge(windowId);
             return;
           }
-          if (state.searchInFlight) {
-            state.queuedSearchQuery = latestQuery;
+          if (state.inFlightSearchIntent) {
+            state.queuedSearchIntent = {
+              ...intent,
+              selectionGeneration: state.selectionGeneration,
+            };
+            state.queuedSearchQuery = intent.query;
             renderKnowledgeBridge(windowId);
             return;
           }
-          sendKnowledgeSemanticSearch(windowId, knowledgeKind, latestQuery);
+          sendKnowledgeSemanticSearch(windowId, {
+            ...intent,
+            selectionGeneration: state.selectionGeneration,
+          });
         }, 250);
         renderKnowledgeBridge(windowId);
       }
 
-      function requestKnowledgeDetail(windowId, knowledgeKind, number) {
+      function dispatchKnowledgeDetailRequest(
+        windowId,
+        knowledgeKind,
+        number,
+        { explicit = false } = {},
+      ) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        state.selectedNumber = number;
+        const previousNumber = state.selectedNumber;
+        const prBaseline = normalizeKnowledgeKind(state.kind) === "pr";
+        if (explicit) {
+          state.selectedNumber = number;
+          if (!prBaseline) {
+            // Issue/SPEC selection is a local transition before any I/O.
+            state.selectionGeneration = (state.selectionGeneration || 0) + 1;
+            state.error = "";
+            const findRow = (rows) =>
+              Array.isArray(rows)
+                ? rows.find((entry) => entry && entry.number === number)
+                : null;
+            const row = findRow(state.entries) || findRow(state.baseEntries) || null;
+            const authoritative = state.detail && state.detail.number === number;
+            if (!authoritative) {
+              state.detail = row
+                ? {
+                    number: row.number,
+                    title: row.title || "",
+                    subtitle: `#${row.number}`,
+                    state: row.state || "",
+                    phase: row.phase ?? null,
+                    labels: Array.isArray(row.labels) ? row.labels.slice() : [],
+                    sections: [],
+                    launch_issue_number: row.number,
+                    related_works: [],
+                  }
+                : null;
+            }
+          }
+        } else if (number !== state.selectedNumber) {
+          return false;
+        }
         state.detailLoading = true;
         const requestId = nextKnowledgeLoadRequestId++;
         state.detailRequestId = requestId;
+        if (!prBaseline) {
+          state.detailRequestSelectionGeneration = state.selectionGeneration;
+          state.detailRequestNumber = number;
+        }
         const effectiveKind = knowledgeKind || state.kind;
+        if (prBaseline) {
+          renderKnowledgeBridge(windowId);
+        } else if (explicit) {
+          renderKnowledgeSelection(windowId, state, previousNumber);
+        } else {
+          renderKnowledgeDetailOnly(windowId, state);
+        }
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
@@ -542,6 +1557,16 @@ export function createKnowledgeKanbanSurface({
           request_id: requestId,
           number,
         });
+        return true;
+      }
+
+      function requestKnowledgeDetail(windowId, knowledgeKind, number) {
+        return dispatchKnowledgeDetailRequest(
+          windowId,
+          knowledgeKind,
+          number,
+          { explicit: true },
+        );
       }
 
       // SPEC-2017 US-8 — push a Kanban phase change to the backend.
@@ -856,14 +1881,20 @@ export function createKnowledgeKanbanSurface({
         if (!bounds) {
           return false;
         }
+        const operationId = createLaunchOperationId("resume");
         if (
           launchPending
-          && !launchPending.begin(knowledgeRelatedWorkPendingKey(sessionId), "Resume")
+          && !launchPending.begin(
+            knowledgeRelatedWorkPendingKey(sessionId),
+            "Resume",
+            operationId,
+          )
         ) {
           return false;
         }
         send({
           kind: "resume_workspace_agent",
+          operation_id: operationId,
           session_id: sessionId,
           agent_session_id: session?.agent_session_id || null,
           bounds,
@@ -1046,7 +2077,11 @@ export function createKnowledgeKanbanSurface({
       }
 
       function filteredIssueEntries(state) {
-        return filteredKnowledgeEntries(state).filter((entry) =>
+        // `state.entries` is already the immediate local filter while a
+        // request is pending and becomes the authoritative semantic result
+        // set on completion. Reapplying substring filtering here would hide
+        // valid semantic matches whose wording differs from the query.
+        return (Array.isArray(state.entries) ? state.entries : []).filter((entry) =>
           issueEntryMatchesStateFilter(entry, state.issueStateFilter || "open"),
         );
       }
@@ -1215,7 +2250,6 @@ export function createKnowledgeKanbanSurface({
           // always request detail (cheap; cache-backed) so selecting the
           // same card still pulls live comment / linked-branch updates.
           requestKnowledgeDetail(windowId, state.kind, entry.number);
-          renderKnowledgeBridge(windowId);
         });
 
         // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) and closed
@@ -1244,8 +2278,154 @@ export function createKnowledgeKanbanSurface({
         return card;
       }
 
+      // SPEC-3671 FR-007 / FR-008 / FR-009 / FR-010 / FR-011: the read-only live
+      // mirror of the agent working on the selected Issue. Exactly one terminal is
+      // mounted, and the only control it offers is Windowize.
+      function renderIssueAgentPreview(windowId, state) {
+        const previews = issuePreviewWindowsForIssue(
+          typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
+          windowId,
+          state.selectedNumber,
+        );
+        if (previews.length === 0) {
+          return null;
+        }
+        const target = previews[0];
+        const section = createNode("section", "issue-preview");
+        section.dataset.windowId = target.id;
+        section.dataset.issueNumber = String(state.selectedNumber);
+
+        const header = createNode("div", "issue-preview-header");
+        const titleWrap = createNode("div", "issue-preview-title-wrap");
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-preview-title",
+            windowDisplayTitle?.(target) || target.title || target.id,
+          ),
+        );
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-preview-meta",
+            windowRoleBadgeLabel?.(target) || target.agent_id || "Agent",
+          ),
+        );
+        header.appendChild(titleWrap);
+
+        const statusView = issuePreviewStatusView(target);
+        const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
+        badge.dataset.tone = statusView.tone;
+        badge.dataset.status = statusView.status;
+        header.appendChild(badge);
+
+        const windowize = createNode("button", "wizard-button", "Windowize");
+        windowize.type = "button";
+        windowize.dataset.action = "windowize-issue-preview";
+        windowize.setAttribute("aria-label", "Windowize agent preview");
+        windowize.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          windowizeIssuePreviewWindow?.(target.id);
+        });
+        header.appendChild(windowize);
+        section.appendChild(header);
+
+        const shell = createNode("div", "issue-preview-terminal");
+        const terminalRoot = createNode("div", "terminal-root");
+        // The mirror is read-only, but a stray mousedown must still not start a
+        // window drag on the host Issue window.
+        terminalRoot.addEventListener("mousedown", (event) => event.stopPropagation());
+        shell.appendChild(terminalRoot);
+        section.appendChild(shell);
+        createTerminalRuntime?.(target.id, terminalRoot, { readOnly: true });
+        return section;
+      }
+
+      // Issue #3884 AC-6 (PM ruling 2026-09-02) / SPEC #3885 T-004: the read-only
+      // status row an Issue row carries for its auto-launched agent — name, last
+      // activity line, elapsed time, Windowize — shown whether or not the row is
+      // selected. The agent state itself is the row's single primary badge
+      // (AC-5), so the status row carries no second badge. It mounts no terminal;
+      // Windowize stays the only hand-off (FR-010). After Windowize the same slot
+      // shows a "Shown on canvas" face (FR-012) that offers focus, never a second
+      // input face for the PTY.
+      function renderIssueAgentStatusRow(windowId, state, entry, faces) {
+        const target = faces.inlineWindow || faces.canvasWindow;
+        if (!target) {
+          return null;
+        }
+        const onCanvas = !faces.inlineWindow;
+        const row = createNode("div", "issue-agent-status");
+        row.dataset.windowId = target.id;
+        // Not `data-issue-number`: that attribute identifies the Issue row / card
+        // itself for selection lookups, and the status row must not alias it.
+        row.dataset.agentIssue = String(entry.number);
+        row.setAttribute("aria-label", `Agent status for Issue #${entry.number}`);
+        const meta = windowRoleBadgeLabel?.(target) || target.agent_id || "Agent";
+
+        const titleWrap = createNode("div", "issue-agent-status-title-wrap");
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-agent-status-title",
+            windowDisplayTitle?.(target) || target.title || target.id,
+          ),
+        );
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-agent-status-meta",
+            onCanvas ? `${meta} · Shown on canvas` : meta,
+          ),
+        );
+        row.appendChild(titleWrap);
+
+        const context = { windowId, state, entry, target };
+        if (onCanvas) {
+          row.classList.add("is-on-canvas");
+          row.appendChild(
+            createNode(
+              "div",
+              "issue-agent-status-placeholder",
+              "Shown on canvas. Input goes to the canvas window.",
+            ),
+          );
+          row.appendChild(issueRowActionButton("focus-canvas-window", context));
+          return row;
+        }
+
+        const statusView = issuePreviewStatusView(target);
+        const since = windowRuntimeStateSince?.(target.id);
+        const elapsed = createNode(
+          "span",
+          "issue-agent-status-elapsed",
+          Number.isFinite(since) ? formatAgentElapsed(Date.now() - since) : "",
+        );
+        elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
+        row.appendChild(elapsed);
+
+        row.appendChild(issueRowActionButton("windowize-issue-preview", context));
+
+        // Last in DOM order: the activity line spans the full width on its own
+        // grid row, so it must follow every first-row cell (title / elapsed /
+        // Windowize) or auto-placement pushes Windowize below it.
+        const output = createNode(
+          "div",
+          "issue-agent-status-output",
+          String(windowActivityDetail?.(target) || "").trim(),
+        );
+        output.title = output.textContent;
+        row.appendChild(output);
+        return row;
+      }
+
       function renderKnowledgeDetailPane(windowId, state, detailPane) {
         detailPane.innerHTML = "";
+        const preview = renderIssueAgentPreview(windowId, state);
+        if (preview) {
+          detailPane.appendChild(preview);
+        }
         const detail = state.detail;
         if (!detail) {
           detailPane.appendChild(
@@ -1332,15 +2512,329 @@ export function createKnowledgeKanbanSurface({
         detailPane.appendChild(scroll);
       }
 
+      function renderKnowledgeDetailOnly(windowId, state) {
+        const element = windowMap.get(windowId);
+        const detailPane = element?.querySelector(".knowledge-detail-pane");
+        if (!detailPane) {
+          return;
+        }
+        renderKnowledgeDetailPane(windowId, state, detailPane);
+      }
+
+      function renderKnowledgeSelection(windowId, state, previousNumber) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const updateNode = (number, selected) => {
+          if (number === null || number === undefined) {
+            return;
+          }
+          for (const node of element.querySelectorAll(
+            `[data-issue-number="${Number(number)}"]`,
+          )) {
+            node.classList.toggle(
+              "selected",
+              selected && node.classList.contains("knowledge-row"),
+            );
+            node.classList.toggle(
+              "is-selected",
+              selected && node.classList.contains("kanban-card"),
+            );
+            const currentTarget = node.classList.contains("knowledge-row")
+              ? node.querySelector(".knowledge-row-select")
+              : node;
+            if (selected) {
+              currentTarget?.setAttribute("aria-current", "true");
+            } else {
+              currentTarget?.removeAttribute("aria-current");
+            }
+          }
+        };
+        updateNode(previousNumber, false);
+        updateNode(state.selectedNumber, true);
+        renderKnowledgeStatusOnly(windowId, state);
+        renderKnowledgeDetailOnly(windowId, state);
+      }
+
+      function renderKnowledgeStatusOnly(windowId, state) {
+        const element = windowMap.get(windowId);
+        const status = element?.querySelector(".knowledge-status");
+        if (!status) {
+          return;
+        }
+        const issueSurface = isSilentSemanticKind(state.kind);
+        status.className = "knowledge-status";
+        status.textContent = "";
+        if (issueSurface) {
+          // FR-017: Issue window errors go to the notification center + the
+          // compact indicator line, never a persistent red band.
+          syncIssueWindowErrorReport(windowId, state);
+        }
+        if (state.error) {
+          // Issue windows keep the status line empty on error (a failed load
+          // is not "no items"); other kinds keep their red band.
+          if (!issueSurface) {
+            status.classList.add("visible", "error");
+            status.textContent = state.error;
+          }
+        } else if (!issueSurface && state.searching) {
+          status.classList.add("visible", "info");
+          status.textContent = "Searching semantic index";
+        } else if (state.loading && state.entries.length > 0) {
+          status.classList.add("visible", "info");
+          status.textContent = state.refreshing
+            ? issueSurface
+              ? "Refreshing cached work items"
+              : "Refreshing cached knowledge"
+            : issueSurface
+              ? "Loading cache-backed work items"
+              : "Loading cache-backed data";
+        } else if (state.loading && state.entries.length === 0) {
+          status.classList.add("visible", "info");
+          status.textContent = issueSurface
+            ? "Loading cache-backed work items"
+            : "Loading cache-backed data";
+        } else if (state.entries.length === 0 && !state.searching) {
+          status.classList.add("visible", "info");
+          status.textContent = state.emptyMessage || (issueSurface
+            ? "No cached work items"
+            : "No cached items");
+        }
+      }
+
+      function canonicalQueuedKnowledgeEntries(state) {
+        const source = Array.isArray(state.baseEntries) && state.baseEntries.length > 0
+          ? state.baseEntries
+          : state.entries;
+        return (Array.isArray(source) ? source : [])
+          .filter(
+            (entry) =>
+              entry?.monitor_state === "queued" &&
+              Number.isFinite(entry.queue_position),
+          )
+          .slice()
+          .sort(
+            (left, right) =>
+              Number(left.queue_position) - Number(right.queue_position) ||
+              Number(left.number) - Number(right.number),
+          );
+      }
+
+      function updateQueuedKnowledgePositions(entries, positions) {
+        if (!Array.isArray(entries)) return;
+        for (let index = 0; index < entries.length; index += 1) {
+          const entry = entries[index];
+          const queuePosition = positions.get(entry?.number);
+          if (queuePosition === undefined || entry.queue_position === queuePosition) {
+            continue;
+          }
+          entries[index] = { ...entry, queue_position: queuePosition };
+        }
+      }
+
+      function moveQueuedKnowledgeEntry(windowId, state, issueNumber, direction) {
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const index = queued.findIndex((entry) => entry.number === issueNumber);
+        const targetIndex = index + direction;
+        if (index < 0 || targetIndex < 0 || targetIndex >= queued.length) return;
+        [queued[index], queued[targetIndex]] = [queued[targetIndex], queued[index]];
+        const positions = new Map(
+          queued.map((entry, queueIndex) => [entry.number, queueIndex + 1]),
+        );
+        updateQueuedKnowledgePositions(state.baseEntries, positions);
+        updateQueuedKnowledgePositions(state.entries, positions);
+        send({
+          kind: "reorder_issue_monitor_issues",
+          issue_numbers: queued.map((entry) => entry.number),
+        });
+        renderKnowledgeBridge(windowId);
+      }
+
+      // SPEC #3885 T-004 (FR-006): every Issue action the row can offer, keyed by
+      // the `data-action` the tests and the Playwright specs address.
+      const ISSUE_ROW_ACTION_VIEWS = Object.freeze({
+        "launch-now": Object.freeze({ label: "Launch now", aria: "Launch now" }),
+        "configure-issue": Object.freeze({
+          label: "Settings",
+          aria: "Project Agent settings for",
+        }),
+        "move-up": Object.freeze({ label: "↑ Move up", aria: "Move up" }),
+        "move-down": Object.freeze({ label: "↓ Move down", aria: "Move down" }),
+        "continue-work": Object.freeze({ label: "Continue work", aria: "Continue work on" }),
+        "resume-work": Object.freeze({ label: "Resume", aria: "Resume work on" }),
+        "cleanup-work": Object.freeze({ label: "Clean Up", aria: "Clean up work for" }),
+        "launch-agent": Object.freeze({ label: "Launch agent", aria: "Launch an agent for" }),
+        "windowize-issue-preview": Object.freeze({
+          label: "Windowize",
+          aria: "Open the agent terminal as a canvas window for",
+        }),
+        "focus-canvas-window": Object.freeze({
+          label: "Focus window",
+          aria: "Focus the agent's canvas window for",
+        }),
+      });
+      // Actions rendered inside the agent status row rather than the row's
+      // action group.
+      const ISSUE_ROW_TERMINAL_ACTIONS = new Set([
+        "windowize-issue-preview",
+        "focus-canvas-window",
+      ]);
+      // Ids this surface Windowized, so the row keeps its "Shown on canvas" face
+      // even before the Work projection reports the agent's window id.
+      const windowizedAgentWindowIds = new Set();
+
+      function runIssueRowAction(action, { windowId, state, entry, work, target }) {
+        switch (action) {
+          case "launch-now":
+            send({
+              kind: "issue_monitor_launch_now",
+              issue_number: entry.number,
+              linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "configure-issue":
+            send({
+              kind: "issue_monitor_configure_issue",
+              issue_number: entry.number,
+              linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "move-up":
+            moveQueuedKnowledgeEntry(windowId, state, entry.number, -1);
+            return;
+          case "move-down":
+            moveQueuedKnowledgeEntry(windowId, state, entry.number, 1);
+            return;
+          case "continue-work":
+            continueWork?.(work.id, getResumeBounds?.());
+            return;
+          case "resume-work":
+            openWorkspaceResumePicker?.(work.id);
+            return;
+          case "cleanup-work":
+            if (work?.cleanup_candidate) {
+              openWorkspaceCleanup?.(work.cleanup_candidate, windowId);
+            }
+            return;
+          case "launch-agent":
+            openIssueLaunchWizard(windowId, entry.number);
+            return;
+          case "windowize-issue-preview":
+            if (target?.id) {
+              windowizedAgentWindowIds.add(target.id);
+              windowizeIssuePreviewWindow?.(target.id);
+            }
+            return;
+          case "focus-canvas-window":
+            if (target?.id) {
+              focusWindowLocally(target.id);
+              sendWindowFocus(target.id);
+            }
+            return;
+          default:
+            return;
+        }
+      }
+
+      function issueRowActionButton(action, context, { menuItem = false } = {}) {
+        const view = ISSUE_ROW_ACTION_VIEWS[action] || { label: action, aria: action };
+        const button = createNode(
+          "button",
+          menuItem ? "knowledge-row-menu-item" : "wizard-button is-compact knowledge-row-action",
+          view.label,
+        );
+        button.type = "button";
+        button.dataset.action = action;
+        button.setAttribute("aria-label", `${view.aria} Issue #${context.entry.number}`);
+        if (menuItem) {
+          button.setAttribute("role", "menuitem");
+        }
+        const { work, queue } = context;
+        if (action === "move-up" && queue) {
+          button.disabled = queue.index <= 0;
+        } else if (action === "move-down" && queue) {
+          button.disabled = queue.index >= queue.length - 1;
+        } else if (action === "cleanup-work" && !work?.cleanup_candidate) {
+          // The backend owns cleanup eligibility (live agent / live process).
+          // The row must never infer it from merged state alone.
+          button.disabled = true;
+          button.dataset.blockedReason = work?.cleanup_blocked_reason || "";
+          button.title = `Cleanup unavailable: ${work?.cleanup_blocked_reason || ""}`;
+        }
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (button.disabled) return;
+          const menu = menuItem ? button.closest(".knowledge-row-menu") : null;
+          if (menu) {
+            menu.open = false;
+            menu.removeAttribute("open");
+          }
+          runIssueRowAction(action, context);
+        });
+        return button;
+      }
+
+      function renderIssueRowMenu(overflow, context) {
+        const menu = createNode("details", "knowledge-row-menu");
+        const trigger = createNode("summary", "icon-button knowledge-row-menu-trigger", "⋯");
+        trigger.setAttribute("aria-label", `More actions for Issue #${context.entry.number}`);
+        trigger.title = `More actions for Issue #${context.entry.number}`;
+        menu.appendChild(trigger);
+        const list = createNode("div", "knowledge-row-menu-list");
+        list.setAttribute("role", "menu");
+        for (const action of overflow) {
+          list.appendChild(issueRowActionButton(action, context, { menuItem: true }));
+        }
+        menu.appendChild(list);
+        return menu;
+      }
+
+      function issueRowFaces(windowId, entry, work) {
+        const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
+        const inlineWindow = issuePreviewWindowsForIssue(windows, windowId, entry.number)[0] || null;
+        const canvasWindow = inlineWindow
+          ? null
+          : issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds)[0] || null;
+        return { inlineWindow, canvasWindow };
+      }
+
       function renderIssueRow(windowId, state, entry) {
-        const row = createNode("button", "knowledge-row");
-        row.type = "button";
+        const row = createNode("div", "knowledge-row");
         row.dataset.issueNumber = String(entry.number);
         row.setAttribute("role", "listitem");
+        const select = createNode("button", "knowledge-row-select");
+        select.type = "button";
         if (state.selectedNumber === entry.number) {
           row.classList.add("selected");
-          row.setAttribute("aria-current", "true");
+          select.setAttribute("aria-current", "true");
         }
+
+        // SPEC-3671 FR-012: the Work row joined from the already-broadcast projection;
+        // SPEC #3885 T-004: everything the row shows derives from one state model.
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        const attention = work ? workAttentionFor?.(work) || null : null;
+        const faces = issueRowFaces(windowId, entry, work);
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const queueIndex = queued.findIndex((queuedEntry) => queuedEntry.number === entry.number);
+        const queue = queueIndex >= 0 ? { index: queueIndex, length: queued.length } : null;
+        const model = issueRowStateModel({
+          entry,
+          work,
+          attention,
+          inlineWindow: faces.inlineWindow,
+          canvasWindow: faces.canvasWindow,
+          queue,
+        });
+        const context = {
+          windowId,
+          state,
+          entry,
+          work,
+          queue,
+          target: faces.inlineWindow || faces.canvasWindow,
+        };
 
         const main = createNode("div", "knowledge-row-main");
         const titleWrap = createNode("div", "");
@@ -1351,46 +2845,54 @@ export function createKnowledgeKanbanSurface({
           createNode("div", "knowledge-row-number", `#${entry.number}`),
         );
         main.appendChild(titleWrap);
-        const rawState = issueEntryState(entry);
-        main.appendChild(
-          createNode(
-            "span",
-            `knowledge-state-chip ${rawState}`,
-            rawState === "closed" ? "Closed" : "Open",
-          ),
-        );
-        row.appendChild(main);
+        const badge = createNode("span", "knowledge-row-badge", model.primary.label);
+        badge.dataset.tone = model.primary.tone;
+        badge.dataset.stateKey = model.primary.key;
+        main.appendChild(badge);
+        select.appendChild(main);
 
-        const meta = createNode("div", "knowledge-row-meta");
-        for (const label of visibleKnowledgeLabels(entry.labels || [])) {
-          meta.appendChild(createNode("span", "knowledge-chip", label));
-        }
-        if ((entry.linked_branch_count || 0) > 0) {
-          meta.appendChild(
-            createNode(
-              "span",
-              "knowledge-meta-copy",
-              `${entry.linked_branch_count} branch${entry.linked_branch_count === 1 ? "" : "es"}`,
-            ),
-          );
-        }
-        if (Number.isFinite(entry.match_score)) {
-          meta.appendChild(
-            createNode("span", "knowledge-meta-copy", `${entry.match_score}% match`),
-          );
-        }
-        appendKnowledgeRelatedCountChips(meta, entry, "knowledge-meta-copy");
-        if (entry.meta) {
-          meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
-        }
-        if (meta.childElementCount > 0) {
-          row.appendChild(meta);
+        if (model.secondary.length > 0) {
+          const secondary = createNode("div", "knowledge-row-secondary");
+          for (const item of model.secondary) {
+            const node = createNode("span", "knowledge-row-secondary-item", item.label);
+            node.dataset.kind = item.kind;
+            node.dataset.key = item.key;
+            if (item.title) {
+              node.title = item.title;
+            }
+            secondary.appendChild(node);
+          }
+          select.appendChild(secondary);
         }
 
-        row.addEventListener("click", () => {
+        row.addEventListener("click", (event) => {
+          if (event.target?.closest?.(".knowledge-row-actions")) return;
+          // Issue #3884: neither is the agent status row (its Windowize button).
+          if (event.target?.closest?.(".issue-agent-status")) return;
           requestKnowledgeDetail(windowId, state.kind, entry.number);
-          renderKnowledgeBridge(windowId);
         });
+        row.appendChild(select);
+
+        const actions = createNode("div", "knowledge-row-actions");
+        actions.setAttribute("role", "group");
+        actions.setAttribute("aria-label", `Issue #${entry.number} actions`);
+        for (const action of model.actions) {
+          if (ISSUE_ROW_TERMINAL_ACTIONS.has(action)) continue;
+          actions.appendChild(issueRowActionButton(action, context));
+        }
+        if (model.overflow.length > 0) {
+          actions.appendChild(renderIssueRowMenu(model.overflow, context));
+        }
+        if (actions.childElementCount > 0) {
+          row.appendChild(actions);
+        }
+        // Issue #3884 AC-6: the agent's read-only status row (or its "Shown on
+        // canvas" face), shown whether or not the row is selected, outside the
+        // select button.
+        const agentStatus = renderIssueAgentStatusRow(windowId, state, entry, faces);
+        if (agentStatus) {
+          row.appendChild(agentStatus);
+        }
         return row;
       }
 
@@ -1413,26 +2915,7 @@ export function createKnowledgeKanbanSurface({
           button.setAttribute("aria-pressed", selected ? "true" : "false");
         }
 
-        status.className = "knowledge-status";
-        status.textContent = "";
-        if (state.error) {
-          status.classList.add("visible", "error");
-          status.textContent = state.error;
-        } else if (state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = "Searching semantic index";
-        } else if (state.loading && state.entries.length > 0) {
-          status.classList.add("visible", "info");
-          status.textContent = state.refreshing
-            ? "Refreshing cached work items"
-            : "Loading cache-backed work items";
-        } else if (state.loading && state.entries.length === 0) {
-          status.classList.add("visible", "info");
-          status.textContent = "Loading cache-backed work items";
-        } else if (state.entries.length === 0 && !state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = state.emptyMessage || "No cached work items";
-        }
+        renderKnowledgeStatusOnly(windowId, state);
 
         list.innerHTML = "";
         const visibleEntries = filteredIssueEntries(state);
@@ -1482,26 +2965,7 @@ export function createKnowledgeKanbanSurface({
         }
         board.dataset.hideDone = state.hideDone === true ? "true" : "false";
 
-        status.className = "knowledge-status";
-        status.textContent = "";
-        if (state.error) {
-          status.classList.add("visible", "error");
-          status.textContent = state.error;
-        } else if (state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = "Searching semantic index";
-        } else if (state.loading && state.entries.length > 0) {
-          status.classList.add("visible", "info");
-          status.textContent = state.refreshing
-            ? "Refreshing cached knowledge"
-            : "Loading cache-backed data";
-        } else if (state.loading && state.entries.length === 0) {
-          status.classList.add("visible", "info");
-          status.textContent = "Loading cache-backed data";
-        } else if (state.entries.length === 0 && !state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = state.emptyMessage || "No cached items";
-        }
+        renderKnowledgeStatusOnly(windowId, state);
 
         // SPEC-2017 — Kanban grouping. Each entry routes to a single
         // column: closed Issues land in "done" regardless of phase
@@ -1554,6 +3018,12 @@ export function createKnowledgeKanbanSurface({
         }
 
         renderKnowledgeDetailPane(windowId, state, detailPane);
+      }
+
+      function renderAllKnowledgeBridgeWindows() {
+        for (const windowId of knowledgeBridgeStateMap.keys()) {
+          renderKnowledgeBridge(windowId);
+        }
       }
       // SPEC-3064 Phase 3 (E6d): Knowledge window mount moved verbatim from
       // app.js mountWindowBody (surface === "knowledge" branch).
@@ -1656,6 +3126,25 @@ export function createKnowledgeKanbanSurface({
                     <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached work items">↻</button>
                   </div>
                 </div>
+                <section class="knowledge-monitor-panel" aria-label="Issue execution monitor">
+                  <div class="knowledge-monitor-overview">
+                    <div class="knowledge-monitor-summary" aria-live="polite">Stopped | Queue 0 | Active 0/1</div>
+                    <div class="knowledge-monitor-settings-copy">Agent settings Missing saved profile: configure before auto start</div>
+                  </div>
+                  <div class="knowledge-monitor-controls">
+                    <button type="button" class="wizard-button" data-action="monitor-settings">Agent settings</button>
+                    <label class="knowledge-monitor-max-active">
+                      <span>Max active</span>
+                      <input type="number" min="1" step="1" value="1" />
+                    </label>
+                    <button type="button" class="wizard-button primary" data-action="monitor-toggle">Start</button>
+                    <button type="button" class="wizard-button" data-action="monitor-autonomous">Autonomous: OFF</button>
+                  </div>
+                  <div class="knowledge-monitor-quick">
+                    <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />
+                    <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
+                  </div>
+                </section>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">
@@ -1713,6 +3202,9 @@ export function createKnowledgeKanbanSurface({
               );
             });
           }
+          if (knowledgeKind === "issue") {
+            wireIssueMonitorControls(body);
+          }
           // SPEC-2017 — Hide done toggle persists via localStorage so
           // reloads honour the user preference. The hidden state hides
           // the Done column entirely (CSS-driven via data-hide-done on
@@ -1750,10 +3242,26 @@ export function createKnowledgeKanbanSurface({
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
           case "knowledge_entries": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (
+              !state ||
+              normalizeKnowledgeKind(event.knowledge_kind) !==
+                normalizeKnowledgeKind(state.kind)
+            ) {
+              break;
+            }
+            const prSelectionCompletion = Boolean(
+              normalizeKnowledgeKind(state.kind) === "pr" &&
+              event.request_id &&
+              event.request_id === state.detailRequestId,
             );
+            if (
+              event.request_id &&
+              !state.ownedLoadRequestIds.has(event.request_id) &&
+              !prSelectionCompletion
+            ) {
+              break;
+            }
             // Issue #3297: a response that lost the race against the 5s
             // recovery timer carries a superseded request_id, but while the
             // window still has no data it is strictly better than the empty
@@ -1761,7 +3269,8 @@ export function createKnowledgeKanbanSurface({
             if (
               event.request_id &&
               event.request_id !== state.loadRequestId &&
-              !knowledgeEntriesAreEmpty(state)
+              !knowledgeEntriesAreEmpty(state) &&
+              !prSelectionCompletion
             ) {
               break;
             }
@@ -1777,9 +3286,19 @@ export function createKnowledgeKanbanSurface({
               state.emptyMessage = state.baseEmptyMessage;
               state.searching = false;
             }
-            state.selectedNumber = keepSelectedNumber
-              ? state.selectedNumber
-              : event.selected_number ?? null;
+            // FR-101: an initial-load / list completion may refresh rows
+            // but must never move an explicit selection.
+            if (
+              state.selectionGeneration > 0 ||
+              (event.request_id === state.loadRequestId &&
+                state.loadSelectionGeneration !== state.selectionGeneration)
+            ) {
+              // keep state.selectedNumber untouched
+            } else {
+              state.selectedNumber = keepSelectedNumber
+                ? state.selectedNumber
+                : event.selected_number ?? null;
+            }
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.error = "";
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
@@ -1797,66 +3316,78 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_search_results": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
-            );
-            const isInFlightResponse =
-              event.request_id === state.inFlightSearchRequestId;
-            if (isInFlightResponse) {
-              state.searchInFlight = false;
-              state.inFlightSearchRequestId = 0;
-            }
-            if (
-              event.request_id !== state.searchRequestId ||
-              event.query !== state.query.trim()
-            ) {
-              const nextQuery = state.queuedSearchQuery || state.query.trim();
-              state.queuedSearchQuery = "";
-              if (isInFlightResponse && nextQuery) {
-                scheduleKnowledgeSearch(
-                  event.id,
-                  event.knowledge_kind,
-                );
-              }
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state) {
               break;
             }
+            const activeIntent = state.inFlightSearchIntent;
+            if (!activeIntent || event.request_id !== activeIntent.requestId) {
+              break;
+            }
+            state.inFlightSearchIntent = null;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            const responseMatchesIntent =
+              normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+              String(event.query || "").trim() === activeIntent.query &&
+              knowledgeSearchIntentIsCurrent(state, activeIntent);
+            if (!responseMatchesIntent) {
+              dispatchLatestKnowledgeSearchIntent(event.id, state);
+              break;
+            }
+            state.queuedSearchIntent = null;
+            state.queuedSearchQuery = "";
+
             state.entries = event.entries || [];
-            state.selectedNumber = event.selected_number ?? null;
+            const selectionIsCurrent =
+              activeIntent.selectionGeneration === state.selectionGeneration;
+            if (selectionIsCurrent && state.selectionGeneration === 0) {
+              state.selectedNumber = event.selected_number ?? null;
+            }
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.error = "";
-            const nextQuery = state.queuedSearchQuery;
-            state.queuedSearchQuery = "";
-            if (nextQuery && nextQuery !== event.query) {
-              scheduleKnowledgeSearch(
-                event.id,
-                event.knowledge_kind,
-              );
-              break;
-            }
             state.searching = false;
-            if (state.selectedNumber) {
-              state.detailLoading = true;
-              requestKnowledgeDetail(
+            const directive = event.semantic_retry;
+            const transientDirective =
+              isSilentSemanticKind(activeIntent.kind) &&
+              isKnowledgeSemanticRetryDirective(directive);
+            if (transientDirective) {
+              state.semanticRetryTyped = true;
+              scheduleKnowledgeSemanticRetry(
                 event.id,
-                event.knowledge_kind,
-                state.selectedNumber,
+                activeIntent.kind,
+                state,
               );
-            } else {
+            } else if (isSilentSemanticKind(activeIntent.kind)) {
+              invalidateKnowledgeSemanticRetry(state);
+            }
+            if (selectionIsCurrent && state.selectedNumber) {
+              dispatchKnowledgeDetailRequest(
+                event.id,
+                activeIntent.kind,
+                state.selectedNumber,
+                { explicit: false },
+              );
+            } else if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.detail = null;
             }
             renderKnowledgeBridge(event.id);
             break;
           }
           case "knowledge_detail": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
-            );
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (
+              !state ||
+              normalizeKnowledgeKind(event.knowledge_kind) !==
+                normalizeKnowledgeKind(state.kind)
+            ) {
+              break;
+            }
             if (!knowledgeDetailRequestMatches(state, event)) {
               break;
             }
+            const previousNumber = state.selectedNumber;
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
             state.detail = event.detail;
@@ -1865,7 +3396,11 @@ export function createKnowledgeKanbanSurface({
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
-            renderKnowledgeBridge(event.id);
+            if (normalizeKnowledgeKind(state.kind) === "pr") {
+              renderKnowledgeBridge(event.id);
+            } else {
+              renderKnowledgeSelection(event.id, state, previousNumber);
+            }
             // SPEC-2017 US-9 — refresh the Drawer body when the detail
             // is for the entry the Drawer is currently showing. This
             // also handles the swap-on-different-card case (T-034):
@@ -1899,10 +3434,10 @@ export function createKnowledgeKanbanSurface({
             // overwrite the optimistic card with fresh_entry and clear
             // the pending marker so the spinner stops; on Error we
             // rollback from dndSnapshot and surface a toast.
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              knowledgeKindForPreset(workspaceWindowById(event.id)?.preset),
-            );
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state) {
+              break;
+            }
             if (state.pendingPhaseUpdates) {
               state.pendingPhaseUpdates.delete(event.issue_number);
             }
@@ -1937,39 +3472,73 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_error": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
-            );
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state) {
+              break;
+            }
             const isSearchError =
               typeof event.request_id === "number" && typeof event.query === "string";
-            if (
-              isSearchError &&
-              (event.request_id !== state.inFlightSearchRequestId ||
-                event.query !== state.query.trim())
-            ) {
-              if (event.request_id === state.inFlightSearchRequestId) {
-                state.searchInFlight = false;
-                state.inFlightSearchRequestId = 0;
-                const nextQuery = state.queuedSearchQuery || state.query.trim();
-                state.queuedSearchQuery = "";
-                if (nextQuery) {
-                  scheduleKnowledgeSearch(
-                    event.id,
-                    event.knowledge_kind,
-                  );
-                }
+            if (isSearchError) {
+              const activeIntent = state.inFlightSearchIntent;
+              if (!activeIntent || event.request_id !== activeIntent.requestId) {
+                break;
+              }
+              state.inFlightSearchIntent = null;
+              state.searchInFlight = false;
+              state.inFlightSearchRequestId = 0;
+              const responseMatchesIntent =
+                normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+                event.query.trim() === activeIntent.query &&
+                knowledgeSearchIntentIsCurrent(state, activeIntent);
+              if (!responseMatchesIntent) {
+                dispatchLatestKnowledgeSearchIntent(event.id, state);
+                break;
+              }
+              state.queuedSearchIntent = null;
+              state.queuedSearchQuery = "";
+              state.searching = false;
+              invalidateKnowledgeSemanticRetry(state);
+              if (
+                isSilentSemanticKind(activeIntent.kind) &&
+                event.error_domain !== "non_semantic"
+              ) {
+                // Legacy/untyped semantic failures are deliberately silent
+                // and never start the typed indefinite retry ladder.
+                renderKnowledgeStatusOnly(event.id, state);
+              } else {
+                state.error = event.message;
+                renderKnowledgeBridge(event.id);
               }
               break;
             }
+
             if (
-              !isSearchError &&
-              !knowledgeDetailRequestMatches(state, event)
+              normalizeKnowledgeKind(event.knowledge_kind) !==
+                normalizeKnowledgeKind(state.kind)
             ) {
               break;
             }
-            const matchesLoadRequest =
-              !event.request_id || event.request_id === state.loadRequestId;
+            const matchesLoadRequest = event.request_id === state.loadRequestId;
+            const prSelectionError =
+              normalizeKnowledgeKind(state.kind) === "pr" &&
+              event.request_id === state.detailRequestId;
+            const matchesDetailRequest =
+              event.request_id === state.detailRequestId &&
+              (prSelectionError ||
+                (state.detailRequestSelectionGeneration === state.selectionGeneration &&
+                  state.detailRequestNumber === state.selectedNumber));
+            const matchesInitialIdless =
+              !event.request_id && state.selectionGeneration === 0;
+            if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
+              break;
+            }
+            if (
+              matchesLoadRequest &&
+              state.loadSelectionGeneration !== state.selectionGeneration
+            ) {
+              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
+              break;
+            }
             const startedQueuedRefresh = matchesLoadRequest
               ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
               : false;
@@ -1979,11 +3548,13 @@ export function createKnowledgeKanbanSurface({
               state.error = event.message;
             }
             state.searching = false;
-            state.searchInFlight = false;
-            state.inFlightSearchRequestId = 0;
-            state.queuedSearchQuery = "";
             state.detailLoading = false;
-            renderKnowledgeBridge(event.id);
+            if (matchesLoadRequest || prSelectionError) {
+              renderKnowledgeBridge(event.id);
+            } else {
+              renderKnowledgeStatusOnly(event.id, state);
+              renderKnowledgeDetailOnly(event.id, state);
+            }
             break;
           }
           default:
@@ -2001,11 +3572,15 @@ export function createKnowledgeKanbanSurface({
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         openKanbanDrawer,
         closeKanbanDrawer,
         renderKanbanDrawerBody,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyIssueMonitorStatus,
+        scheduleIssueMonitorProjectionRefresh,
+        handleKnowledgeTransportChange,
       };
 }

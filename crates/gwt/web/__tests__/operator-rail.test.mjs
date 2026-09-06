@@ -102,7 +102,7 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
   );
 });
 
-test("Issue Monitor status strip cell stays visible and opens the monitor surface", async () => {
+test("Issue Monitor status strip cell stays visible and requests the canonical Issue entry", async () => {
   const { applyIssueMonitorStatus } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const originalCustomEvent = globalThis.CustomEvent;
@@ -150,6 +150,116 @@ test("Issue Monitor status strip cell stays visible and opens the monitor surfac
   } finally {
     globalThis.CustomEvent = originalCustomEvent;
   }
+});
+
+test("Issue Monitor status strip distinguishes and clears a quota hold", async () => {
+  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const cell = document.getElementById("op-strip-issue-monitor");
+  const value = document.getElementById("op-strip-issue-monitor-value");
+
+  applyIssueMonitorStatus(document, {
+    enabled: true,
+    state: "idle",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    quota_hold: {
+      provider: "codex",
+      reset_at: "2026-09-04T09:30:00Z",
+    },
+  });
+
+  const quotaHoldValue = value.textContent;
+  const quotaHoldState = cell.dataset.state;
+  const quotaHoldTitle = cell.getAttribute("title") ?? "";
+
+  applyIssueMonitorStatus(document, {
+    enabled: true,
+    state: "idle",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+  });
+
+  assert.equal(value.textContent, "Idle Q3 A0/2");
+  assert.equal(cell.dataset.state, "idle");
+  assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
+  assert.equal(quotaHoldValue, "Hold Q3 A0/2");
+  assert.doesNotMatch(quotaHoldValue, /Idle/i);
+  assert.equal(quotaHoldState, "quota_hold");
+  assert.match(quotaHoldTitle, /Provider codex/);
+  assert.match(quotaHoldTitle, /Reset 2026-09-04T09:30:00Z/);
+});
+
+test("Issue Monitor status strip preserves higher-priority states around quota-hold metadata", async () => {
+  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const cell = document.getElementById("op-strip-issue-monitor");
+  const value = document.getElementById("op-strip-issue-monitor-value");
+  const quotaHold = {
+    provider: "codex",
+    reset_at: "2026-09-04T09:30:00Z",
+  };
+
+  applyIssueMonitorStatus(document, {
+    enabled: true,
+    state: "error",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    last_error: "issue #3785: failed",
+    quota_hold: quotaHold,
+  });
+
+  assert.equal(value.textContent, "Error Q3 A0/2");
+  assert.equal(cell.dataset.state, "error");
+  assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
+  assert.match(cell.getAttribute("title") ?? "", /issue #3785: failed/);
+  assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
+
+  applyIssueMonitorStatus(document, {
+    enabled: false,
+    state: "disabled",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    quota_hold: quotaHold,
+  });
+
+  assert.equal(value.textContent, "Off");
+  assert.equal(cell.dataset.state, "disabled");
+  assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+  assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
+
+  for (const state of ["active", "launching"]) {
+    applyIssueMonitorStatus(document, {
+      enabled: true,
+      state,
+      queue_len: 3,
+      active_count: 1,
+      max_active_agents: 2,
+      quota_hold: quotaHold,
+    });
+
+    assert.equal(value.textContent, "Hold Q3 A1/2");
+    assert.equal(cell.dataset.state, "quota_hold");
+    assert.match(cell.getAttribute("title") ?? "", /Provider codex/);
+    assert.match(cell.getAttribute("title") ?? "", /Reset 2026-09-04T09:30:00Z/);
+  }
+
+  applyIssueMonitorStatus(document, {
+    enabled: true,
+    state: "active",
+    queue_len: 3,
+    active_count: 1,
+    max_active_agents: 2,
+    quota_hold: {},
+  });
+
+  assert.equal(value.textContent, "Run Q3 A1/2");
+  assert.equal(cell.dataset.state, "active");
+  assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset|undefined/);
 });
 
 test("migration: 起動時に旧 localStorage キーが removeItem される", async () => {

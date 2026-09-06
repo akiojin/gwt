@@ -1,11 +1,11 @@
 //! Worktree-local hook bridge assets for providers without Claude/Codex-style hooks.
 
 use std::{
+    collections::BTreeMap,
     env, fs, io,
     path::{Path, PathBuf},
 };
 
-use gwt_core::process::hidden_command;
 use serde_json::{json, Value};
 
 use crate::settings_local::{
@@ -29,7 +29,7 @@ pub fn generate_opencode_hooks(worktree: &Path) -> io::Result<()> {
     let plugin_path = config_dir.join("plugins/gwt-hooks.js");
     let config_path = config_dir.join("opencode.json");
     let skip_permissions_path = config_dir.join("skip-permissions.json");
-    let plugin_content = opencode_plugin_content(&gwt_hook_bin_path(), is_gwt_repository(worktree));
+    let plugin_content = opencode_plugin_content(&gwt_hook_bin_path());
     let config = json!({
         "plugin": ["./plugins/gwt-hooks.js"],
     });
@@ -101,7 +101,7 @@ pub(crate) fn generate_hermes_hooks_with_source(
 
     write_text_atomically(
         &script_path,
-        &hermes_hook_script_content(&gwt_hook_bin_path(), is_gwt_repository(worktree)),
+        &hermes_hook_script_content(&gwt_hook_bin_path()),
     )?;
     set_executable(&script_path)?;
 
@@ -161,15 +161,197 @@ pub fn hermes_provider_choices(source_home: &Path) -> Vec<String> {
     choices
 }
 
-/// Enumerate Hermes providers from the user's global HERMES_HOME
-/// (`$HERMES_HOME` or `~/.hermes`). Convenience wrapper over
-/// [`hermes_provider_choices`] for callers (e.g. the launch wizard) that only
-/// have the global home, not a worktree.
-pub fn hermes_provider_choices_global() -> Vec<String> {
-    match hermes_global_home() {
-        Some(home) => hermes_provider_choices(&home),
-        None => Vec::new(),
+/// Issue #3863: launch-option candidates enumerated from the user's real
+/// Hermes home, extending the provider picker pattern to every field with a
+/// finite candidate set. Every list is empty when the config is absent or
+/// unparseable; the wizard then degrades to "config default + Other".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HermesLaunchChoices {
+    /// `model.provider` first, then `providers:` keys (see
+    /// [`hermes_provider_choices`]).
+    pub providers: Vec<String>,
+    /// `model.provider`, when set. A blank provider selection in the wizard
+    /// resolves to this provider's models.
+    pub default_provider: Option<String>,
+    /// `providers.<id>.models` per provider, with `model.default` prepended
+    /// for the default provider (built-in providers have no `providers:`
+    /// entry, so the configured default is their only known model).
+    pub models_by_provider: BTreeMap<String, Vec<String>>,
+    /// `agent.personalities` keys.
+    pub profiles: Vec<String>,
+    /// Sorted union of `platform_toolsets.cli`, `known_plugin_toolsets.cli`,
+    /// top-level `toolsets` and `agent.disabled_toolsets`.
+    pub toolsets: Vec<String>,
+    /// Directory names under `<home>/skills/**` that contain a `SKILL.md`
+    /// (the names `hermes --skills` accepts), sorted.
+    pub skills: Vec<String>,
+}
+
+impl HermesLaunchChoices {
+    /// Model candidates for `provider`; a blank provider means the config
+    /// default provider. Unknown providers have no candidates.
+    pub fn models_for(&self, provider: &str) -> Vec<String> {
+        let provider = provider.trim();
+        let key = if provider.is_empty() {
+            self.default_provider.as_deref()
+        } else {
+            Some(provider)
+        };
+        key.and_then(|key| self.models_by_provider.get(key))
+            .cloned()
+            .unwrap_or_default()
     }
+}
+
+/// Enumerate every Hermes launch-option candidate set from `source_home`.
+/// See [`HermesLaunchChoices`] for the per-field sources.
+pub fn hermes_launch_choices(source_home: &Path) -> HermesLaunchChoices {
+    let mut choices = HermesLaunchChoices {
+        providers: hermes_provider_choices(source_home),
+        skills: hermes_skill_choices(&source_home.join("skills")),
+        ..HermesLaunchChoices::default()
+    };
+    let Ok(text) = fs::read_to_string(source_home.join("config.yaml")) else {
+        return choices;
+    };
+    let Ok(serde_yaml::Value::Mapping(root)) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+    else {
+        return choices;
+    };
+
+    let model = root.get("model").and_then(serde_yaml::Value::as_mapping);
+    choices.default_provider = model
+        .and_then(|model| model.get("provider"))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_string);
+    if let Some(default_provider) = choices.default_provider.clone() {
+        if let Some(default_model) = model
+            .and_then(|model| model.get("default"))
+            .and_then(serde_yaml::Value::as_str)
+        {
+            push_unique(
+                choices
+                    .models_by_provider
+                    .entry(default_provider)
+                    .or_default(),
+                default_model,
+            );
+        }
+    }
+    if let Some(providers) = root
+        .get("providers")
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        for (key, entry) in providers {
+            let Some(name) = key.as_str().map(str::trim).filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            let models = choices
+                .models_by_provider
+                .entry(name.to_string())
+                .or_default();
+            for model in yaml_string_list(entry.get("models")) {
+                push_unique(models, &model);
+            }
+        }
+    }
+
+    let agent = root.get("agent").and_then(serde_yaml::Value::as_mapping);
+    choices.profiles = agent
+        .and_then(|agent| agent.get("personalities"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .map(|personalities| {
+            personalities
+                .keys()
+                .filter_map(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let cli_toolsets = |section: &str| {
+        yaml_string_list(
+            root.get(section)
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(|platforms| platforms.get("cli")),
+        )
+    };
+    let mut toolsets: Vec<String> = cli_toolsets("platform_toolsets");
+    toolsets.extend(cli_toolsets("known_plugin_toolsets"));
+    toolsets.extend(yaml_string_list(root.get("toolsets")));
+    toolsets.extend(yaml_string_list(
+        agent.and_then(|agent| agent.get("disabled_toolsets")),
+    ));
+    toolsets.sort();
+    toolsets.dedup();
+    choices.toolsets = toolsets;
+    choices
+}
+
+/// Enumerate every Hermes launch-option candidate set from the user's global
+/// HERMES_HOME (`$HERMES_HOME` or `~/.hermes`). Convenience wrapper over
+/// [`hermes_launch_choices`] for the launch wizard, which only has the
+/// global home, not a worktree.
+pub fn hermes_launch_choices_global() -> HermesLaunchChoices {
+    match hermes_global_home() {
+        Some(home) => hermes_launch_choices(&home),
+        None => HermesLaunchChoices::default(),
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !list.iter().any(|existing| existing == value) {
+        list.push(value.to_string());
+    }
+}
+
+fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    value
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Skill names: directories holding a `SKILL.md`, at most two levels deep
+/// (`skills/<name>` or `skills/<category>/<name>`), mirroring
+/// `hermes skills list`.
+fn hermes_skill_choices(skills_root: &Path) -> Vec<String> {
+    fn collect(dir: &Path, depth: u8, out: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.join("SKILL.md").is_file() {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    out.push(name.to_string());
+                }
+            } else if depth > 0 {
+                collect(&path, depth - 1, out);
+            }
+        }
+    }
+    let mut skills = Vec::new();
+    collect(skills_root, 1, &mut skills);
+    skills.sort();
+    skills.dedup();
+    skills
 }
 
 /// `true` when the user's global Hermes home has resolvable credentials.
@@ -220,12 +402,15 @@ fn bridge_hermes_credentials(source_home: &Path, dest_home: &Path) -> io::Result
     fs::create_dir_all(dest_home)?;
     for name in [".env", "auth.json"] {
         let src = source_home.join(name);
+        let dst = dest_home.join(name);
         if !src.exists() {
+            if fs::symlink_metadata(&dst).is_ok() {
+                fs::remove_file(&dst)?;
+            }
             continue;
         }
-        let dst = dest_home.join(name);
         if fs::symlink_metadata(&dst).is_ok() {
-            let _ = fs::remove_file(&dst);
+            fs::remove_file(&dst)?;
         }
         if symlink_file(&src, &dst).is_err() {
             fs::copy(&src, &dst)?;
@@ -292,7 +477,7 @@ pub fn generate_openclaw_hooks(worktree: &Path) -> io::Result<()> {
     )?;
     write_text_atomically(
         &plugin_dir.join("plugin.ts"),
-        &openclaw_plugin_content(&gwt_hook_bin_path(), is_gwt_repository(worktree)),
+        &openclaw_plugin_content(&gwt_hook_bin_path()),
     )
 }
 
@@ -300,33 +485,12 @@ fn js_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"gwtd\"".to_string())
 }
 
-fn opencode_plugin_content(bin: &str, self_improvement_stop: bool) -> String {
+fn opencode_plugin_content(bin: &str) -> String {
     let bin = js_string_literal(bin);
-    let self_improvement_dispatch = if self_improvement_stop {
-        r#"function dispatchSelfImprovementStop() {
-  const result = spawnSync(
-    GWT_HOOK_BIN,
-    ["hook", "gwt-self-improvement-stop"],
-    {
-      input: "",
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "ignore"],
-    },
-  );
-  try {
-    return result.stdout ? JSON.parse(result.stdout) : {};
-  } catch {
-    return {};
-  }
-}
-"#
-    } else {
-        "function dispatchSelfImprovementStop() { return {}; }\n"
-    };
     format!(
         r#"import {{ spawnSync }} from "node:child_process";
 
-const GWT_HOOK_BIN = {bin};
+const GWT_HOOK_BIN = process.env.GWT_BIN_PATH || {bin};
 
 function canonicalPayload(nativeEvent, input = {{}}, output = {{}}, context = {{}}) {{
   const toolName = input.tool ?? input.toolName ?? output.tool ?? output.toolName ?? input.name;
@@ -364,8 +528,6 @@ function blockReason(result) {{
   return result.hookSpecificOutput?.permissionDecisionReason ?? result.reason;
 }}
 
-{self_improvement_dispatch}
-
 export const GwtHooks = async (context) => ({{
   "session.created": async (input, output) => dispatch("session.created", input, output, context),
   "message.updated": async (input, output) => dispatch("message.updated", input, output, context),
@@ -374,12 +536,7 @@ export const GwtHooks = async (context) => ({{
     if (reason) throw new Error(reason);
   }},
   "tool.execute.after": async (input, output) => dispatch("tool.execute.after", input, output, context),
-  "session.idle": async (input, output) => {{
-    const result = dispatch("session.idle", input, output, context);
-    const reason = blockReason(dispatchSelfImprovementStop());
-    if (reason) throw new Error(reason);
-    return result;
-  }},
+  "session.idle": async (input, output) => dispatch("session.idle", input, output, context),
 }});
 "#
     )
@@ -422,23 +579,15 @@ hooks_auto_accept: true
     )
 }
 
-fn hermes_hook_script_content(bin: &str, self_improvement_stop: bool) -> String {
+fn hermes_hook_script_content(bin: &str) -> String {
     let bin = posix_shell_quote(bin);
-    let self_improvement_block = if self_improvement_stop {
-        r#"self_output=""
-if [ "$event" = "on_session_end" ]; then
-  # Drop stderr so a gwtd that predates the gwt-self-improvement-stop transport
-  # exception (e.g. <v9.63.0) degrades silently instead of leaking its
-  # legacy-argv rejection into the Stop loop (issue #3178).
-  self_output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook gwt-self-improvement-stop 2>/dev/null)"
-fi
-"#
-    } else {
-        r#"self_output=""
-"#
-    };
     r#"#!/bin/sh
 set -eu
+
+gwt_bin="${GWT_BIN_PATH:-}"
+if [ -z "$gwt_bin" ]; then
+  gwt_bin=__GWT_HOOK_BIN__
+fi
 
 event="${1:-}"
 if [ -z "$event" ]; then
@@ -447,17 +596,13 @@ fi
 
 payload="$(cat)"
 set +e
-output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook provider-event hermes "$event")"
-__GWT_SELF_IMPROVEMENT_BLOCK__
+output="$(printf '%s' "$payload" | "$gwt_bin" hook provider-event hermes "$event" 2>/dev/null)"
 set -e
-if [ -n "$self_output" ]; then
-  printf '%s\n' "$self_output"
-elif [ -n "$output" ]; then
+if [ -n "$output" ]; then
   printf '%s\n' "$output"
 fi
 exit 0
 "#
-    .replace("__GWT_SELF_IMPROVEMENT_BLOCK__", self_improvement_block)
     .replace("__GWT_HOOK_BIN__", &bin)
 }
 
@@ -513,34 +658,13 @@ fn openclaw_package_content() -> String {
     .to_string()
 }
 
-fn openclaw_plugin_content(bin: &str, self_improvement_stop: bool) -> String {
+fn openclaw_plugin_content(bin: &str) -> String {
     let bin = js_string_literal(bin);
-    let self_improvement_dispatch = if self_improvement_stop {
-        r#"function dispatchSelfImprovementStop() {
-  const result = spawnSync(
-    GWT_HOOK_BIN,
-    ["hook", "gwt-self-improvement-stop"],
-    {
-      input: "",
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "ignore"],
-    },
-  );
-  try {
-    return result.stdout ? JSON.parse(result.stdout) : {};
-  } catch {
-    return {};
-  }
-}
-"#
-    } else {
-        "function dispatchSelfImprovementStop() { return {}; }\n"
-    };
     format!(
         r#"import {{ spawnSync }} from "node:child_process";
 import {{ definePluginEntry }} from "openclaw/plugin-sdk/plugin-entry";
 
-const GWT_HOOK_BIN = {bin};
+const GWT_HOOK_BIN = process.env.GWT_BIN_PATH || {bin};
 
 function dispatch(nativeEvent, event = {{}}, ctx = {{}}) {{
   const payload = {{
@@ -575,8 +699,6 @@ function blockResult(result) {{
   return {{ block: true, blockReason: reason }};
 }}
 
-{self_improvement_dispatch}
-
 function promptContextResult(result) {{
   const text = result.hookSpecificOutput?.additionalContext ?? result.context;
   if (!text) return undefined;
@@ -592,56 +714,138 @@ export default definePluginEntry({{
     api.on("before_prompt_build", async (event, ctx) => promptContextResult(dispatch("before_prompt_build", event, ctx)));
     api.on("before_tool_call", async (event, ctx) => blockResult(dispatch("before_tool_call", event, ctx)));
     api.on("after_tool_call", async (event, ctx) => dispatch("after_tool_call", event, ctx));
-    api.on("session_end", async (event, ctx) => {{
-      const result = dispatch("session_end", event, ctx);
-      return blockResult(dispatchSelfImprovementStop()) ?? result;
-    }});
+    api.on("session_end", async (event, ctx) => dispatch("session_end", event, ctx));
   }},
 }});
 "#
     )
 }
 
-fn is_gwt_repository(worktree: &Path) -> bool {
-    origin_remote_url(worktree)
-        .and_then(|url| github_slug_from_remote_url(&url))
-        .is_some_and(|slug| slug == "akiojin/gwt")
-}
+#[cfg(test)]
+mod runtime_resolution_tests {
+    use super::*;
+    use gwt_core::process::hidden_command;
+    #[cfg(unix)]
+    use std::process::Stdio;
 
-fn origin_remote_url(worktree: &Path) -> Option<String> {
-    let output = hidden_command("git")
-        .arg("-C")
-        .arg(worktree)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
+    const FALLBACK: &str = "/Applications/GWT.app/Contents/MacOS/gwtd";
 
-fn github_slug_from_remote_url(url: &str) -> Option<String> {
-    let value = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let rest = value
-        .strip_prefix("https://github.com/")
-        .or_else(|| value.strip_prefix("http://github.com/"))
-        .or_else(|| value.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| value.strip_prefix("git@github.com:"))?;
-    let slug = rest
-        .trim_matches('/')
-        .trim_end_matches(".git")
-        .to_ascii_lowercase();
-    let mut parts = slug.split('/');
-    let owner = parts.next()?.trim();
-    let repo = parts.next()?.trim();
-    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
-        return None;
+    #[test]
+    fn javascript_provider_bridges_resolve_runtime_override_before_fallback() {
+        for content in [
+            opencode_plugin_content(FALLBACK),
+            openclaw_plugin_content(FALLBACK),
+        ] {
+            assert!(
+                content.contains(
+                    "const GWT_HOOK_BIN = process.env.GWT_BIN_PATH || \"/Applications/GWT.app/Contents/MacOS/gwtd\";"
+                ),
+                "provider bridge must resolve GWT_BIN_PATH first: {content}"
+            );
+        }
     }
-    Some(format!("{owner}/{repo}"))
+
+    #[test]
+    fn hermes_bridge_resolves_runtime_override_before_fallback() {
+        let content = hermes_hook_script_content(FALLBACK);
+
+        assert!(
+            content.contains("gwt_bin=\"${GWT_BIN_PATH:-}\""),
+            "Hermes bridge must resolve GWT_BIN_PATH first: {content}"
+        );
+        assert!(content.contains("gwt_bin='/Applications/GWT.app/Contents/MacOS/gwtd'"));
+        assert!(content.contains("\"$gwt_bin\" hook provider-event"));
+        assert!(
+            !content.contains("gwt-self-improvement-stop"),
+            "the retired self-improvement Stop hook must not be generated: {content}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_bridge_fails_open_when_binary_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("gwt-hook.sh");
+        fs::write(
+            &script,
+            hermes_hook_script_content("/definitely/missing/gwtd"),
+        )
+        .unwrap();
+
+        let status = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env_remove("GWT_BIN_PATH")
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_bridge_invokes_brace_paths_for_runtime_and_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_hook_bin(path: &Path, marker: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_bin = dir.path().join("runtime}").join("gwtd");
+        let fallback_bin = dir.path().join("fallback}").join("gwtd");
+        write_hook_bin(&runtime_bin, "runtime");
+        write_hook_bin(&fallback_bin, "fallback");
+
+        let script = dir.path().join("gwt-hook.sh");
+        fs::write(
+            &script,
+            hermes_hook_script_content(&fallback_bin.to_string_lossy()),
+        )
+        .unwrap();
+
+        let runtime = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env("GWT_BIN_PATH", &runtime_bin)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run runtime-selected Hermes hook");
+        assert!(runtime.status.success());
+        assert_eq!(String::from_utf8_lossy(&runtime.stdout).trim(), "runtime");
+
+        let fallback = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env_remove("GWT_BIN_PATH")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run fallback-selected Hermes hook");
+        assert!(fallback.status.success());
+        assert_eq!(String::from_utf8_lossy(&fallback.stdout).trim(), "fallback");
+    }
+
+    #[test]
+    fn opencode_bridge_fails_open_when_binary_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("gwt-hooks.mjs");
+        let mut content = opencode_plugin_content("/definitely/missing/gwtd");
+        content.push_str(
+            "\nconst hooks = await GwtHooks({});\nawait hooks['tool.execute.before']({}, {});\n",
+        );
+        fs::write(&script, content).unwrap();
+
+        let status = hidden_command("node")
+            .arg(&script)
+            .env_remove("GWT_BIN_PATH")
+            .status()
+            .expect("run OpenCode bridge");
+
+        assert!(status.success());
+    }
 }
 
 #[cfg(test)]
@@ -762,6 +966,123 @@ mod hermes_tests {
     fn provider_choices_empty_without_config() {
         let src = tempfile::tempdir().unwrap();
         assert!(hermes_provider_choices(src.path()).is_empty());
+    }
+
+    // Issue #3863: launch choices (models / profiles / toolsets / skills)
+    // are enumerated from the user's real config, mirroring the provider
+    // picker. Absent / unparseable config degrades to empty choices.
+    const LAUNCH_CHOICES_CONFIG: &str = "\
+model:
+  provider: zai
+  default: glm-5.2
+providers:
+  ollama-launch:
+    api: http://127.0.0.1:11434/v1
+    models:
+    - qwen3.5
+    - gemma4:latest
+  myvault:
+    base_url: http://y
+toolsets:
+- hermes-cli
+- web
+agent:
+  disabled_toolsets:
+  - spotify
+  personalities:
+    concise: You are concise.
+    pirate: Arrr.
+platform_toolsets:
+  cli:
+  - browser
+  - terminal
+  - web
+  discord:
+  - hermes-discord
+known_plugin_toolsets:
+  cli:
+  - spotify
+";
+
+    #[test]
+    fn launch_choices_models_are_grouped_per_provider_with_config_default_first() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+
+        let choices = hermes_launch_choices(src.path());
+        assert_eq!(choices.providers, vec!["zai", "ollama-launch", "myvault"]);
+        assert_eq!(choices.default_provider.as_deref(), Some("zai"));
+        // The selected provider's `model.default` is its only known model
+        // when it has no `providers.<id>.models` entry.
+        assert_eq!(choices.models_for("zai"), vec!["glm-5.2"]);
+        assert_eq!(
+            choices.models_for("ollama-launch"),
+            vec!["qwen3.5", "gemma4:latest"]
+        );
+        assert!(choices.models_for("myvault").is_empty());
+        assert!(choices.models_for("unknown").is_empty());
+        // Blank provider means "use config default" → the default provider's models.
+        assert_eq!(choices.models_for(""), vec!["glm-5.2"]);
+    }
+
+    #[test]
+    fn launch_choices_profiles_come_from_agent_personalities() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+
+        let choices = hermes_launch_choices(src.path());
+        assert_eq!(choices.profiles, vec!["concise", "pirate"]);
+    }
+
+    #[test]
+    fn launch_choices_toolsets_union_cli_platform_enabled_and_disabled_sets() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+
+        let choices = hermes_launch_choices(src.path());
+        // Sorted, deduped union of platform_toolsets.cli, known_plugin_toolsets.cli,
+        // top-level toolsets and agent.disabled_toolsets. Non-cli platforms are
+        // not launch candidates.
+        assert_eq!(
+            choices.toolsets,
+            vec!["browser", "hermes-cli", "spotify", "terminal", "web"]
+        );
+    }
+
+    #[test]
+    fn launch_choices_skills_are_skill_md_directories_under_skills() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+        write_file(&src.path().join("skills/github/SKILL.md"), "# gh\n");
+        write_file(
+            &src.path().join("skills/creative/pixel-art/SKILL.md"),
+            "# px\n",
+        );
+        write_file(
+            &src.path().join("skills/creative/ascii-art/SKILL.md"),
+            "# ascii\n",
+        );
+        // Not a skill: no SKILL.md.
+        write_file(&src.path().join("skills/creative/notes.txt"), "x\n");
+
+        let choices = hermes_launch_choices(src.path());
+        assert_eq!(choices.skills, vec!["ascii-art", "github", "pixel-art"]);
+    }
+
+    #[test]
+    fn launch_choices_are_empty_without_config_or_with_invalid_yaml() {
+        let src = tempfile::tempdir().unwrap();
+        assert_eq!(
+            hermes_launch_choices(src.path()),
+            HermesLaunchChoices::default()
+        );
+
+        write_file(&src.path().join("config.yaml"), "model: [unclosed\n");
+        let choices = hermes_launch_choices(src.path());
+        assert!(choices.providers.is_empty());
+        assert!(choices.profiles.is_empty());
+        assert!(choices.toolsets.is_empty());
+        assert!(choices.models_for("").is_empty());
     }
 
     #[test]

@@ -67,18 +67,28 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+// Issue #3164 retired the only production members of
+// DEFAULT_ORDERED_STATE_KINDS, so these fence tests exercise the generic
+// "activation state must precede scoped outcomes" mechanism with an
+// explicit ordered-state kind set rather than relying on the (now empty)
+// default.
+const SAMPLE_ORDERED_STATE_KINDS = new Set([
+  "project_scoped_notice",
+  "project_scoped_alert",
+]);
+
 test("project snapshots stay after the workspace state that activates their project", () => {
   const workspace = {
     kind: "workspace_state",
     workspace: { active_tab_id: "project-b" },
   };
   const candidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/b",
     candidates: [{ id: "impr-b" }],
   };
   const otherProjectCandidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/a",
     candidates: [{ id: "impr-a" }],
   };
@@ -87,6 +97,7 @@ test("project snapshots stay after the workspace state that activates their proj
     coalesceEvents(
       [workspace, otherProjectCandidates, candidates],
       DEFAULT_COALESCE_KINDS,
+      { orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS },
     ),
     [workspace, otherProjectCandidates, candidates],
     "project-scoped snapshots must preserve multiplicity without overtaking activation state",
@@ -99,18 +110,20 @@ test("project action outcomes stay behind the workspace activation fence", () =>
     workspace: { active_tab_id: "project-b" },
   };
   const staleError = {
-    kind: "improvement_action_error",
+    kind: "project_scoped_alert",
     project_root: "/projects/a",
     message: "stale project error",
   };
   const candidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/b",
     candidates: [{ id: "impr-b" }],
   };
 
   assert.deepEqual(
-    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS),
+    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS, {
+      orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS,
+    }),
     [workspace, staleError, candidates],
     "the active-project fence must run before scoped action outcomes",
   );
@@ -122,7 +135,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     workspace: { active_tab_id: "project-b" },
   };
   const staleError = {
-    kind: "improvement_action_error",
+    kind: "project_scoped_alert",
     project_root: "/projects/a",
     message: "stale project error",
   };
@@ -131,7 +144,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     workspace: { active_tab_id: "project-c" },
   };
   const candidatesC = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/c",
     candidates: [{ id: "impr-c" }],
   };
@@ -140,6 +153,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     coalesceEvents(
       [workspaceB, staleError, workspaceC, candidatesC],
       DEFAULT_COALESCE_KINDS,
+      { orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS },
     ),
     [workspaceC, staleError, candidatesC],
     "the surviving activation must update the frontend fence before stale outcomes",
@@ -167,7 +181,6 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "terminal_output",
     "terminal_snapshot",
     "runtime_hook_event",
-    "improvement_candidates",
   ]) {
     assert.equal(
       DEFAULT_COALESCE_KINDS.has(kind),
@@ -587,4 +600,97 @@ test("dispatcher skips trace callbacks while shouldTrace is false", () => {
     ["ws_message", "ws_flush_start", "ws_receive", "ws_flush_end"],
     "trace events must resume once shouldTrace returns true",
   );
+});
+
+// Issue #3365 — swallowed receive() failures must become visible. The
+// dispatcher keeps continuing with the remaining events (a poisoned event
+// must not stall the stream), but it now reports each failure through
+// `onReceiveError` so app.js can surface a degradation banner instead of a
+// console-only warn.
+test("onReceiveError reports a throwing receive and the flush continues", () => {
+  const received = [];
+  const errors = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      if (event.kind === "workspace_state") {
+        throw new Error("render exploded");
+      }
+      received.push(event);
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onReceiveError: (error, eventKind) => errors.push({ error, eventKind }),
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "still alive" });
+  scheduler.runOnce();
+
+  assert.equal(received.length, 1, "events after the failure must still be delivered");
+  assert.equal(received[0].kind, "terminal_output");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].eventKind, "workspace_state");
+  assert.match(String(errors[0].error), /render exploded/);
+});
+
+test("onReceiveError receives the kind hint for raw string payloads", () => {
+  const errors = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: () => {
+      throw new Error("boom");
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onReceiveError: (error, eventKind) => errors.push(eventKind),
+  });
+
+  dispatcher.handle({ data: JSON.stringify({ kind: "window_list", windows: [] }) });
+  scheduler.runOnce();
+
+  assert.deepEqual(errors, ["window_list"]);
+});
+
+test("a throwing onReceiveError does not break the flush", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      if (event.kind === "workspace_state") {
+        throw new Error("render exploded");
+      }
+      received.push(event);
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onReceiveError: () => {
+      throw new Error("reporter exploded");
+    },
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "still alive" });
+  assert.doesNotThrow(() => scheduler.runOnce());
+  assert.equal(received.length, 1);
+});
+
+test("a throwing receive without onReceiveError keeps the legacy warn-and-continue path", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      if (event.kind === "workspace_state") {
+        throw new Error("render exploded");
+      }
+      received.push(event);
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "still alive" });
+  assert.doesNotThrow(() => scheduler.runOnce());
+  assert.equal(received.length, 1);
 });

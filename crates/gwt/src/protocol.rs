@@ -208,6 +208,70 @@ pub enum ContinueWorkOutcomeKind {
     Failed,
 }
 
+/// SPEC #1921 Phase 86 (#3813): wire shape of the agent process-tree
+/// resource policy shared by `update_system_settings` and the
+/// `system_settings` / `system_settings_updated` replies. Numeric `null`
+/// means automatic mode; zero is rejected at the settings boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResourceSettings {
+    pub enabled: bool,
+    /// `automatic` / `gui-responsiveness` / `build-speed` / `custom`.
+    /// Older senders omit it, which keeps the automatic preset.
+    #[serde(default = "default_agent_resource_preset")]
+    pub preset: String,
+    /// `normal` / `below-normal` / `idle` (Custom preset).
+    pub priority: String,
+    #[serde(default)]
+    pub cpu_limit_percent: Option<u8>,
+    /// Build parallelism per agent (Custom preset).
+    #[serde(default)]
+    pub build_jobs: Option<u32>,
+}
+
+fn default_agent_resource_preset() -> String {
+    gwt_config::AgentResourcePreset::Automatic
+        .as_str()
+        .to_string()
+}
+
+impl AgentResourceSettings {
+    pub fn from_config(config: &gwt_config::AgentResourceConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            preset: config.preset.as_str().to_string(),
+            priority: config.priority.as_str().to_string(),
+            cpu_limit_percent: config.cpu_limit_percent,
+            build_jobs: config.build_jobs,
+        }
+    }
+
+    /// Convert to the persisted config, rejecting unknown preset / priority
+    /// names. Range validation of the numeric fields happens in
+    /// [`gwt_config::AgentResourceConfig::validate`].
+    pub fn to_config(&self) -> Result<gwt_config::AgentResourceConfig, String> {
+        let preset = gwt_config::AgentResourcePreset::parse(&self.preset).ok_or_else(|| {
+            format!(
+                "invalid agent resource preset `{}`: expected `automatic`, `gui-responsiveness`, `build-speed`, or `custom`",
+                self.preset
+            )
+        })?;
+        let priority =
+            gwt_config::AgentProcessPriority::parse(&self.priority).ok_or_else(|| {
+                format!(
+                "invalid agent process priority `{}`: expected `normal`, `below-normal`, or `idle`",
+                self.priority
+            )
+            })?;
+        Ok(gwt_config::AgentResourceConfig {
+            enabled: self.enabled,
+            preset,
+            priority,
+            cpu_limit_percent: self.cpu_limit_percent,
+            build_jobs: self.build_jobs,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -221,6 +285,29 @@ pub enum FrontendEvent {
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
+    /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
+    /// resident PM pane if it is not running, then frames it in the viewport.
+    OpenPmAgent {
+        #[serde(default)]
+        bounds: Option<WindowGeometry>,
+    },
+    /// SPEC-3431 FR-026: opt the active project in or out of PM auto-start.
+    /// Governs the next project open only — it never stops a live PM.
+    SetPmAutoStart {
+        enabled: bool,
+    },
+    /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
+    /// pane is untouched; applying the change is the explicit restart below.
+    SetPmLaunchProfile {
+        agent_id: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        reasoning: Option<String>,
+    },
+    /// SPEC-3431 FR-026: stop the live PM and bring it back on the configured
+    /// profile. Starts a NEW conversation — a history cannot cross agents.
+    RestartPmAgent,
     OpenProjectDialog,
     SelectCloneProjectParent,
     GithubRepositorySearch {
@@ -339,6 +426,23 @@ pub enum FrontendEvent {
     PaneSendInput {
         session_id: String,
         text: String,
+    },
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
+    /// agent pane of the same project. Caller identity comes only from the
+    /// authenticated WebSocket principal; the general self-only contract of
+    /// [`FrontendEvent::PaneSendInput`] is unchanged for every other caller.
+    PmPaneSendInput {
+        operation_id: String,
+        window_id: String,
+        text: String,
+    },
+    /// SPEC-3431 FR-124: narrow request accepted only on the authenticated
+    /// agent listener. Project identity is supplied by the server-side
+    /// capability principal, never by this payload.
+    AgentIssueMonitorScanNow {
+        /// Non-secret guard that binds the caller's persisted prefs target to
+        /// the server-derived capability scope. It is never routing authority.
+        expected_project_scope: String,
     },
     PasteImage {
         id: String,
@@ -878,6 +982,10 @@ pub enum FrontendEvent {
         /// `None` leaves the persisted value unchanged.
         #[serde(default)]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): complete agent process-tree resource
+        /// policy. `None` leaves the persisted policy unchanged.
+        #[serde(default)]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -936,24 +1044,6 @@ pub enum FrontendEvent {
     CloseWork {
         work_id: String,
         close_kind: String,
-    },
-    ImprovementPromoteIssue {
-        id: String,
-    },
-    ImprovementResolve {
-        id: String,
-        #[serde(default)]
-        expected_resolver_revision: Option<String>,
-    },
-    ImprovementSelectOwner {
-        id: String,
-        owner_number: u64,
-        resolver_revision: String,
-    },
-    ImprovementDismiss {
-        id: String,
-        #[serde(default)]
-        reason: Option<String>,
     },
 }
 
@@ -1405,6 +1495,10 @@ pub struct ActiveWorkItemView {
     pub blocked_agents: usize,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    /// Worktree-specific managed-hook health. Unlike the projection-level
+    /// compatibility field, this is audited against this row's exact worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
@@ -1540,6 +1634,18 @@ pub struct RuntimeHealthProcessView {
     pub focus_window_id: Option<String>,
 }
 
+/// SPEC-3431 FR-026: one agent the PM may be configured to run as.
+///
+/// Deliberately a two-field view rather than the Launch Wizard's `AgentOption`:
+/// the PM picker offers no version pinning, no custom agents, and no Docker
+/// target, because the only agents that can resolve the `$gwt-pm` bootstrap
+/// prompt are the ones with a managed skills mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PmAgentOption {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -1553,24 +1659,14 @@ pub enum BackendEvent {
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
     },
+    /// Issue #3783: bounded lifecycle/watcher update. The browser replaces
+    /// live membership and scalar fields while preserving its existing Work,
+    /// journal, and per-agent Session history for the same projection id.
+    ActiveWorkProjectionPatch {
+        projection: Box<ActiveWorkProjectionView>,
+    },
     WindowList {
         windows: Vec<PersistedWindowState>,
-    },
-    ImprovementCandidates {
-        project_root: String,
-        candidates: Vec<serde_json::Value>,
-    },
-    ImprovementActionResult {
-        project_root: String,
-        id: String,
-        action: String,
-        message: Option<String>,
-    },
-    ImprovementActionError {
-        project_root: Option<String>,
-        id: Option<String>,
-        action: String,
-        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -1591,6 +1687,15 @@ pub enum BackendEvent {
         id: String,
         data_base64: String,
     },
+    /// Origin-client completion receipt for one authenticated pane snapshot
+    /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
+    /// sets explain every authorized pane that produced no frame.
+    PaneSyncComplete {
+        empty_window_ids: Vec<String>,
+        busy_window_ids: Vec<String>,
+        unavailable_window_ids: Vec<String>,
+        failed_window_ids: Vec<String>,
+    },
     TerminalStatus {
         id: String,
         status: WindowProcessStatus,
@@ -1603,11 +1708,58 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    /// Origin-connection-only terminal result for one privileged PM message.
+    /// `queued` is reserved for a future durable payload queue; this slice
+    /// emits `delivered` after exact acknowledgement, `unverified` when the
+    /// prompt reached the pane but no acknowledgement arrived inside the
+    /// operation's budget, and `failed` when the input never committed.
+    /// `unverified` is deliberately not folded into `failed` (Issue #3608):
+    /// the two demand opposite responses from the caller.
+    PmMessageSendResult {
+        operation_id: String,
+        status: String,
+        window_id: Option<String>,
+        reason: Option<String>,
+    },
+    /// Origin-client-only acknowledgement for one authenticated Monitor scan
+    /// request. `accepted` means one new project worker was enqueued; it does
+    /// not claim that a candidate was found or launched.
+    IssueMonitorScanRequestResult {
+        accepted: bool,
+        reason: Option<String>,
+    },
     /// Direct, origin-connection-only acceptance for an authenticated
     /// self-close. The internal close ticket never crosses the wire.
     PaneCloseAccepted {
         request_id: String,
         window_id: String,
+    },
+    /// Client-scoped reply to a peer-pane `close_window` request on the agent
+    /// pane route (Issue #3629 AC-10/AC-12): every close outcome — success,
+    /// refusal, or a window record that could not be removed — answers
+    /// explicitly instead of silently producing no events.
+    PaneCloseResult {
+        ok: bool,
+        window_id: String,
+        reason: Option<String>,
+    },
+    /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
+    /// active project tab.
+    ///
+    /// `configured_*` is what the NEXT PM start will use; `running_*` is what
+    /// the live conversation actually is. They are separate fields on purpose —
+    /// the panel's "restart to apply" affordance exists precisely because a
+    /// profile change cannot migrate a running conversation.
+    PmStatus {
+        auto_start: bool,
+        configured_agent_id: String,
+        configured_model: Option<String>,
+        configured_reasoning: Option<String>,
+        running_agent_id: Option<String>,
+        running_model: Option<String>,
+        running_reasoning: Option<String>,
+        is_running: bool,
+        agent_options: Vec<PmAgentOption>,
     },
     IssueMonitorStatus {
         status: IssueMonitorStatusView,
@@ -1957,7 +2109,7 @@ pub enum BackendEvent {
     },
     ProjectIndexStatus {
         project_root: String,
-        status: crate::ProjectIndexStatusView,
+        status: Box<crate::ProjectIndexStatusView>,
     },
     RuntimeHookEvent {
         event: RuntimeHookEvent,
@@ -2098,6 +2250,9 @@ pub enum BackendEvent {
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): authoritative agent resource policy.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC-2963: remote Board provider sign-in state, the editable provider
     /// configuration (non-secret), and an optional status message. The settings
@@ -2161,6 +2316,10 @@ pub enum BackendEvent {
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): persisted agent resource policy echoed
+        /// back so every open Settings window reconciles to the same values.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
@@ -2289,24 +2448,14 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
-        "window_list",
+        "active_work_projection_patch",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
-        "improvement_candidates",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::PreserveOrder,
-    ),
-    BackendEventPolicy::new(
-        "improvement_action_result",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "improvement_action_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
+        "window_list",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
         "provider_usage",
@@ -2324,7 +2473,17 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "process_line",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "terminal_snapshot",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "pane_sync_complete",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -2339,9 +2498,31 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pm_message_send_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_scan_request_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
+    // the newest one matters.
+    BackendEventPolicy::new(
+        "pm_status",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
         "issue_monitor_status",
@@ -2764,17 +2945,22 @@ impl BackendEvent {
         match self {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
+            BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
-            BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
-            BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
-            BackendEvent::ImprovementActionError { .. } => "improvement_action_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
+            BackendEvent::IssueMonitorScanRequestResult { .. } => {
+                "issue_monitor_scan_request_result"
+            }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
+            BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
@@ -2901,7 +3087,7 @@ pub enum KnowledgePhaseUpdateResult {
     /// Phase write-back succeeded. `fresh_entry` is the rebuilt cache
     /// entry (with the new labels / state / phase) so the optimistic
     /// Kanban card can be overwritten with authoritative data.
-    Ok { fresh_entry: KnowledgeListItem },
+    Ok { fresh_entry: Box<KnowledgeListItem> },
     /// Phase write-back failed. `message` is human-readable so the
     /// toast / log can show it directly; the frontend rolls back the
     /// optimistic UI from `state.dndSnapshot`.
@@ -2935,6 +3121,28 @@ mod tests {
     };
 
     #[test]
+    fn knowledge_search_results_retains_the_baseline_rust_shape() {
+        // SPEC #1939 FR-407 — the public Rust event remains source-compatible
+        // with legacy clients. Optional retry metadata belongs to the private
+        // outbound wire envelope, not this public enum variant.
+        let event = BackendEvent::KnowledgeSearchResults {
+            id: "tab-1::issue-1".to_string(),
+            knowledge_kind: crate::knowledge_bridge::KnowledgeKind::Issue,
+            query: "silent recovery".to_string(),
+            request_id: 7,
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: true,
+        };
+        let value = serde_json::to_value(&event).expect("serialize baseline event");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "direct event serialization must retain the baseline wire shape: {value}"
+        );
+    }
+
+    #[test]
     fn pane_send_input_deserializes_session_scoped_injection_contract() {
         let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
             "kind": "pane_send_input",
@@ -2966,6 +3174,20 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #3755 AC-2: the final availability receipt is origin-client
+    /// state and must survive outbound pressure like the pane snapshot itself.
+    #[test]
+    fn pane_sync_completion_has_client_scoped_snapshot_policy() {
+        let policy =
+            backend_event_policy("pane_sync_complete").expect("pane_sync_complete delivery policy");
+
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,
@@ -3381,6 +3603,13 @@ mod tests {
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
+        let process_line = backend_event_policy("process_line").expect("process_line policy");
+        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
+        assert_eq!(
+            process_line.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
         let workspace_state =
             backend_event_policy("workspace_state").expect("workspace_state policy");
         assert_eq!(
@@ -3600,6 +3829,7 @@ mod tests {
                     blocked_agents: 0,
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    managed_hook_health: None,
                     pr_number: Some(2538),
                     pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
                     pr_state: Some("OPEN".to_string()),
@@ -3696,6 +3926,16 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false),
             "Work cleanup must default to local-only deletion"
+        );
+        let BackendEvent::ActiveWorkProjection { projection } = event else {
+            unreachable!("constructed full projection")
+        };
+        let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
+            .expect("serialize bounded active work projection patch");
+        assert_eq!(
+            patch.get("kind"),
+            Some(&Value::String("active_work_projection_patch".to_string())),
+            "bounded lifecycle updates need merge semantics on the frontend"
         );
     }
 
@@ -4769,6 +5009,39 @@ mod tests {
         let value = serde_json::to_value(&action).expect("serialize goto_step");
         assert_eq!(value["kind"], "goto_step");
         assert_eq!(value["phase"], "confirm");
+    }
+
+    #[test]
+    fn launch_wizard_holder_decision_actions_round_trip() {
+        use crate::launch_wizard::LaunchWizardAction;
+
+        let actions = [
+            (
+                LaunchWizardAction::StopAndStartSuccessor {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:successor".to_string(),
+                },
+                "stop_and_start_successor",
+            ),
+            (
+                LaunchWizardAction::MoveExistingPane {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:destination".to_string(),
+                },
+                "move_existing_pane",
+            ),
+        ];
+
+        for (action, expected_kind) in actions {
+            let value = serde_json::to_value(&action).expect("serialize holder decision action");
+            assert_eq!(value["kind"], expected_kind);
+            assert_eq!(value["fingerprint"], "repo:/tmp/gwt:work/issue-3547");
+            assert!(value["window_id"].as_str().is_some());
+
+            let round_tripped: LaunchWizardAction =
+                serde_json::from_value(value).expect("deserialize holder decision action");
+            assert_eq!(round_tripped, action);
+        }
     }
 
     #[test]

@@ -21,6 +21,12 @@ pub struct Issue {
     pub assignee: Option<String>,
     pub body: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+fn issue_list_json_fields() -> &'static str {
+    "number,title,state,labels,assignees,body,url,updatedAt"
 }
 
 /// File-based cache for GitHub Issues.
@@ -111,7 +117,7 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
             "--state",
             "open",
             "--json",
-            "number,title,state,labels,assignees,body,url",
+            issue_list_json_fields(),
             "--limit",
             GITHUB_ISSUE_LIST_LIMIT,
         ],
@@ -124,6 +130,78 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
     }
 
     parse_gh_issues_json(&output.stdout)
+}
+
+/// Fetch the comment bodies of one Issue via `gh issue view --json comments`
+/// (Issue #3917 AC-2: delegation records may live in Issue comments).
+pub fn fetch_issue_comment_bodies(owner: &str, repo: &str, number: u64) -> Result<Vec<String>> {
+    let repo_slug = format!("{owner}/{repo}");
+    let number = number.to_string();
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
+            "issue",
+            "view",
+            number.as_str(),
+            "--repo",
+            repo_slug.as_str(),
+            "--json",
+            "comments",
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh issue view comments"),
+    )
+    .map_err(|e| GwtError::Git(format!("gh issue view comments: {e}")))?;
+    if !output.success() {
+        return Err(GwtError::Git(format!(
+            "gh issue view comments: {}",
+            output.stderr
+        )));
+    }
+    parse_gh_issue_comment_bodies(&output.stdout)
+}
+
+/// Repository roles whose comment may carry a delegation record (Issue #3917
+/// AC-2). A settlement can close an Issue with unchecked criteria on the
+/// strength of such a comment, so a drive-by commenter must not be able to
+/// author one. Anything else — including a missing association — fails closed.
+const TRUSTED_COMMENT_AUTHOR_ASSOCIATIONS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
+
+/// Whether `association` (GitHub's `authorAssociation`) is a repository role
+/// gwt trusts to record decisions about the Issue.
+fn comment_author_is_trusted(association: Option<&str>) -> bool {
+    association.is_some_and(|association| {
+        TRUSTED_COMMENT_AUTHOR_ASSOCIATIONS
+            .iter()
+            .any(|trusted| association.eq_ignore_ascii_case(trusted))
+    })
+}
+
+/// Parse `gh issue view --json comments` into the comment bodies in order,
+/// keeping only comments written by a trusted repository role.
+pub fn parse_gh_issue_comment_bodies(json: &str) -> Result<Vec<String>> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(e.to_string()))?;
+    Ok(value
+        .get("comments")
+        .and_then(serde_json::Value::as_array)
+        .map(|comments| {
+            comments
+                .iter()
+                .filter(|comment| {
+                    comment_author_is_trusted(
+                        comment
+                            .get("authorAssociation")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                })
+                .filter_map(|comment| comment.get("body").and_then(serde_json::Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Parse the JSON output from `gh issue list --json`.
@@ -151,6 +229,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
             .map(String::from);
         let body = v["body"].as_str().map(String::from);
         let url = v["url"].as_str().unwrap_or("").to_string();
+        let updated_at = v["updatedAt"].as_str().map(String::from);
 
         issues.push(Issue {
             number,
@@ -160,6 +239,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
             assignee,
             body,
             url,
+            updated_at,
         });
     }
 
@@ -180,7 +260,8 @@ mod tests {
                 "labels": [{"name": "bug"}],
                 "assignees": [{"login": "alice"}],
                 "body": "Description",
-                "url": "https://github.com/owner/repo/issues/42"
+                "url": "https://github.com/owner/repo/issues/42",
+                "updatedAt": "2026-08-05T10:00:00Z"
             },
             {
                 "number": 43,
@@ -189,7 +270,8 @@ mod tests {
                 "labels": [],
                 "assignees": [],
                 "body": null,
-                "url": "https://github.com/owner/repo/issues/43"
+                "url": "https://github.com/owner/repo/issues/43",
+                "updatedAt": "2026-08-05T10:01:00Z"
             }
         ]"#;
 
@@ -199,15 +281,63 @@ mod tests {
         assert_eq!(issues[0].title, "Fix bug");
         assert_eq!(issues[0].labels, vec!["bug"]);
         assert_eq!(issues[0].assignee.as_deref(), Some("alice"));
+        assert_eq!(
+            issues[0].updated_at.as_deref(),
+            Some("2026-08-05T10:00:00Z")
+        );
         assert_eq!(issues[1].number, 43);
         assert!(issues[1].assignee.is_none());
         assert!(issues[1].body.is_none());
+        assert_eq!(
+            issues[1].updated_at.as_deref(),
+            Some("2026-08-05T10:01:00Z")
+        );
+    }
+
+    #[test]
+    fn parse_gh_issue_comment_bodies_reads_comments_array() {
+        // Issue #3917 AC-2: delegation records may live in Issue comments.
+        let json = r#"{"comments":[{"authorAssociation":"OWNER","body":"first"},{"authorAssociation":"collaborator","body":"残 AC は別 Issue に委譲 (#77)"},{"authorAssociation":"MEMBER","author":{"login":"x"}}]}"#;
+        let bodies = parse_gh_issue_comment_bodies(json).unwrap();
+        assert_eq!(bodies, vec!["first", "残 AC は別 Issue に委譲 (#77)"]);
+        assert!(parse_gh_issue_comment_bodies("{}").unwrap().is_empty());
+        assert!(parse_gh_issue_comment_bodies("not json").is_err());
+    }
+
+    #[test]
+    fn parse_gh_issue_comment_bodies_drops_untrusted_authors() {
+        // A delegation record can close an Issue whose criteria are unchecked,
+        // so only a repository role may author one. Everything else — an
+        // outside contributor, a first-time commenter, a missing association —
+        // fails closed.
+        let json = r#"{"comments":[
+            {"authorAssociation":"NONE","body":"残 AC は別 Issue に委譲 (#77)"},
+            {"authorAssociation":"CONTRIBUTOR","body":"残 AC は別 Issue に委譲 (#78)"},
+            {"authorAssociation":"FIRST_TIME_CONTRIBUTOR","body":"残 AC は別 Issue に委譲 (#79)"},
+            {"body":"残 AC は別 Issue に委譲 (#80)"},
+            {"authorAssociation":"OWNER","body":"owner note"}
+        ]}"#;
+        assert_eq!(
+            parse_gh_issue_comment_bodies(json).unwrap(),
+            vec!["owner note"]
+        );
     }
 
     #[test]
     fn parse_gh_issues_json_empty() {
         let issues = parse_gh_issues_json("[]").unwrap();
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn parse_gh_issues_json_accepts_missing_updated_at() {
+        let issues =
+            parse_gh_issues_json(r#"[{"number":42,"title":"Legacy payload","state":"OPEN"}]"#)
+                .expect("parse legacy payload");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 42);
+        assert!(issues[0].updated_at.is_none());
     }
 
     #[test]
@@ -219,6 +349,17 @@ mod tests {
     #[test]
     fn issue_list_limit_is_high_enough_for_large_repositories() {
         assert_eq!(GITHUB_ISSUE_LIST_LIMIT, "1000");
+    }
+
+    #[test]
+    fn issue_list_fields_request_updated_at() {
+        let fields = issue_list_json_fields().split(',').collect::<Vec<_>>();
+
+        assert!(fields.contains(&"updatedAt"));
+        assert_eq!(
+            fields.iter().filter(|field| **field == "updatedAt").count(),
+            1
+        );
     }
 
     #[test]
@@ -238,6 +379,7 @@ mod tests {
             assignee: Some("alice".into()),
             body: Some("body".into()),
             url: "https://example.com".into(),
+            updated_at: None,
         }];
         cache.write("owner", "repo", &issues).unwrap();
 
@@ -284,6 +426,7 @@ mod tests {
             assignee: None,
             body: None,
             url: "https://example.com".into(),
+            updated_at: None,
         }];
 
         // Malicious owner/repo should not escape cache directory

@@ -45,6 +45,8 @@ The operation names and state file remain compatibility surfaces.
   satisfied for a releaseable slice.
 - `build.abort` with a concrete reason when implementation cannot proceed.
 
+If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`.
+
 Linked-owner Execution launches also carry an Execution Control Record
 (SPEC-3248 P8a) written at launch, and Stop stays blocked until the record is
 settled — even when `build.start` was never called (plain-Issue fixes
@@ -87,8 +89,12 @@ When resuming or recovering another session's execution (crash, closed
 window), take over the record explicitly with JSON operation
 `execution.adopt` and a non-empty `params.reason` — takeovers are audited as
 an ownership transfer chain. Adopt requires a valid integrity record. An
-integrity-failed record cannot be repaired in the same execution lifetime
-without risking audit loss; use a fresh linked-owner launch instead.
+integrity-failed record is repaired in place with JSON operation
+`execution.repair`: it quarantines the corrupt record under a unique
+`.corrupt-*` path with a trusted audit entry and atomically materializes a
+fresh Active record, so the same execution lifetime can continue. Diagnose
+first with `execution.status` — its `available_recoveries` names the exact
+operation to run.
 
 ## Mode detection
 
@@ -151,6 +157,32 @@ verification handoff and a `User Verification Result`.
 PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
 pre-PR verification passes and the `User Verification Result` is `confirmed` or
 `n/a`.
+
+## Heavy command serialization
+
+Every `cargo test`, `cargo clippy`, `cargo build`, coverage, or headed
+browser run in the RED / GREEN / refactor / verify loop compiles on a host
+shared with every other agent worktree (Issue #3913). Serialize them
+through the host-wide lease before starting, even for a single focused
+test:
+
+1. Run JSON operation `verify.lease.acquire` with `params.reason` naming
+   the Issue and a `ttl_minutes` sized for the run (default 45). Run the
+   command, then `verify.lease.release` with the lease id. Never start a
+   raw `cargo` command without the lease.
+2. On refusal, follow the wait procedure in gwt-verify's "Heavy
+   verification serialization" section: declare the wait with
+   `issue.monitor.wait` so it costs no autonomous attempt (Issue #3844),
+   retry every 3 minutes, keep the holder visible, escalate after 15
+   attempts, and clear the declaration once granted. A refusal is not
+   permission to run anyway.
+3. `verify.run` admits itself: it honors a lease this worktree already
+   holds, otherwise claims the lease in-process and waits up to
+   `params.max_wait_secs` (default 300, hard cap 1500) for other
+   worktrees' `cargo` / `rustc` / test binaries to drain. A `deferred`
+   answer means the budget ran out without writing a record — rerun
+   `verify.run`; each rerun is a fresh tool call and counts as one attempt
+   of the same wait procedure.
 
 ## Legacy aliases
 

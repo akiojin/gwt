@@ -1,14 +1,30 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
-use gwt::index_worker::bootstrap_project_index_for_path_with;
+use gwt::index_worker::bootstrap_project_index_for_path_with_broker;
+#[cfg(unix)]
+use gwt::index_worker::{
+    bootstrap_project_index_for_path, execute_claimed_project_index_refresh_with,
+};
 use gwt_core::process::hidden_command;
+#[cfg(unix)]
 use gwt_core::{
-    index::runtime::RunnerSpawner, paths::gwt_cache_dir, repo_hash::detect_repo_hash,
+    index::broker::{
+        RefreshIntent, RefreshReason, RefreshResourceClass, RefreshScope, RefreshTarget,
+        RefreshTargetState, REFRESH_INTENT_PROTOCOL_VERSION,
+    },
+    index_coordinator::JobPriority,
+    paths::gwt_cache_dir,
+    process_console::{ProcessConsoleHub, ProcessKind},
     worktree_hash::compute_worktree_hash,
+};
+use gwt_core::{
+    index::{broker::RefreshBroker, runtime::RunnerSpawner},
+    repo_hash::detect_repo_hash,
 };
 
 #[derive(Clone, Default)]
@@ -36,6 +52,7 @@ impl RunnerSpawner for RecordingSpawner {
     }
 }
 
+#[cfg(unix)]
 use gwt_core::test_support::ScopedEnvVar;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -44,7 +61,8 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 #[test]
-fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
+#[cfg(unix)]
+fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_spawn() {
     let _env_lock = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -53,17 +71,24 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
     fs::create_dir_all(&home).expect("create home");
     let _home = ScopedEnvVar::set("HOME", &home);
     let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+    let process_console = ProcessConsoleHub::new();
+    assert!(
+        gwt_core::process_console::set_global(process_console.clone()),
+        "index_bootstrap_test must install the process-global observation hub exactly once"
+    );
 
     let repo = tmp.path().join("repo");
-    let wt = tmp.path().join("wt-feature");
+    let wt_a = tmp.path().join("wt-feature-a");
+    let wt_b = tmp.path().join("wt-feature-b");
     init_git_repo(&repo);
     add_origin(&repo, "https://github.com/example/project.git");
     commit_file(&repo, "README.md", "# repo\n");
-    add_worktree(&repo, &wt);
+    add_worktree(&repo, &wt_a, "feature/a");
+    add_worktree(&repo, &wt_b, "feature/b");
 
     let repo_hash = detect_repo_hash(&repo).expect("repo hash");
-    let wt_hash = compute_worktree_hash(&wt).expect("worktree hash");
-    let index_root = tmp.path().join("index");
+    let wt_hash = compute_worktree_hash(&wt_a).expect("worktree hash");
+    let index_root = home.join(".gwt").join("index");
     let worktree_root = index_root
         .join(repo_hash.as_str())
         .join("worktrees")
@@ -75,7 +100,7 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
     fs::write(worktree_root.join("meta.json"), r#"{"schema_version":1}"#)
         .expect("write worktree meta");
 
-    let legacy_worktree_index = wt.join(".gwt").join("index");
+    let legacy_worktree_index = wt_a.join(".gwt").join("index");
     fs::create_dir_all(&legacy_worktree_index).expect("create legacy worktree dir");
     fs::write(legacy_worktree_index.join("stale"), "data").expect("write legacy worktree file");
 
@@ -86,82 +111,182 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
     fs::create_dir_all(&orphan).expect("create orphan");
     fs::write(orphan.join("marker"), "data").expect("write orphan file");
 
+    // Activate the legacy direct issue-refresh branch. A partial GREEN that
+    // removes runtime ensure but leaves this direct spawn behind must still
+    // fail the synchronous RecordingSpawner assertion below.
     let issues_dir = index_root.join(repo_hash.as_str()).join("issues");
     fs::create_dir_all(&issues_dir).expect("create issues dir");
-    let stale = chrono::Utc::now() - chrono::Duration::minutes(20);
     fs::write(
         issues_dir.join("meta.json"),
         serde_json::json!({
             "schema_version": 1,
-            "last_full_refresh": stale.to_rfc3339(),
+            "last_full_refresh": (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339(),
             "ttl_minutes": 15,
             "source_cache_fingerprint": "stale",
             "source_document_count": 1,
         })
         .to_string(),
     )
-    .expect("write issues meta");
+    .expect("write stale issues meta");
     let cache_root = gwt_cache_dir().join("issues").join(repo_hash.as_str());
     gwt_github::Cache::new(cache_root)
         .write_snapshot(&gwt_github::IssueSnapshot {
-            number: gwt_github::IssueNumber(2867),
-            title: "Recent Projects cache freshness".to_string(),
-            body: "Closed state should reach Issue search at startup.".to_string(),
-            labels: vec!["bug".to_string()],
-            state: gwt_github::IssueState::Closed,
-            updated_at: gwt_github::UpdatedAt::new("2026-05-23T00:00:00Z"),
+            number: gwt_github::IssueNumber(3772),
+            title: "Refresh Broker admission storm".to_string(),
+            body: "Startup submits one canonical base intent.".to_string(),
+            labels: vec!["perf".to_string()],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z"),
             comments: vec![],
         })
         .expect("write issue cache snapshot");
 
-    let spawner = RecordingSpawner::default();
-    bootstrap_project_index_for_path_with(&wt, &index_root, &spawner).expect("bootstrap index");
+    let runner_log = tmp.path().join("runner-log.txt");
+    fs::write(&runner_log, b"").expect("create runner log");
+    let _runner_log = ScopedEnvVar::set("GWT_FAKE_RUNNER_LOG", &runner_log);
+    let python = gwt_core::runtime::project_index_python_path();
+    fs::create_dir_all(python.parent().expect("python parent")).expect("create runtime dir");
+    fs::write(
+        &python,
+        "#!/bin/sh\necho \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\nprintf '{\"ok\":true}\\n'\n",
+    )
+    .expect("write poison runner");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod runner");
+    }
+
+    // Exercise the production wrapper used by startup / FrontendReady, not
+    // only the lower-level injectable helper. Main plus linked worktrees and
+    // a replay must all open the same default durable broker. The Process
+    // Console banner is emitted synchronously before a detached runner
+    // process starts, so its exact count avoids a shell-log timing race.
+    let runner_banners_before = process_console
+        .snapshot_kind(ProcessKind::IndexRunner)
+        .len();
+    for project_root in [&repo, &wt_a, &wt_b, &wt_a] {
+        bootstrap_project_index_for_path(project_root).expect("bootstrap index");
+    }
+    assert_eq!(
+        process_console
+            .snapshot_kind(ProcessKind::IndexRunner)
+            .len(),
+        runner_banners_before,
+        "startup / FrontendReady admission must synchronously emit zero runner spawn banners"
+    );
 
     assert!(
         worktree_root.join("meta.json").exists(),
-        "worktree meta should survive bootstrap cleanup"
+        "startup admission must not mutate worktree metadata"
     );
     assert!(
-        !worktree_root.join("specs").exists(),
-        "bootstrap should remove legacy worktree specs dir"
+        worktree_root.join("specs").exists(),
+        "startup admission must not mutate legacy worktree specs before the broker owns a job"
     );
     assert!(
-        !worktree_root.join("manifest-specs.json").exists(),
-        "bootstrap should remove legacy worktree specs manifest"
+        worktree_root.join("manifest-specs.json").exists(),
+        "startup admission must not mutate the legacy specs manifest"
     );
     assert!(
-        !legacy_worktree_index.exists(),
-        "bootstrap should remove legacy $WORKTREE/.gwt/index"
+        legacy_worktree_index.exists(),
+        "startup admission must not remove legacy $WORKTREE/.gwt/index"
     );
     assert!(
-        !orphan.exists(),
-        "bootstrap should remove orphan worktree index"
+        orphan.exists(),
+        "startup admission must leave orphan cleanup to the admitted broker owner"
     );
 
-    let calls = spawner
-        .calls
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runner_argv = fs::read(&runner_log).expect("read runner log");
+    assert!(
+        runner_argv.is_empty(),
+        "startup must submit to the refresh broker instead of spawning any runner: {}",
+        String::from_utf8_lossy(&runner_argv)
+    );
+
+    let broker = RefreshBroker::open_default().expect("open default refresh broker");
+    let expected_base = RefreshTarget::base(
+        repo_hash.as_str(),
+        [RefreshScope::Files, RefreshScope::FilesDocs],
+    );
+    let snapshot = broker.inspect().expect("inspect refresh broker");
+    let targets = snapshot
+        .targets()
+        .iter()
+        .map(|state| state.target())
+        .collect::<Vec<_>>();
     assert_eq!(
-        calls.len(),
-        1,
-        "source cache fingerprint mismatch should kick one issue rebuild"
+        targets,
+        vec![&expected_base],
+        "main plus N linked worktrees must coalesce to one canonical base target and no overlays"
+    );
+    assert_eq!(snapshot.target_count(), 1, "distinct target count");
+    assert!(
+        snapshot.queue_depth() <= 1,
+        "startup queue must remain bounded by the one distinct base target"
+    );
+    assert_eq!(
+        snapshot.running_count(),
+        0,
+        "startup admission must not start model work synchronously"
+    );
+    let pending = snapshot
+        .target(&expected_base)
+        .expect("startup base target snapshot");
+    assert_eq!(pending.state(), RefreshTargetState::Quiet);
+    assert_eq!(pending.priority(), JobPriority::Background);
+    assert!(
+        pending.quiet_deadline_millis().is_some(),
+        "startup admission must retain a background quiet deadline"
     );
     assert!(
-        calls[0].contains(repo_hash.as_str()),
-        "rebuild must target the resolved repo hash, got {:?}",
-        *calls
+        broker
+            .claim_next()
+            .expect("probe quiet startup target")
+            .is_none(),
+        "startup target must not be claimable before the quiet period expires"
     );
+
+    // Elevate the quiet startup intent, acquire its real durable claim, and
+    // pass ownership into the maintenance boundary. Cleanup must happen only
+    // after this owner transition, and stale issue state must not escape the
+    // broker by invoking RunnerSpawner directly.
+    broker
+        .submit(RefreshIntent {
+            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+            target: expected_base.clone(),
+            desired_epoch: pending.desired_epoch(),
+            desired_snapshot: pending.desired_snapshot().to_string(),
+            priority: JobPriority::ManualRebuild,
+            reason: RefreshReason::Manual,
+            resource_class: RefreshResourceClass::Embedding,
+        })
+        .expect("promote startup target for owner execution");
+    let claim = broker
+        .claim_next()
+        .expect("claim promoted startup target")
+        .expect("promoted startup target must have one owner");
+    let spawner = RecordingSpawner::default();
+    execute_claimed_project_index_refresh_with(claim, &wt_a, &index_root, &spawner)
+        .expect("execute claimed index maintenance");
+    let completed = broker.inspect().expect("inspect completed startup owner");
+    assert_eq!(completed.running_count(), 0);
+    let completed_target = completed
+        .target(&expected_base)
+        .expect("completed startup base target");
+    assert_eq!(completed_target.state(), RefreshTargetState::Ready);
+    assert_eq!(completed_target.follow_up_count(), 0);
     assert!(
-        call_project_root_matches(&calls[0], &wt),
-        "rebuild should use the requested worktree path, got {:?}",
-        *calls
+        spawner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "broker-owned maintenance must not retain a direct issue runner escape hatch"
     );
-    assert!(
-        calls[0].ends_with("|false"),
-        "startup rebuild should bypass index TTL after cache source mismatch, got {:?}",
-        *calls
-    );
+    assert!(!worktree_root.join("specs").exists());
+    assert!(!worktree_root.join("manifest-specs.json").exists());
+    assert!(!legacy_worktree_index.exists());
+    assert!(!orphan.exists());
 }
 
 #[test]
@@ -178,7 +303,7 @@ fn bootstrap_preserves_repo_scoped_memory_index_directory() {
     init_git_repo(&repo);
     add_origin(&repo, "https://github.com/example/project.git");
     commit_file(&repo, "README.md", "# repo\n");
-    add_worktree(&repo, &wt);
+    add_worktree(&repo, &wt, "feature/shared");
 
     let repo_hash = detect_repo_hash(&repo).expect("repo hash");
     let index_root = tmp.path().join("index");
@@ -187,8 +312,11 @@ fn bootstrap_preserves_repo_scoped_memory_index_directory() {
     fs::write(memory_dir.join("chroma.sqlite3"), "fake-db").expect("write memory db");
     fs::write(memory_dir.join("meta.json"), r#"{"schema_version":1}"#).expect("write memory meta");
 
+    let broker = RefreshBroker::open(index_root.join("refresh-broker"), Duration::from_secs(30))
+        .expect("open refresh broker");
     let spawner = RecordingSpawner::default();
-    bootstrap_project_index_for_path_with(&wt, &index_root, &spawner).expect("bootstrap index");
+    bootstrap_project_index_for_path_with_broker(&wt, &index_root, &broker, &spawner)
+        .expect("bootstrap index");
 
     assert!(
         memory_dir.join("chroma.sqlite3").exists(),
@@ -300,15 +428,121 @@ fn default_rebuild_runner_waits_for_host_wide_heavy_lease() {
     );
 }
 
-fn call_project_root_matches(call: &str, expected: &Path) -> bool {
-    let Some(actual) = call.split('|').nth(1) else {
-        return false;
-    };
-    normalize_path(actual) == normalize_path(expected)
-}
+/// T-IDX-431 review regression: file-index-v2 reports action failures in its
+/// JSON payload while intentionally retaining exit status 0. The owner must
+/// publish that structured failure through the coordinator so an equivalent
+/// joined rebuild cannot observe a false `Completed` outcome.
+#[cfg(unix)]
+#[test]
+fn default_rebuild_runner_propagates_structured_file_failure_to_joiner() {
+    use gwt_core::index_coordinator::{IndexCoordinator, TargetKey};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
 
-fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
-    dunce::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf())
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let _home = ScopedEnvVar::set("HOME", &home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+    add_origin(&repo, "https://github.com/example/structured-failure.git");
+    commit_file(&repo, "README.md", "# repo\n");
+
+    let runner_log = tmp.path().join("runner-log.txt");
+    let runner_started = tmp.path().join("runner-started");
+    let runner_release = tmp.path().join("runner-release");
+    let _runner_log_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_LOG", &runner_log);
+    let _runner_started_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_STARTED", &runner_started);
+    let _runner_release_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_RELEASE", &runner_release);
+    let python = gwt_core::runtime::project_index_python_path();
+    fs::create_dir_all(python.parent().expect("python parent")).expect("create venv dir");
+    fs::write(
+        &python,
+        "#!/bin/sh\n\
+echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
+: > \"$GWT_FAKE_RUNNER_STARTED\"\n\
+while [ ! -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; do sleep 0.01; done\n\
+printf '{\"ok\":false,\"error_code\":\"PUBLISH_FAILED\",\"error\":\"marker fsync failed\"}\\n'\n",
+    )
+    .expect("write fake python");
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod fake python");
+
+    let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+    let worktree_hash = compute_worktree_hash(&repo).expect("worktree hash");
+    let coordinator = IndexCoordinator::open(gwt_core::index_coordinator::coordinator_root())
+        .expect("open coordinator");
+    let key = TargetKey::worktree(repo_hash.as_str(), "files", worktree_hash.as_str());
+
+    let owner_repo = repo.clone();
+    let owner = std::thread::spawn(move || {
+        gwt::default_rebuild_runner(
+            &owner_repo,
+            gwt::index_worker::IndexRebuildScope::Files,
+            None,
+        )
+    });
+    let started_deadline = Instant::now() + Duration::from_secs(10);
+    while !runner_started.exists() {
+        assert!(
+            Instant::now() < started_deadline,
+            "owner runner never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let joiner_repo = repo.clone();
+    let joiner = std::thread::spawn(move || {
+        gwt::default_rebuild_runner(
+            &joiner_repo,
+            gwt::index_worker::IndexRebuildScope::Files,
+            None,
+        )
+    });
+    let waiter_deadline = Instant::now() + Duration::from_secs(10);
+    while fs::read_dir(coordinator.target_waiters_dir(&key))
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
+        == 0
+    {
+        assert!(
+            Instant::now() < waiter_deadline,
+            "equivalent rebuild never joined the owner"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(&runner_release, b"release").expect("release fake runner");
+
+    let owner_error = owner
+        .join()
+        .expect("join owner")
+        .expect_err("structured owner failure must propagate");
+    let joiner_error = joiner
+        .join()
+        .expect("join joiner")
+        .expect_err("joined caller must observe failed outcome");
+    for error in [&owner_error, &joiner_error] {
+        assert!(
+            error.contains("PUBLISH_FAILED"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("marker fsync failed"),
+            "unexpected error: {error}"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&runner_log)
+            .expect("runner log")
+            .lines()
+            .count(),
+        1,
+        "equivalent rebuilds must share one runner invocation"
+    );
 }
 
 fn init_git_repo(path: &Path) {
@@ -367,15 +601,9 @@ fn commit_file(path: &Path, name: &str, body: &str) {
     );
 }
 
-fn add_worktree(repo: &Path, worktree: &Path) {
+fn add_worktree(repo: &Path, worktree: &Path, branch: &str) {
     let output = hidden_command("git")
-        .args([
-            "worktree",
-            "add",
-            "-b",
-            "feature/shared",
-            worktree.to_str().unwrap(),
-        ])
+        .args(["worktree", "add", "-b", branch, worktree.to_str().unwrap()])
         .current_dir(repo)
         .output()
         .expect("git worktree add");

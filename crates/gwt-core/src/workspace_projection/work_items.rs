@@ -320,6 +320,24 @@ impl WorkItemsProjection {
     }
 
     pub fn apply_event(&mut self, event: WorkEvent) -> WorkEventApplyOutcome {
+        self.apply_event_inner(event, false)
+    }
+
+    /// Apply one event inside an already globally ordered bulk fold.
+    ///
+    /// The caller must invoke [`Self::finalize_event_batch`] exactly once
+    /// after the batch. Deferring only derived-summary synthesis and stable
+    /// collection sorting keeps the state transition semantics identical
+    /// while avoiding a full growing-history rescan for every event.
+    pub(crate) fn apply_event_for_batch(&mut self, event: WorkEvent) -> WorkEventApplyOutcome {
+        self.apply_event_inner(event, true)
+    }
+
+    fn apply_event_inner(
+        &mut self,
+        event: WorkEvent,
+        defer_derived_and_sort: bool,
+    ) -> WorkEventApplyOutcome {
         let existing_index = self
             .work_items
             .iter()
@@ -398,7 +416,10 @@ impl WorkItemsProjection {
                 }
             }
             item.events.push(event);
-            refresh_work_item_progress_summary(item);
+            if !defer_derived_and_sort {
+                item.events.sort_by_key(|event| event.updated_at);
+                refresh_work_item_progress_summary(item);
+            }
             return WorkEventApplyOutcome::Applied;
         }
         if let Some(title) = non_empty_clone(event.title.as_deref()) {
@@ -494,14 +515,27 @@ impl WorkItemsProjection {
         }
         let event_updated_at = event.updated_at;
         item.events.push(event);
-        item.events.sort_by_key(|event| event.updated_at);
-        refresh_work_item_progress_summary(item);
+        if !defer_derived_and_sort {
+            item.events.sort_by_key(|event| event.updated_at);
+            refresh_work_item_progress_summary(item);
+        }
         if event_updated_at > self.updated_at {
             self.updated_at = event_updated_at;
         }
+        if !defer_derived_and_sort {
+            self.work_items
+                .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+        }
+        WorkEventApplyOutcome::Applied
+    }
+
+    pub(crate) fn finalize_event_batch(&mut self) {
+        for item in &mut self.work_items {
+            item.events.sort_by_key(|event| event.updated_at);
+            refresh_work_item_progress_summary(item);
+        }
         self.work_items
             .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
-        WorkEventApplyOutcome::Applied
     }
 
     pub(crate) fn would_reject_session_attach(&self, event: &WorkEvent) -> bool {
@@ -520,8 +554,63 @@ impl WorkItemsProjection {
                     existing_index,
                     session_id,
                     event.execution_container.as_ref(),
-                )
+                ) || (event.kind == WorkEventKind::Claim
+                    && work_session_claims_same_container_duplicate(
+                        &self.work_items,
+                        existing_index,
+                        session_id,
+                        event.execution_container.as_ref(),
+                    ))
             })
+    }
+
+    /// Issue #3684 AC-2: remove this session's *claim-provenance* refs from
+    /// same-container duplicates of the canonical Work. Fail-closed
+    /// boundaries: the canonical Work must exist, be incomplete, and hold the
+    /// session itself; refs with any other provenance, and duplicates whose
+    /// containers are not fully covered by the canonical containers, are
+    /// preserved. Terminal duplicates are healed too — a discarded duplicate
+    /// otherwise pins the poisoned session forever. Returns the healed ids.
+    pub fn detach_same_container_duplicate_claims(
+        &mut self,
+        session_id: &str,
+        canonical_id: &str,
+    ) -> Vec<String> {
+        let Some(canonical) = self
+            .work_items
+            .iter()
+            .find(|item| item.id == canonical_id)
+            .filter(|item| item.is_incomplete())
+            .filter(|item| {
+                item.agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+            })
+        else {
+            return Vec::new();
+        };
+        let canonical_containers = canonical.execution_containers.clone();
+        let mut healed = Vec::new();
+        for item in &mut self.work_items {
+            if item.id == canonical_id
+                || item.execution_containers.is_empty()
+                || !item.execution_containers.iter().all(|container| {
+                    canonical_containers.iter().any(|canonical_container| {
+                        workspace_execution_container_same(canonical_container, container)
+                    })
+                })
+            {
+                continue;
+            }
+            let before = item.agents.len();
+            item.agents.retain(|agent| {
+                agent.session_id != session_id || agent.attached_by != Some(WorkEventKind::Claim)
+            });
+            if item.agents.len() != before {
+                healed.push(item.id.clone());
+            }
+        }
+        healed
     }
 
     pub fn refresh_derived_progress_summaries(&mut self) {
@@ -556,12 +645,22 @@ fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
     })
 }
 
-fn workspace_execution_container_same(
+pub(crate) fn workspace_execution_container_same(
     left: &WorkspaceExecutionContainerRef,
     right: &WorkspaceExecutionContainerRef,
 ) -> bool {
+    // Issue #3524 (folded into #3606): a checked-out path is the strongest
+    // identity a container has. Two views of one origin can each hold a
+    // worktree on the same branch name, and matching on the branch alone
+    // collapses them into one row — the second worktree then has no container
+    // anywhere, so prune / UI / launch can never reach it. Before #3466 the
+    // split project stores hid this; consolidating them makes it reachable.
+    // Only two *known and different* paths prove two containers, so a
+    // path-less container still merges into the branch it names.
+    if let (Some(left_path), Some(right_path)) = (&left.worktree_path, &right.worktree_path) {
+        return left_path == right_path;
+    }
     (left.branch.is_some() && left.branch == right.branch)
-        || (left.worktree_path.is_some() && left.worktree_path == right.worktree_path)
         || (left.pr_number.is_some() && left.pr_number == right.pr_number)
         || (left.pr_url.is_some() && left.pr_url == right.pr_url)
 }
@@ -599,6 +698,45 @@ fn work_session_attach_conflicts(
                 .iter()
                 .any(|agent| agent.session_id == session_id)
             && work_container_identities_conflict(&other.execution_containers, &target_containers)
+    })
+}
+
+/// Issue #3684: true when a Claim event would attach `session_id` to a Work
+/// while the session already holds an attach on a *different* incomplete Work
+/// whose container identity is the same (a same-container duplicate). Such a
+/// claim is the similarity-join poison: it double-attaches the session and
+/// makes `workspace.ensure` fail-closed forever. Replay-shaped kinds
+/// (Resume / Backfill / Update) keep the historical attach behavior.
+fn work_session_claims_same_container_duplicate(
+    work_items: &[WorkItem],
+    target_index: Option<usize>,
+    session_id: &str,
+    event_container: Option<&WorkspaceExecutionContainerRef>,
+) -> bool {
+    let target_containers: Vec<&WorkspaceExecutionContainerRef> = if event_container.is_some() {
+        event_container.into_iter().collect()
+    } else {
+        target_index
+            .and_then(|index| work_items.get(index))
+            .into_iter()
+            .flat_map(|item| item.execution_containers.iter())
+            .collect()
+    };
+    if target_containers.is_empty() {
+        return false;
+    }
+    work_items.iter().enumerate().any(|(index, other)| {
+        Some(index) != target_index
+            && other.is_incomplete()
+            && other
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == session_id)
+            && other.execution_containers.iter().any(|owned| {
+                target_containers
+                    .iter()
+                    .any(|target| workspace_execution_container_same(owned, target))
+            })
     })
 }
 
@@ -892,6 +1030,186 @@ mod tests {
             progress.contains("User confirmed the Project Tabs UX"),
             "{progress}"
         );
+    }
+
+    #[test]
+    fn batch_apply_defers_derived_progress_until_one_finalization() {
+        let work_item_id = "test-item-batch-progress";
+        let started_at = Utc.with_ymd_and_hms(2026, 7, 28, 10, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(started_at);
+
+        for index in 0..256 {
+            let mut event = WorkEvent::new(
+                if index == 0 {
+                    WorkEventKind::Start
+                } else {
+                    WorkEventKind::Update
+                },
+                work_item_id,
+                started_at + chrono::Duration::seconds(index),
+            );
+            event.title = (index == 0).then(|| "Batch progress".to_string());
+            event.summary = Some(format!("Completed batch step {index}"));
+            assert_eq!(
+                projection.apply_event_for_batch(event),
+                WorkEventApplyOutcome::Applied
+            );
+        }
+
+        let pending = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("pending work");
+        assert_eq!(
+            pending.progress_summary, None,
+            "batch apply must not rescan the growing event history per event"
+        );
+
+        projection.finalize_event_batch();
+
+        let finalized = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("finalized work");
+        let progress = finalized
+            .progress_summary
+            .as_deref()
+            .expect("batch finalization synthesizes progress");
+        assert!(progress.contains("Completed batch step 255"), "{progress}");
+        assert_eq!(finalized.events.len(), 256);
+        assert!(
+            finalized
+                .events
+                .windows(2)
+                .all(|events| events[0].updated_at <= events[1].updated_at),
+            "batch finalization restores stable event ordering"
+        );
+    }
+
+    #[test]
+    fn batch_apply_matches_sequential_apply_for_mixed_lifecycle_events() {
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 1, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 2, 0).unwrap();
+        let t4 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 3, 0).unwrap();
+
+        // Seed an existing Work with a newer event so a later incremental
+        // Backfill exercises the same out-of-order history repair as intake.
+        let mut alpha_start = WorkEvent::new(WorkEventKind::Start, "work-alpha", t1);
+        alpha_start.title = Some("Alpha".to_string());
+        alpha_start.execution_container =
+            Some(container_for_test("work/alpha", "/repo/work/alpha"));
+        let mut alpha_update = WorkEvent::new(WorkEventKind::Update, "work-alpha", t3);
+        alpha_update.summary = Some("Alpha is already newer than backfill".to_string());
+
+        let mut sequential = WorkItemsProjection::empty(t1);
+        sequential.apply_event(alpha_start.clone());
+        sequential.apply_event(alpha_update.clone());
+        let mut batched = sequential.clone();
+
+        let mut owner_start = WorkEvent::new(WorkEventKind::Start, "work-owner", t1);
+        owner_start.agent_session_id = Some("session-conflict".to_string());
+        owner_start.execution_container =
+            Some(container_for_test("work/owner", "/repo/work/owner"));
+
+        let mut beta_start = WorkEvent::new(WorkEventKind::Start, "work-beta", t1);
+        beta_start.title = Some("Beta".to_string());
+        beta_start.agent_session_id = Some("session-beta".to_string());
+        beta_start.execution_container = Some(container_for_test("work/beta", "/repo/work/beta"));
+
+        let mut alpha_backfill = WorkEvent::new(WorkEventKind::Backfill, "work-alpha", t2);
+        alpha_backfill.execution_container = Some(container_for_test(
+            "work/alpha",
+            "/repo/work/alpha-backfill",
+        ));
+
+        let mut beta_done = WorkEvent::new(WorkEventKind::Done, "work-beta", t2);
+        beta_done.status_category = Some(WorkspaceStatusCategory::Done);
+
+        let mut conflicting_attach = WorkEvent::new(WorkEventKind::Update, "work-beta", t2);
+        conflicting_attach.agent_session_id = Some("session-conflict".to_string());
+        conflicting_attach.execution_container =
+            Some(container_for_test("work/beta", "/repo/work/beta"));
+
+        let mut beta_resume = WorkEvent::new(WorkEventKind::Resume, "work-beta", t3);
+        beta_resume.status_category = Some(WorkspaceStatusCategory::Active);
+
+        let mut duplicate_first = WorkEvent::new(WorkEventKind::Start, "work-duplicate", t4);
+        duplicate_first.id = "event-same-time-duplicate".to_string();
+        duplicate_first.execution_container = Some(container_for_test(
+            "work/duplicate",
+            "/repo/work/duplicate-one",
+        ));
+        let mut duplicate_second = duplicate_first.clone();
+        duplicate_second.execution_container = Some(container_for_test(
+            "work/duplicate-copy",
+            "/repo/work/duplicate-two",
+        ));
+
+        let events = vec![
+            owner_start,
+            beta_start,
+            alpha_backfill,
+            beta_done,
+            conflicting_attach,
+            beta_resume,
+            duplicate_first,
+            duplicate_second,
+        ];
+        let sequential_outcomes = events
+            .iter()
+            .cloned()
+            .map(|event| sequential.apply_event(event))
+            .collect::<Vec<_>>();
+        let batched_outcomes = events
+            .into_iter()
+            .map(|event| batched.apply_event_for_batch(event))
+            .collect::<Vec<_>>();
+        batched.finalize_event_batch();
+
+        assert_eq!(
+            batched_outcomes, sequential_outcomes,
+            "batch application must preserve acceptance and session-conflict decisions"
+        );
+        assert_eq!(
+            batched, sequential,
+            "one batch finalization must produce the exact sequential projection"
+        );
+
+        let alpha = batched
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-alpha")
+            .expect("alpha");
+        assert!(
+            alpha
+                .events
+                .windows(2)
+                .all(|events| events[0].updated_at <= events[1].updated_at),
+            "incremental Backfill history remains chronological"
+        );
+        let beta = batched
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-beta")
+            .expect("beta");
+        assert_eq!(beta.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(beta.completed_at, None);
+        assert!(
+            beta.agents
+                .iter()
+                .all(|agent| agent.session_id != "session-conflict"),
+            "the conflicting session attach remains rejected"
+        );
+        let duplicate = batched
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-duplicate")
+            .expect("same-time duplicate");
+        assert_eq!(duplicate.events.len(), 2);
+        assert_eq!(duplicate.execution_containers.len(), 2);
     }
 
     #[test]
@@ -1374,5 +1692,228 @@ mod tests {
         let agent: WorkAgentRef = serde_json::from_str(json).expect("deserialize legacy ref");
         assert_eq!(agent.attached_by, None);
         assert_eq!(agent.session_id, "s");
+    }
+
+    /// Issue #3684: a session already attached to one Work must not gain a
+    /// second attach through a Claim event on a *same-container* sibling Work
+    /// (the similarity-join poison observed on work/issue-3287: canonical
+    /// start attach at launch, stale duplicate claimed 52s later, ensure then
+    /// fail-closed forever).
+    #[test]
+    fn apply_event_rejects_same_container_duplicate_claim() {
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 18, 10).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let container = container_for_test("work/issue-3287", "/repo/work/issue-3287");
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        start.agent_session_id = Some("session-victim".to_string());
+        start.execution_container = Some(container.clone());
+        assert_eq!(
+            projection.apply_event(start),
+            WorkEventApplyOutcome::Applied
+        );
+
+        // Stale duplicate of the same container, created by an older id scheme.
+        let mut stale = WorkEvent::new(WorkEventKind::Update, "work-duplicate", t0);
+        stale.agent_session_id = Some("session-old".to_string());
+        stale.title = Some("Issue #3287 の実装".to_string());
+        stale.execution_container = Some(container.clone());
+        assert_eq!(
+            projection.apply_event(stale),
+            WorkEventApplyOutcome::Applied
+        );
+        let before = projection.clone();
+
+        let mut claim = WorkEvent::new(WorkEventKind::Claim, "work-duplicate", t1);
+        claim.agent_session_id = Some("session-victim".to_string());
+        claim.execution_container = Some(container);
+        assert_eq!(
+            projection.apply_event(claim),
+            WorkEventApplyOutcome::RejectedSessionConflict
+        );
+        assert_eq!(projection, before);
+    }
+
+    /// Issue #3684 contract guard: the duplicate-claim rejection is scoped to
+    /// same-container siblings. Claims onto a different container (cross-work
+    /// collaboration) and first-time claims keep attaching.
+    #[test]
+    fn apply_event_allows_claim_to_other_container_or_first_attach() {
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
+        start.agent_session_id = Some("session-shared".to_string());
+        start.execution_container = Some(container_for_test("work/same", "/repo/work/same"));
+        projection.apply_event(start);
+
+        let mut foreign = WorkEvent::new(WorkEventKind::Start, "work-foreign", t0);
+        foreign.agent_session_id = Some("session-other".to_string());
+        foreign.execution_container = Some(container_for_test("work/other", "/repo/work/other"));
+        projection.apply_event(foreign);
+
+        // Cross-container claims are already rejected by the Issue #3216
+        // identity guard, so collaboration targets are identity-less items.
+        let mut collab = WorkEvent::new(WorkEventKind::Claim, "work-session-collab", t0);
+        collab.agent_session_id = Some("session-shared".to_string());
+        assert_eq!(
+            projection.apply_event(collab),
+            WorkEventApplyOutcome::Applied
+        );
+
+        // First attach of a fresh session via Claim stays allowed.
+        let mut first = WorkEvent::new(WorkEventKind::Claim, "work-owner", t0);
+        first.agent_session_id = Some("session-fresh".to_string());
+        first.execution_container = Some(container_for_test("work/same", "/repo/work/same"));
+        assert_eq!(
+            projection.apply_event(first),
+            WorkEventApplyOutcome::Applied
+        );
+    }
+
+    /// Issue #3684 AC-2: `detach_same_container_duplicate_claims` removes the
+    /// poisoned claim-provenance ref from same-container duplicates of the
+    /// canonical Work — and nothing else.
+    #[test]
+    fn detach_same_container_duplicate_claims_removes_only_the_poisoned_ref() {
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+        let container = container_for_test("work/issue-3287", "/repo/work/issue-3287");
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        start.agent_session_id = Some("session-victim".to_string());
+        start.execution_container = Some(container.clone());
+        projection.apply_event(start);
+
+        let mut stale = WorkEvent::new(WorkEventKind::Update, "work-duplicate", t0);
+        stale.agent_session_id = Some("session-old".to_string());
+        stale.execution_container = Some(container);
+        projection.apply_event(stale);
+
+        // Simulate the pre-fix poisoned store: the claim ref already exists.
+        let duplicate = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == "work-duplicate")
+            .expect("duplicate item");
+        duplicate.agents.push(WorkAgentRef {
+            session_id: "session-victim".to_string(),
+            agent_id: Some("claude".to_string()),
+            display_name: Some("Claude Code".to_string()),
+            updated_at: t0,
+            attached_by: Some(WorkEventKind::Claim),
+        });
+
+        let healed =
+            projection.detach_same_container_duplicate_claims("session-victim", "work-canonical");
+        assert_eq!(healed, vec!["work-duplicate".to_string()]);
+
+        let duplicate = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-duplicate")
+            .expect("duplicate item");
+        assert!(
+            !duplicate
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-victim"),
+            "poisoned claim ref must be removed"
+        );
+        assert!(
+            duplicate
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-old"),
+            "unrelated session refs must be kept"
+        );
+        let canonical = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-canonical")
+            .expect("canonical item");
+        assert!(
+            canonical
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-victim"),
+            "canonical start attach must be kept"
+        );
+        // Idempotent: a second heal finds nothing.
+        assert!(projection
+            .detach_same_container_duplicate_claims("session-victim", "work-canonical")
+            .is_empty());
+    }
+
+    /// Issue #3684 AC-2 fail-closed boundary: refs that are not
+    /// claim-provenance, or that live on a different container, are never
+    /// healed away.
+    #[test]
+    fn detach_same_container_duplicate_claims_keeps_non_claim_and_foreign_refs() {
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+        let container = container_for_test("work/issue-3287", "/repo/work/issue-3287");
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        start.agent_session_id = Some("session-victim".to_string());
+        start.execution_container = Some(container.clone());
+        projection.apply_event(start);
+
+        // Same container, but the session ref is start-provenance (a genuine
+        // historical home, not a similarity-claim poison).
+        let mut sibling = WorkEvent::new(WorkEventKind::Update, "work-sibling", t0);
+        sibling.agent_session_id = Some("session-old".to_string());
+        sibling.execution_container = Some(container);
+        projection.apply_event(sibling);
+        projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == "work-sibling")
+            .expect("sibling item")
+            .agents
+            .push(WorkAgentRef {
+                session_id: "session-victim".to_string(),
+                agent_id: None,
+                display_name: None,
+                updated_at: t0,
+                attached_by: Some(WorkEventKind::Start),
+            });
+
+        // Claim ref on a different container: not a duplicate of canonical.
+        let mut foreign = WorkEvent::new(WorkEventKind::Update, "work-foreign", t0);
+        foreign.agent_session_id = Some("session-other".to_string());
+        foreign.execution_container = Some(container_for_test("work/other", "/repo/work/other"));
+        projection.apply_event(foreign);
+        projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == "work-foreign")
+            .expect("foreign item")
+            .agents
+            .push(WorkAgentRef {
+                session_id: "session-victim".to_string(),
+                agent_id: None,
+                display_name: None,
+                updated_at: t0,
+                attached_by: Some(WorkEventKind::Claim),
+            });
+
+        assert!(projection
+            .detach_same_container_duplicate_claims("session-victim", "work-canonical")
+            .is_empty());
+        for id in ["work-sibling", "work-foreign"] {
+            assert!(
+                projection
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == id)
+                    .expect("item")
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == "session-victim"),
+                "{id} ref must be kept"
+            );
+        }
     }
 }

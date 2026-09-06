@@ -88,7 +88,10 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
     if !ref_exists(repo_path, branch)? {
         return Ok(false);
     }
+    is_branch_merged_into_existing_refs(repo_path, branch, base)
+}
 
+fn is_branch_merged_into_existing_refs(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
     let output = gwt_core::process::run_git_logged(&["cherry", base, branch], Some(repo_path))
         .map_err(|e| GwtError::Git(format!("cherry: {e}")))?;
 
@@ -230,10 +233,57 @@ pub fn cleanup_readiness_base_target(
     Ok(None)
 }
 
+/// Resolves cleanup readiness using a bulk ref snapshot captured by the
+/// caller. Unlike [`cleanup_readiness_base_target`], this path never probes
+/// branch/base existence with per-ref `git rev-parse` processes. It is used by
+/// the Workspace background refresh, where historical Work rows can outnumber
+/// live branches by hundreds.
+///
+/// `known_refs` contains short names from
+/// [`crate::refs::branch_tip_committer_times`] such as `work/x` and
+/// `origin/develop`.
+pub fn cleanup_readiness_base_target_with_known_refs(
+    repo_path: &Path,
+    branch: &str,
+    known_refs: &HashSet<String>,
+) -> Result<Option<CleanupReadinessTarget>> {
+    if is_protected_branch(branch) || !known_refs.contains(branch) {
+        return Ok(None);
+    }
+    for (base, target) in CANONICAL_BASE_BRANCHES {
+        let refname = format!("origin/{base}");
+        if !known_refs.contains(&refname) {
+            continue;
+        }
+        let target_ref = MergeTargetRef::new(*target, refname.clone());
+        if is_branch_merged_into_existing_refs(repo_path, branch, &refname)? {
+            return Ok(Some(CleanupReadinessTarget {
+                target: target_ref,
+                reason: CleanupReadinessReason::Merged,
+            }));
+        }
+        if branch_has_no_changes_against_existing_refs(repo_path, branch, &refname)? {
+            return Ok(Some(CleanupReadinessTarget {
+                target: target_ref,
+                reason: CleanupReadinessReason::NoChanges,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn branch_has_no_changes_against_base(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
     if !ref_exists(repo_path, base)? || !ref_exists(repo_path, branch)? {
         return Ok(false);
     }
+    branch_has_no_changes_against_existing_refs(repo_path, branch, base)
+}
+
+fn branch_has_no_changes_against_existing_refs(
+    repo_path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<bool> {
     let range = format!("{base}...{branch}");
     if git_diff_quiet(repo_path, &range, None)? {
         return Ok(true);
@@ -908,6 +958,62 @@ mod tests {
         let readiness = cleanup_readiness_base_target(repo, "work/same-tree")
             .unwrap()
             .expect("same final tree branch is cleanup-ready");
+
+        assert_eq!(readiness.reason, CleanupReadinessReason::NoChanges);
+        assert_eq!(readiness.target.reference, "origin/develop");
+    }
+
+    #[test]
+    fn cleanup_readiness_with_known_refs_skips_missing_historical_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+        let known_refs = HashSet::from(["develop".to_string(), "origin/develop".to_string()]);
+
+        assert!(
+            cleanup_readiness_base_target_with_known_refs(
+                repo,
+                "work/deleted-history",
+                &known_refs,
+            )
+            .unwrap()
+            .is_none(),
+            "a deleted historical branch must be rejected from the in-memory ref snapshot"
+        );
+    }
+
+    #[test]
+    fn cleanup_readiness_with_known_refs_preserves_no_changes_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        make_commit(repo, "a.txt", "base\n", "feat: base");
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+        run(&["checkout", "-b", "work/no-changes-fast", "develop"], repo);
+        make_commit(repo, "a.txt", "changed\n", "feat: temporary change");
+        make_commit(repo, "a.txt", "base\n", "revert: temporary change");
+        let known_refs = HashSet::from([
+            "develop".to_string(),
+            "origin/develop".to_string(),
+            "work/no-changes-fast".to_string(),
+        ]);
+
+        let readiness = cleanup_readiness_base_target_with_known_refs(
+            repo,
+            "work/no-changes-fast",
+            &known_refs,
+        )
+        .unwrap()
+        .expect("known branch with an empty effective diff remains cleanup-ready");
 
         assert_eq!(readiness.reason, CleanupReadinessReason::NoChanges);
         assert_eq!(readiness.target.reference, "origin/develop");

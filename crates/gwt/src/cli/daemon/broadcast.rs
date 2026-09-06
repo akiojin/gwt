@@ -24,10 +24,14 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use gwt_core::daemon::DaemonFrame;
+use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 
 /// Default per-channel capacity. 64 is enough headroom for a burst of
@@ -112,6 +116,19 @@ pub(crate) struct IssueMonitorControlRequest {
     completion: IssueMonitorControlCompletion,
 }
 
+/// Connection-bound proof that one GUI subscriber can materialize Issue
+/// Monitor deliveries. Dropping the guard revokes presence even when ordinary
+/// observers remain subscribed to the same broadcast channels.
+pub(crate) struct IssueMonitorMaterializerLease {
+    count: Arc<AtomicUsize>,
+}
+
+impl Drop for IssueMonitorMaterializerLease {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl IssueMonitorControlRequest {
     #[cfg(test)]
     pub(crate) fn frame(&self) -> &DaemonFrame {
@@ -144,6 +161,8 @@ impl IssueMonitorControlRequest {
 pub struct BroadcastHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<DaemonFrame>>>>,
     issue_monitor_controls: Arc<IssueMonitorControlQueue>,
+    issue_monitor_status: Arc<Mutex<Option<Value>>>,
+    issue_monitor_materializers: Arc<AtomicUsize>,
 }
 
 impl Default for BroadcastHub {
@@ -151,6 +170,8 @@ impl Default for BroadcastHub {
         Self {
             channels: Arc::new(Mutex::new(HashMap::new())),
             issue_monitor_controls: Arc::new(IssueMonitorControlQueue::new()),
+            issue_monitor_status: Arc::new(Mutex::new(None)),
+            issue_monitor_materializers: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -168,6 +189,22 @@ impl BroadcastHub {
             .entry(channel.to_string())
             .or_insert_with(|| broadcast::channel(DEFAULT_CHANNEL_CAPACITY).0);
         sender.subscribe()
+    }
+
+    pub(crate) fn acquire_issue_monitor_materializer(&self) -> IssueMonitorMaterializerLease {
+        self.issue_monitor_materializers
+            .fetch_add(1, Ordering::SeqCst);
+        IssueMonitorMaterializerLease {
+            count: Arc::clone(&self.issue_monitor_materializers),
+        }
+    }
+
+    pub(crate) fn issue_monitor_materializer_connected(&self) -> bool {
+        self.issue_monitor_materializer_count() > 0
+    }
+
+    pub(crate) fn issue_monitor_materializer_count(&self) -> usize {
+        self.issue_monitor_materializers.load(Ordering::SeqCst)
     }
 
     /// Claim the sole lossless Issue Monitor control receiver. Until the
@@ -206,6 +243,56 @@ impl BroadcastHub {
         self.issue_monitor_controls
             .state
             .send_replace(IssueMonitorControlState::Closed);
+        *self
+            .issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned") = None;
+    }
+
+    /// Replace the daemon-owned atomic projection consumed by agent status
+    /// requests. The worker calls this from the same immutable monitor borrow
+    /// used for frontend status/inbox publication.
+    pub(crate) fn set_issue_monitor_status(&self, status: Value) {
+        *self
+            .issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned") = Some(status);
+    }
+
+    /// Read the latest projection only while the Issue Monitor worker is the
+    /// live control authority. Recovery-blocked workers retain their GUI
+    /// diagnostics, but must fail closed for agent status requests.
+    pub(crate) fn issue_monitor_status(&self) -> Option<Value> {
+        if !matches!(
+            *self.issue_monitor_controls.state.borrow(),
+            IssueMonitorControlState::Ready
+        ) {
+            return None;
+        }
+        self.issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned")
+            .clone()
+    }
+
+    /// Wait until worker startup resolves before serving an agent status
+    /// request. The daemon socket can accept connections while the Issue
+    /// Monitor worker is still loading its durable state; exposing `None` in
+    /// that window makes a healthy live daemon look unavailable.
+    pub(crate) async fn wait_for_issue_monitor_status(&self) -> Option<Value> {
+        let mut state = self.issue_monitor_controls.state.subscribe();
+        loop {
+            match *state.borrow() {
+                IssueMonitorControlState::Starting => {}
+                IssueMonitorControlState::Ready => return self.issue_monitor_status(),
+                IssueMonitorControlState::RecoveryBlocked | IssueMonitorControlState::Closed => {
+                    return None;
+                }
+            }
+            if state.changed().await.is_err() {
+                return None;
+            }
+        }
     }
 
     /// Admit one command and await its durable completion receipt. Successful
@@ -300,14 +387,6 @@ impl BroadcastHub {
         }
     }
 
-    pub(crate) fn receiver_count(&self, channel: &str) -> usize {
-        let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
-        guard
-            .get(channel)
-            .map(tokio::sync::broadcast::Sender::receiver_count)
-            .unwrap_or(0)
-    }
-
     /// Number of distinct channels currently tracked. Used by the
     /// daemon's status snapshot frame and by tests.
     pub(crate) fn channel_count(&self) -> usize {
@@ -320,6 +399,8 @@ impl BroadcastHub {
 
 #[cfg(test)]
 mod tests {
+    use std::{future::Future, task::Poll};
+
     use gwt_core::daemon::DaemonFrame;
     use serde_json::json;
     use tokio::sync::broadcast::error::TryRecvError;
@@ -343,6 +424,24 @@ mod tests {
             2,
             "second subscribe to existing channel must reuse the sender"
         );
+    }
+
+    #[test]
+    fn materializer_presence_lease_is_counted_and_released_by_guard_lifetime() {
+        let hub = BroadcastHub::new();
+        assert!(!hub.issue_monitor_materializer_connected());
+
+        let first = hub.acquire_issue_monitor_materializer();
+        assert_eq!(hub.issue_monitor_materializer_count(), 1);
+        let second = hub.acquire_issue_monitor_materializer();
+        assert_eq!(hub.issue_monitor_materializer_count(), 2);
+
+        drop(first);
+        assert!(hub.issue_monitor_materializer_connected());
+        assert_eq!(hub.issue_monitor_materializer_count(), 1);
+        drop(second);
+        assert!(!hub.issue_monitor_materializer_connected());
+        assert_eq!(hub.issue_monitor_materializer_count(), 0);
     }
 
     #[test]
@@ -613,8 +712,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_monitor_status_starting_waits_for_the_ready_projection() {
+        let hub = BroadcastHub::new();
+        let mut status = Box::pin(hub.wait_for_issue_monitor_status());
+
+        let was_pending = std::future::poll_fn(|context| {
+            Poll::Ready(matches!(status.as_mut().poll(context), Poll::Pending))
+        })
+        .await;
+        assert!(
+            was_pending,
+            "a connectable daemon is not status-ready while its worker is Starting"
+        );
+
+        let projection = json!({"queue": []});
+        hub.set_issue_monitor_status(projection.clone());
+        let _receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("projection publication precedes the Ready transition");
+
+        assert_eq!(status.await, Some(projection));
+    }
+
+    #[tokio::test]
     async fn issue_monitor_control_starting_resolves_to_recovery_blocked_or_closed() {
         let recovery_hub = BroadcastHub::new();
+        recovery_hub.set_issue_monitor_status(json!({"queue": []}));
         let recovery_publish = tokio::spawn({
             let hub = recovery_hub.clone();
             async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
@@ -628,6 +751,10 @@ mod tests {
         assert_eq!(
             recovery_error.message(),
             crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+        );
+        assert!(
+            recovery_hub.issue_monitor_status().is_none(),
+            "recovery-blocked worker must not expose a normal agent status projection"
         );
         assert_eq!(
             recovery_hub

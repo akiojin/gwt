@@ -17,10 +17,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 // knowledge-kanban-surface.js; source-pattern asserts scan both files so
 // shared helpers kept in app.js (clamp, createKnowledgeMarkdownBody) and
 // the moved renderers stay covered.
-const appSource = [
-  readFileSync(resolve(here, "../app.js"), "utf8"),
-  readFileSync(resolve(here, "../knowledge-kanban-surface.js"), "utf8"),
-].join("\n");
+const appJs = readFileSync(resolve(here, "../app.js"), "utf8");
+const knowledgeSurfaceSource = readFileSync(
+  resolve(here, "../knowledge-kanban-surface.js"),
+  "utf8",
+);
+const appSource = [appJs, knowledgeSurfaceSource].join("\n");
 const componentsCss = readFileSync(
   resolve(here, "../styles/components.css"),
   "utf8",
@@ -105,6 +107,25 @@ test("app initializes Launch Pending before Knowledge surface construction", () 
   assert.ok(
     launchPendingDeclaration < knowledgeSurfaceConstruction,
     "Knowledge surface wiring must not read launchPending before it is initialized",
+  );
+});
+
+test("Issue/SPEC semantic search uses an OPEN-only direct WebSocket send", () => {
+  const directSend = appJs.match(
+    /function sendKnowledgeSemanticSearchNow\(message\) \{[\s\S]*?\n      \}/,
+  )?.[0];
+  assert.ok(directSend, "expected a dedicated semantic direct-send helper");
+  assert.match(directSend, /activeSocket\.readyState !== WebSocket\.OPEN/);
+  assert.match(directSend, /activeSocket\.send\(JSON\.stringify\(message\)\)/);
+  assert.doesNotMatch(
+    directSend,
+    /pendingMessages|\bsend\(message\)/,
+    "semantic direct send must have no path into the generic pending queue",
+  );
+  assert.match(
+    knowledgeSurfaceSource,
+    /!issueSurface && state\.searching/,
+    "only PR may expose the legacy semantic searching status",
   );
 });
 
@@ -402,7 +423,7 @@ test("Kanban drawer uses the same display labels as the detail pane", () => {
   );
 });
 
-test("Kanban card click keeps the selected item in the right detail pane", () => {
+test("Kanban card click scopes targeted selection to Issue/SPEC and preserves PR full render", () => {
   assert.match(
     appSource,
     /knowledge-detail-pane/,
@@ -410,8 +431,23 @@ test("Kanban card click keeps the selected item in the right detail pane", () =>
   );
   assert.match(
     appSource,
-    /addEventListener\("click"[\s\S]{0,500}?requestKnowledgeDetail[\s\S]{0,500}?renderKnowledgeBridge/,
-    "expected card click to refresh detail inside the split-pane Kanban surface",
+    /addEventListener\("click"[\s\S]{0,500}?requestKnowledgeDetail/,
+    "expected card click to request detail inside the split-pane Kanban surface",
+  );
+  assert.match(
+    appSource,
+    /function renderKnowledgeSelection[\s\S]{0,1600}?renderKnowledgeDetailOnly/,
+    "expected Issue/SPEC selection to update row/card identity and the right pane through a targeted renderer",
+  );
+  assert.match(
+    appSource,
+    /const prBaseline = normalizeKnowledgeKind\(state\.kind\) === "pr";[\s\S]{0,2200}?if \(prBaseline\) \{\s*renderKnowledgeBridge\(windowId\);\s*\} else if \(explicit\) \{\s*renderKnowledgeSelection/,
+    "expected PR selection to retain its baseline full render while Issue/SPEC use the targeted renderer",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /requestKnowledgeDetail\(windowId, state\.kind, entry\.number\);\s*renderKnowledgeBridge/,
+    "the shared click handler must let the kind-aware dispatcher choose full versus targeted rendering",
   );
   assert.doesNotMatch(
     appSource,
@@ -527,6 +563,22 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
     /scheduleKnowledgeRelatedWorkRefresh/,
     "Knowledge windows should expose a cache-first refresh hook for Work/Session changes",
   );
+  const relatedRefreshStart = knowledgeSurfaceSource.indexOf(
+    "function scheduleKnowledgeRelatedWorkRefresh",
+  );
+  const relatedRefreshEnd = knowledgeSurfaceSource.indexOf(
+    "function applyLocalKnowledgeFilter",
+    relatedRefreshStart,
+  );
+  assert.ok(
+    relatedRefreshStart >= 0 && relatedRefreshEnd > relatedRefreshStart,
+    "expected a bounded Related Work refresh scheduler",
+  );
+  assert.match(
+    knowledgeSurfaceSource.slice(relatedRefreshStart, relatedRefreshEnd),
+    /requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)/,
+    "Related Work outcome refreshes must remain cache-first",
+  );
   assert.match(
     appSource,
     /case "active_work_projection":[\s\S]{0,1200}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
@@ -571,5 +623,34 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
     componentsCss,
     /\.knowledge-related-works\b/,
     "expected CSS hook for related Work detail rows",
+  );
+});
+
+test("Issue Related Work Resume shares one canonical operation identity with pending and payload (FR-628)", () => {
+  const resumeStart = knowledgeSurfaceSource.indexOf(
+    "function resumeKnowledgeRelatedSession",
+  );
+  assert.ok(resumeStart >= 0, "expected the Issue Related Work Resume producer");
+  const resumeEnd = knowledgeSurfaceSource.indexOf(
+    "function renderKnowledgeRelatedSessionAction",
+    resumeStart,
+  );
+  assert.ok(resumeEnd > resumeStart, "expected a bounded Related Work Resume producer");
+  const resumeSource = knowledgeSurfaceSource.slice(resumeStart, resumeEnd);
+
+  assert.match(
+    resumeSource,
+    /const operationId = createLaunchOperationId\("resume"\);/,
+    "the producer must create one canonical Resume operation identity",
+  );
+  assert.match(
+    resumeSource,
+    /launchPending\.begin\(\s*knowledgeRelatedWorkPendingKey\(sessionId\),\s*"Resume",\s*operationId,?\s*\)/,
+    "the pending entry must retain that exact operation identity",
+  );
+  assert.match(
+    resumeSource,
+    /send\(\{[\s\S]*?kind:\s*"resume_workspace_agent",[\s\S]*?operation_id:\s*operationId,[\s\S]*?session_id:\s*sessionId,/,
+    "the outbound Resume request must carry the same operation identity",
   );
 });

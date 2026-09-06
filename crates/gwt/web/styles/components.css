@@ -604,7 +604,7 @@ body::after {
   border-right: 1px solid var(--color-border);
   /* Flyout chips + popovers (window list, update CTA) extend over the canvas. */
   overflow: visible;
-  z-index: 30;
+  z-index: var(--z-rail);
 }
 
 .op-rail__group {
@@ -871,6 +871,15 @@ button.op-status-strip__cell {
 
 .op-status-strip__cell--running .op-status-strip__value {
   color: var(--color-state-active);
+}
+
+/* Issue #3884 AC-3 — RUNNING breakdown: "N inline" names the running agents
+   that live as inline terminals in the Issue window rather than on the canvas.
+   Quieter than the value so the total still reads first. */
+.op-status-strip__sub {
+  margin-left: var(--space-1);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--color-state-active) 72%, var(--color-status-strip-fg));
 }
 
 .op-status-strip__cell--idle .op-status-strip__value {
@@ -2537,7 +2546,7 @@ kbd.op-kbd {
 }
 
 /* Each Session row is a list element: label + meta on the left, its own
-   inspection control on the right. Producing continuation stays on the Work. */
+   resume control on the right. Producing continuation stays on the Work. */
 .workspace-detail-session {
   display: flex;
   flex-wrap: wrap;
@@ -4643,6 +4652,13 @@ button.workspace-board-ref:focus-visible {
   max-width: 520px;
 }
 
+/* SPEC #1921 Phase 86 (#3813): the Custom-only resource controls are
+   toggled with the `hidden` attribute, which the flex display above would
+   otherwise override. */
+:root[data-theme] .settings-section[hidden] {
+  display: none;
+}
+
 :root[data-theme] .settings-section + .settings-section {
   margin-top: var(--space-3);
 }
@@ -5550,6 +5566,8 @@ button.workspace-board-ref:focus-visible {
 
 .op-status-strip__cell--usage {
   display: inline-flex;
+  flex: 0 0 23ch;
+  inline-size: 23ch;
   align-items: center;
   gap: 6px;
   border: 0;
@@ -5558,27 +5576,43 @@ button.workspace-board-ref:focus-visible {
   font: inherit;
   color: inherit;
   padding: 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 /* Stable per-provider summary chips in the status strip (no rotation). */
 .op-usage-sum {
   display: inline-flex;
+  flex: 0 0 7ch;
+  inline-size: 7ch;
   align-items: baseline;
   gap: 3px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
-.op-usage-sum[data-provider="codex"] {
-  color: var(--agent-color-codex, #6fb1ff);
+.op-usage-sum[data-severity="normal"] {
+  color: var(--color-status-strip-fg);
 }
 
-.op-usage-sum[data-provider="claude_code"] {
-  color: var(--agent-color-claude, #e0a06a);
+.op-usage-sum[data-severity="warning"] {
+  color: var(--color-state-needs-input);
+}
+
+.op-usage-sum[data-severity="danger"] {
+  color: var(--color-state-blocked);
 }
 
 .op-usage-sum[data-limit="true"] {
-  color: var(--color-state-blocked, #ff6b6b);
+  color: var(--color-state-blocked);
+}
+
+.op-usage-more {
+  flex: 0 0 3ch;
+  inline-size: 3ch;
+  color: var(--color-status-strip-fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .op-status-strip__cell--usage:hover .op-usage-sum,
@@ -5680,6 +5714,13 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text-muted, #9aa0ad);
 }
 
+.op-usage-card__limit {
+  margin-left: auto;
+  color: var(--color-state-blocked);
+  font-size: var(--type-xs);
+  font-weight: 700;
+}
+
 .op-usage-card__account {
   margin: -2px 0 8px 24px;
   color: var(--color-text-muted, #9aa0ad);
@@ -5745,6 +5786,76 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs, 0.72rem);
   color: var(--color-text-muted, #9aa0ad);
   white-space: nowrap;
+}
+
+/* Per-session tokens / context (Issue #3862): bounded list inside a provider
+   card — name | model | tokens | context left. Severity reuses the Operator
+   state tokens; no raw colors. */
+.op-usage-sess {
+  display: grid;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.op-usage-sess__head {
+  margin-bottom: 2px;
+  font-size: var(--type-xs, 0.72rem);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 48px 72px;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--type-sm, 0.85rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.op-usage-sess__row[data-eligible="false"] {
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-usage-sess__model {
+  font-size: var(--type-xs, 0.72rem);
+  color: var(--color-text-muted, #9aa0ad);
+  white-space: nowrap;
+}
+
+.op-usage-sess__tokens {
+  text-align: right;
+}
+
+.op-usage-sess__ctx {
+  text-align: right;
+  white-space: nowrap;
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__ctx[data-severity="normal"] {
+  color: var(--color-text, #e7e9ee);
+}
+
+.op-usage-sess__ctx[data-severity="warning"] {
+  color: var(--color-state-needs-input);
+}
+
+.op-usage-sess__ctx[data-severity="danger"] {
+  color: var(--color-state-blocked);
+}
+
+.op-usage-sess__more {
+  font-size: var(--type-xs, 0.72rem);
+  color: var(--color-text-muted, #9aa0ad);
 }
 
 /* Consumption grid: period × in/out/cached, right-aligned numerics. */
@@ -5940,15 +6051,15 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-bar__fill {
   height: 100%;
-  background: var(--color-accent, #6fb1ff);
+  background: var(--color-state-active);
 }
 
-.op-usage-bar__fill[data-level="mid"] {
-  background: #e0b341;
+.op-usage-bar__fill[data-severity="warning"] {
+  background: var(--color-state-needs-input);
 }
 
-.op-usage-bar__fill[data-level="high"] {
-  background: var(--color-state-blocked, #ff6b6b);
+.op-usage-bar__fill[data-severity="danger"] {
+  background: var(--color-state-blocked);
 }
 
 .op-usage-window__pct {
@@ -6066,6 +6177,69 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
+/* Issue #3365 — render/receive degradation banner. Shown when a workspace
+   sync step or a WebSocket receive() handler throws: the event stream keeps
+   running (warn-and-continue), so the user needs an explicit signal that
+   the live view may be stale, plus a Reload escape hatch. Sits below the
+   connection overlay (which blocks everything anyway). */
+.render-degradation-banner {
+  position: fixed;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-state-needs-input);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-2);
+  font-size: var(--type-xs);
+}
+
+.render-degradation-banner__title {
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-state-needs-input);
+  white-space: nowrap;
+}
+
+.render-degradation-banner__detail {
+  color: var(--color-text-muted);
+}
+
+.render-degradation-banner__reload {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-button-border);
+  border-radius: var(--radius-md);
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  font-size: var(--type-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.render-degradation-banner__reload:hover {
+  background: var(--color-button-bg-hover);
+}
+
+.render-degradation-banner__dismiss {
+  padding: 0 var(--space-1);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.render-degradation-banner__dismiss:hover {
+  color: var(--color-text-strong);
+}
+
 /* SPEC-2359 W-17 (FR-398) — pending Resume feedback. */
 .workspace-resume-picker-pending {
   margin-top: 10px;
@@ -6155,8 +6329,8 @@ button.workspace-board-ref:focus-visible {
   box-shadow: 0 0 0 1px var(--color-focus-ring);
 }
 
-.fleet-minimap__cell[data-lane-symbol]::before {
-  content: attr(data-lane-symbol);
+.fleet-minimap__cell[data-worktree-symbol]::before {
+  content: attr(data-worktree-symbol);
   position: absolute;
   left: 2px;
   bottom: 2px;
@@ -6174,12 +6348,12 @@ button.workspace-board-ref:focus-visible {
   text-align: center;
 }
 
-.fleet-minimap__cell[data-lane-kind="intake"]::before {
+.fleet-minimap__cell[data-worktree-form="ephemeral"]::before {
   border-color: var(--color-state-needs-input);
   color: var(--color-state-needs-input);
 }
 
-.fleet-minimap__cell[data-lane-kind="execution"]::before {
+.fleet-minimap__cell[data-worktree-form="branch-backed"]::before {
   border-color: var(--color-state-active);
   color: var(--color-state-active);
 }
@@ -6277,5 +6451,294 @@ button.workspace-board-ref:focus-visible {
   .fleet-minimap__cell[data-telemetry="error"]::after,
   .fleet-minimap__cell[data-telemetry="waiting"]::after {
     animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   SPEC-3431 — Project Manager surfaces.
+
+   The PM is the user's single conversational window, so it gets one identity
+   colour (--color-role-pm) reused by all three surfaces: the rail launcher,
+   the canvas launcher, and the PM window chrome. The colour is a ROLE, not a
+   runtime state, so it never replaces the status chip or the agent colour.
+   --------------------------------------------------------------------------- */
+
+/* Rail launcher (FR-018). The PM is the one rail item that is a *destination*
+   rather than a command, and review (2026-08-05) showed a plain icon does not
+   read as "this is the PM". It therefore carries a persistent accent chip so
+   it stands apart from the command icons at a glance, in every state. */
+.op-rail__item--pm {
+  color: var(--color-role-pm);
+  background: color-mix(in oklab, var(--color-role-pm) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-role-pm) 45%, transparent);
+}
+
+.op-rail__item--pm:hover,
+.op-rail__item--pm:focus-visible {
+  background: color-mix(in oklab, var(--color-role-pm) 26%, transparent);
+}
+
+.op-rail__item--pm .op-rail__icon {
+  color: var(--color-role-pm);
+}
+
+/* FR-021: running / stopped / not started. Light mode cannot lean on a
+   surface tint alone (near-white on near-white), so every state that is not
+   "absent" carries a filled dot in an accent colour. */
+.op-rail__pm-dot {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  pointer-events: none;
+}
+
+.op-rail__item--pm[data-pm-state="running"] .op-rail__pm-dot {
+  background: var(--color-role-pm);
+}
+
+.op-rail__item--pm[data-pm-state="stopped"] .op-rail__pm-dot {
+  background: var(--color-state-idle);
+}
+
+/* Canvas launcher (FR-018). Bottom-LEFT: .fleet-minimap owns bottom-right. */
+.canvas-pm-launcher {
+  position: absolute;
+  left: var(--space-4, 16px);
+  bottom: var(--space-4, 16px);
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  padding: var(--space-2, 8px) var(--space-4, 16px);
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--color-surface-elevated) 92%, transparent);
+  color: var(--color-role-pm);
+  box-shadow: var(--shadow-2);
+  transition: background var(--motion-fast) var(--motion-curve),
+              transform var(--motion-fast) var(--motion-curve);
+}
+
+.canvas-pm-launcher:hover {
+  background: color-mix(in oklab, var(--color-role-pm) 16%, var(--color-surface-elevated));
+}
+
+.canvas-pm-launcher:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.canvas-pm-launcher[hidden] {
+  display: none;
+}
+
+.canvas-pm-launcher__icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.canvas-pm-launcher__label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* PM window chrome (FR-020). A left accent bar plus a filled role badge —
+   form first, colour second — so the PM reads as distinct even for users who
+   cannot separate the hue from the agent ramp. */
+.workspace-window[data-pm="true"] {
+  /* 3px read as "hard to notice" against the dark window chrome in review
+     (2026-08-05); the bar has to be legible at a glance from across the
+     canvas, not only when the window is already in focus. */
+  border-left: 6px solid var(--color-role-pm);
+}
+
+.workspace-window[data-pm="true"] .titlebar {
+  background: color-mix(in oklab, var(--color-role-pm) 22%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-role-pm) 45%, transparent);
+}
+
+/* Keep the identity readable when the PM is not the focused window. */
+.workspace-window[data-pm="true"] .title-text {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+.workspace-window[data-pm="true"] .window-role-badge {
+  border-color: var(--color-role-pm);
+  background: var(--color-role-pm);
+  color: var(--color-canvas);
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-pm-launcher {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   SPEC-3431 FR-026 — Project Manager settings.
+
+   Anchored to the rail launcher rather than dropped into Settings: the PM is
+   configured where it is seen. The gear stays out of the way until the shell is
+   hovered or focused, so the rail keeps reading as one icon per action.
+   --------------------------------------------------------------------------- */
+.pm-launcher-shell {
+  position: relative;
+}
+
+.pm-launcher-gear {
+  position: absolute;
+  right: calc(-1 * var(--space-1, 4px));
+  top: calc(-1 * var(--space-1, 4px));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  appearance: none;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill, 999px);
+  background: var(--color-surface-elevated);
+  color: var(--color-role-pm);
+  transition: opacity var(--motion-fast) var(--motion-curve);
+}
+
+.pm-launcher-shell:hover .pm-launcher-gear,
+.pm-launcher-shell:focus-within .pm-launcher-gear,
+.pm-launcher-gear[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.pm-launcher-gear:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+.pm-settings-panel {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 0;
+  z-index: 40;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px);
+  border: 1px solid var(--color-border-strong);
+  border-left: 3px solid var(--color-role-pm);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+}
+
+.pm-settings-panel[hidden] {
+  display: none;
+}
+
+.pm-settings-panel__title {
+  margin: 0;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-role-pm);
+}
+
+.pm-settings-panel__running {
+  margin: 0;
+  font-size: var(--type-sm);
+  color: var(--color-text-strong);
+}
+
+/* The one place the user learns that the configured agent is not the one they
+   are talking to. Form (a bordered chip) carries it as much as colour. */
+.pm-settings-panel__pending {
+  margin: 0;
+  align-self: flex-start;
+  padding: 2px var(--space-2, 8px);
+  font-size: var(--type-xs);
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--color-role-pm) 16%, transparent);
+  color: var(--color-text-strong);
+}
+
+.pm-settings-panel__pending[hidden] {
+  display: none;
+}
+
+.pm-settings-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+}
+
+.pm-settings-panel__field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+.pm-settings-panel__label {
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.pm-settings-panel__select,
+.pm-settings-panel__input {
+  width: 100%;
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  font-size: var(--type-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.pm-settings-panel__select:focus-visible,
+.pm-settings-panel__input:focus-visible,
+.pm-settings-panel__checkbox:focus-visible,
+.pm-settings-panel__restart:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.pm-settings-panel__help {
+  margin: 0;
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.pm-settings-panel__restart {
+  padding: var(--space-1, 4px) var(--space-3, 12px);
+  appearance: none;
+  cursor: pointer;
+  font-size: var(--type-sm);
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-role-pm);
+}
+
+.pm-settings-panel__restart:hover {
+  background: color-mix(in oklab, var(--color-role-pm) 16%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-launcher-gear {
+    transition: none;
   }
 }

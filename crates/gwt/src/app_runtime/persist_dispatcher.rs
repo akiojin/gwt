@@ -482,6 +482,7 @@ mod tests {
     #[test]
     fn enqueue_burst_does_not_wait_for_blocked_disk_write() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
         let workspace_path = temp.path().join("workspace.json");
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
@@ -540,6 +541,7 @@ mod tests {
     #[test]
     fn coalesces_burst_so_only_latest_snapshot_persists() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
@@ -572,6 +574,7 @@ mod tests {
         // a quick burst (resize / focus / viewport pan / arrange) collapses
         // to a single disk hit instead of producing one write per call.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
@@ -614,6 +617,7 @@ mod tests {
     #[test]
     fn suppresses_identical_snapshot_after_successful_write() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
         let snapshot = sample_snapshot(path.clone(), "stable");
@@ -652,6 +656,7 @@ mod tests {
     #[test]
     fn suppresses_identical_snapshot_while_pending() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = unstarted_dispatcher();
         let snapshot = sample_snapshot(path.clone(), "pending");
@@ -692,6 +697,7 @@ mod tests {
     #[test]
     fn failed_write_does_not_suppress_later_retry() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         std::fs::create_dir(&path).expect("create blocking directory");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
@@ -725,6 +731,7 @@ mod tests {
         // flush a pending snapshot to disk before returning, otherwise an app
         // shutdown immediately after a state change loses the latest write.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
@@ -762,6 +769,7 @@ mod tests {
             .build()
             .expect("tokio runtime");
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
 
         {
@@ -799,6 +807,7 @@ mod tests {
     #[test]
     fn writes_workspace_state_alongside_session_state() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
         let workspace_path = temp.path().join("workspace.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
@@ -817,6 +826,7 @@ mod tests {
     #[test]
     fn durable_workspace_barrier_orders_exact_window_after_inflight_snapshot() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
         let workspace_path = temp.path().join("workspace.json");
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));

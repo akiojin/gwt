@@ -1,5 +1,157 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
+export function compactText(value, fallback = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+// SPEC-2359 Phase W-12 (FR-349/FR-351): human-readable label for the
+// agent-session Work lifecycle state (active / paused / done / discarded)
+// rendered as a badge on each Work card.
+export function formatLifecycleStateLabel(state) {
+  switch (String(state || "active").toLowerCase()) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "done":
+      return "Done";
+    case "discarded":
+      return "Discarded";
+    default:
+      return "Active";
+  }
+}
+
+function attentionText(value) {
+  return compactText(value).toLowerCase();
+}
+
+function explicitAttentionReason(item) {
+  const blocked = compactText(item?.blocked_reason);
+  if (blocked) return blocked;
+  if (String(item?.status_category || "").toLowerCase() === "blocked") {
+    return compactText(item?.next_action || item?.status_text, "Resolve blocker");
+  }
+  if (Number(item?.blocked_agents) > 0) {
+    return compactText(item?.next_action || item?.status_text, "Resolve blocker");
+  }
+  const candidate = compactText(item?.next_action || item?.status_text || item?.summary);
+  if (!candidate) return "";
+  if (
+    /\b(question|request|requested|needs attention|verification pending|error|failed|failure|resolve blocker|blocked)\b/i
+      .test(candidate)
+  ) {
+    return candidate;
+  }
+  return "";
+}
+
+export function attentionForWorkspace(item) {
+  const lifecycle = attentionText(item?.lifecycle_state || "");
+  const status = attentionText(item?.status_category || "");
+  if (
+    item?.done_equivalent ||
+    lifecycle === "done" ||
+    lifecycle === "discarded" ||
+    status === "done" ||
+    status === "discarded" ||
+    status === "closed" ||
+    status === "completed"
+  ) {
+    return {
+      lane: "closed",
+      label: "Closed",
+      reason: item?.done_equivalent ? "Merged with no updates" : formatLifecycleStateLabel(lifecycle),
+    };
+  }
+  if (item?.remote_only) {
+    return { lane: "remote", label: "Remote", reason: "" };
+  }
+  const reason = explicitAttentionReason(item);
+  if (reason) {
+    return { lane: "needs_attention", label: "Needs Attention", reason };
+  }
+  if (
+    Number(item?.active_agents) > 0 ||
+    status === "active" ||
+    status === "running" ||
+    lifecycle === "active"
+  ) {
+    return { lane: "running", label: "Running", reason: compactText(item?.status_text) };
+  }
+  return {
+    lane: "paused",
+    label: "Paused",
+    reason: compactText(item?.next_action),
+  };
+}
+
+// Issue #3783: close acknowledgements and Workspace watcher updates carry
+// current membership only. Preserve the already-rendered unbounded history in
+// the browser while treating every live field and membership list in the
+// patch as authoritative. Project identity is an exact fence: history must
+// never leak across a tab switch.
+export function mergeActiveWorkProjectionPatch(previous, patch) {
+  if (!patch || !previous || previous.id !== patch.id) return patch || null;
+
+  const sessionsByAgent = new Map();
+  const rememberAgents = (agents) => {
+    for (const agent of Array.isArray(agents) ? agents : []) {
+      if (
+        agent?.session_id
+        && Array.isArray(agent.sessions)
+        && agent.sessions.length > 0
+        && !sessionsByAgent.has(agent.session_id)
+      ) {
+        sessionsByAgent.set(agent.session_id, agent.sessions);
+      }
+    }
+  };
+  const visitProjectionAgents = (projection) => {
+    rememberAgents(projection?.agents);
+    rememberAgents(projection?.unassigned_agents);
+    for (const work of Array.isArray(projection?.active_works)
+      ? projection.active_works
+      : []) {
+      rememberAgents(work?.agents);
+      for (const child of Array.isArray(work?.works) ? work.works : []) {
+        rememberAgents(child?.agents);
+      }
+    }
+  };
+  visitProjectionAgents(previous);
+
+  const restoreAgents = (agents) => (Array.isArray(agents) ? agents : []).map((agent) => {
+    if (!agent?.session_id || (Array.isArray(agent.sessions) && agent.sessions.length > 0)) {
+      return agent;
+    }
+    const sessions = sessionsByAgent.get(agent.session_id);
+    return sessions ? { ...agent, sessions } : agent;
+  });
+  const activeWorks = (Array.isArray(patch.active_works) ? patch.active_works : []).map(
+    (work) => ({
+      ...work,
+      agents: restoreAgents(work?.agents),
+      works: (Array.isArray(work?.works) ? work.works : []).map((child) => ({
+        ...child,
+        agents: restoreAgents(child?.agents),
+      })),
+    }),
+  );
+
+  return {
+    ...patch,
+    journal_entries: Array.isArray(previous.journal_entries)
+      ? previous.journal_entries
+      : [],
+    works: Array.isArray(previous.works) ? previous.works : [],
+    agents: restoreAgents(patch.agents),
+    unassigned_agents: restoreAgents(patch.unassigned_agents),
+    active_works: activeWorks,
+  };
+}
+
 export function createWorkspaceKanbanSurface({
   activeWorkspace,
   agentStatusLabel,
@@ -45,11 +197,6 @@ export function createWorkspaceKanbanSurface({
     paused: 3,
     closed: 4,
   });
-
-  function compactText(value, fallback = "") {
-    const text = String(value || "").replace(/\s+/g, " ").trim();
-    return text || fallback;
-  }
 
   function statusLabel(value) {
     const raw = String(value || "idle").toLowerCase();
@@ -104,88 +251,6 @@ export function createWorkspaceKanbanSurface({
               .join(" ")
           : "";
     }
-  }
-
-  // SPEC-2359 Phase W-12 (FR-349/FR-351): human-readable label for the
-  // agent-session Work lifecycle state (active / paused / done / discarded)
-  // rendered as a badge on each Work card.
-  function formatLifecycleStateLabel(state) {
-    switch (String(state || "active").toLowerCase()) {
-      case "active":
-        return "Active";
-      case "paused":
-        return "Paused";
-      case "done":
-        return "Done";
-      case "discarded":
-        return "Discarded";
-      default:
-        return "Active";
-    }
-  }
-
-  function attentionText(value) {
-    return compactText(value).toLowerCase();
-  }
-
-  function explicitAttentionReason(item) {
-    const blocked = compactText(item?.blocked_reason);
-    if (blocked) return blocked;
-    if (String(item?.status_category || "").toLowerCase() === "blocked") {
-      return compactText(item?.next_action || item?.status_text, "Resolve blocker");
-    }
-    if (Number(item?.blocked_agents) > 0) {
-      return compactText(item?.next_action || item?.status_text, "Resolve blocker");
-    }
-    const candidate = compactText(item?.next_action || item?.status_text || item?.summary);
-    if (!candidate) return "";
-    if (
-      /\b(question|request|requested|needs attention|verification pending|error|failed|failure|resolve blocker|blocked)\b/i
-        .test(candidate)
-    ) {
-      return candidate;
-    }
-    return "";
-  }
-
-  function attentionForWorkspace(item) {
-    const lifecycle = attentionText(item?.lifecycle_state || "");
-    const status = attentionText(item?.status_category || "");
-    if (
-      item?.done_equivalent ||
-      lifecycle === "done" ||
-      lifecycle === "discarded" ||
-      status === "done" ||
-      status === "discarded" ||
-      status === "closed" ||
-      status === "completed"
-    ) {
-      return {
-        lane: "closed",
-        label: "Closed",
-        reason: item?.done_equivalent ? "Merged with no updates" : formatLifecycleStateLabel(lifecycle),
-      };
-    }
-    if (item?.remote_only) {
-      return { lane: "remote", label: "Remote", reason: "" };
-    }
-    const reason = explicitAttentionReason(item);
-    if (reason) {
-      return { lane: "needs_attention", label: "Needs Attention", reason };
-    }
-    if (
-      Number(item?.active_agents) > 0 ||
-      status === "active" ||
-      status === "running" ||
-      lifecycle === "active"
-    ) {
-      return { lane: "running", label: "Running", reason: compactText(item?.status_text) };
-    }
-    return {
-      lane: "paused",
-      label: "Paused",
-      reason: compactText(item?.next_action),
-    };
   }
 
   function compactPath(value) {
@@ -409,13 +474,28 @@ export function createWorkspaceKanbanSurface({
     };
   }
 
+  // Issue #3455: the projection is the *container* of its child Works, never
+  // their identity. Passing the whole projection as a child's fallback made
+  // every ownerless Work inherit the current Work's owner, agents, board refs,
+  // and PR — on real data 648 of 783 rows showed an owner they never had. Only
+  // container-scoped display state may cross that boundary, so children get an
+  // explicit allowlist: a field added to the projection later cannot leak
+  // by default.
+  function childWorkFallback(projection) {
+    return {
+      lifecycle_stage: projection.lifecycle_stage,
+      managed_hook_health: projection.managed_hook_health,
+    };
+  }
+
   function workspacesFromProjection(projection) {
     if (!projection) return [];
+    const childFallback = childWorkFallback(projection);
     const activeWorks = Array.isArray(projection.active_works)
       ? projection.active_works
       : [];
     if (activeWorks.length > 0) {
-      return activeWorks.map((item) => normalizeWorkspaceItem(item, projection));
+      return activeWorks.map((item) => normalizeWorkspaceItem(item, childFallback));
     }
     const sourceItems = Array.isArray(projection.works)
       ? projection.works
@@ -425,7 +505,7 @@ export function createWorkspaceKanbanSurface({
           ? projection.work_items
           : [];
     if (sourceItems.length > 0) {
-      return sourceItems.map((item) => normalizeWorkspaceItem(item, projection));
+      return sourceItems.map((item) => normalizeWorkspaceItem(item, childFallback));
     }
 
     const current = normalizeWorkspaceItem(projection, {
@@ -1213,7 +1293,7 @@ export function createWorkspaceKanbanSurface({
           createNode(
             "div",
             "workspace-overview-empty workspace-detail-session-guidance",
-            "No previous session to inspect. Continue work can start a new one.",
+            "No previous session to open. Continue work can start a new one.",
           ),
         );
       }
@@ -1260,6 +1340,9 @@ export function createWorkspaceKanbanSurface({
       ["claude-code", "claude"],
       ["claude code", "claude"],
       ["codex", "codex"],
+      ["grok", "grok"],
+      ["grok build", "grok"],
+      ["grok-build", "grok"],
       ["agy", "agy"],
       ["antigravity", "agy"],
       ["antigravity cli", "agy"],
@@ -1424,16 +1507,16 @@ export function createWorkspaceKanbanSurface({
     if (session && session.resumable === false) {
       return null;
     }
-    const button = createNode("button", "wizard-button is-compact", "Inspect session");
+    const button = createNode("button", "wizard-button is-compact", "Open session");
     button.type = "button";
     button.dataset.action = "resume-session";
     button.dataset.sessionId = work.session_id;
     const agentSessionId = session && session.agent_session_id;
     if (agentSessionId) {
       button.dataset.agentSessionId = agentSessionId;
-      button.setAttribute("aria-label", `Inspect conversation ${agentSessionId}`);
+      button.setAttribute("aria-label", `Open conversation ${agentSessionId}`);
     } else {
-      button.setAttribute("aria-label", "Inspect this conversation");
+      button.setAttribute("aria-label", "Open this conversation");
     }
     if (isWorkResumePending(work.session_id)) {
       markResumeButtonPending(button);
@@ -1457,7 +1540,7 @@ export function createWorkspaceKanbanSurface({
     // agent_session_id (this Session row).
     if (
       launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Inspect session", operationId)
+      && !launchPending.begin(workPendingKey(sessionId), "Open session", operationId)
     ) {
       return;
     }
@@ -1570,7 +1653,7 @@ export function createWorkspaceKanbanSurface({
 
     // E4: expose the row's identity / state / resumability to assistive tech.
     const stateLabel = active ? "Current" : "Past";
-    const resumableLabel = resume ? "resumable" : "history only";
+    const resumableLabel = resume ? "resumable" : "not resumable";
     const ariaParts = [`Session ${fullId}`.trim(), stateLabel, resumableLabel];
     if (relative) {
       ariaParts.push(`started ${relative}`);

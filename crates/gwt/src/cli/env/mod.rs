@@ -17,7 +17,7 @@ mod tests;
 
 pub use default::DefaultCliEnv;
 #[cfg(test)]
-pub use default::{IssueClientFactory, LazyIssueClient, LazyOwnerClient, OwnerClientFactory};
+pub use default::{IssueClientFactory, LazyIssueClient};
 pub(crate) use stdout_capture::StdoutCaptureEnv;
 pub use test_env::{TargetIssueCreateCall, TestEnv};
 
@@ -27,10 +27,7 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{
-    client::{ApiError, IssueClient, OwnerRepositoryClient, ResolutionDeadline},
-    IssueNumber, IssueSnapshot, SpecListFilter, SpecOpsError,
-};
+use gwt_github::{client::IssueClient, IssueNumber, IssueSnapshot, SpecListFilter};
 
 use super::{
     parse_actions_args, parse_board_args, parse_discussion_args, parse_hook_args, parse_issue_args,
@@ -43,13 +40,7 @@ use super::{
 /// `client::fake::FakeIssueClient`) instead of spinning up real HTTP.
 pub trait CliEnv {
     type Client: IssueClient;
-    type OwnerClient: OwnerRepositoryClient;
     fn client(&self) -> &Self::Client;
-    fn improvement_owner_client(
-        &self,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&Self::OwnerClient, ApiError>;
-    fn improvement_source_scope_nonce(&self) -> Result<String, SpecOpsError>;
     fn cache_root(&self) -> PathBuf;
     fn repo_path(&self) -> &std::path::Path;
     fn stdout(&mut self) -> &mut dyn io::Write;
@@ -66,6 +57,12 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead>;
+    /// Issue #3891 AC-3: raw `gh api rate_limit` payload (a free endpoint).
+    fn probe_github_rate_limit(&mut self) -> io::Result<String>;
     fn create_pr(
         &mut self,
         base: &str,
@@ -83,6 +80,10 @@ pub trait CliEnv {
         add_labels: &[String],
     ) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext>;
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus>;
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus>;
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
@@ -142,6 +143,13 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         new_title: &str,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.inner.patch_title(number, new_title)
+    }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.inner.patch_issue_fields(number, fields)
     }
     fn patch_comment(
         &self,

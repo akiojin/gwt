@@ -466,6 +466,38 @@ fn resolve_bootstrap_action_spawns_when_endpoint_is_malformed() {
 }
 
 #[test]
+fn resolve_bootstrap_action_rejects_pre_materializer_protocol_endpoint() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let path = scope.endpoint_path(gwt_home.path());
+    let mut old_endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "old-daemon.sock".into(),
+        "old-token".into(),
+        "old-daemon".into(),
+    );
+    old_endpoint.protocol_version = 2;
+    persist_endpoint(&path, &old_endpoint).unwrap();
+
+    let result =
+        resolve_bootstrap_action(gwt_home.path(), &scope, DAEMON_PROTOCOL_VERSION, |pid| {
+            pid == 4242
+        })
+        .unwrap();
+
+    assert!(matches!(result, DaemonBootstrapAction::Spawn { .. }));
+    assert!(!path.exists(), "old protocol endpoint must not be reused");
+}
+
+#[test]
 fn persist_endpoint_round_trips_through_file_system() {
     let gwt_home = tempdir().unwrap();
     let project_root = tempdir().unwrap();
@@ -531,6 +563,19 @@ fn client_frame_subscribe_serializes_channel_list() {
     assert_eq!(json_value["type"], "subscribe");
     assert_eq!(json_value["channels"][0], "board");
     assert_eq!(json_value["channels"][1], "runtime-status");
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn client_frame_materializer_subscribe_is_distinct_from_observer_subscribe() {
+    let frame = ClientFrame::SubscribeMaterializer {
+        channels: vec!["issue_monitor".to_string()],
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "subscribe_materializer");
+    assert_eq!(json_value["channels"][0], "issue_monitor");
 
     let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
     assert_eq!(round_trip, frame);
@@ -604,6 +649,7 @@ fn daemon_frame_status_carries_uptime_and_channel_count() {
         uptime_seconds: 42,
         broadcast_channels: 3,
         connections: 2,
+        issue_monitor: None,
     });
     let json_value = serde_json::to_value(&frame).unwrap();
     assert_eq!(json_value["type"], "status");
@@ -633,6 +679,7 @@ fn daemon_status_connections_field_defaults_to_zero_when_missing() {
     match frame {
         DaemonFrame::Status(status) => {
             assert_eq!(status.connections, 0);
+            assert!(status.issue_monitor.is_none());
         }
         other => panic!("expected Status frame, got: {other:?}"),
     }
