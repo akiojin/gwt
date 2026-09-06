@@ -716,6 +716,16 @@ mod tests {
     /// runner, not for a lease that was never released (Issue #3937).
     const RELEASE_OBSERVATION_BUDGET: Duration = Duration::from_secs(5);
 
+    /// How long a freshly spawned sibling may stay invisible to
+    /// [`scan_foreign_heavy`] before the scan is treated as broken. A spawned
+    /// test binary is not scannable the instant `spawn` returns: the OS still
+    /// has to publish the process and resolve its working directory, and under
+    /// Windows default parallelism on a shared runner that window is not
+    /// bounded by any small constant (Issue #3404). This is a deadlock guard,
+    /// not the contract — the contract is that the scan eventually reports the
+    /// sibling, which the convergence loop below asserts.
+    const FOREIGN_SCAN_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
+
     /// Issue #3937: one test's private verification-lease root, plus the
     /// diagnosis a failure owes its reader.
     ///
@@ -1032,35 +1042,67 @@ mod tests {
         std::thread::sleep(Duration::from_secs(60));
     }
 
+    /// The worktree root above this binary's `target/.../deps` directory.
+    fn worktree_root_of(exe: &Path) -> PathBuf {
+        let mut root = exe.to_path_buf();
+        while root.file_name().is_some_and(|name| name != "target") {
+            assert!(
+                root.pop(),
+                "a test binary must live under a worktree's target directory: {}",
+                exe.display()
+            );
+        }
+        root.pop();
+        root
+    }
+
     #[test]
     fn scan_foreign_heavy_finds_a_target_binary_running_in_a_sibling() {
-        let sibling = tempfile::tempdir().unwrap();
         let own = tempfile::tempdir().unwrap();
-        // This test binary lives under `target/debug/deps/`, exactly where a
-        // sibling worktree's test binaries live.
-        let exe = std::env::current_exe().unwrap();
+        // Production attributes a sibling's heavy work through the binary's own
+        // path under `<worktree>/target/.../deps`. Standing the sibling up as a
+        // bare tempdir and only pointing `current_dir` at it makes the working
+        // directory the single attribution signal, and Windows cannot supply
+        // one: sysinfo reads another process's cwd out of its PEB, so the scan
+        // came back empty there while Linux passed on the same SHA (Issue
+        // #3404). This binary already sits under a worktree's target
+        // directory, which is the production shape on every platform.
+        let exe = dunce::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let sibling = worktree_root_of(&exe);
         let mut child = gwt_core::process::hidden_command(&exe)
             .args([
                 "--ignored",
                 "--exact",
                 "cli::verification_lease::admission::tests::fake_heavy_process_parks",
             ])
-            .current_dir(sibling.path())
+            .current_dir(&sibling)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(300));
 
-        let siblings = vec![dunce::canonicalize(sibling.path()).unwrap()];
-        let found = scan_foreign_heavy(own.path(), &siblings);
+        let siblings = vec![sibling];
+        let deadline = Instant::now() + FOREIGN_SCAN_OBSERVATION_BUDGET;
+        let (found, hit) = loop {
+            let found = scan_foreign_heavy(own.path(), &siblings);
+            if let Some(index) = found.iter().position(|process| process.pid == child.id()) {
+                break (found, index);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "the parked test binary (pid {}) must be reported within {:?}: {found:?}",
+                    child.id(),
+                    FOREIGN_SCAN_OBSERVATION_BUDGET
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let _ = child.kill();
         let _ = child.wait();
 
-        let hit = found
-            .iter()
-            .find(|process| process.pid == child.id())
-            .unwrap_or_else(|| panic!("the parked test binary must be reported: {found:?}"));
+        let hit = &found[hit];
         assert_eq!(hit.kind, HeavyKind::TargetBinary);
         assert_eq!(hit.worktree, siblings[0]);
         assert!(
