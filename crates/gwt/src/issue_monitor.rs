@@ -21085,6 +21085,33 @@ mod tests {
         );
     }
 
+    /// Issue #3490 AC-2: several Codex agents racing for the shared `~/.codex`
+    /// state directory is a property of the host, exactly like the transient
+    /// infrastructure aborts of Issue #3941. It must requeue the Issue without
+    /// spending an attempt, so a fan-out that collides never walks a healthy
+    /// Issue up the retry ladder.
+    #[test]
+    fn codex_shared_state_lock_requeues_without_spending_an_attempt() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.set_active_launch_id(42, Some("tab-1::agent-1".to_string()));
+
+        monitor.record_agent_issue_failed(42, gwt_agent::codex_shared_state_lock_detail());
+
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "shared Codex state contention must not consume the Issue's retry budget"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the Issue returns to the queue instead of becoming a terminal agent failure"
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot is released for reuse");
+    }
+
     #[test]
     fn transient_failure_under_cap_retries_and_counts() {
         // SPEC #3200 T-042/FR-026: a transient failure below max_attempts

@@ -45,7 +45,7 @@ use gwt_github::{
     ApiError, Cache, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient,
     IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
 };
-use gwt_terminal::{Pane, PaneStatus};
+use gwt_terminal::{Pane, PaneStatus, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT};
 use tracing::{field::Visit, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
@@ -53,11 +53,12 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 use super::continuation::set_durable_launch_recovery_directory_sync_test_hook;
 use super::continuation::{
     clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
-    durable_launch_recovery_exists, durable_launch_recovery_session_identity,
-    nonlocal_runtime_index_scan_metrics, persist_durable_launch_recovery,
-    reset_nonlocal_runtime_index_scan_metrics, resolve_split_workspace_state_external_commit,
+    continuation_launch_config, durable_launch_recovery_exists,
+    durable_launch_recovery_session_identity, nonlocal_runtime_index_scan_metrics,
+    persist_durable_launch_recovery, reset_nonlocal_runtime_index_scan_metrics,
+    resolve_split_workspace_state_external_commit,
     set_fresh_execution_pre_work_commit_hook_for_test, set_missing_session_cleanup_hook_for_test,
-    ActiveOwnerLiveness, DurableLaunchRecoveryKind,
+    ActiveOwnerLiveness, ContinueWorkLaunchSeed, DurableLaunchRecoveryKind,
 };
 use super::{
     active_work_projection_from_saved, continue_work_readiness_decision,
@@ -4919,11 +4920,27 @@ fn agent_pane_sync_completion_distinguishes_snapshot_unavailable_and_poisoned() 
     assert!(failed_log.fields.contains_key("elapsed_ms"));
 }
 
-/// Issue #3755 AC-3: removing mutex waits must not hide a new multi-pane
-/// serialization stall. Four panes at the replay cap still finish as one
-/// bounded GUI dispatch on the debug build used by regression tests.
+/// Issue #3755 AC-3 / Issue #3988: removing mutex waits must not hide a new
+/// multi-pane serialization stall. The original guard was a 300ms wall-clock
+/// budget, which turned every saturated CI runner red without saying anything
+/// about the invariant, so the guard is structural now. Two properties make a
+/// stall impossible and both are decidable without a clock: a pane whose mutex
+/// is held is reported busy instead of awaited, and every snapshot the dispatch
+/// emits stays clamped to the scrollback replay cap however much the pane
+/// printed. The only timeout left is a deadlock guard on the holder thread, so
+/// a regression that waits on the mutex fails an assertion instead of hanging
+/// the test binary.
 #[test]
 fn agent_pane_sync_with_full_scrollback_stays_bounded() {
+    // Rows of `long_running_test_pane`, which the snapshot replays on top of
+    // the capped scrollback.
+    const PANE_ROWS: usize = 24;
+    // The holder releases as soon as the dispatch returns, so this only bounds
+    // the failing path where the dispatch waits on the mutex forever.
+    const HOLDER_DEADLOCK_GUARD: Duration = Duration::from_secs(60);
+    // Print well past the cap so the clamp is exercised rather than assumed.
+    let printed_lines = SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + PANE_ROWS + 1_000;
+
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
@@ -4948,45 +4965,105 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
         .map(|window| combined_window_id("tab-project", &window.id))
         .collect::<Vec<_>>();
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let replay = (0..5_000)
-        .map(|line| format!("snapshot-line-{line:04}\n"))
+    let replay = (0..printed_lines)
+        .map(|line| format!("snapshot-line-{line:06}\n"))
         .collect::<String>();
+    let contended_window_id = window_ids[0].clone();
+    let mut contended_pane = None;
     for window_id in &window_ids {
         let mut pane = long_running_test_pane(window_id);
         pane.process_bytes(replay.as_bytes());
+        let pane = Arc::new(Mutex::new(pane));
+        if window_id == &contended_window_id {
+            contended_pane = Some(Arc::clone(&pane));
+        }
         runtime.runtimes.insert(
             window_id.clone(),
-            WindowRuntime::new(
-                super::next_window_runtime_incarnation(),
-                Arc::new(Mutex::new(pane)),
-            ),
+            WindowRuntime::new(super::next_window_runtime_incarnation(), pane),
         );
     }
+    let contended_pane = contended_pane.expect("contended pane runtime");
+
+    // Explicit sync points replace the old sleep: the holder owns the mutex
+    // before the dispatch starts and releases it only after the dispatch has
+    // returned, so contention covers the whole dispatch on any host speed.
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = thread::spawn(move || {
+        let _guard = contended_pane.lock().expect("hold contended pane mutex");
+        held_tx.send(()).expect("signal held mutex");
+        let _ = release_rx.recv_timeout(HOLDER_DEADLOCK_GUARD);
+    });
+    held_rx.recv().expect("contended pane mutex acquired");
+
     let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
         .expect("authenticated principal");
-
-    let started = Instant::now();
     let events = runtime.handle_agent_frontend_event(
         "pane-client".to_string(),
         principal,
         AgentFrontendRequest::Ready,
     );
-    let elapsed = started.elapsed();
+    let _ = release_tx.send(());
+    holder.join().expect("contended pane holder");
 
     assert!(
-        elapsed < Duration::from_millis(300),
-        "four full-scrollback snapshots blocked the GUI dispatch for {elapsed:?}"
+        events.iter().any(|outbound| matches!(
+            &outbound.event,
+            BackendEvent::PaneSyncComplete {
+                empty_window_ids,
+                busy_window_ids,
+                unavailable_window_ids,
+                failed_window_ids,
+            } if busy_window_ids == &vec![contended_window_id.clone()]
+                && empty_window_ids.is_empty()
+                && unavailable_window_ids.is_empty()
+                && failed_window_ids.is_empty()
+        )),
+        "a full-scrollback pane holding its mutex must be reported busy, never awaited: {events:?}"
     );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|outbound| matches!(outbound.event, BackendEvent::TerminalSnapshot { .. }))
-            .count(),
-        window_ids.len()
-    );
-    assert!(events
+
+    let snapshots = events
         .iter()
-        .any(|outbound| matches!(outbound.event, BackendEvent::PaneSyncComplete { .. })));
+        .filter_map(|outbound| match &outbound.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } => {
+                Some((id.clone(), data_base64.clone()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut expected_snapshot_ids = window_ids
+        .iter()
+        .filter(|id| *id != &contended_window_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    expected_snapshot_ids.sort();
+    assert_eq!(
+        snapshots.keys().cloned().collect::<Vec<_>>(),
+        expected_snapshot_ids,
+        "every uncontended full-scrollback pane must still be snapshotted in the same dispatch"
+    );
+
+    let newest_line = format!("snapshot-line-{:06}", printed_lines - 1);
+    for (window_id, data_base64) in &snapshots {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .expect("snapshot base64");
+        let snapshot = String::from_utf8_lossy(&decoded);
+        let replayed_lines = snapshot.matches("snapshot-line-").count();
+        assert!(
+            replayed_lines <= SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + PANE_ROWS,
+            "{window_id} replayed {replayed_lines} lines, past the \
+             {SNAPSHOT_SCROLLBACK_REPLAY_LIMIT}-row scrollback replay cap"
+        );
+        assert!(
+            snapshot.contains(&newest_line),
+            "{window_id} dropped the newest line {newest_line} from its snapshot"
+        );
+        assert!(
+            !snapshot.contains("snapshot-line-000000"),
+            "{window_id} replayed a line older than the scrollback replay cap"
+        );
+    }
 }
 
 /// Issue #3755 AC-2/AC-3: close removes the runtime and window synchronously,
@@ -63149,5 +63226,203 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
             .window("agent-7")
             .map(|window| window.status),
         Some(WindowProcessStatus::Error)
+    );
+}
+
+/// Issue #3489: build the durable Session seed the Continue work fixtures use
+/// for owner-linkage regression coverage.
+fn issue_3489_durable_seed(linked_issue_number: Option<u64>) -> ContinueWorkLaunchSeed {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "durable-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = linked_issue_number;
+    ContinueWorkLaunchSeed::DurableSession(Box::new(session))
+}
+
+/// Issue #3489: mint the binding Continue work installs for the Work owner and
+/// prove the launch Session accepts it. `set_execution_binding` runs before the
+/// PTY starts, so a rejection here is exactly the pre-PTY launch failure.
+fn issue_3489_binding_installs(config: &gwt_agent::LaunchConfig, owner_number: u64) -> bool {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "continuation-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = config.linked_issue_number;
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: "repo-3489".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3489".to_string(),
+            binding_id: "binding-3489".to_string(),
+            ledger_head_hash: "head-3489".to_string(),
+        },
+        capability_generation: 1,
+    };
+    session.set_execution_binding(Some(binding)).is_ok()
+}
+
+/// Issue #3489 AC-1: a durable Session that carries no owner linkage must not
+/// seed the continuation with `None`. Continue work mints the binding from the
+/// Work owner, so an inherited `None` fails the binding install before the PTY
+/// starts and leaves the pane with a bare invariant string.
+#[test]
+fn continue_work_durable_seed_without_owner_linkage_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &issue_3489_durable_seed(None),
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert!(
+        issue_3489_binding_installs(&config, owner.number),
+        "an unbound durable seed must still install the owner binding before the PTY starts"
+    );
+}
+
+/// Issue #3489 AC-2: a durable Session linked to another owner must be
+/// re-resolved to the Work owner the continuation binding is minted for.
+#[test]
+fn continue_work_durable_seed_with_foreign_owner_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &issue_3489_durable_seed(Some(3464)),
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert!(
+        issue_3489_binding_installs(&config, owner.number),
+        "a foreign-owner durable seed must be re-resolved before the PTY starts"
+    );
+}
+
+/// Issue #3489 AC-2: the Work projection seed keeps the same single source of
+/// owner truth, so both seeds stay interchangeable for the binding install.
+#[test]
+fn continue_work_projection_seed_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &ContinueWorkLaunchSeed::WorkProjection {
+            agent_id: gwt_agent::AgentId::Codex,
+            display_name: Some("Projection seed".to_string()),
+            branch: "work/issue-3489".to_string(),
+        },
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert_eq!(config.display_name, "Projection seed");
+}
+
+/// Issue #3489 AC-4: the owner-mismatch refusal fails before the PTY starts, so
+/// the pane only ever shows this one line. It must name both sides of the
+/// mismatch and the recovery route instead of the bare invariant string.
+#[test]
+fn owner_mismatch_launch_failure_names_both_owners_and_the_recovery_route() {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "continuation-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = Some(3464);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: "repo-3489".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number: 3489,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3489".to_string(),
+            binding_id: "binding-3489".to_string(),
+            ledger_head_hash: "head-3489".to_string(),
+        },
+        capability_generation: 1,
+    };
+    let detail = session
+        .set_execution_binding(Some(binding))
+        .expect_err("a foreign linked owner must be refused");
+
+    assert!(
+        detail.contains("continuation-3489") && detail.contains("3464") && detail.contains("3489"),
+        "the refusal must name the Session and both owners: {detail}"
+    );
+
+    let diagnostic = String::from_utf8(AppRuntime::launch_error_terminal_bytes(
+        &AppRuntime::user_facing_launch_error_detail(&detail),
+    ))
+    .expect("diagnostic bytes are UTF-8");
+    assert!(
+        diagnostic.contains("execution.status"),
+        "the pane diagnostic must name the recovery probe: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("Continue work"),
+        "the pane diagnostic must name the continuation route: {diagnostic}"
+    );
+}
+
+/// Issue #3489 AC-4: unrelated launch failures keep their exact detail, so the
+/// recovery hint never widens beyond the owner-mismatch refusal.
+#[test]
+fn unrelated_launch_failure_detail_is_not_rewritten_with_the_owner_hint() {
+    let detail = "execution binding session does not match the durable Session";
+
+    assert_eq!(
+        AppRuntime::user_facing_launch_error_detail(detail),
+        detail,
+        "only the owner mismatch gains the recovery route"
+    );
+}
+
+/// Issue #3489 AC-1: the owner-linkage regression above proves the binding
+/// install accepts the resolved config. That only matters because the install
+/// runs on the pre-PTY path — pin that ordering so a later refactor cannot move
+/// the refusal behind a started pane, where it would stop being a launch
+/// failure at all.
+#[test]
+fn launch_worker_installs_the_execution_binding_before_the_process_launch() {
+    let source = include_str!("launch.rs");
+    let worker = source
+        .split("fn spawn_agent_window_async_with_claim")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn close_work").next())
+        .expect("async launch worker body");
+    let install = worker
+        .find("set_execution_binding(Some(binding.clone()))?")
+        .expect("prepared continuation binding install");
+    let process_launch = worker
+        .find("let process_launch = ProcessLaunch {")
+        .expect("process launch construction");
+    assert!(
+        install < process_launch,
+        "the execution binding must be installed before the PTY process launch is built"
     );
 }
