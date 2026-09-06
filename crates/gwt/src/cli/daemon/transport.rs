@@ -71,9 +71,10 @@ pub(crate) fn cleanup_stale_bind(bind: &Path) {
 /// Whether a daemon currently accepts connections at `bind`.
 ///
 /// Synchronous so the bootstrap / hygiene callers (which run outside a
-/// tokio runtime) can use it. On Windows a successful open is closed at
-/// once; a pipe whose instances are all busy (`ERROR_PIPE_BUSY`) is served
-/// too.
+/// tokio runtime) can use it. On Windows the probe lists the pipe
+/// namespace instead of opening the pipe: a named pipe exists there exactly
+/// while a server instance is alive, and opening it would consume that
+/// instance's pending `connect` and hand the daemon an empty connection.
 pub(crate) fn bind_is_served(bind: &str) -> bool {
     #[cfg(unix)]
     {
@@ -81,13 +82,19 @@ pub(crate) fn bind_is_served(bind: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(gwt_core::daemon::windows_pipe_name_for(bind))
-        {
-            Ok(_) => true,
-            Err(error) => error.raw_os_error() == Some(windows_impl::ERROR_PIPE_BUSY),
+        let prefix = gwt_core::daemon::WINDOWS_PIPE_PREFIX;
+        let pipe_name = gwt_core::daemon::windows_pipe_name_for(bind);
+        let Some(name) = pipe_name.get(prefix.len()..) else {
+            return false;
+        };
+        match std::fs::read_dir(prefix) {
+            Ok(entries) => entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(name)
+            }),
+            Err(_) => false,
         }
     }
 }
