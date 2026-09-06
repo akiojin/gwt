@@ -1,10 +1,16 @@
 //! Cross-platform PTY handle: spawn, I/O, resize, kill.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -48,6 +54,185 @@ pub struct SpawnConfig {
     pub cwd: Option<PathBuf>,
 }
 
+/// Scheduling priority of a gated PTY process tree relative to the gwt
+/// process (SPEC #1921 Phase 86, Issue #3813).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessPriority {
+    Normal,
+    BelowNormal,
+    Idle,
+}
+
+impl ProcessPriority {
+    /// Unix nice value. Descendants inherit it across fork/exec.
+    pub fn unix_nice(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::BelowNormal => 10,
+            Self::Idle => 19,
+        }
+    }
+
+    /// Windows process priority class. Children created without an explicit
+    /// class inherit BELOW_NORMAL / IDLE from their parent.
+    #[cfg(windows)]
+    pub fn windows_priority_class(self) -> gwt_core::process_tree::ProcessPriorityClass {
+        use gwt_core::process_tree::ProcessPriorityClass;
+        match self {
+            Self::Normal => ProcessPriorityClass::Normal,
+            Self::BelowNormal => ProcessPriorityClass::BelowNormal,
+            Self::Idle => ProcessPriorityClass::Idle,
+        }
+    }
+}
+
+/// Resource policy applied to a pending PTY tree before its target runs.
+///
+/// `cpu_limit_percent` is enforced through the Windows Job Object hard cap;
+/// Unix has no equivalent tree-wide cap and relies on the nice value alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessPolicy {
+    pub priority: ProcessPriority,
+    pub cpu_limit_percent: Option<u8>,
+}
+
+const START_GATE_ENDPOINT_ENV: &str = "GWT_INTERNAL_PTY_GATE_ENDPOINT";
+const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
+const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
+const START_GATE_HELLO: u8 = 1;
+const START_GATE_RELEASE: u8 = 2;
+/// Sent by the helper instead of `START_GATE_HELLO` when the encoded target
+/// cannot be executed at all, so the owner reports a pre-spawn failure.
+const START_GATE_TARGET_MISSING: u8 = 3;
+/// `CSI 1 ; 1 R` — the reply Windows ConPTY waits for before it lets a console
+/// client finish attaching.
+#[cfg(windows)]
+const CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
+
+/// A PTY child that has completed its private start-gate handshake but whose
+/// real target has not begun executing.
+pub struct PendingPty {
+    handle: Option<PtyHandle>,
+    gate: Option<TcpStream>,
+}
+
+impl PendingPty {
+    /// Return the gate helper's process id. The helper preserves this identity
+    /// when it replaces itself with the target on Unix.
+    pub fn process_id(&self) -> Option<u32> {
+        self.handle.as_ref().and_then(PtyHandle::process_id)
+    }
+
+    /// Apply a resource policy to the blocked gate helper. The target and
+    /// every descendant inherit it once [`Self::release`] runs, so no child
+    /// can exist outside the policy. Failure leaves the target unreleased.
+    pub fn apply_policy(&self, policy: ProcessPolicy) -> Result<(), TerminalError> {
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| TerminalError::PtyIoError {
+                details: "PTY start gate is unavailable".to_string(),
+            })?;
+        handle.apply_process_policy(policy)
+    }
+
+    /// Release the helper to execute the target and return the live PTY.
+    pub fn release(mut self) -> Result<PtyHandle, TerminalError> {
+        let mut gate = self.gate.take().ok_or_else(|| TerminalError::PtyIoError {
+            details: "PTY start gate is unavailable".to_string(),
+        })?;
+        if let Err(error) = gate
+            .write_all(&[START_GATE_RELEASE])
+            .and_then(|()| gate.flush())
+        {
+            let _ = self.abort_inner();
+            return Err(TerminalError::PtyIoError {
+                details: format!("release PTY start gate: {error}"),
+            });
+        }
+        drop(gate);
+        Ok(self.handle.take().expect("pending PTY owns its handle"))
+    }
+
+    /// Abort the pending launch without allowing the target to execute.
+    pub fn abort(mut self) -> Result<(), TerminalError> {
+        self.abort_inner()
+    }
+
+    fn abort_inner(&mut self) -> Result<(), TerminalError> {
+        if let Some(gate) = self.gate.take() {
+            let _ = gate.shutdown(Shutdown::Both);
+        }
+        self.handle.take().map_or(Ok(()), |handle| handle.kill())
+    }
+}
+
+impl Drop for PendingPty {
+    fn drop(&mut self) {
+        let _ = self.abort_inner();
+    }
+}
+
+struct SpawnedChildGuard {
+    child: Option<Box<dyn portable_pty::Child + Send>>,
+    process_group: Option<ProcessGroup>,
+}
+
+impl SpawnedChildGuard {
+    fn new(child: Box<dyn portable_pty::Child + Send>) -> Self {
+        Self {
+            child: Some(child),
+            process_group: None,
+        }
+    }
+
+    fn terminate(&mut self) {
+        if let Some(group) = self.process_group.as_mut() {
+            group.terminate();
+        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            reap_child_in_background(Arc::new(Mutex::new(child)));
+        }
+    }
+
+    fn into_parts(mut self) -> (Box<dyn portable_pty::Child + Send>, ProcessGroup) {
+        (
+            self.child.take().expect("spawn guard owns its child"),
+            self.process_group.take().unwrap_or_default(),
+        )
+    }
+}
+
+impl Drop for SpawnedChildGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpawnTestFailure {
+    None,
+    TakeWriter,
+    ProcessGroupAttach,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpawnDiagnostic {
     path_entry_count: usize,
@@ -59,10 +244,22 @@ struct SpawnDiagnostic {
 /// Provides methods for I/O, resize, and process lifecycle management.
 /// Dropping a `PtyHandle` terminates the child and any descendants that were
 /// attached to its process group / Job Object.
+#[derive(Default)]
+struct PtyInputState {
+    protected: bool,
+    queued: VecDeque<Vec<u8>>,
+    /// Ordinary (unprotected) keystrokes that have not been submitted or
+    /// cleared. Used so PM wake injection can wait instead of splicing a
+    /// `[gwt]` prompt into a live TUI composer.
+    unsent_user_input: bool,
+}
+
 pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input_state: Mutex<PtyInputState>,
+    generation_active: AtomicBool,
     // Wrapped so `kill` (which takes `&self`) can synchronously terminate the
     // group without waiting for `Drop`. Declared last so that when `Drop` runs
     // the direct child has already been signaled above.
@@ -73,6 +270,158 @@ impl PtyHandle {
     /// Spawn a child process with a PTY.
     #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
+        Self::spawn_inner(config, SpawnTestFailure::None, None)
+    }
+
+    /// Spawn a trusted gate helper in the PTY and wait until it proves that it
+    /// is blocking before returning. `gate_args_prefix` precedes the private
+    /// environment-carried gate parameters, allowing binaries and test
+    /// harnesses to select their hidden helper entrypoint.
+    pub fn spawn_pending(
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+    ) -> Result<PendingPty, TerminalError> {
+        let config =
+            normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: reason.to_string(),
+            })?;
+        let nonce = nonce.into();
+        if nonce.is_empty() {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "PTY start-gate nonce must not be empty".to_string(),
+            });
+        }
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|error| {
+            TerminalError::PtyCreationFailed {
+                reason: format!("bind PTY start gate: {error}"),
+            }
+        })?;
+        listener
+            .set_nonblocking(false)
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("configure PTY start gate: {error}"),
+            })?;
+        let endpoint = listener
+            .local_addr()
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("resolve PTY start-gate endpoint: {error}"),
+            })?;
+        let target = encode_start_gate_target(&config.command, &config.args);
+        let mut gate_config = SpawnConfig {
+            command: gate_program.to_string_lossy().into_owned(),
+            args: gate_args_prefix,
+            cols: config.cols,
+            rows: config.rows,
+            env: config.env,
+            remove_env: config.remove_env,
+            cwd: config.cwd,
+        };
+        gate_config
+            .env
+            .insert(START_GATE_ENDPOINT_ENV.to_string(), endpoint.to_string());
+        gate_config
+            .env
+            .insert(START_GATE_NONCE_ENV.to_string(), nonce.clone());
+        gate_config
+            .env
+            .insert(START_GATE_TARGET_ENV.to_string(), target);
+
+        let handle = Self::spawn(gate_config)?;
+        // Windows ConPTY parks a freshly attached console client inside its
+        // startup handshake until the terminal answers the cursor-position
+        // query the pseudoconsole emitted on creation. A gated launch only
+        // installs its pane — and therefore its frontend terminal — after
+        // release, so the gate helper would never reach the handshake below.
+        // Answering here is what a real terminal does anyway; conhost consumes
+        // the report instead of forwarding it to the released target.
+        #[cfg(windows)]
+        let _ = handle.write_input(CURSOR_POSITION_REPORT);
+        if handle.process_id().is_none() {
+            return Err(pending_spawn_error(
+                handle,
+                "PTY start-gate helper has no process id".to_string(),
+            ));
+        }
+        if let Err(error) = listener.set_nonblocking(true) {
+            return Err(pending_spawn_error(
+                handle,
+                format!("configure accept: {error}"),
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut handle = Some(handle);
+        loop {
+            match listener.accept() {
+                Ok((mut gate, peer)) if peer.ip().is_loopback() => {
+                    // Windows hands out accepted sockets in the listener's
+                    // non-blocking mode; the handshake read below must block
+                    // (bounded by the timeout) until the helper's HELLO
+                    // arrives instead of failing with WSAEWOULDBLOCK.
+                    gate.set_nonblocking(false)
+                        .and_then(|()| gate.set_read_timeout(Some(Duration::from_secs(2))))
+                        .map_err(|error| {
+                            pending_spawn_error(
+                                handle.take().expect("pending handle"),
+                                format!("configure handshake: {error}"),
+                            )
+                        })?;
+                    let mut hello = vec![0_u8; 1 + nonce.len()];
+                    if let Err(error) = gate.read_exact(&mut hello) {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            format!("read PTY start-gate handshake: {error}"),
+                        ));
+                    }
+                    if hello[0] == START_GATE_TARGET_MISSING && hello[1..] == *nonce.as_bytes() {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            format!("PTY start-gate target not found: {}", config.command),
+                        ));
+                    }
+                    if hello[0] != START_GATE_HELLO || hello[1..] != *nonce.as_bytes() {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            "PTY start-gate nonce mismatch".to_string(),
+                        ));
+                    }
+                    gate.set_read_timeout(None).map_err(|error| {
+                        pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            format!("finalize handshake: {error}"),
+                        )
+                    })?;
+                    return Ok(PendingPty {
+                        handle,
+                        gate: Some(gate),
+                    });
+                }
+                Ok((_gate, _)) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            "PTY start-gate handshake timed out".to_string(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    return Err(pending_spawn_error(
+                        handle.take().expect("pending handle"),
+                        format!("accept PTY start-gate handshake: {error}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn spawn_inner(
+        config: SpawnConfig,
+        failure: SpawnTestFailure,
+        observe_pid: Option<&mut dyn FnMut(u32)>,
+    ) -> Result<Self, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
                 reason: reason.to_string(),
@@ -126,34 +475,158 @@ impl PtyHandle {
             }
         };
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| TerminalError::PtyCreationFailed {
+        let mut child = SpawnedChildGuard::new(child);
+        let child_pid = child.child.as_ref().and_then(|child| child.process_id());
+        if let (Some(pid), Some(observe)) = (child_pid, observe_pid) {
+            observe(pid);
+        }
+        if failure == SpawnTestFailure::TakeWriter {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "take_writer: injected test failure".to_string(),
+            });
+        }
+        if failure == SpawnTestFailure::ProcessGroupAttach {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "process group attach: injected test failure".to_string(),
+            });
+        }
+        let process_group = match child_pid {
+            Some(pid) => Some(ProcessGroup::attach(pid).map_err(|reason| {
+                child.terminate();
+                TerminalError::PtyCreationFailed {
+                    reason: format!("process group attach: {reason}"),
+                }
+            })?),
+            None => None,
+        };
+        child.process_group = process_group;
+        let writer = pair.master.take_writer().map_err(|e| {
+            child.terminate();
+            TerminalError::PtyCreationFailed {
                 reason: format!("take_writer: {e}"),
-            })?;
-
-        let process_group = child
-            .process_id()
-            .map(ProcessGroup::attach)
-            .unwrap_or_default();
+            }
+        })?;
+        let (child, process_group) = child.into_parts();
 
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
+            input_state: Mutex::new(PtyInputState::default()),
+            generation_active: AtomicBool::new(true),
             process_group: Mutex::new(process_group),
         })
     }
 
+    // Only the unix reaping tests inject a spawn failure; gating on `test`
+    // alone left this dead on Windows, where `-D warnings` then failed a lint
+    // CI never runs (its clippy job is Linux-only).
+    #[cfg(all(test, unix))]
+    fn spawn_with_test_failure(
+        config: SpawnConfig,
+        failure: SpawnTestFailure,
+        mut observe_pid: impl FnMut(u32),
+    ) -> Result<Self, TerminalError> {
+        Self::spawn_inner(config, failure, Some(&mut observe_pid))
+    }
+
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        let mut state = self
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
+        if !self.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        state.note_user_input(data);
+        if state.protected {
+            state.queued.push_back(data.to_vec());
+            return Ok(());
+        }
+
         let lock_started = Instant::now();
         let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+        if !self.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        drop(state);
 
+        Self::write_with_locked_writer(&mut writer, data, lock_wait_us)
+    }
+
+    /// Whether the last ordinary keystrokes left unsent prompt content in the
+    /// TUI composer. Escape-only navigation and protected injects do not
+    /// count; submit (`\r`/`\n`) and composer-clear (Ctrl+C / Ctrl+U) reset it.
+    pub fn has_unsent_user_input(&self) -> bool {
+        self.input_state
+            .lock()
+            .map(|state| state.unsent_user_input)
+            .unwrap_or(false)
+    }
+
+    /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
+    /// key input is queued until the reservation is released.
+    pub fn reserve_input_transaction(
+        self: &Arc<Self>,
+    ) -> Result<PtyInputReservation, TerminalError> {
+        let mut state = self
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
+        if !self.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        if state.protected {
+            return Err(TerminalError::PtyIoError {
+                details: "another protected PTY input transaction is active".to_string(),
+            });
+        }
+        state.protected = true;
+        drop(state);
+        Ok(PtyInputReservation {
+            handle: Arc::clone(self),
+        })
+    }
+
+    /// Revoke this writer generation without waiting for an in-flight physical
+    /// write. New transactions fail immediately; teardown can finish the
+    /// physical commit barrier on a background worker.
+    pub fn revoke_input_generation(&self) {
+        self.generation_active.store(false, Ordering::Release);
+    }
+
+    /// Finish invalidating this writer generation at the physical-write commit
+    /// point. Logical lifecycle transitions should call
+    /// [`Self::revoke_input_generation`] first so new input is rejected without
+    /// waiting for an in-flight writer; background teardown then calls this
+    /// barrier before releasing the registry entry.
+    pub fn invalidate_input_generation(&self) {
+        self.revoke_input_generation();
+        let _writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+
+    fn write_with_locked_writer(
+        writer: &mut Box<dyn Write + Send>,
+        data: &[u8],
+        lock_wait_us: u64,
+    ) -> Result<(), TerminalError> {
         let write_started = Instant::now();
         let write_result = writer.write_all(data);
         let write_us = write_started.elapsed().as_micros() as u64;
@@ -179,6 +652,30 @@ impl PtyHandle {
             details: e.to_string(),
         })?;
         Ok(())
+    }
+
+    fn release_protected_input(&self, writer: &mut Box<dyn Write + Send>) {
+        loop {
+            let queued = match self.input_state.lock() {
+                Ok(mut state)
+                    if self.generation_active.load(Ordering::Acquire)
+                        && !state.queued.is_empty() =>
+                {
+                    state.queued.drain(..).collect::<Vec<_>>()
+                }
+                Ok(mut state) => {
+                    state.queued.clear();
+                    state.protected = false;
+                    return;
+                }
+                Err(_) => return,
+            };
+            for bytes in queued {
+                if let Err(error) = Self::write_with_locked_writer(writer, &bytes, 0) {
+                    tracing::warn!(%error, "queued PTY input failed after protected submit");
+                }
+            }
+        }
     }
 
     /// Resize the PTY window.
@@ -262,15 +759,29 @@ impl PtyHandle {
     /// open the master reader does not observe EOF, which would otherwise
     /// strand the reader thread (and its `Arc<Mutex<Pane>>`) and prevent the
     /// Drop chain from running.
-    pub fn kill(&self) -> Result<(), TerminalError> {
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        let kill_result = child.kill();
-        drop(child);
+    ///
+    /// This must not wait for the child to reap. `portable-pty`'s Unix
+    fn apply_process_policy(&self, policy: ProcessPolicy) -> Result<(), TerminalError> {
+        let pid = self
+            .process_id()
+            .ok_or_else(|| TerminalError::PtyCreationFailed {
+                reason: "apply process policy: PTY child has no process id".to_string(),
+            })?;
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group
+            .apply_policy(pid, policy)
+            .map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: format!("apply process policy: {reason}"),
+            })
+    }
 
-        // Always sweep descendants, even if the direct kill failed: the group
-        // terminate is idempotent and uses an independent kernel path.
+    /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
+    /// run on the GUI event loop and freeze every `pane.*` operation during
+    /// consecutive live-PTY closes (Issue #3705).
+    pub fn kill(&self) -> Result<(), TerminalError> {
         let mut group = match self.process_group.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -278,9 +789,42 @@ impl PtyHandle {
         group.terminate();
         drop(group);
 
-        kill_result.map_err(|e| TerminalError::PtyIoError {
-            details: e.to_string(),
-        })
+        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
+            details: format!("lock poisoned: {e}"),
+        })?;
+        if child
+            .try_wait()
+            .map_err(|e| TerminalError::PtyIoError {
+                details: e.to_string(),
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        let reaped = child.try_wait().ok().flatten().is_some();
+        drop(child);
+        if !reaped {
+            // Reap off the caller thread. Immediate try_wait after SIGKILL
+            // often misses the exit, and a zombie still looks alive to
+            // `kill(pid, 0)` (Issue #3705 / pty lifecycle tests).
+            reap_child_in_background(Arc::clone(&self.child));
+        }
+        Ok(())
     }
 
     /// Returns the OS process id of the spawned child, if available.
@@ -312,6 +856,357 @@ impl PtyHandle {
         child.try_wait().map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })
+    }
+}
+
+fn reap_child_in_background(child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match child.lock() {
+                Ok(mut guard) => {
+                    if guard.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
+fn pending_spawn_error(handle: PtyHandle, reason: String) -> TerminalError {
+    let _ = handle.kill();
+    TerminalError::PtyCreationFailed { reason }
+}
+
+/// Run the trusted side of a PTY start gate configured by
+/// [`PtyHandle::spawn_pending`]. The helper connects and proves it is blocked,
+/// then executes the target only after the owning process sends release.
+/// Closing the connection before release exits successfully without starting
+/// the target.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the parent already normalized the target before encoding it; Unix must use CommandExt::exec to preserve the gated PID"
+)]
+pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
+    let endpoint = std::env::var(START_GATE_ENDPOINT_ENV).map_err(|error| {
+        TerminalError::PtyCreationFailed {
+            reason: format!("missing PTY start-gate endpoint: {error}"),
+        }
+    })?;
+    let nonce =
+        std::env::var(START_GATE_NONCE_ENV).map_err(|error| TerminalError::PtyCreationFailed {
+            reason: format!("missing PTY start-gate nonce: {error}"),
+        })?;
+    let target =
+        std::env::var(START_GATE_TARGET_ENV).map_err(|error| TerminalError::PtyCreationFailed {
+            reason: format!("missing PTY start-gate target: {error}"),
+        })?;
+    let (command, args) = decode_start_gate_target(&target)?;
+    if command.is_empty() || nonce.is_empty() {
+        return Err(TerminalError::PtyCreationFailed {
+            reason: "PTY start-gate target and nonce must not be empty".to_string(),
+        });
+    }
+
+    let mut gate =
+        TcpStream::connect(&endpoint).map_err(|error| TerminalError::PtyCreationFailed {
+            reason: format!("connect PTY start gate at {endpoint}: {error}"),
+        })?;
+    // SPEC #1921 Phase 86 T518: the helper runs with the target's exact
+    // environment, so it is the right place to notice a target that cannot
+    // exist. Reporting it through the handshake keeps such launches on the
+    // owner's pre-spawn failure path instead of releasing a doomed target.
+    let target_missing = !start_gate_target_can_exist(&command);
+    let mut hello = Vec::with_capacity(1 + nonce.len());
+    hello.push(if target_missing {
+        START_GATE_TARGET_MISSING
+    } else {
+        START_GATE_HELLO
+    });
+    hello.extend_from_slice(nonce.as_bytes());
+    gate.write_all(&hello)
+        .and_then(|()| gate.flush())
+        .map_err(|error| TerminalError::PtyIoError {
+            details: format!("send PTY start-gate handshake: {error}"),
+        })?;
+    if target_missing {
+        drop(gate);
+        return Err(TerminalError::PtyCreationFailed {
+            reason: format!("PTY start-gate target not found: {command}"),
+        });
+    }
+    let mut release = [0_u8; 1];
+    match gate.read_exact(&mut release) {
+        Ok(()) if release[0] == START_GATE_RELEASE => {}
+        Ok(()) => {
+            return Err(TerminalError::PtyIoError {
+                details: "invalid PTY start-gate release".to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(0),
+        Err(error) => {
+            return Err(TerminalError::PtyIoError {
+                details: format!("wait for PTY start-gate release: {error}"),
+            })
+        }
+    }
+    drop(gate);
+
+    let mut target = Command::new(command);
+    target.args(args);
+    for key in [
+        START_GATE_ENDPOINT_ENV,
+        START_GATE_NONCE_ENV,
+        START_GATE_TARGET_ENV,
+    ] {
+        target.env_remove(key);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        let error = target.exec();
+        Err(TerminalError::PtyCreationFailed {
+            reason: format!("execute released PTY target: {error}"),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let status = target
+            .status()
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("execute released PTY target: {error}"),
+            })?;
+        Ok(status.code().unwrap_or(1))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let status = target
+            .status()
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("execute released PTY target: {error}"),
+            })?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+impl PtyInputState {
+    fn note_user_input(&mut self, data: &[u8]) {
+        self.unsent_user_input = next_unsent_user_input(self.unsent_user_input, data);
+    }
+}
+
+/// Issue #3702: classify one ordinary PTY write as leaving, submitting, or
+/// clearing unsent composer content. Protected injects never call this.
+fn next_unsent_user_input(unsent: bool, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return unsent;
+    }
+    if data.iter().any(|&byte| matches!(byte, 0x03 | 0x15)) {
+        return false;
+    }
+    if let Some(offset) = data
+        .iter()
+        .rposition(|&byte| byte == b'\r' || byte == b'\n')
+    {
+        return chunk_has_prompt_content(&data[offset + 1..]);
+    }
+    unsent || chunk_has_prompt_content(data)
+}
+
+fn chunk_has_prompt_content(data: &[u8]) -> bool {
+    let mut index = 0;
+    while index < data.len() {
+        match data[index] {
+            0x1b => index = skip_escape_sequence(data, index),
+            0x08 | 0x09 | 0x7f => return true,
+            0x20..=0x7e => return true,
+            byte if byte >= 0x80 => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn skip_escape_sequence(data: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    if index >= data.len() {
+        return index;
+    }
+    match data[index] {
+        b'[' => {
+            index += 1;
+            while index < data.len() && (0x20..0x40).contains(&data[index]) {
+                index += 1;
+            }
+            if index < data.len() {
+                index += 1;
+            }
+            index
+        }
+        b']' => {
+            index += 1;
+            while index < data.len() && data[index] != 0x07 && data[index] != 0x1b {
+                index += 1;
+            }
+            if index < data.len() && data[index] == 0x07 {
+                index + 1
+            } else if index + 1 < data.len() && data[index] == 0x1b {
+                index + 2
+            } else {
+                index
+            }
+        }
+        _ => index + 1,
+    }
+}
+
+/// Conservative existence check for a decoded gate target, evaluated inside
+/// the helper with the target's environment. Only clearly impossible targets
+/// return `false`: an explicit path that does not exist, or (on Unix) a bare
+/// name absent from every `PATH` entry. Bare names on Windows are left to
+/// `CreateProcess`, whose search order goes beyond `PATH`.
+fn start_gate_target_can_exist(command: &str) -> bool {
+    let has_separator = command.contains('/') || (cfg!(windows) && command.contains('\\'));
+    if has_separator {
+        let path = std::path::Path::new(command);
+        if path.is_file() {
+            return true;
+        }
+        if cfg!(windows) && path.extension().is_none() {
+            return path.with_extension("exe").is_file();
+        }
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Some(path_value) = std::env::var_os("PATH") else {
+            return false;
+        };
+        std::env::split_paths(&path_value).any(|dir| is_executable_file(&dir.join(command)))
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn encode_start_gate_target(command: &str, args: &[String]) -> String {
+    let mut encoded = String::new();
+    for component in std::iter::once(command).chain(args.iter().map(String::as_str)) {
+        encoded.push_str(&component.len().to_string());
+        encoded.push(':');
+        encoded.push_str(component);
+    }
+    encoded
+}
+
+fn decode_start_gate_target(encoded: &str) -> Result<(String, Vec<String>), TerminalError> {
+    let mut remaining = encoded;
+    let mut components = Vec::new();
+    while !remaining.is_empty() {
+        let separator = remaining
+            .find(':')
+            .ok_or_else(|| TerminalError::PtyCreationFailed {
+                reason: "invalid PTY start-gate target length".to_string(),
+            })?;
+        let length = remaining[..separator].parse::<usize>().map_err(|error| {
+            TerminalError::PtyCreationFailed {
+                reason: format!("invalid PTY start-gate target length: {error}"),
+            }
+        })?;
+        remaining = &remaining[separator + 1..];
+        if length > remaining.len() || !remaining.is_char_boundary(length) {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "invalid PTY start-gate target component".to_string(),
+            });
+        }
+        components.push(remaining[..length].to_string());
+        remaining = &remaining[length..];
+    }
+    let mut components = components.into_iter();
+    let command = components
+        .next()
+        .ok_or_else(|| TerminalError::PtyCreationFailed {
+            reason: "PTY start-gate target is empty".to_string(),
+        })?;
+    Ok((command, components.collect()))
+}
+
+/// Owned guard for a protected input sequence that may cross a worker delay.
+pub struct PtyInputReservation {
+    handle: Arc<PtyHandle>,
+}
+
+impl PtyInputReservation {
+    pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        if !self.handle.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        let mut writer = self
+            .handle
+            .writer
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if !self.handle.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        PtyHandle::write_with_locked_writer(&mut writer, data, 0)
+    }
+
+    /// Acquire the physical writer first, then let the caller linearize its
+    /// revocable authorization around the actual write. This prevents a
+    /// writer-lock stall from carrying an authority check past its deadline.
+    pub fn write_input_authorized(
+        &self,
+        data: &[u8],
+        authorize_and_commit: impl FnOnce(
+            &mut dyn FnMut(&mut dyn FnMut()) -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
+        let mut writer = self
+            .handle
+            .writer
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if !self.handle.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        let mut commit = |mark_attempted: &mut dyn FnMut()| {
+            if !self.handle.generation_active.load(Ordering::Acquire) {
+                return Err(TerminalError::PtyIoError {
+                    details: "PTY input generation is no longer active".to_string(),
+                });
+            }
+            mark_attempted();
+            PtyHandle::write_with_locked_writer(&mut writer, data, 0)
+        };
+        authorize_and_commit(&mut commit)
+    }
+}
+
+impl Drop for PtyInputReservation {
+    fn drop(&mut self) {
+        if let Ok(mut writer) = self.handle.writer.lock() {
+            self.handle.release_protected_input(&mut writer);
+        } else if let Ok(mut state) = self.handle.input_state.lock() {
+            state.queued.clear();
+            state.protected = false;
+        }
     }
 }
 
@@ -449,38 +1344,25 @@ fn is_executable_file(path: &Path) -> bool {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         // Best-effort termination: must never panic from Drop and must not
-        // block the caller for long. Tolerate poisoned mutexes.
-        let mut guard = match self.child.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let _ = guard.kill();
-
-        // Short reap loop so subsequent try_wait callers observe the exit.
-        // Capped at ~500ms so Drop never stalls the UI thread.
-        for _ in 0..20 {
-            match guard.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            }
-        }
-        drop(guard);
-
-        // Belt-and-suspenders: explicitly terminate the group in case `kill`
-        // was never called (e.g. the handle was dropped without going through
-        // stop_window_runtime). ProcessGroup::terminate is idempotent.
-        if let Ok(mut group) = self.process_group.lock() {
-            group.terminate();
-        }
+        // block the caller. Issue #3705: the previous reap loop slept up to
+        // 500ms on the GUI event loop when a live PTY was dropped during
+        // pane.close. Reuse `kill` so a child whose pgid is not its pid still
+        // receives a direct SIGKILL.
+        let _ = self.kill();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    // `Instant` is only consumed by the Unix reaping tests below.
+    #[cfg_attr(windows, allow(unused_imports))]
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
     };
+
+    #[cfg(unix)]
+    use std::time::Instant;
 
     use super::*;
     use crate::test_util::{
@@ -593,6 +1475,63 @@ mod tests {
 
     fn sleep_config(secs: &str) -> SpawnConfig {
         command_config(sleep_command(secs))
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: u32) -> bool {
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn take_writer_failure_reaps_the_spawned_child() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _pty_guard = lock_pty_test();
+        let observed_pid = Arc::new(AtomicU32::new(0));
+        let pid = Arc::clone(&observed_pid);
+        let error = match PtyHandle::spawn_with_test_failure(
+            sleep_config("60"),
+            SpawnTestFailure::TakeWriter,
+            move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+        ) {
+            Ok(_) => panic!("injected writer failure must fail spawn"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("take_writer"));
+
+        let pid = observed_pid.load(Ordering::SeqCst);
+        assert!(pid > 0, "spawned child pid was not observed");
+        assert!(wait_for_process_exit(pid), "writer failure orphaned {pid}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_attach_failure_reaps_the_spawned_child() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _pty_guard = lock_pty_test();
+        let observed_pid = Arc::new(AtomicU32::new(0));
+        let pid = Arc::clone(&observed_pid);
+        let error = match PtyHandle::spawn_with_test_failure(
+            sleep_config("60"),
+            SpawnTestFailure::ProcessGroupAttach,
+            move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+        ) {
+            Ok(_) => panic!("injected attach failure must fail spawn"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("process group"));
+
+        let pid = observed_pid.load(Ordering::SeqCst);
+        assert!(pid > 0, "spawned child pid was not observed");
+        assert!(wait_for_process_exit(pid), "attach failure orphaned {pid}");
     }
 
     #[test]
@@ -784,6 +1723,48 @@ mod tests {
         assert!(exited, "Process should have exited after kill");
     }
 
+    /// Issue #3705 AC-2: `portable-pty` waits up to ~200ms after SIGHUP before
+    /// SIGKILL. A TUI that installs a SIGHUP handler (Codex at a usage-limit
+    /// prompt) made that wait land on the GUI event loop and freeze pane.*.
+    #[cfg(unix)]
+    #[test]
+    fn kill_of_sighup_resistant_child_returns_without_blocking() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "trap '' HUP; exec /bin/sleep 60".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn failed");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        handle.kill().expect("kill should succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "PtyHandle::kill blocked for {elapsed:?}; live PTY close must not wait for SIGHUP reap"
+        );
+        let mut exited = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            exited,
+            "SIGHUP-resistant child must still be reaped after non-blocking kill"
+        );
+    }
+
     #[test]
     fn test_try_wait_running() {
         let _pty_guard = lock_pty_test();
@@ -932,5 +1913,165 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(exited, "Process should have completed");
+    }
+
+    #[test]
+    fn protected_input_reservation_queues_ordinary_input_until_submit_finishes() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let reservation = Arc::clone(&handle)
+            .reserve_input_transaction()
+            .expect("reserve protected input");
+
+        reservation.write_input(b"protected body").expect("body");
+        handle
+            .write_input(b"user input")
+            .expect("ordinary input queues behind the reservation");
+        {
+            let state = handle.input_state.lock().expect("input state");
+            assert!(state.protected);
+            assert_eq!(state.queued.len(), 1);
+        }
+
+        reservation.write_input(b"\r").expect("submit");
+        drop(reservation);
+        let state = handle.input_state.lock().expect("settled input state");
+        assert!(!state.protected);
+        assert!(state.queued.is_empty());
+    }
+
+    #[test]
+    fn generation_invalidation_fences_reserved_submit_and_drops_queued_input() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let reservation = Arc::clone(&handle)
+            .reserve_input_transaction()
+            .expect("reserve protected input");
+        reservation.write_input(b"body").expect("body");
+        handle.write_input(b"queued input").expect("queue input");
+
+        handle.invalidate_input_generation();
+
+        assert!(reservation.write_input(b"\r").is_err());
+        drop(reservation);
+        assert!(handle.write_input(b"late input").is_err());
+        let state = handle.input_state.lock().expect("settled input state");
+        assert!(state.queued.is_empty());
+        assert!(!state.protected);
+    }
+
+    #[test]
+    fn generation_invalidation_waits_for_the_physical_write_commit_point() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let writer = handle.writer.lock().expect("hold physical writer");
+        let (invalidated_tx, invalidated_rx) = std::sync::mpsc::channel();
+        let invalidating_handle = Arc::clone(&handle);
+        let invalidator = std::thread::spawn(move || {
+            invalidating_handle.invalidate_input_generation();
+            invalidated_tx.send(()).expect("publish invalidation");
+        });
+
+        assert!(
+            invalidated_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "invalidation must wait behind an already-authorized physical write"
+        );
+        drop(writer);
+        invalidated_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("invalidation completes after the physical write commit point");
+        invalidator.join().expect("invalidation thread");
+
+        assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn next_unsent_user_input_tracks_compose_submit_and_clear() {
+        assert!(
+            next_unsent_user_input(false, "ちゃんとbunx/npxで実行されてい".as_bytes()),
+            "printable / UTF-8 composer text is unsent"
+        );
+        assert!(
+            next_unsent_user_input(true, b"\x1b[A"),
+            "navigation must not clear an already-unsent composer"
+        );
+        assert!(
+            !next_unsent_user_input(false, b"\x1b[A"),
+            "escape-only input is not composer content"
+        );
+        assert!(
+            !next_unsent_user_input(true, "ますか？\r".as_bytes()),
+            "a trailing submit consumes the composer"
+        );
+        assert!(
+            next_unsent_user_input(false, b"hello\rworld"),
+            "bytes after the last submit start a new unsent composer"
+        );
+        assert!(
+            !next_unsent_user_input(true, b"\x03"),
+            "Ctrl+C clears the composer"
+        );
+        assert!(
+            !next_unsent_user_input(true, b"\x15"),
+            "Ctrl+U clears the composer"
+        );
+        assert!(
+            !next_unsent_user_input(false, b"\x1b[1;1R"),
+            "cursor-position replies are not composer content"
+        );
+    }
+
+    #[test]
+    fn write_input_marks_unsent_user_input_until_submit() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper");
+        assert!(!handle.has_unsent_user_input());
+        handle
+            .write_input("実行されてい".as_bytes())
+            .expect("compose");
+        assert!(handle.has_unsent_user_input());
+        handle.write_input(b"\r").expect("submit");
+        assert!(!handle.has_unsent_user_input());
+    }
+
+    #[test]
+    fn generation_revocation_is_non_blocking_while_physical_invalidation_waits() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let writer = handle.writer.lock().expect("hold physical writer");
+
+        handle.revoke_input_generation();
+
+        assert!(
+            Arc::clone(&handle).reserve_input_transaction().is_err(),
+            "logical close must reject new input without waiting for the physical writer"
+        );
+        drop(writer);
+        handle.invalidate_input_generation();
+        assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn authorized_commit_rechecks_generation_after_authorization_work() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let reservation = Arc::clone(&handle)
+            .reserve_input_transaction()
+            .expect("reserve protected input");
+        let invalidating_handle = Arc::clone(&handle);
+
+        let error = reservation
+            .write_input_authorized(b"late body", move |commit| {
+                invalidating_handle
+                    .generation_active
+                    .store(false, Ordering::Release);
+                let mut attempted = || {};
+                commit(&mut attempted)
+            })
+            .expect_err("generation invalidated during authorization must fail closed");
+
+        assert!(error.to_string().contains("generation is no longer active"));
     }
 }

@@ -93,6 +93,44 @@ class IssueTtlTests(unittest.TestCase):
             self.assertTrue(issues["repair_required"], issues)
             self.assertEqual(issues["reason"], "source_cache_changed")
 
+    def test_status_reports_count_mismatch_when_issue_cache_outgrows_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index_root"
+            issues_root = db_root / "abc1234567890def" / "issues"
+            issues_root.mkdir(parents=True)
+            (issues_root / runner.META_FILENAME).write_text("{}")
+            indexed_meta = {
+                "document_count": 1,
+                "source_document_count": 1,
+                "source_cache_fingerprint": "indexed",
+            }
+            current_source = {"document_count": 2, "fingerprint": "current"}
+
+            with (
+                mock.patch.object(
+                    runner, "_read_issue_meta", return_value=indexed_meta
+                ),
+                mock.patch.object(
+                    runner,
+                    "_issue_cache_source_snapshot",
+                    return_value=current_source,
+                ),
+                mock.patch.object(
+                    runner, "_scope_document_count", return_value=(True, 1)
+                ),
+            ):
+                issues = runner._issue_status_v2(
+                    repo_hash="abc1234567890def",
+                    db_root=db_root,
+                )
+
+            self.assertFalse(issues["healthy"], issues)
+            self.assertTrue(issues["repair_required"], issues)
+            self.assertEqual(issues["reason"], "count_mismatch")
+            self.assertEqual(issues["document_count"], 1)
+            self.assertEqual(issues["source_document_count"], 1)
+            self.assertEqual(issues["current_source_document_count"], 2)
+
     def test_search_issues_rebuilds_after_cached_issue_state_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_root = Path(tmp) / "index_root"

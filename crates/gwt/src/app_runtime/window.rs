@@ -30,6 +30,14 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
     matches!(preset, WindowPreset::Work | WindowPreset::Branches)
 }
 
+/// Result of a close request (Issue #3629 AC-10): `closed` reports whether the
+/// workspace record was actually removed, so callers can answer the requester
+/// instead of treating an empty event list as success.
+pub(crate) struct CloseWindowOutcome {
+    pub(crate) closed: bool,
+    pub(crate) events: Vec<OutboundEvent>,
+}
+
 impl AppRuntime {
     pub(crate) fn create_window_events(
         &mut self,
@@ -105,9 +113,7 @@ impl AppRuntime {
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
         if tab_changed {
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
@@ -420,7 +426,15 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        self.close_window_events_with_monitor_notification(id, true)
+        self.close_window_outcome(id).events
+    }
+
+    /// Close a window and report whether the workspace record was actually
+    /// removed (Issue #3629 AC-10): the agent pane route must be able to
+    /// distinguish a landed close from the silent no-op that an unknown or
+    /// already-closed window produces.
+    pub(crate) fn close_window_outcome(&mut self, id: &str) -> CloseWindowOutcome {
+        self.close_window_outcome_with_monitor_notification(id, true, None)
     }
 
     /// Close a window whose Issue Monitor lifecycle transition was already
@@ -431,15 +445,66 @@ impl AppRuntime {
         &mut self,
         id: &str,
     ) -> Vec<OutboundEvent> {
-        self.close_window_events_with_monitor_notification(id, false)
+        self.close_window_outcome_with_monitor_notification(id, false, None)
+            .events
     }
 
-    fn close_window_events_with_monitor_notification(
+    pub(super) fn close_window_outcome_with_self_close_ticket(
+        &mut self,
+        id: &str,
+        ticket: crate::AgentSelfCloseCapabilityTicket,
+    ) -> CloseWindowOutcome {
+        self.close_window_outcome_with_monitor_notification(id, true, Some(ticket))
+    }
+
+    fn close_window_outcome_with_monitor_notification(
         &mut self,
         id: &str,
         notify_issue_monitor: bool,
-    ) -> Vec<OutboundEvent> {
+        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+    ) -> CloseWindowOutcome {
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
+        if !close_window_from_workspace(
+            &mut self.tabs,
+            &mut self.window_lookup,
+            &mut self.window_details,
+            id,
+        ) {
+            return CloseWindowOutcome {
+                closed: false,
+                events: Vec::new(),
+            };
+        }
+        // Issue #3783: the accepted close is the in-memory removal above.
+        // Everything that may wait on PTY, execution, Session, or Work locks
+        // runs in one detached finalizer and cannot delay PaneCloseResult.
+        self.queue_accepted_window_close_finalizer(
+            id,
+            issue_monitor_project_root,
+            notify_issue_monitor,
+            self_close_ticket,
+        );
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
+        CloseWindowOutcome {
+            closed: true,
+            events,
+        }
+    }
+
+    /// Move an already-accepted window lifecycle into its detached finalizer.
+    /// Callers must first remove the window from the visible workspace, but
+    /// must leave runtime/session ownership intact for this method to capture.
+    pub(super) fn queue_accepted_window_close_finalizer(
+        &mut self,
+        id: &str,
+        project_root: Option<std::path::PathBuf>,
+        notify_issue_monitor: bool,
+        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+    ) {
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.
@@ -447,46 +512,41 @@ impl AppRuntime {
             .active_agent_sessions
             .get(id)
             .map(|session| session.session_id.clone());
-        self.clear_agent_window_startup_restore(id);
-        self.stop_window_runtime(id);
-        self.remove_window_state_tracking(id);
-        self.profile_selections.remove(id);
-        if !close_window_from_workspace(
-            &mut self.tabs,
-            &mut self.window_lookup,
-            &mut self.window_details,
-            id,
-        ) {
-            return Vec::new();
-        }
-        let pm_deregistered = match (
-            closing_session_id.as_deref(),
-            issue_monitor_project_root.as_ref(),
-        ) {
-            (Some(session_id), Some(project_root)) => {
-                self.deregister_pm_for_closed_window(project_root, session_id)
+        let closing_window_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .copied();
+        // PR #3787 review: the fence must count only closes of the registered
+        // PM session — any other agent pane close in the project would
+        // otherwise suppress PM ensure (Automatic/Explicit) and crash respawn
+        // through `pending_pm_closes` until its finalizer completes.
+        let closing_pm_session = match (project_root.as_ref(), closing_session_id.as_ref()) {
+            (Some(project_root), Some(session_id)) => {
+                self.pm_sessions.get(project_root) == Some(session_id)
             }
             _ => false,
         };
-        let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast()];
-        // SPEC-3431 FR-026: closing the PM is a PM state change, so the
-        // settings panel has to hear about it or it keeps offering a restart
-        // for a pane that is already gone.
-        if pm_deregistered {
-            events.extend(self.pm_status_broadcast_events());
-        }
-        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-            events.push(event);
-        }
-        if notify_issue_monitor {
-            if let Some(project_root) = issue_monitor_project_root {
-                events.extend(
-                    self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]),
-                );
+        if closing_pm_session {
+            if let Some(project_root) = project_root.as_ref() {
+                *self
+                    .pending_pm_closes
+                    .entry(project_root.clone())
+                    .or_default() += 1;
+                self.pm_sessions.remove(project_root);
             }
         }
-        events
+        self.queue_window_close_finalizer(
+            id,
+            project_root,
+            closing_session_id,
+            closing_pm_session,
+            notify_issue_monitor,
+            self_close_ticket,
+            closing_window_generation,
+        );
+        self.profile_selections.remove(id);
     }
 
     /// SPEC-2356 安心 Addendum (FR-041): stop a single window's agent runtime

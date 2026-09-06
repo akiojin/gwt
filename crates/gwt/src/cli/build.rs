@@ -17,6 +17,8 @@ pub(super) fn run<E: CliEnv>(
     action: SkillStateAction,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let mut completion_verification_hash = None;
+    let mut completion_session_id = None;
     if matches!(&action, SkillStateAction::Complete { .. }) {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         if let Some(refusal) =
@@ -25,8 +27,136 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("{VERB}: completion refused — {refusal}\n"));
             return Ok(2);
         }
+        let verification = crate::cli::verification_record::load(&worktree).map_err(|error| {
+            gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(format!(
+                "failed to load verification evidence: {error}"
+            )))
+        })?;
+        if verification
+            .as_ref()
+            .is_some_and(|record| !record.quarantined_failures.is_empty())
+        {
+            let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            else {
+                out.push_str(&format!(
+                    "{VERB}: completion refused — typed quarantine requires the current owning Session\n"
+                ));
+                return Ok(2);
+            };
+            let expected_owner = match &action {
+                SkillStateAction::Complete { spec } => Some(*spec),
+                _ => None,
+            };
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                &session_id,
+                expected_owner,
+            );
+            if evidence != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                out.push_str(&format!(
+                    "{VERB}: completion refused — {}\n",
+                    evidence.describe()
+                ));
+                return Ok(2);
+            }
+            if let Err(refusal) =
+                crate::cli::verification_record::validate_current_quarantine_references(
+                    env,
+                    verification.as_ref().expect("typed record checked above"),
+                    None,
+                )
+            {
+                out.push_str(&format!(
+                    "{VERB}: completion refused — typed quarantine evidence is not current: {refusal}\n"
+                ));
+                return Ok(2);
+            }
+            completion_verification_hash = verification.map(|record| record.content_hash);
+            completion_session_id = Some(session_id);
+        }
     }
-    if let Err(error) = record_current_work_terminal_before_finalize(env, &action) {
+    if let (Some(expected_hash), Some(session_id)) = (
+        completion_verification_hash.as_deref(),
+        completion_session_id.as_deref(),
+    ) {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        if let Some(refusal) =
+            crate::cli::action_obligation::open_obligation_refusal(&worktree, session_id, &[])
+        {
+            out.push_str(&format!("{VERB}: completion refused — {refusal}\n"));
+            return Ok(2);
+        }
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&worktree)
+            .ok_or_else(|| {
+                gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
+                    "typed quarantine build completion requires canonical trusted storage"
+                        .to_string(),
+                ))
+            })?;
+        let result = crate::cli::trusted_store::with_write_lease_for_resolved_dir(
+            &trusted_dir,
+            || {
+            let current = crate::cli::verification_record::load(&worktree)?;
+            if current
+                .as_ref()
+                .is_none_or(|record| record.content_hash != expected_hash)
+            {
+                out.push_str(
+                    "build: completion refused — typed quarantine verification evidence changed after live PR validation\n",
+                );
+                return Ok(Ok(2));
+            }
+            let expected_owner = match &action {
+                SkillStateAction::Complete { spec } => Some(*spec),
+                _ => None,
+            };
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                session_id,
+                expected_owner,
+            );
+            if evidence != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                out.push_str(&format!(
+                    "build: completion refused — {}\n",
+                    evidence.describe()
+                ));
+                return Ok(Ok(2));
+            }
+            Ok(run_after_quarantine_precheck(
+                env,
+                action,
+                out,
+                Some(expected_hash),
+                Some(&trusted_dir),
+            ))
+            },
+        )
+        .map_err(|error| {
+            gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error(
+                    "holding typed quarantine build completion lease",
+                    &error,
+                ),
+            ))
+        })?;
+        return result;
+    }
+    run_after_quarantine_precheck(env, action, out, None, None)
+}
+
+fn run_after_quarantine_precheck<E: CliEnv>(
+    env: &mut E,
+    action: SkillStateAction,
+    out: &mut String,
+    completion_verification_hash: Option<&str>,
+    held_trusted_dir: Option<&std::path::Path>,
+) -> Result<i32, SpecOpsError> {
+    if let Err(error) =
+        record_current_work_terminal_before_finalize_with_lease(env, &action, held_trusted_dir)
+    {
         out.push_str(&format!("{VERB}: Work lifecycle update failed: {error}\n"));
         return Ok(1);
     }
@@ -78,12 +208,35 @@ pub(super) fn run<E: CliEnv>(
                         &session_id,
                         Some(spec),
                     );
-                    if status == crate::cli::verification_record::EvidenceStatus::Fresh {
-                        crate::cli::execution_state::settle_completed_best_effort(
-                            &worktree,
-                            &session_id,
-                            spec,
-                        );
+                    if status.is_delivery_acceptable() {
+                        let settled = if let Some(expected_hash) = completion_verification_hash {
+                            debug_assert!(held_trusted_dir.is_some());
+                            match crate::cli::execution_state::settle_completed_with_evidence_locked(
+                                &worktree,
+                                &session_id,
+                                Some(spec),
+                                Some(expected_hash),
+                            ) {
+                                Ok(Ok(
+                                    crate::cli::execution_state::SettleResult::Settled(_)
+                                    | crate::cli::execution_state::SettleResult::AlreadySettled(_),
+                                )) => true,
+                                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => false,
+                            }
+                        } else {
+                            crate::cli::execution_state::settle_completed_best_effort(
+                                &worktree,
+                                &session_id,
+                                spec,
+                            );
+                            true
+                        };
+                        if completion_verification_hash.is_some() && !settled {
+                            out.push_str(
+                                "build: completion refused — typed quarantine verification evidence changed after live PR validation\n",
+                            );
+                            return Ok(2);
+                        }
                     } else {
                         out.push_str(&format!(
                             "{VERB}: execution control not settled — {}\n",
@@ -97,13 +250,24 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
+#[cfg(test)]
 fn record_current_work_terminal_before_finalize<E: CliEnv>(
     env: &E,
     action: &SkillStateAction,
 ) -> Result<(), String> {
-    let (spec, close_kind) = match action {
-        SkillStateAction::Complete { spec } => (*spec, WorkTerminalKind::Done),
-        SkillStateAction::Abort { spec, .. } => (*spec, WorkTerminalKind::Discarded),
+    record_current_work_terminal_before_finalize_with_lease(env, action, None)
+}
+
+fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
+    env: &E,
+    action: &SkillStateAction,
+    held_trusted_dir: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let (spec, close_kind, abort_reason) = match action {
+        SkillStateAction::Complete { spec } => (*spec, WorkTerminalKind::Done, None),
+        SkillStateAction::Abort { spec, reason } => {
+            (*spec, WorkTerminalKind::Discarded, reason.as_deref())
+        }
         SkillStateAction::Start { .. } | SkillStateAction::Phase { .. } => return Ok(()),
     };
     let repo = env.repo_path();
@@ -141,6 +305,13 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
                 return Ok(());
             }
         }
+        let terminal_refusal = |refusal: String| {
+            if matches!(close_kind, WorkTerminalKind::Discarded) {
+                crate::cli::execution_state::terminal_recovery_refusal(repo, &session_id, &refusal)
+            } else {
+                refusal
+            }
+        };
         let compatibility_authority =
             crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
                 repo,
@@ -150,29 +321,85 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
                     WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
                 },
             )
-            .map_err(|error| error.to_string())?
+            .map_err(|error| terminal_refusal(error.to_string()))?
             .ok_or_else(|| {
-                "managed build terminalization requires an exact durable Host Work authority"
-                    .to_string()
+                terminal_refusal(
+                    "managed build terminalization requires an exact durable Host Work authority"
+                        .to_string(),
+                )
             })?;
         let observation = crate::observe_agent_runtime(repo).map_err(|error| error.to_string())?;
         let request = crate::AgentWorkTerminalizationRequest {
             schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
-            claimed_session_id: session_id,
+            claimed_session_id: session_id.clone(),
             observation,
             terminal_kind: match close_kind {
                 WorkTerminalKind::Done => crate::AgentWorkTerminalKind::Done,
                 WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
             },
         };
-        let receipt =
-            crate::daemon_runtime::send_work_terminalization_via_agent_bridge(&target, &request)?;
+        let blocked_build_abort = compatibility_authority
+            .requires_blocked_build_abort_bridge()
+            .map_err(|error| terminal_refusal(error.to_string()))?;
+        let receipt = if blocked_build_abort {
+            let reason = abort_reason
+                .filter(|reason| !reason.trim().is_empty())
+                .ok_or_else(|| {
+                    "Blocked build abort requires a non-empty reason before Host terminalization"
+                        .to_string()
+                })?;
+            match crate::daemon_runtime::send_blocked_build_abort_terminalization_via_agent_bridge(
+                &target,
+                &crate::AgentBuildAbortTerminalizationRequest {
+                    schema_version: crate::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+                    claimed_session_id: request.claimed_session_id.clone(),
+                    owner_number: spec,
+                    reason: reason.to_string(),
+                    observation: request.observation.clone(),
+                },
+            ) {
+                Ok(receipt) => receipt,
+                Err(bridge_error) if bridge_error.is_missing_route_rejection() => {
+                    let reconciliation = if let Some(held_trusted_dir) = held_trusted_dir {
+                        crate::agent_project_state::continue_bound_terminal_compatibility_held_global_lease(
+                            &compatibility_authority,
+                            request,
+                            held_trusted_dir,
+                        )
+                    } else {
+                        crate::agent_project_state::continue_bound_terminal_compatibility(
+                            &compatibility_authority,
+                            request,
+                        )
+                    };
+                    return reconciliation
+                    .map(|_| ())
+                    .map_err(|local_error| {
+                        format!(
+                            "{bridge_error}; local Blocked build abort reconciliation was also refused: {local_error}"
+                        )
+                    });
+                }
+                Err(bridge_error) => return Err(bridge_error.to_string()),
+            }
+        } else {
+            crate::daemon_runtime::send_work_terminalization_via_agent_bridge(&target, &request)?
+        };
         return match receipt.outcome {
             crate::AgentWorkTerminalizationOutcome::Emitted => {
-                crate::agent_project_state::confirm_bound_terminal_compatibility_authority(
-                    &compatibility_authority,
-                    request,
-                )
+                let confirmation = if let Some(held_trusted_dir) = held_trusted_dir {
+                    crate::agent_project_state::confirm_bound_terminal_compatibility_authority_held_global_lease(
+                        &compatibility_authority,
+                        request,
+                        held_trusted_dir,
+                    )
+                } else {
+                    crate::agent_project_state::confirm_bound_terminal_compatibility_authority(
+                        &compatibility_authority,
+                        request,
+                    )
+                };
+                confirmation
                 .map_err(|error| {
                     format!(
                         "Host emitted a terminal event outside the canonical Work authority: {error}"
@@ -182,13 +409,21 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
             crate::AgentWorkTerminalizationOutcome::AlreadyMatching
             | crate::AgentWorkTerminalizationOutcome::WrongTerminal
             | crate::AgentWorkTerminalizationOutcome::AssignedWorkMissing
-            | crate::AgentWorkTerminalizationOutcome::NoTarget => {
+            | crate::AgentWorkTerminalizationOutcome::NoTarget => if let Some(held_trusted_dir) =
+                held_trusted_dir
+            {
+                crate::agent_project_state::continue_bound_terminal_compatibility_held_global_lease(
+                    &compatibility_authority,
+                    request,
+                    held_trusted_dir,
+                )
+            } else {
                 crate::agent_project_state::continue_bound_terminal_compatibility(
                     &compatibility_authority,
                     request,
                 )
-                .map(|_| ())
             }
+            .map(|_| ()),
             crate::AgentWorkTerminalizationOutcome::AmbiguousTerminal => {
                 map_agent_terminal_outcome(receipt.outcome, close_kind)
             }
@@ -289,8 +524,11 @@ impl WorkTerminalKind {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{Read, Write},
+        net::TcpListener as StdTcpListener,
         path::{Path, PathBuf},
         sync::{mpsc, Arc},
+        thread::JoinHandle,
         time::Duration,
     };
 
@@ -310,13 +548,103 @@ mod tests {
         runtime: Runtime,
         shutdown_tx: Option<oneshot::Sender<()>>,
         rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
+        abort_rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
         redirect_rx: mpsc::Receiver<HeaderMap>,
         forward_url: String,
+    }
+
+    struct RawTerminalBridgeServer {
+        join_handle: Option<JoinHandle<()>>,
+        request_rx: mpsc::Receiver<()>,
+        forward_url: String,
+    }
+
+    impl RawTerminalBridgeServer {
+        fn start(
+            status: StatusCode,
+            declared_content_length: Option<usize>,
+            body: Vec<u8>,
+        ) -> Self {
+            let listener =
+                StdTcpListener::bind(("127.0.0.1", 0)).expect("raw terminal bridge listener");
+            let address = listener.local_addr().expect("raw terminal bridge address");
+            let (request_tx, request_rx) = mpsc::channel();
+            let join_handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("raw terminal bridge request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("raw terminal bridge read timeout");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).expect("read raw terminal request");
+                    assert_ne!(read, 0, "terminal bridge request ended before its body");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = std::str::from_utf8(&request[..header_end])
+                        .expect("raw terminal request headers");
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                request_tx.send(()).expect("capture raw terminal request");
+                let reason = status.canonical_reason().unwrap_or("Rejected");
+                write!(
+                    stream,
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nConnection: close\r\n",
+                    status.as_u16(),
+                    reason
+                )
+                .expect("write raw terminal response status");
+                if let Some(content_length) = declared_content_length {
+                    write!(stream, "Content-Length: {content_length}\r\n")
+                        .expect("write raw terminal response length");
+                }
+                write!(stream, "\r\n").expect("finish raw terminal response headers");
+                // The client may reject an oversized Content-Length before
+                // consuming the body and close the socket. That is the
+                // behavior this fixture exercises, not a server failure.
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            });
+            Self {
+                join_handle: Some(join_handle),
+                request_rx,
+                forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
+            }
+        }
+
+        fn receive(&self) {
+            self.request_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("raw build abort bridge request");
+        }
+    }
+
+    impl Drop for RawTerminalBridgeServer {
+        fn drop(&mut self) {
+            if let Some(join_handle) = self.join_handle.take() {
+                join_handle.join().expect("join raw terminal bridge server");
+            }
+        }
     }
 
     #[derive(Clone)]
     struct TerminalBridgeState {
         tx: mpsc::Sender<(HeaderMap, serde_json::Value)>,
+        abort_tx: mpsc::Sender<(HeaderMap, serde_json::Value)>,
         status: StatusCode,
         body: String,
         before_response: Arc<dyn Fn() + Send + Sync>,
@@ -358,6 +686,7 @@ mod tests {
                 .expect("terminal bridge listener");
             let address = listener.local_addr().expect("terminal bridge address");
             let (tx, rx) = mpsc::channel();
+            let (abort_tx, abort_rx) = mpsc::channel();
             let (redirect_tx, redirect_rx) = mpsc::channel();
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let app = Router::new()
@@ -390,6 +719,34 @@ mod tests {
                     ),
                 )
                 .route(
+                    "/internal/build-abort-terminalization",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<TerminalBridgeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .abort_tx
+                                .send((headers, body))
+                                .expect("capture build abort bridge request");
+                            (state.before_response)();
+                            let mut response = (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response();
+                            if let Some(location) = state.redirect_location.as_deref() {
+                                response.headers_mut().insert(
+                                    axum::http::header::LOCATION,
+                                    axum::http::HeaderValue::from_str(location)
+                                        .expect("valid redirect location"),
+                                );
+                            }
+                            response
+                        },
+                    ),
+                )
+                .route(
                     "/redirected-terminal",
                     post(
                         |headers: HeaderMap, State(state): State<TerminalBridgeState>| async move {
@@ -403,6 +760,7 @@ mod tests {
                 )
                 .with_state(TerminalBridgeState {
                     tx,
+                    abort_tx,
                     status,
                     body: body.to_string(),
                     before_response: Arc::new(before_response),
@@ -421,6 +779,7 @@ mod tests {
                 runtime,
                 shutdown_tx: Some(shutdown_tx),
                 rx,
+                abort_rx,
                 redirect_rx,
                 forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
             }
@@ -432,10 +791,23 @@ mod tests {
                 .expect("terminal bridge request")
         }
 
+        fn receive_abort(&self) -> (HeaderMap, serde_json::Value) {
+            self.abort_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("build abort bridge request")
+        }
+
         fn assert_no_request(&self) {
             assert!(
                 matches!(self.rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "terminal bridge must not receive a request"
+            );
+        }
+
+        fn assert_no_abort_request(&self) {
+            assert!(
+                matches!(self.abort_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "build abort bridge must not receive a request"
             );
         }
 
@@ -691,6 +1063,21 @@ mod tests {
             );
         }
 
+        fn settle_execution_blocked(&self) {
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    &self.git.repo,
+                    &self.session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                )
+                .expect("settle fixture execution"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+        }
+
         fn canonical_work(&self) -> gwt_core::workspace_projection::WorkspaceWorkItem {
             gwt_core::workspace_projection::load_workspace_work_items(&self.git.repo)
                 .expect("load canonical WorkItems")
@@ -865,16 +1252,23 @@ mod tests {
             );
             discard.agent_session_id = Some(session.id.clone());
             legacy.apply_event(discard.clone());
-            let legacy_work_items_path =
-                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&worktree);
+            // #3466: before the project store followed the repository
+            // identity, a linked worktree got its own store keyed by the hash
+            // of its *path*. Old Hosts wrote terminals there, so that store
+            // still exists on disk after upgrading. Address it the way those
+            // Hosts did, not through the (now canonical) worktree lookup.
+            let legacy_store = gwt_core::paths::gwt_project_dir(
+                &gwt_core::repo_hash::compute_path_hash(&worktree),
+            )
+            .join("project-state");
+            let legacy_work_items_path = legacy_store.join("works.json");
             assert_ne!(canonical_path, legacy_work_items_path);
             gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
                 &legacy_work_items_path,
                 &legacy,
             )
             .expect("save stale linked-worktree WorkItems");
-            let legacy_close_path =
-                gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&worktree);
+            let legacy_close_path = legacy_store.join("work-events-closed.jsonl");
             std::fs::create_dir_all(legacy_close_path.parent().expect("legacy close parent"))
                 .expect("legacy close parent");
             std::fs::write(
@@ -955,9 +1349,17 @@ mod tests {
         server: &TerminalBridgeServer,
         operation: impl FnOnce(&crate::cli::TestEnv) -> T,
     ) -> T {
+        with_terminal_bridge_url_env_for(repo, session_id, &server.forward_url, operation)
+    }
+
+    fn with_terminal_bridge_url_env_for<T>(
+        repo: &Path,
+        session_id: &str,
+        forward_url: &str,
+        operation: impl FnOnce(&crate::cli::TestEnv) -> T,
+    ) -> T {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
-        let _forward_url =
-            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &server.forward_url);
+        let _forward_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, forward_url);
         let _forward_token =
             ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
         let _runtime = ScopedEnvVar::set(
@@ -965,6 +1367,229 @@ mod tests {
             repo.join("managed-runtime.json"),
         );
         operation(&crate::cli::TestEnv::new(repo.to_path_buf()))
+    }
+
+    #[test]
+    fn build_complete_rejects_typed_quarantine_without_session_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        crate::cli::verification_record::save_plan(
+            repo.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "session-missing".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (mut verification, _) = crate::cli::verification_record::run_verification(
+            repo.path(),
+            "session-missing",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        verification.quarantined_failures =
+            vec![crate::cli::verification_record::TypedQuarantinedFailure {
+                failed_command: "cargo test -p gwt --lib".to_string(),
+                test_identity: "tests::flake".to_string(),
+                owner_issue: 3755,
+                head_sha: "head".to_string(),
+                merge_base_sha: "base".to_string(),
+                baseline_command: "cargo test -p gwt --lib tests::flake -- --exact".to_string(),
+                baseline_exit_code: 0,
+                baseline_result_line: "test tests::flake ... ok".to_string(),
+                pr_number: 3854,
+                pr_reference: crate::cli::verification_record::PrQuarantineReference {
+                    kind: crate::cli::verification_record::PrQuarantineReferenceKind::Body,
+                    comment_id: None,
+                    marker: crate::cli::verification_record::quarantine_marker(
+                        "tests::flake",
+                        3755,
+                    ),
+                },
+            }];
+        crate::cli::verification_record::save(repo.path(), &verification).unwrap();
+
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            SkillStateAction::Complete { spec: 3248 },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("current owning Session"), "{out}");
+    }
+
+    #[test]
+    fn build_complete_atomically_settles_typed_quarantine_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let session_id = "session-typed-build";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        crate::cli::execution_state::materialize_at_launch(
+            repo.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            3248,
+            session_id,
+            "launch",
+            false,
+        )
+        .unwrap();
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 3248,
+        };
+        let binding =
+            crate::cli::execution_state::current_execution_binding(repo.path(), owner).unwrap();
+        let command = "cargo test -p gwt --lib".to_string();
+        let test_identity = "tests::flake";
+        let baseline_command = format!("{command} {test_identity} -- --exact");
+        crate::cli::verification_record::save_plan(
+            repo.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: session_id.to_string(),
+                owner_number: Some(3248),
+                execution_binding: binding.clone(),
+                commands: vec![command.clone()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: vec![
+                    crate::cli::verification_record::VerificationQuarantineRequest {
+                        failed_command: command.clone(),
+                        test_identity: test_identity.to_string(),
+                        baseline_command: baseline_command.clone(),
+                        owner_issue: 3755,
+                        pr_number: 3854,
+                    },
+                ],
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let plan = crate::cli::verification_record::load_plan(repo.path())
+            .unwrap()
+            .unwrap();
+        let marker = crate::cli::verification_record::quarantine_marker(test_identity, 3755);
+        crate::cli::verification_record::save(
+            repo.path(),
+            &crate::cli::verification_record::VerificationRunRecord {
+                record_id: "vrr-typed-build".to_string(),
+                session_id: session_id.to_string(),
+                owner_number: Some(3248),
+                execution_binding: binding,
+                worktree_fingerprint: plan.worktree_fingerprint.clone(),
+                commands: vec![crate::cli::verification_record::VerificationCommandResult {
+                    command: command.clone(),
+                    exit_code: 101,
+                    output_tail: format!(
+                        "failures:\n    {test_identity}\n\ntest result: FAILED. 0 passed; 1 failed"
+                    ),
+                }],
+                all_passed: false,
+                quarantined_failures: vec![
+                    crate::cli::verification_record::TypedQuarantinedFailure {
+                        failed_command: command,
+                        test_identity: test_identity.to_string(),
+                        owner_issue: 3755,
+                        head_sha: "head".to_string(),
+                        merge_base_sha: "base".to_string(),
+                        baseline_command,
+                        baseline_exit_code: 0,
+                        baseline_result_line: format!("test {test_identity} ... ok"),
+                        pr_number: 3854,
+                        pr_reference: crate::cli::verification_record::PrQuarantineReference {
+                            kind: crate::cli::verification_record::PrQuarantineReferenceKind::Body,
+                            comment_id: None,
+                            marker: marker.clone(),
+                        },
+                    },
+                ],
+                adjudications: Vec::new(),
+                started_at: Some(chrono::Utc::now()),
+                created_at: chrono::Utc::now(),
+                plan_covered: true,
+                planned_missing: Vec::new(),
+                verification_plan_hash: plan.content_hash,
+                plan_derived: false,
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(3755),
+            title: "owned flake".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        env.pr_quarantine_contexts.insert(
+            3854,
+            crate::cli::pr::PrQuarantineContext {
+                number: 3854,
+                body: marker,
+                comments: Vec::new(),
+            },
+        );
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, SkillStateAction::Start { spec: 3248 }, &mut out,).unwrap(),
+            0,
+            "{out}"
+        );
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                SkillStateAction::Complete { spec: 3248 },
+                &mut out,
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let completed = crate::cli::execution_state::load(repo.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed.status,
+            crate::cli::execution_state::ExecutionControlStatus::Completed
+        );
+        assert!(
+            completed
+                .completion_evidence
+                .is_some_and(|receipt| receipt.used_typed_quarantine),
+            "typed quarantine must be pinned in the Completed ECR"
+        );
     }
 
     #[test]
@@ -1181,6 +1806,448 @@ mod tests {
         );
         let (_, request) = server.receive();
         assert_eq!(request["terminal_kind"], "discarded");
+    }
+
+    #[test]
+    fn blocked_execution_allows_build_abort_but_rejects_build_complete() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let abort_fixture = BoundTerminalFixture::new();
+        let _session = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            abort_fixture.session.id.clone(),
+        );
+        let mut start_env = crate::cli::TestEnv::new(abort_fixture.git.repo.clone());
+        let mut start_output = String::new();
+        assert_eq!(
+            run(
+                &mut start_env,
+                SkillStateAction::Start { spec: 3327 },
+                &mut start_output,
+            )
+            .expect("run build.start"),
+            0,
+            "{start_output}"
+        );
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &abort_fixture.git.repo,
+                &abort_fixture.session.id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle abort fixture execution"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let abort_server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+        let abort_repo = abort_fixture.git.repo.clone();
+        let (abort_code, abort_output) =
+            with_terminal_bridge_env(&abort_fixture, &abort_server, |_| {
+                let mut env = crate::cli::TestEnv::new(abort_repo);
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("blocked verification cannot proceed".to_string()),
+                    },
+                    &mut output,
+                )
+                .expect("run build.abort after execution.blocked");
+                (code, output)
+            });
+
+        assert_eq!(abort_code, 0, "{abort_output}");
+        assert!(
+            !gwt_core::skill_state::load(&abort_fixture.git.repo, SKILL_NAME)
+                .expect("load aborted build state")
+                .expect("aborted build state")
+                .active,
+            "build.abort must close the stranded lifecycle"
+        );
+        let aborted_work = abort_fixture.canonical_work();
+        assert!(aborted_work.is_terminal());
+        assert!(aborted_work.discarded);
+        let (_, abort_request) = abort_server.receive_abort();
+        assert_eq!(abort_request["owner_number"], 3327);
+        assert_eq!(
+            abort_request["reason"],
+            "blocked verification cannot proceed"
+        );
+        assert!(abort_request.get("terminal_kind").is_none());
+
+        let complete_fixture = BoundTerminalFixture::new();
+        let mut start_env = crate::cli::TestEnv::new(complete_fixture.git.repo.clone());
+        let mut start_output = String::new();
+        assert_eq!(
+            run(
+                &mut start_env,
+                SkillStateAction::Start { spec: 3327 },
+                &mut start_output,
+            )
+            .expect("run build.start"),
+            0,
+            "{start_output}"
+        );
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &complete_fixture.git.repo,
+                &complete_fixture.session.id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle complete fixture execution"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let complete_server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+        let complete_repo = complete_fixture.git.repo.clone();
+        let (complete_code, complete_output) =
+            with_terminal_bridge_env(&complete_fixture, &complete_server, |_| {
+                let mut env = crate::cli::TestEnv::new(complete_repo);
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Complete { spec: 3327 },
+                    &mut output,
+                )
+                .expect("run build.complete after execution.blocked");
+                (code, output)
+            });
+
+        assert_ne!(complete_code, 0, "{complete_output}");
+        assert_build_still_active(&complete_fixture.git);
+        assert!(!complete_fixture.canonical_work().is_terminal());
+        complete_server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_transport_failure_never_falls_back_locally() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+
+        let unavailable = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve unavailable bridge address");
+        let port = unavailable
+            .local_addr()
+            .expect("unavailable bridge address")
+            .port();
+        drop(unavailable);
+        let unavailable_url = format!("http://127.0.0.1:{port}/internal/hook-live");
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &fixture.session.id);
+        let _forward_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &unavailable_url);
+        let _forward_token =
+            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            fixture.git.repo.join("managed-runtime.json"),
+        );
+        let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+        let mut output = String::new();
+
+        let code = run(
+            &mut env,
+            SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("blocked verification cannot proceed".to_string()),
+            },
+            &mut output,
+        )
+        .expect("run build.abort with unavailable Host bridge");
+
+        assert_ne!(code, 0, "{output}");
+        assert!(
+            output.contains("outcome may be unknown"),
+            "transport failure must remain fail-closed: {output}"
+        );
+        assert_build_still_active(&fixture.git);
+        assert!(
+            !fixture.canonical_work().is_terminal(),
+            "unknown Host outcome must not trigger a local terminal write"
+        );
+    }
+
+    #[test]
+    fn blocked_build_abort_rejects_blank_reason_before_host_or_local_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let server = TerminalBridgeServer::start(StatusCode::NOT_FOUND, serde_json::Value::Null);
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("   ".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run build.abort with blank reason");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("non-empty reason"), "{output}");
+        assert_build_still_active(&fixture.git);
+        assert!(!fixture.canonical_work().is_terminal());
+        server.assert_no_abort_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_unreadable_or_oversized_rejection_body_fails_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let limit = 64 * 1024;
+
+        for (label, declared_content_length, body) in [
+            ("truncated", Some(64), b"{}".to_vec()),
+            ("declared-oversized", Some(limit + 1), vec![b' '; limit + 1]),
+            ("streamed-oversized", None, vec![b' '; limit + 1]),
+        ] {
+            let fixture = BoundTerminalFixture::new();
+            fixture.settle_execution_blocked();
+            let server = RawTerminalBridgeServer::start(
+                StatusCode::NOT_FOUND,
+                declared_content_length,
+                body,
+            );
+            let repo = fixture.git.repo.clone();
+
+            let (code, output) = with_terminal_bridge_url_env_for(
+                &fixture.git.repo,
+                &fixture.session.id,
+                &server.forward_url,
+                |_| {
+                    let mut env = crate::cli::TestEnv::new(repo);
+                    let mut output = String::new();
+                    let code = run(
+                        &mut env,
+                        SkillStateAction::Abort {
+                            spec: 3327,
+                            reason: Some("blocked verification cannot proceed".to_string()),
+                        },
+                        &mut output,
+                    )
+                    .expect("run build.abort after unsafe Host rejection body");
+                    (code, output)
+                },
+            );
+
+            assert_ne!(code, 0, "{label}: {output}");
+            assert!(output.contains("transport_failure"), "{label}: {output}");
+            assert_build_still_active(&fixture.git);
+            assert!(
+                !fixture.canonical_work().is_terminal(),
+                "{label}: unsafe rejection body must not trigger a local terminal write"
+            );
+            server.receive();
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_missing_host_route_falls_back_locally() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+            let fixture = BoundTerminalFixture::new();
+            fixture.settle_execution_blocked();
+            let server = TerminalBridgeServer::start(status, serde_json::Value::Null);
+            let repo = fixture.git.repo.clone();
+
+            let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(repo);
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("blocked verification cannot proceed".to_string()),
+                    },
+                    &mut output,
+                )
+                .expect("run build.abort after explicit Host rejection");
+                (code, output)
+            });
+
+            assert_eq!(code, 0, "{status}: {output}");
+            assert!(
+                !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                    .expect("load reconciled build state")
+                    .expect("reconciled build state")
+                    .active
+            );
+            let work = fixture.canonical_work();
+            assert!(work.is_terminal());
+            assert!(work.discarded);
+            server.receive_abort();
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_host_denials_and_unknown_responses_fail_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        for (label, status, body) in [
+            (
+                "unauthorized",
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({
+                    "code": "invalid_request",
+                    "reason": "invalid_request",
+                    "message": "agent capability is invalid"
+                }),
+            ),
+            (
+                "forbidden",
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "code": "invalid_request",
+                    "reason": "invalid_request",
+                    "message": "agent capability is forbidden"
+                }),
+            ),
+            (
+                "authority-mismatch",
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "code": "execution_binding_mismatch",
+                    "reason": "authority_mismatch",
+                    "message": "execution binding is stale"
+                }),
+            ),
+            (
+                "unknown-conflict",
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "code": "future_conflict",
+                    "reason": "future_conflict",
+                    "message": "future Host rejection"
+                }),
+            ),
+            (
+                "internal",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({
+                    "code": "internal",
+                    "reason": "internal",
+                    "message": "Host mutation outcome is unknown"
+                }),
+            ),
+            (
+                "unsupported-receipt",
+                StatusCode::OK,
+                serde_json::json!({
+                    "schema_version": 2,
+                    "outcome": "already_matching"
+                }),
+            ),
+            ("invalid-receipt", StatusCode::OK, serde_json::Value::Null),
+        ] {
+            let fixture = BoundTerminalFixture::new();
+            fixture.settle_execution_blocked();
+            let server = TerminalBridgeServer::start(status, body);
+            let repo = fixture.git.repo.clone();
+
+            let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(repo);
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("blocked verification cannot proceed".to_string()),
+                    },
+                    &mut output,
+                )
+                .expect("run build.abort after Host denial");
+                (code, output)
+            });
+
+            assert_ne!(code, 0, "{label}: {output}");
+            assert_build_still_active(&fixture.git);
+            assert!(
+                !fixture.canonical_work().is_terminal(),
+                "{label}: Host denial or unknown outcome must not trigger a local terminal write"
+            );
+            server.receive_abort();
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_redirect_never_falls_back_or_forwards_its_bearer() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let server = TerminalBridgeServer::start_redirect();
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("blocked verification cannot proceed".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run redirected build.abort");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert_build_still_active(&fixture.git);
+        assert!(!fixture.canonical_work().is_terminal());
+        server.receive_abort();
+        server.assert_no_redirect();
     }
 
     #[test]
@@ -1534,6 +2601,148 @@ mod tests {
             std::fs::read(&works_path).expect("read canonical WorkItems"),
             before
         );
+        assert_build_still_active(&fixture.git);
+        server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_duplicate_session_authority_guides_status_recovery_without_ensure_loop()
+    {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let mut current =
+            gwt_core::workspace_projection::load_workspace_projection(&fixture.git.repo)
+                .expect("load canonical current")
+                .expect("canonical current");
+        let duplicate = current
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == fixture.session.id)
+            .expect("canonical Session assignment")
+            .clone();
+        current.agents.push(duplicate);
+        gwt_core::workspace_projection::save_workspace_projection(&fixture.git.repo, &current)
+            .expect("seed duplicate Session assignment");
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+        );
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("recover the stranded lifecycle".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run blocked build.abort with ambiguous Work authority");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("execution.status"), "{output}");
+        assert!(output.contains("recovery_probes"), "{output}");
+        assert!(output.contains("verify.plan"), "{output}");
+        assert!(
+            !output.contains("run workspace.ensure"),
+            "the refusal must not restart the build.abort/workspace.ensure loop: {output}"
+        );
+        let diagnosis =
+            crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+        assert!(
+            !diagnosis
+                .available_recoveries
+                .contains(&"build.abort".to_string()),
+            "an operation rejected by the exact Work preflight must not be advertised: {diagnosis:?}"
+        );
+        let abort_probe = diagnosis
+            .recovery_probes
+            .iter()
+            .find(|probe| probe.operation == "build.abort")
+            .expect("build.abort operation-local recovery probe");
+        assert_eq!(
+            abort_probe.state,
+            crate::cli::governance::RecoveryProbeState::Unavailable
+        );
+        assert_eq!(
+            abort_probe.governance.cause,
+            Some(crate::cli::governance::GovernanceCause::Authority)
+        );
+        assert_eq!(abort_probe.governance.retryable, Some(false));
+        assert!(
+            abort_probe
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("ambiguous")),
+            "{abort_probe:?}"
+        );
+        assert_build_still_active(&fixture.git);
+        server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_without_host_authority_guides_status_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let mut docker = fixture.session.clone();
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        docker
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save Docker Session");
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+        );
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("recover without Host authority".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run blocked build.abort without Host authority");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("execution.status"), "{output}");
+        assert!(output.contains("available_recoveries"), "{output}");
+        assert!(output.contains("verify.plan"), "{output}");
+        let diagnosis =
+            crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+        let abort_probe = diagnosis
+            .recovery_probes
+            .iter()
+            .find(|probe| probe.operation == "build.abort")
+            .expect("build.abort operation-local recovery probe");
+        assert_eq!(
+            abort_probe.governance.cause,
+            Some(crate::cli::governance::GovernanceCause::Authority)
+        );
+        assert_eq!(abort_probe.governance.retryable, Some(false));
         assert_build_still_active(&fixture.git);
         server.assert_no_request();
     }
