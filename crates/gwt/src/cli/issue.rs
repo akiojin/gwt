@@ -482,7 +482,6 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    #[cfg(unix)]
     if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(&project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
@@ -1324,25 +1323,15 @@ fn monitor_projection_reports_blocked_by_claim(
     project_root: &std::path::Path,
     number: u64,
 ) -> bool {
-    #[cfg(unix)]
-    {
-        let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root)
-        else {
-            return false;
-        };
-        let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status) else {
-            return false;
-        };
-        agent_status_reports_blocked_by_claim(&status, number)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (project_root, number);
-        false
-    }
+    let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root) else {
+        return false;
+    };
+    let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status) else {
+        return false;
+    };
+    agent_status_reports_blocked_by_claim(&status, number)
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 fn agent_status_reports_blocked_by_claim(
     status: &crate::IssueMonitorAgentStatus,
     number: u64,
@@ -1455,6 +1444,24 @@ fn issue_monitor_scan_delivery(result: Result<(), String>) -> IssueMonitorScanDe
 
 #[cfg(unix)]
 fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    request_immediate_daemon_monitor_scan(project_root)
+}
+
+/// Windows prefers the daemon control lane like Unix (Issue #3526) but keeps
+/// the SPEC-3431 FR-124 GUI WebSocket request as the fallback for the
+/// GUI-only topology, i.e. before the supervisor has started a daemon for
+/// this project.
+#[cfg(not(unix))]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    match request_immediate_daemon_monitor_scan(project_root) {
+        Err(code) if code == "daemon_control_unavailable" => {
+            super::pane::request_issue_monitor_scan_now(project_root)
+        }
+        other => other,
+    }
+}
+
+fn request_immediate_daemon_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({ "scan_now": {} }),
@@ -1477,11 +1484,6 @@ fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), 
             "scan_request_rejected".to_string()
         }
     })
-}
-
-#[cfg(not(unix))]
-fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
-    super::pane::request_issue_monitor_scan_now(project_root)
 }
 
 /// SPEC-3431 FR-031: a stable, greppable name for each refusal.
@@ -1874,24 +1876,11 @@ fn run_monitor_profiles_set<E: CliEnv>(
     Ok(0)
 }
 
-#[cfg(unix)]
 fn publish_monitor_config_set(
     project_root: &std::path::Path,
     payload: serde_json::Value,
 ) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
     crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-}
-
-#[cfg(not(unix))]
-fn publish_monitor_config_set(
-    _project_root: &std::path::Path,
-    _payload: serde_json::Value,
-) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
-    Err(
-        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-            "Issue Monitor daemon control is unavailable on this platform".to_string(),
-        ),
-    )
 }
 
 /// Issue #3844: the Issue an agent's wait declaration is about. The launch
@@ -1911,7 +1900,6 @@ fn monitor_launch_is_live(
     project_root: &std::path::Path,
     number: u64,
 ) -> Result<bool, SpecOpsError> {
-    #[cfg(unix)]
     if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
@@ -1925,7 +1913,6 @@ fn monitor_launch_is_live(
     Ok(monitor.launched_window_id(number).is_some())
 }
 
-#[cfg(unix)]
 fn publish_monitor_wait_control(
     project_root: &std::path::Path,
     wait: serde_json::Value,
@@ -1940,14 +1927,6 @@ fn publish_monitor_wait_control(
         crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
         payload,
     )
-}
-
-#[cfg(not(unix))]
-fn publish_monitor_wait_control(
-    _project_root: &std::path::Path,
-    _wait: serde_json::Value,
-) -> Result<(), String> {
-    Err("wait declaration publish unavailable on this platform".to_string())
 }
 
 /// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
@@ -2044,7 +2023,6 @@ fn run_monitor_wait<E: CliEnv>(
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
 /// Monitor daemon's control channel. The daemon re-judges the raw verdict
 /// (SHA-bound) — this only transports it.
-#[cfg(unix)]
 fn run_monitor_review_verdict<E: CliEnv>(
     env: &mut E,
     issue_number: u64,
@@ -2081,20 +2059,6 @@ fn run_monitor_review_verdict<E: CliEnv>(
             1
         }
     }
-}
-
-#[cfg(not(unix))]
-fn run_monitor_review_verdict<E: CliEnv>(
-    _env: &mut E,
-    issue_number: u64,
-    _reviewed_sha: &str,
-    _verdict_raw: &str,
-    out: &mut String,
-) -> i32 {
-    out.push_str(&format!(
-        "review verdict publish unavailable on this platform (#{issue_number})\n"
-    ));
-    1
 }
 
 fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<IssueCommand, CliParseError> {
