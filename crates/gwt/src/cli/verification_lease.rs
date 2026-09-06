@@ -38,6 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::CliEnv;
 
+/// Issue #3913: `verify.run` host admission — the lease's in-process claimant.
+pub(crate) mod admission;
+
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
 /// Upper bound so a typo cannot park the host for a day.
@@ -539,7 +542,7 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
         .into())
 }
 
-fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
+pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     IndexCoordinator::open_default()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
@@ -562,7 +565,7 @@ fn ensure_control_dir_is_ours(control: &Path) -> Result<(), SpecOpsError> {
     )))
 }
 
-fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
+pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
     let worktree = resolve_current_worktree_root(env.repo_path());
     let worktree_hash = compute_worktree_hash(&worktree)
         .map_err(|err| unexpected(format!("failed to identify the current worktree: {err}")))?;
@@ -737,17 +740,39 @@ mod tests {
         path
     }
 
+    #[cfg(windows)]
+    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+
+        if path.is_dir() {
+            return OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path);
+        }
+        fs::File::options().write(true).open(path)
+    }
+
+    #[cfg(not(windows))]
+    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .or_else(|_| fs::File::open(path))
+    }
+
     /// Backdate a directory and its outcome past the grace window so the sweep
     /// treats it as residue without the test having to wait.
     fn age_out(dir: &Path) {
         let stale = std::time::SystemTime::now() - CONTROL_RESIDUE_GRACE * 2;
         for path in [dir.join(OUTCOME_FILE), dir.to_path_buf()] {
             if path.exists() {
-                let file = fs::File::options()
-                    .write(true)
-                    .open(&path)
-                    .or_else(|_| fs::File::open(&path))
-                    .expect("open for backdating");
+                let file = open_for_backdating(&path).expect("open for backdating");
                 file.set_modified(stale).expect("backdate");
             }
         }

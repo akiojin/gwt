@@ -567,6 +567,7 @@ impl AppRuntime {
         language: String,
         codex_trust_managed_hooks: Option<bool>,
         board_provider: Option<String>,
+        agent_resource: Option<gwt::protocol::AgentResourceSettings>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -587,6 +588,7 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource,
             ),
         )]
     }

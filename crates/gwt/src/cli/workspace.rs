@@ -4553,6 +4553,7 @@ pub(crate) mod tests {
             missing_verification: None,
             launched_at: now,
             settled_at: Some(now),
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -7963,6 +7964,7 @@ pub(crate) mod tests {
             &mut env,
             crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands: plan.commands,
+                max_wait_secs: None,
             }),
         )
         .expect("run the status-advertised verification plan");

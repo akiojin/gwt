@@ -90,11 +90,7 @@ impl FrontendUserActionLog {
 }
 
 fn sanitize_ui_action_field(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(160)
-        .collect()
+    gwt::perf::sanitize_ui_action_field(value)
 }
 
 fn sanitize_ui_action_url(value: &str) -> String {
@@ -647,20 +643,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
-        FrontendEvent::ImprovementPromoteIssue { id } => {
-            FrontendUserActionLog::new("improvement_promote_issue", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementResolve { id, .. } => {
-            FrontendUserActionLog::new("improvement_resolve", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementSelectOwner {
-            id, owner_number, ..
-        } => FrontendUserActionLog::new("improvement_select_owner", "improvement")
-            .target(id)
-            .mode(format!("owner:{owner_number}")),
-        FrontendEvent::ImprovementDismiss { id, .. } => {
-            FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
-        }
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
         FrontendEvent::PaneSendInput { session_id, .. } => {

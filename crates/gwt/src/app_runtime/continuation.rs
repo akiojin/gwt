@@ -169,7 +169,7 @@ struct ContinueWorkTarget {
 }
 
 #[derive(Debug)]
-enum ContinueWorkLaunchSeed {
+pub(super) enum ContinueWorkLaunchSeed {
     DurableSession(Box<gwt_agent::Session>),
     WorkProjection {
         agent_id: gwt_agent::AgentId,
@@ -763,6 +763,54 @@ pub(super) fn configure_provider_continuation_with_grok_home(
     config.session_mode = gwt_agent::SessionMode::Normal;
     config.resume_session_id = None;
     gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+}
+
+/// Build the launch config a Continue work dispatch hands to the launch worker.
+///
+/// Issue #3489: the continuation binding is always minted from the Work owner,
+/// and `Session::set_execution_binding` refuses a binding whose owner differs
+/// from the launch config's `linked_issue_number` — before the PTY starts. A
+/// durable Session seed carries whatever owner linkage it happened to persist
+/// (`None` after a relaunch that dropped it, or another owner entirely), so the
+/// owner linkage is re-resolved from `owner` here for every seed. `owner` is the
+/// single source of truth for the launch's owner linkage.
+pub(super) fn continuation_launch_config(
+    seed: &ContinueWorkLaunchSeed,
+    worktree_path: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    grok_home: Option<&Path>,
+) -> (gwt_agent::LaunchConfig, gwt::ContinueWorkOutcomeKind) {
+    let (mut config, outcome) = match seed {
+        ContinueWorkLaunchSeed::DurableSession(source_session) => {
+            let mut config = launch_config_from_persisted_session(source_session);
+            config.working_dir = Some(worktree_path.to_path_buf());
+            config.branch = Some(source_session.branch.clone());
+            let outcome = configure_provider_continuation_with_grok_home(
+                &mut config,
+                source_session,
+                grok_home,
+            );
+            (config, outcome)
+        }
+        ContinueWorkLaunchSeed::WorkProjection {
+            agent_id,
+            display_name,
+            branch,
+        } => {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .working_dir(worktree_path.to_path_buf())
+                .branch(branch.clone())
+                .linked_issue_number(owner.number)
+                .session_mode(gwt_agent::SessionMode::Normal)
+                .build();
+            if let Some(display_name) = display_name {
+                config.display_name = display_name.clone();
+            }
+            (config, gwt::ContinueWorkOutcomeKind::StartedWithHandoff)
+        }
+    };
+    config.linked_issue_number = Some(owner.number);
+    (config, outcome)
 }
 
 impl AppRuntime {
@@ -3848,6 +3896,12 @@ impl AppRuntime {
         classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
     }
 
+    /// Issue #3934: the batch prefilter moved to the free
+    /// [`classify_nonlocal_active_owner_liveness_batch_at`] so the Issue
+    /// Monitor scan worker can run the reaper without an `AppRuntime`. The
+    /// method survives as the test-facing wrapper over the runtime's own
+    /// sessions directory.
+    #[cfg(test)]
     pub(super) fn classify_nonlocal_active_owner_liveness_batch<'a>(
         &self,
         session_ids: impl IntoIterator<Item = &'a str>,
@@ -5504,6 +5558,14 @@ impl AppRuntime {
                 return self.continue_work_failure_events(client_id, operation_id, work_id, failure)
             }
         };
+        // Issue #3759: Continue work is the GUI recovery route for a
+        // stranded owner. Rebuild a lost worktree pointer/projection from
+        // the owner ledger before the strict read so the route does not
+        // refuse the exact state it exists to recover from.
+        super::launch::heal_lost_generation_publication_best_effort(
+            &target.worktree_path,
+            target.owner,
+        );
         let generation_was_missing = match gwt::cli::execution_state::load_generation_ledger(
             &target.worktree_path,
             target.owner,
@@ -5765,44 +5827,23 @@ impl AppRuntime {
                 )
             }
         };
-        let (mut config, outcome) = match &target.launch_seed {
-            ContinueWorkLaunchSeed::DurableSession(source_session) => {
-                let mut config = launch_config_from_persisted_session(source_session);
-                config.working_dir = Some(target.worktree_path.clone());
-                config.branch = Some(source_session.branch.clone());
-                let grok_home = (source_session.agent_id == gwt_agent::AgentId::GrokBuild)
-                    .then(|| {
-                        self.active_profile_grok_home_for_continuation(
-                            source_session,
-                            &target.worktree_path,
-                        )
-                    })
-                    .flatten();
-                let outcome = configure_provider_continuation_with_grok_home(
-                    &mut config,
+        let grok_home = match &target.launch_seed {
+            ContinueWorkLaunchSeed::DurableSession(source_session)
+                if source_session.agent_id == gwt_agent::AgentId::GrokBuild =>
+            {
+                self.active_profile_grok_home_for_continuation(
                     source_session,
-                    grok_home.as_deref(),
-                );
-                (config, outcome)
+                    &target.worktree_path,
+                )
             }
-            ContinueWorkLaunchSeed::WorkProjection {
-                agent_id,
-                display_name,
-                branch,
-            } => {
-                let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
-                    .working_dir(target.worktree_path.clone())
-                    .branch(branch.clone())
-                    .linked_issue_number(target.owner.number)
-                    .session_mode(gwt_agent::SessionMode::Normal)
-                    .build();
-                if let Some(display_name) = display_name {
-                    config.display_name = display_name.clone();
-                }
-                (config, gwt::ContinueWorkOutcomeKind::StartedWithHandoff)
-            }
+            _ => None,
         };
-        config.linked_issue_number = Some(target.owner.number);
+        let (mut config, outcome) = continuation_launch_config(
+            &target.launch_seed,
+            &target.worktree_path,
+            target.owner,
+            grok_home.as_deref(),
+        );
         let continuation_session_id = uuid::Uuid::new_v4().to_string();
         let predecessor_binding = match gwt::cli::execution_state::current_execution_binding(
             &target.worktree_path,

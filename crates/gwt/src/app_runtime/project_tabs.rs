@@ -570,9 +570,6 @@ impl AppRuntime {
         }
         let active_project_changed =
             self.active_project_root().map(Path::to_path_buf) != previous_project_root;
-        if active_project_changed {
-            self.schedule_active_improvement_candidates_refresh();
-        }
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];

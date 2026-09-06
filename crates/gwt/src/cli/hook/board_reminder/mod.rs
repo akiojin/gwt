@@ -154,6 +154,13 @@ fn build_self_match_keys(session: &Session) -> Vec<String> {
 }
 
 fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
+    // Issue #3984: an independent-review dispatch window owns no Workspace
+    // Work, so `workspace.update` is permanently rejected there — the same
+    // unfollowable-instruction case as the detached-HEAD probe below, only
+    // known up front from the launch marker instead of from git.
+    if crate::issue_monitor_review::review_dispatch_session_active() {
+        return Ok(false);
+    }
     let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
         session,
         &session.worktree_path,
@@ -869,6 +876,63 @@ mod tests {
             !text.contains("branch / worktree"),
             "the PM performs no git operations; the Work/Git guidance is noise:\n{text}"
         );
+    }
+
+    /// Issue #3767 AC-2: the intent-boundary reminder the PM reads every turn
+    /// carries the steering obligation in both languages, so the injected
+    /// prompt cannot quietly outrank the skill body back into "observe only".
+    #[test]
+    fn the_resident_pm_is_told_to_steer_running_launches() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).expect("pm worktree");
+        let session = make_session(&pm_worktree, "work", "Project Manager");
+
+        let plan = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            "2026-09-03T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .expect("plan")
+        .expect("some plan");
+        let text = match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
+            other => panic!("expected additional context, got {other:?}"),
+        };
+        assert!(
+            text.contains("Steer them before you judge the cycle unchanged")
+                || text.contains("「変化なし」と判定する前に稼働中の launch を steering"),
+            "the PM reminder must carry the steering obligation:\n{text}"
+        );
+        for (reminder, phrases) in [
+            (
+                texts::PM_REMINDER,
+                [
+                    "Steer them before you judge the cycle unchanged",
+                    "stalled, drifting out of scope, or waiting for its next action",
+                    "`board.post` with a mention or `pm.message.send`",
+                    "never inject launch instructions past the Issue Monitor",
+                ],
+            ),
+            (
+                texts::PM_REMINDER_JA,
+                [
+                    "「変化なし」と判定する前に稼働中の launch を steering",
+                    "停滞・スコープ逸脱・次アクション待ち",
+                    "`board.post` の mention か `pm.message.send`",
+                    "Issue Monitor を迂回した起動系注入はしません",
+                ],
+            ),
+        ] {
+            for phrase in phrases {
+                assert!(
+                    reminder.contains(phrase),
+                    "PM reminder is missing `{phrase}`:\n{reminder}"
+                );
+            }
+        }
     }
 
     /// The exemption is keyed on the PM worktree alone. An identical session

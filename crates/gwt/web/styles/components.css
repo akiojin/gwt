@@ -604,7 +604,7 @@ body::after {
   border-right: 1px solid var(--color-border);
   /* Flyout chips + popovers (window list, update CTA) extend over the canvas. */
   overflow: visible;
-  z-index: 30;
+  z-index: var(--z-rail);
 }
 
 .op-rail__group {
@@ -871,6 +871,15 @@ button.op-status-strip__cell {
 
 .op-status-strip__cell--running .op-status-strip__value {
   color: var(--color-state-active);
+}
+
+/* Issue #3884 AC-3 — RUNNING breakdown: "N inline" names the running agents
+   that live as inline terminals in the Issue window rather than on the canvas.
+   Quieter than the value so the total still reads first. */
+.op-status-strip__sub {
+  margin-left: var(--space-1);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--color-state-active) 72%, var(--color-status-strip-fg));
 }
 
 .op-status-strip__cell--idle .op-status-strip__value {
@@ -4643,6 +4652,13 @@ button.workspace-board-ref:focus-visible {
   max-width: 520px;
 }
 
+/* SPEC #1921 Phase 86 (#3813): the Custom-only resource controls are
+   toggled with the `hidden` attribute, which the flex display above would
+   otherwise override. */
+:root[data-theme] .settings-section[hidden] {
+  display: none;
+}
+
 :root[data-theme] .settings-section + .settings-section {
   margin-top: var(--space-3);
 }
@@ -5770,6 +5786,76 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs, 0.72rem);
   color: var(--color-text-muted, #9aa0ad);
   white-space: nowrap;
+}
+
+/* Per-session tokens / context (Issue #3862): bounded list inside a provider
+   card — name | model | tokens | context left. Severity reuses the Operator
+   state tokens; no raw colors. */
+.op-usage-sess {
+  display: grid;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.op-usage-sess__head {
+  margin-bottom: 2px;
+  font-size: var(--type-xs, 0.72rem);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 48px 72px;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--type-sm, 0.85rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.op-usage-sess__row[data-eligible="false"] {
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-usage-sess__model {
+  font-size: var(--type-xs, 0.72rem);
+  color: var(--color-text-muted, #9aa0ad);
+  white-space: nowrap;
+}
+
+.op-usage-sess__tokens {
+  text-align: right;
+}
+
+.op-usage-sess__ctx {
+  text-align: right;
+  white-space: nowrap;
+  color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-sess__ctx[data-severity="normal"] {
+  color: var(--color-text, #e7e9ee);
+}
+
+.op-usage-sess__ctx[data-severity="warning"] {
+  color: var(--color-state-needs-input);
+}
+
+.op-usage-sess__ctx[data-severity="danger"] {
+  color: var(--color-state-blocked);
+}
+
+.op-usage-sess__more {
+  font-size: var(--type-xs, 0.72rem);
+  color: var(--color-text-muted, #9aa0ad);
 }
 
 /* Consumption grid: period × in/out/cached, right-aligned numerics. */

@@ -650,3 +650,100 @@ test("switchSettingsTab toggles aria-selected and hidden together", () => {
     "switchSettingsTab must toggle hidden on non-active panels",
   );
 });
+
+test("renderSystemPanel exposes agent process-tree resource controls (#3813)", () => {
+  assert.match(
+    settingsSource,
+    /agentResource:\s*\{\s*enabled:\s*true,\s*preset:\s*"automatic",\s*priority:\s*"below-normal",\s*cpuLimitPercent:\s*null,\s*buildJobs:\s*null,?\s*\}/,
+    "expected agent resource UI state to default to enabled / automatic preset",
+  );
+  for (const id of [
+    "settings-system-agent-resource-enabled",
+    "settings-system-agent-preset",
+    "settings-system-agent-priority",
+    "settings-system-agent-cpu-limit",
+    "settings-system-agent-build-jobs",
+  ]) {
+    assert.match(
+      settingsSource,
+      new RegExp(`id\\s*=\\s*"${id}"`),
+      `expected agent resource control with id ${id}`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*agent_resource:/,
+    "expected agent resource controls to send the complete agent_resource object",
+  );
+  assert.match(
+    settingsSource,
+    /function parseOptionalPositiveInteger\(/,
+    "expected empty numeric inputs to resolve to automatic (null) mode",
+  );
+  assert.match(
+    settingsSource,
+    /applyAgentResourceSnapshot\(deferred\.agent_resource\)/,
+    "expected deferred backend events to reconcile agent resource state",
+  );
+  assert.match(
+    settingsSource,
+    /presetSelect\.className\s*=\s*"settings-select"/,
+    "expected the preset select to reuse the shared settings-select primitive",
+  );
+  for (const [value, label] of [
+    ["automatic", "Automatic (recommended)"],
+    ["gui-responsiveness", "Prioritize GUI responsiveness"],
+    ["build-speed", "Prioritize build speed"],
+    ["custom", "Custom"],
+  ]) {
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(
+      settingsSource,
+      new RegExp(`value:\\s*"${value}",\\s*text:\\s*"${escapedLabel}"`),
+      `expected preset option ${value} labelled "${label}"`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /customSection\.hidden\s*=\s*agentResource\.preset\s*!==\s*"custom"/,
+    "expected numeric / priority controls to be shown only for the Custom preset",
+  );
+  assert.match(
+    componentsCss,
+    /\.settings-section\[hidden\]\s*\{\s*display:\s*none;/,
+    "expected the hidden attribute to win over the flex display of settings sections",
+  );
+  assert.doesNotMatch(
+    settingsSource,
+    /Cargo build jobs/,
+    "expected the parallelism control to use generic build vocabulary, not cargo",
+  );
+  assert.match(
+    settingsSource,
+    /prioritySelect\.className\s*=\s*"settings-select"/,
+    "expected the priority select to reuse the shared settings-select primitive",
+  );
+  assert.match(
+    settingsSource,
+    /cpuInput\.className\s*=\s*"settings-input"/,
+    "expected numeric inputs to reuse the shared settings-input primitive",
+  );
+});
+
+test("app.js reconciles agent_resource from system settings events (#3813)", () => {
+  assert.match(
+    appSource,
+    /kind:\s*"system_settings",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
+    "expected deferred system_settings payload to carry agent_resource",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"system_settings_updated",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
+    "expected deferred system_settings_updated payload to carry agent_resource",
+  );
+  const applyCalls = appSource.match(/applyAgentResourceSnapshot\(event\.agent_resource\)/g) || [];
+  assert.ok(
+    applyCalls.length >= 2,
+    "expected both system_settings and system_settings_updated arms to reconcile agent_resource",
+  );
+});

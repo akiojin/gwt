@@ -109,6 +109,93 @@ pub struct ProcessLaunch {
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
+    /// SPEC #1921 Phase 86 (#3813): resource policy applied to the PTY tree
+    /// through the start gate before the target runs. `None` keeps the direct
+    /// spawn route (Shell panes, or isolation disabled).
+    pub(crate) resource_policy: Option<gwt_terminal::pty::ProcessPolicy>,
+}
+
+/// SPEC #1921 Phase 86 (#3813): resolve the AgentBootstrap resource policy
+/// for a launch whose repository is `repo_path`, handing the build
+/// parallelism to build tools through `env` where it is not already pinned. Settings come from
+/// the global profile config; `max_active` from the repository's persisted
+/// Issue Monitor preferences (missing preferences count as one agent).
+fn resolve_agent_resource_launch(
+    profile_config_path: &Path,
+    repo_path: &Path,
+    env: &mut HashMap<String, String>,
+) -> Result<Option<gwt_terminal::pty::ProcessPolicy>, String> {
+    let settings = if profile_config_path.exists() {
+        gwt_config::Settings::load_from_path(profile_config_path).map_err(|error| {
+            format!(
+                "load agent resource policy from {}: {error}",
+                profile_config_path.display()
+            )
+        })?
+    } else {
+        gwt_config::Settings::default()
+    };
+    let max_active =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
+            .map_or(1, |prefs| prefs.max_active_agents);
+    let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
+        &settings.agent.resource,
+        max_active,
+        logical_cores,
+    )
+    .map_err(|error| format!("agent resource policy: {error}"))?;
+    gwt::agent_resource_policy::inject_build_parallelism_env(env, resolved.build_jobs);
+    Ok(resolved.process_policy)
+}
+
+/// Resolve the trusted PTY start-gate program and its hidden entry arguments.
+fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
+    let gate_program = bound_pty_gate_program()
+        .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
+    #[cfg(not(test))]
+    let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
+    #[cfg(test)]
+    let gate_args = vec![
+        "app_runtime::tests::pty_start_gate_helper".to_string(),
+        "--exact".to_string(),
+        "--nocapture".to_string(),
+    ];
+    Ok((gate_program, gate_args))
+}
+
+/// Apply an agent resource policy to a gated launch without letting a
+/// rejection fail it.
+///
+/// Issue #3942: the tree-wide priority of SPEC #1921 Phase 86 (#3813) is an
+/// optimization for GUI responsiveness, not a precondition for running an
+/// agent. `setpriority` returns EPERM on every host where the launcher may not
+/// renice the target's process group, and propagating that turned an ordinary
+/// launch into a user-facing `PTY creation failed: setpriority permission
+/// denied`. This returns nothing on purpose: the spawn routes never hold an
+/// outcome they could propagate, panic on, or drop silently.
+pub(crate) fn best_effort_apply_policy(
+    window_id: &str,
+    pending: &gwt_terminal::PendingPane,
+    policy: gwt_terminal::pty::ProcessPolicy,
+) {
+    note_unapplied_agent_resource_policy(window_id, pending.apply_policy(policy));
+}
+
+/// Warn about a rejected policy and let the target run at the inherited
+/// priority. Split from `best_effort_apply_policy` so the warning contract is
+/// testable without a live PTY.
+pub(crate) fn note_unapplied_agent_resource_policy(
+    window_id: &str,
+    outcome: Result<(), gwt_terminal::TerminalError>,
+) {
+    if let Err(error) = outcome {
+        tracing::warn!(
+            window_id = %window_id,
+            error = %error,
+            "agent resource policy was not applied; continuing launch at the inherited priority"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -742,6 +829,45 @@ enum AgentCapabilityLaunchAuthority<'a> {
     Active(&'a gwt_agent::SessionExecutionBinding),
 }
 
+/// Issue #3759: best-effort republication of a lost worktree pointer/projection
+/// pair from the committed owner ledger, run before a strict authority read.
+///
+/// The repair is idempotent and never touches the owner ledger. Any failure
+/// is logged only: the strict read that follows reports the real state, so a
+/// heal error can never mask or replace the authoritative refusal.
+pub(crate) fn heal_lost_generation_publication_best_effort(
+    worktree: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+) {
+    use gwt::cli::execution_state::GenerationPublicationHeal;
+    match gwt::cli::execution_state::heal_missing_generation_publication(worktree, owner) {
+        Ok(GenerationPublicationHeal::Republished) => tracing::warn!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            worktree = %worktree.display(),
+            "execution generation pointer/projection were missing after ledger ownership; republished from the owner ledger"
+        ),
+        Ok(GenerationPublicationHeal::ForeignWorktree) => tracing::warn!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            worktree = %worktree.display(),
+            "execution generation pointer is missing and the current generation belongs to another worktree; left fail-closed"
+        ),
+        Ok(
+            GenerationPublicationHeal::NoLedger
+            | GenerationPublicationHeal::AlreadyPublished
+            | GenerationPublicationHeal::NotApplicable,
+        ) => {}
+        Err(error) => tracing::warn!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            worktree = %worktree.display(),
+            %error,
+            "execution generation publication heal failed; the strict authority read decides"
+        ),
+    }
+}
+
 /// Issue #3426: explain a refused genesis launch instead of stating the bare
 /// single-writer rule.
 ///
@@ -773,7 +899,8 @@ fn existing_generation_conflict_detail(
         format!(" held by Session {session_id} ({session_state})")
     });
     format!(
-        "an execution generation already exists for {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
         owner.kind.as_str(),
         owner.number,
         status,
@@ -999,6 +1126,14 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             container_runtime,
         )?;
 
+        // Issue #3759: the owner ledger commits before the worktree
+        // pointer/projection pair, and trusted-store GC of a removed
+        // worktree drops that pair while the ledger stays. Rebuild a lost
+        // publication from the ledger before the strict authority read
+        // below; otherwise every relaunch on this worktree dies before the
+        // PTY and burns the Issue Monitor retry budget. A heal failure is
+        // logged and the strict read reports the real state.
+        heal_lost_generation_publication_best_effort(worktree, owner);
         let mut current_binding =
             gwt::cli::execution_state::current_execution_binding(worktree, owner)
                 .map_err(|error| error.to_string())?;
@@ -1838,6 +1973,22 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
     WindowProcessStatus::Running
 }
 
+/// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this tab.
+/// A canvas Issue window is preferred over one that is itself contained, and creation
+/// order breaks ties so repeated launches land in the same pane.
+fn issue_preview_host_window_id(workspace: &gwt::WindowCanvasState) -> Option<String> {
+    let windows = &workspace.persisted().windows;
+    windows
+        .iter()
+        .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|window| window.preset.hosts_issue_preview())
+        })
+        .map(|window| window.id.clone())
+}
+
 #[derive(Debug, Clone)]
 enum AgentWindowPlacement {
     Centered(WindowGeometry),
@@ -2503,28 +2654,47 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                 .map(|home| home.join("config.toml"))
                 .or_else(|| codex_config_path_for_profile_config(profile_config_path))
             else {
+                // Not a registration failure: gwt simply cannot locate this
+                // profile's Codex config, which says nothing about whether the
+                // hooks are trusted. Blocking the launch here would strand
+                // every Codex launch under a non-standard profile layout, so
+                // keep it a warning — Issue #3967 AC-4 covers registrations
+                // that actually fail.
                 tracing::warn!(
                     profile_config = %profile_config_path.display(),
                     "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
                 );
                 return Ok(None);
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // Issue #3967 AC-1: trust every managed hooks file that can exist
+            // on disk, not just the one this launch would generate. The
+            // `Both`-mode managed-asset writers (startup self-heal, hook front
+            // door, health repair, SessionStart re-materialization) keep the
+            // worktree-local copy refreshed even when generation targets the
+            // workspace-home copy, and Codex discovers whichever it finds
+            // first. Narrowing trust to the generation mode left the other copy
+            // orphaned — present, gwt-generated, and untrusted. Trust state is
+            // keyed by absolute hooks path, so entries for a file Codex does
+            // not read are inert.
+            let report = gwt_skills::register_codex_managed_hook_trust_for_mode(
                 worktree_path,
                 &codex_config_path,
-                codex_hook_discovery_mode,
-            ) {
-                Ok(report) => Ok(Some(report)),
-                Err(error) => {
-                    tracing::warn!(
-                        worktree = %worktree_path.display(),
-                        codex_config = %codex_config_path.display(),
-                        error = %error,
-                        "failed to register gwt-managed Codex hook trust; continuing launch"
-                    );
-                    Ok(None)
-                }
+                gwt::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+            )
+            .map_err(|error| {
+                format!(
+                    "Codex hook trust registration failed for worktree {} (config {}): {error}",
+                    worktree_path.display(),
+                    codex_config_path.display()
+                )
+            })?;
+            if !report.untrusted_gwt_hooks.is_empty() {
+                return Err(format!(
+                    "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}",
+                    report.untrusted_gwt_hooks.join(", ")
+                ));
             }
+            Ok(Some(report))
         }
         gwt_agent::LaunchRuntimeTarget::Docker => {
             if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
@@ -2654,6 +2824,25 @@ impl AppRuntime {
         window_id: String,
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
+        // Issue #3851: an Err result is produced before this handler spawns a
+        // PTY. If this window already owns a live agent runtime, the result is
+        // necessarily from an older preparation attempt and must not consume
+        // the current launch context or overwrite the live pane. Failures
+        // after PTY spawn enter through the Ok arm below and remain visible.
+        let stale_pre_pty_failure = result.is_err()
+            && self.active_agent_sessions.contains_key(&window_id)
+            && self.runtimes.contains_key(&window_id)
+            && self.window_status(&window_id).is_some_and(|status| {
+                !matches!(
+                    status,
+                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                )
+            });
+        if stale_pre_pty_failure {
+            self.inflight_launches
+                .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+            return Vec::new();
+        }
         let is_continue_work = self.pending_continue_work.contains_key(&window_id);
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let mut launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
@@ -3536,7 +3725,7 @@ impl AppRuntime {
             }
         }
         .with_project_root(&project_root);
-        let (env, remove_env) = effective_env.into_parts();
+        let (mut env, remove_env) = effective_env.into_parts();
 
         // SPEC-2809 (revised) — Surface the launch pipeline for AI
         // agent presets (Codex / Claude / Gemini / Agent) so the Console
@@ -3547,6 +3736,22 @@ impl AppRuntime {
             preset,
             WindowPreset::Claude | WindowPreset::Codex | WindowPreset::Agent
         );
+        // SPEC #1921 Phase 86 (#3813): agent presets carry the resource
+        // policy and cargo budget; Shell panes keep the direct spawn path.
+        let resource_policy = if is_agent_preset {
+            match self.profile_config_path().and_then(|config_path| {
+                resolve_agent_resource_launch(&config_path, &project_root, &mut env)
+            }) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                    self.window_details.insert(window_id.clone(), error.clone());
+                    return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                }
+            }
+        } else {
+            None
+        };
         let console_kind =
             is_agent_preset.then_some(gwt_core::process_console::ProcessKind::AgentBootstrap);
         let stage_id =
@@ -3574,6 +3779,7 @@ impl AppRuntime {
                 remove_env,
                 cwd: Some(project_root),
                 pending_tool_runtime_migration: None,
+                resource_policy,
             },
             console_kind,
         ) {
@@ -3605,19 +3811,35 @@ impl AppRuntime {
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let pane = Pane::new_with_spawn_config(
-            id.to_string(),
-            gwt_terminal::pty::SpawnConfig {
-                command: launch.command,
-                args: launch.args,
-                cols,
-                rows,
-                env: launch.env,
-                remove_env: launch.remove_env,
-                cwd: launch.cwd,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let resource_policy = launch.resource_policy;
+        let spawn_config = gwt_terminal::pty::SpawnConfig {
+            command: launch.command,
+            args: launch.args,
+            cols,
+            rows,
+            env: launch.env,
+            remove_env: launch.remove_env,
+            cwd: launch.cwd,
+        };
+        // SPEC #1921 Phase 86 (#3813): a policy-bearing AgentBootstrap launch
+        // goes through the start gate so priority / Job limits exist before
+        // the target can create its first descendant. Shell panes stay direct.
+        let pane = if let Some(policy) = resource_policy {
+            let (gate_program, gate_args) = pty_gate_launch_parts()?;
+            let pending = Pane::new_pending_with_spawn_config(
+                id.to_string(),
+                spawn_config,
+                gate_program,
+                gate_args,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+            best_effort_apply_policy(id, &pending, policy);
+            pending.release().map_err(|error| error.to_string())?
+        } else {
+            Pane::new_with_spawn_config(id.to_string(), spawn_config)
+                .map_err(|error| error.to_string())?
+        };
         let incarnation = next_window_runtime_incarnation();
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
@@ -3633,16 +3855,8 @@ impl AppRuntime {
         handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let gate_program = bound_pty_gate_program()
-            .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
-        #[cfg(not(test))]
-        let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
-        #[cfg(test)]
-        let gate_args = vec![
-            "app_runtime::tests::pty_start_gate_helper".to_string(),
-            "--exact".to_string(),
-            "--nocapture".to_string(),
-        ];
+        let (gate_program, gate_args) = pty_gate_launch_parts()?;
+        let resource_policy = launch.resource_policy;
         let pending = Pane::new_pending_with_spawn_config(
             id.to_string(),
             gwt_terminal::pty::SpawnConfig {
@@ -3705,6 +3919,12 @@ impl AppRuntime {
             );
         }
 
+        // SPEC #1921 Phase 86 (#3813): the policy lands on the gated tree
+        // after identity proof and before release, so the target never runs
+        // ungoverned.
+        if let Some(policy) = resource_policy {
+            best_effort_apply_policy(id, &pending, policy);
+        }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
@@ -4002,9 +4222,10 @@ impl AppRuntime {
         // Resume or chooses a fresh fallback, a same-branch window must not
         // replace the requested materialization. Durable deliveries also need
         // their own window so the exact delivery tuple can be ACKed.
-        let issue_monitor_launch = launch_feedback_context
+        let issue_monitor_issue_number = launch_feedback_context
             .as_ref()
-            .is_some_and(|context| context.issue_monitor_issue_number.is_some());
+            .and_then(|context| context.issue_monitor_issue_number);
+        let issue_monitor_launch = issue_monitor_issue_number.is_some();
         if continuation.is_some() {
             if let Some(window_id) =
                 self.pending_continue_work
@@ -4121,6 +4342,18 @@ impl AppRuntime {
                 target.lane_id,
                 None,
             );
+        } else if let Some(issue_number) = issue_monitor_issue_number {
+            // SPEC-3671 FR-002: an Issue Monitor launch is mirrored inside the Issue
+            // window instead of opening a canvas window. FR-003 keeps every manual
+            // launch (Start Work / Launch Agent) on the canvas, and a tab with no
+            // Issue window keeps the canvas fallback so the agent is never invisible.
+            if let Some(issue_window_id) = issue_preview_host_window_id(&tab.workspace) {
+                let _ = tab.workspace.place_agent_window_in_issue_preview(
+                    &window.id,
+                    &issue_window_id,
+                    issue_number,
+                );
+            }
         }
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
@@ -4341,6 +4574,14 @@ impl AppRuntime {
                 );
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
+            // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
+            // build parallelism before Docker materializes the exec environment
+            // so container agents receive the same budget variables.
+            let resource_policy = resolve_agent_resource_launch(
+                &profile_config_path,
+                Path::new(&project_root),
+                &mut config.env_vars,
+            )?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
             // launch argv BEFORE the Windows host shell wrapper rewrites it
             // (the `$gwt-*` prompt token moves into an env var / embedded
@@ -4661,7 +4902,26 @@ impl AppRuntime {
                 remove_env: config.remove_env.clone(),
                 cwd: config.working_dir.clone(),
                 pending_tool_runtime_migration,
+                resource_policy,
             };
+            // Issue #3490 AC-1: without a Backend Override profile every Codex
+            // process shares the user's `~/.codex`, and two of them
+            // initializing its SQLite state together lose the race with
+            // `database is locked`. gwt fans launches out in parallel, so it
+            // owns the mitigation: hold the last step before dispatch until
+            // the previous shared-`~/.codex` spawn has cleared its
+            // initialization window. This runs on the per-launch worker
+            // thread, never on the UI thread, and a worktree-local CODEX_HOME
+            // has no contention to pace.
+            if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
+                let waited = gwt_agent::pace_shared_codex_spawn();
+                if !waited.is_zero() {
+                    tracing::debug!(
+                        waited_ms = waited.as_millis() as u64,
+                        "paced Codex spawn to avoid shared ~/.codex state contention"
+                    );
+                }
+            }
             Ok((
                 process_launch,
                 session_id,
@@ -5354,6 +5614,7 @@ mod docker_session_persistence_tests {
             remove_env: config.remove_env,
             cwd: config.working_dir,
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         };
         assert_eq!(process_launch.command, runtime.binary());
         let workdir_index = process_launch
@@ -5936,6 +6197,138 @@ mod agent_endpoint_env_tests {
             .clone()
             .expect("the superseding launch must be bound");
         assert_eq!(binding.session_id, relaunch.id);
+        assert_ne!(
+            binding.identity.generation_id,
+            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+                .expect("reload holder Session")
+                .execution_binding
+                .expect("holder binding")
+                .identity
+                .generation_id,
+            "the successor must own a new generation, not the holder's"
+        );
+    }
+
+    /// Issue #3759: the owner ledger is committed before the worktree-scoped
+    /// pointer/projection pair (`write_activated_generation`), and trusted-
+    /// store GC of a removed worktree deletes that pair while the owner ledger
+    /// stays. Either way the next Issue Monitor / Start Work launch on the
+    /// same worktree used to die before the PTY with "execution generation
+    /// pointer is missing after ledger ownership was established", burning
+    /// every retry. A lost publication is a pure function of the ledger and
+    /// must be rebuilt before the fresh-launch preflight reads authority.
+    #[test]
+    fn fresh_launch_republishes_a_lost_generation_pointer_before_reading_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut genesis_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut genesis_env)
+        .expect("materialize the first producing generation");
+
+        // The holder's Host is gone (forced restart) ...
+        let holder_id = launch.session.id.clone();
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &launch.sessions_dir,
+            &holder_id,
+        ))
+        .expect("clear the holder runtime sidecar");
+        // ... and the worktree-scoped publication was lost while the owner
+        // ledger survived (GC of the trusted worktree directory).
+        let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&launch.project)
+            .expect("trusted worktree directory");
+        std::fs::remove_file(trusted_dir.join("execution-generation-pointer.json"))
+            .expect("drop trusted pointer");
+        std::fs::remove_file(trusted_dir.join("execution-control.json"))
+            .expect("drop trusted projection");
+        let _ = std::fs::remove_file(
+            launch
+                .project
+                .join(".gwt/skill-state/execution-generation-pointer.json"),
+        );
+        let _ = std::fs::remove_file(
+            launch
+                .project
+                .join(".gwt/skill-state/execution-control.json"),
+        );
+        let error =
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect_err("fixture must reproduce the strict-view failure");
+        assert!(
+            error.to_string().contains(
+                "execution generation pointer is missing after ledger ownership was established"
+            ),
+            "{error}"
+        );
+
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.update_status(gwt_agent::AgentStatus::Running);
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut relaunch,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("a fresh launch must self-heal a lost pointer instead of failing before the PTY");
+
+        assert!(
+            env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "the healed launch must receive its producing capability"
+        );
+        let binding = relaunch
+            .execution_binding
+            .clone()
+            .expect("the healed launch must be bound");
+        assert_eq!(binding.session_id, relaunch.id);
+        // The successor is Prepared at install time and activates once the
+        // PTY handshake completes, so the published current generation is
+        // still the healed predecessor; what matters is that the strict view
+        // is readable again instead of failing before the PTY.
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("strict view is readable again")
+                .is_some(),
+            "the healed pointer/projection must publish the predecessor generation"
+        );
         assert_ne!(
             binding.identity.generation_id,
             gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))

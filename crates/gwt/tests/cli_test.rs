@@ -2,9 +2,9 @@
 
 use gwt::cli::{
     dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli,
-    ActionsCommand, CliCommand, CliParseError, HookCommand, IssueCommand, LinkedPrSummary,
-    PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview, PrReviewThread,
-    PrReviewThreadComment, TestEnv,
+    ActionsCommand, ActionsRerunTarget, CliCommand, CliParseError, HookCommand, IssueCommand,
+    LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview,
+    PrReviewThread, PrReviewThreadComment, TestEnv,
 };
 use gwt_git::PrStatus;
 use gwt_github::{
@@ -430,7 +430,15 @@ fn red_104_parse_pr_view() {
 #[test]
 fn parse_pr_list() {
     let cmd = parse_pr_args(&[s("list")]).unwrap();
-    assert_eq!(cmd, CliCommand::Pr(PrCommand::List));
+    assert_eq!(
+        cmd,
+        CliCommand::Pr(PrCommand::List {
+            stale_after_hours: None,
+            escalate_after_cycles: None,
+            refresh: false,
+            include: None,
+        })
+    );
 }
 
 #[test]
@@ -587,6 +595,26 @@ fn red_107_parse_actions_job_logs() {
     assert_eq!(
         cmd,
         CliCommand::Actions(ActionsCommand::JobLogs { job_id: 202 })
+    );
+}
+
+/// Issue #3515: `actions.rerun` is reachable from the argv transport too.
+#[test]
+fn parse_actions_rerun_targets() {
+    assert_eq!(
+        parse_actions_args(&[s("rerun"), s("--run"), s("303"), s("--failed")]).unwrap(),
+        CliCommand::Actions(ActionsCommand::Rerun {
+            target: ActionsRerunTarget::Run {
+                run_id: 303,
+                failed_only: true
+            }
+        })
+    );
+    assert_eq!(
+        parse_actions_args(&[s("rerun"), s("--job"), s("404")]).unwrap(),
+        CliCommand::Actions(ActionsCommand::Rerun {
+            target: ActionsRerunTarget::Job { job_id: 404 }
+        })
     );
 }
 

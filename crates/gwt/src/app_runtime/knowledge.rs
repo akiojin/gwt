@@ -237,7 +237,7 @@ mod related_snapshot_cache_tests {
             id: id.to_string(),
             title: id.to_string(),
             status_category: "active".to_string(),
-            branch: None,
+            branch: Some(format!("work/{id}")),
             worktree_path: None,
             updated_at: "2026-08-03T00:00:00Z".to_string(),
             agents: Vec::new(),
@@ -260,9 +260,11 @@ mod related_snapshot_cache_tests {
                 phase: None,
                 has_unknown_phase: false,
                 is_spec: false,
+                parent_spec: None,
                 monitor_state: None,
                 queue_position: None,
                 exclusion_reason: None,
+                related_work_refs: Vec::new(),
             }],
             selected_number: Some(number),
             empty_message: None,
@@ -452,6 +454,17 @@ mod related_snapshot_cache_tests {
         apply_latest_knowledge_bridge_related_works(&root, &mut partial_view, &snapshots);
 
         assert_eq!(partial_view.entries[0].related_work_count, 1);
+        // SPEC-3671 FR-012: the row carries the Issue -> Work correlation so the
+        // Issue surface can join the active Work projection it already receives.
+        assert_eq!(
+            partial_view.entries[0].related_work_refs,
+            vec![gwt::KnowledgeWorkRefView {
+                id: "work-42".to_string(),
+                branch: Some("work/work-42".to_string()),
+                worktree_path: None,
+                updated_at: "2026-08-03T00:00:00Z".to_string(),
+            }]
+        );
         assert_eq!(partial_view.detail.related_works[0].id, "work-42");
         let retained = snapshots
             .lock()
@@ -508,9 +521,11 @@ mod monitor_snapshot_cache_tests {
             phase: None,
             has_unknown_phase: false,
             is_spec: false,
+            parent_spec: None,
             monitor_state: Some(gwt::MonitorInboxState::Launched),
             queue_position: Some(99),
             exclusion_reason: Some("stale".to_string()),
+            related_work_refs: Vec::new(),
         }
     }
 
@@ -983,6 +998,18 @@ fn apply_knowledge_bridge_related_works(
         if let Some(works) = related_by_number.get(&entry.number) {
             entry.related_work_count = works.len();
             entry.related_session_count = related_session_count(works);
+            // SPEC-3671 FR-012: carry the correlation itself, not a copy of the
+            // Work's display state. The Issue surface joins these ids/branches
+            // against the active Work projection it already receives.
+            entry.related_work_refs = works
+                .iter()
+                .map(|work| gwt::KnowledgeWorkRefView {
+                    id: work.id.clone(),
+                    branch: work.branch.clone(),
+                    worktree_path: work.worktree_path.clone(),
+                    updated_at: work.updated_at.clone(),
+                })
+                .collect();
         }
     }
     if let Some(number) = view.detail.number {
@@ -2050,7 +2077,9 @@ impl AppRuntime {
                         id: id_owned,
                         request_id,
                         issue_number,
-                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok { fresh_entry },
+                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok {
+                            fresh_entry: Box::new(fresh_entry),
+                        },
                     }
                 }
                 Err(error) => BackendEvent::KnowledgeBridgePhaseUpdated {

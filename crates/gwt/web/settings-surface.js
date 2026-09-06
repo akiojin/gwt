@@ -138,6 +138,61 @@ export function createSettingsSurface({
         systemSettingsState.statusKind = "error";
       }
 
+      // SPEC #1921 Phase 86 (#3813): the backend echoes the complete agent
+      // resource policy on every system_settings / system_settings_updated
+      // event; it is authoritative over any optimistic local edit.
+      function applyAgentResourceSnapshot(snapshot) {
+        if (!snapshot || typeof snapshot !== "object") {
+          return;
+        }
+        systemSettingsState.agentResource = {
+          enabled: snapshot.enabled !== false,
+          preset:
+            typeof snapshot.preset === "string" && snapshot.preset
+              ? snapshot.preset
+              : "automatic",
+          priority:
+            typeof snapshot.priority === "string" && snapshot.priority
+              ? snapshot.priority
+              : "below-normal",
+          cpuLimitPercent: Number.isInteger(snapshot.cpu_limit_percent)
+            ? snapshot.cpu_limit_percent
+            : null,
+          buildJobs: Number.isInteger(snapshot.build_jobs)
+            ? snapshot.build_jobs
+            : null,
+        };
+      }
+
+      // Empty input = automatic (null). A non-integer or value below 1 is
+      // invalid (undefined) and is rejected before anything is sent.
+      function parseOptionalPositiveInteger(raw) {
+        const text = String(raw ?? "").trim();
+        if (text === "") {
+          return null;
+        }
+        const value = Number(text);
+        if (!Number.isInteger(value) || value < 1) {
+          return undefined;
+        }
+        return value;
+      }
+
+      function agentResourceWirePayload() {
+        const resource = systemSettingsState.agentResource;
+        return {
+          enabled: resource.enabled !== false,
+          preset: resource.preset || "automatic",
+          priority: resource.priority || "below-normal",
+          cpu_limit_percent: Number.isInteger(resource.cpuLimitPercent)
+            ? resource.cpuLimitPercent
+            : null,
+          build_jobs: Number.isInteger(resource.buildJobs)
+            ? resource.buildJobs
+            : null,
+        };
+      }
+
       const systemSettingsInteractionGuard = createInteractionGuard({
         onFlush: (deferred) => {
           if (!deferred || typeof deferred !== "object") {
@@ -149,6 +204,7 @@ export function createSettingsSurface({
               deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               deferred.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(deferred.agent_resource);
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -164,6 +220,7 @@ export function createSettingsSurface({
               deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               deferred.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(deferred.agent_resource);
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
@@ -208,6 +265,15 @@ export function createSettingsSurface({
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
+        // SPEC #1921 Phase 86 (#3813): agent process-tree resource policy.
+        // Numeric null = automatic (derived from max active agents / cores).
+        agentResource: {
+          enabled: true,
+          preset: "automatic",
+          priority: "below-normal",
+          cpuLimitPercent: null,
+          buildJobs: null,
+        },
         // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
         // SPEC-2963: remote provider sign-in state + last sign-in message.
@@ -660,6 +726,195 @@ export function createSettingsSurface({
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
+        // SPEC #1921 Phase 86 (#3813): agent process-tree resource isolation.
+        // Every control sends the complete policy object so the backend can
+        // validate it as a unit and echo the authoritative result.
+        const resourceSection = createDiv("settings-section");
+        const agentResource = systemSettingsState.agentResource;
+        const resourceEnabled = agentResource.enabled !== false;
+        const sendAgentResourceUpdate = () => {
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({
+            kind: "update_system_settings",
+            language: systemSettingsState.language || "auto",
+            agent_resource: agentResourceWirePayload(),
+          });
+        };
+        const rejectAgentResourceInput = (message, input, previous) => {
+          input.value = Number.isInteger(previous) ? String(previous) : "";
+          systemSettingsState.statusMessage = message;
+          systemSettingsState.statusKind = "error";
+          renderSystemPanelStatus(panel);
+        };
+
+        const resourceLabel = document.createElement("label");
+        resourceLabel.className = "settings-checkbox-label";
+        resourceLabel.setAttribute("for", "settings-system-agent-resource-enabled");
+        const resourceCheckbox = document.createElement("input");
+        resourceCheckbox.type = "checkbox";
+        resourceCheckbox.className = "settings-checkbox";
+        resourceCheckbox.id = "settings-system-agent-resource-enabled";
+        resourceCheckbox.checked = resourceEnabled;
+        resourceCheckbox.addEventListener("change", (e) => {
+          systemSettingsState.agentResource.enabled = e.target.checked === true;
+          sendAgentResourceUpdate();
+        });
+        const resourceText = document.createElement("span");
+        resourceText.textContent = "Isolate agent process trees";
+        resourceLabel.appendChild(resourceCheckbox);
+        resourceLabel.appendChild(resourceText);
+        resourceSection.appendChild(resourceLabel);
+
+        const resourceHelp = document.createElement("p");
+        resourceHelp.className = "settings-help";
+        resourceHelp.textContent =
+          "Enabled by default. Agent launches (and everything they spawn: cargo, bun, tsc, " +
+          "docker build, ...) run below gwt's scheduling priority; on Windows the whole tree " +
+          "also gets a CPU cap.";
+        resourceSection.appendChild(resourceHelp);
+
+        // User feedback 2026-09-02: thresholds are hard to pick by hand, so the
+        // preset carries the intent and Custom is the only place with numbers.
+        const presetLabel = document.createElement("label");
+        presetLabel.className = "settings-label";
+        presetLabel.setAttribute("for", "settings-system-agent-preset");
+        presetLabel.textContent = "Resource preset";
+        resourceSection.appendChild(presetLabel);
+        const presetSelect = document.createElement("select");
+        presetSelect.className = "settings-select";
+        presetSelect.id = "settings-system-agent-preset";
+        for (const opt of [
+          { value: "automatic", text: "Automatic (recommended)" },
+          { value: "gui-responsiveness", text: "Prioritize GUI responsiveness" },
+          { value: "build-speed", text: "Prioritize build speed" },
+          { value: "custom", text: "Custom" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          presetSelect.appendChild(option);
+        }
+        presetSelect.value = agentResource.preset || "automatic";
+        presetSelect.disabled = !resourceEnabled;
+        presetSelect.addEventListener("change", (e) => {
+          systemSettingsState.agentResource.preset = e.target.value;
+          sendAgentResourceUpdate();
+        });
+        resourceSection.appendChild(presetSelect);
+
+        const presetHelp = document.createElement("p");
+        presetHelp.className = "settings-help";
+        presetHelp.textContent =
+          "Automatic: below-normal priority, CPU and build parallelism shared by the max " +
+          "active agents. GUI responsiveness: idle priority and half of that budget. " +
+          "Build speed: below-normal priority with no CPU cap and full parallelism.";
+        resourceSection.appendChild(presetHelp);
+
+        const customSection = createDiv("settings-section");
+        customSection.dataset.role = "agent-resource-custom";
+        customSection.hidden = agentResource.preset !== "custom";
+
+        const priorityLabel = document.createElement("label");
+        priorityLabel.className = "settings-label";
+        priorityLabel.setAttribute("for", "settings-system-agent-priority");
+        priorityLabel.textContent = "Agent process priority";
+        customSection.appendChild(priorityLabel);
+        const prioritySelect = document.createElement("select");
+        prioritySelect.className = "settings-select";
+        prioritySelect.id = "settings-system-agent-priority";
+        for (const opt of [
+          { value: "normal", text: "Normal (same as gwt)" },
+          { value: "below-normal", text: "Below normal" },
+          { value: "idle", text: "Idle" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          prioritySelect.appendChild(option);
+        }
+        prioritySelect.value = agentResource.priority || "below-normal";
+        prioritySelect.disabled = !resourceEnabled;
+        prioritySelect.addEventListener("change", (e) => {
+          systemSettingsState.agentResource.priority = e.target.value;
+          sendAgentResourceUpdate();
+        });
+        customSection.appendChild(prioritySelect);
+
+        const cpuLabel = document.createElement("label");
+        cpuLabel.className = "settings-label";
+        cpuLabel.setAttribute("for", "settings-system-agent-cpu-limit");
+        cpuLabel.textContent = "CPU limit per agent (%, Windows)";
+        customSection.appendChild(cpuLabel);
+        const cpuInput = document.createElement("input");
+        cpuInput.type = "number";
+        cpuInput.className = "settings-input";
+        cpuInput.id = "settings-system-agent-cpu-limit";
+        cpuInput.min = "1";
+        cpuInput.max = "100";
+        cpuInput.step = "1";
+        cpuInput.placeholder = "Automatic";
+        cpuInput.value = Number.isInteger(agentResource.cpuLimitPercent)
+          ? String(agentResource.cpuLimitPercent)
+          : "";
+        cpuInput.disabled = !resourceEnabled;
+        cpuInput.addEventListener("change", (e) => {
+          const next = parseOptionalPositiveInteger(e.target.value);
+          if (next === undefined || (next !== null && next > 100)) {
+            rejectAgentResourceInput(
+              "CPU limit must be a whole number between 1 and 100, or empty for automatic.",
+              e.target,
+              systemSettingsState.agentResource.cpuLimitPercent,
+            );
+            return;
+          }
+          systemSettingsState.agentResource.cpuLimitPercent = next;
+          sendAgentResourceUpdate();
+        });
+        customSection.appendChild(cpuInput);
+
+        const jobsLabel = document.createElement("label");
+        jobsLabel.className = "settings-label";
+        jobsLabel.setAttribute("for", "settings-system-agent-build-jobs");
+        jobsLabel.textContent = "Build parallelism per agent (jobs)";
+        customSection.appendChild(jobsLabel);
+        const jobsInput = document.createElement("input");
+        jobsInput.type = "number";
+        jobsInput.className = "settings-input";
+        jobsInput.id = "settings-system-agent-build-jobs";
+        jobsInput.min = "1";
+        jobsInput.step = "1";
+        jobsInput.placeholder = "Automatic";
+        jobsInput.value = Number.isInteger(agentResource.buildJobs)
+          ? String(agentResource.buildJobs)
+          : "";
+        jobsInput.disabled = !resourceEnabled;
+        jobsInput.addEventListener("change", (e) => {
+          const next = parseOptionalPositiveInteger(e.target.value);
+          if (next === undefined) {
+            rejectAgentResourceInput(
+              "Build parallelism must be a whole number of at least 1, or empty for automatic.",
+              e.target,
+              systemSettingsState.agentResource.buildJobs,
+            );
+            return;
+          }
+          systemSettingsState.agentResource.buildJobs = next;
+          sendAgentResourceUpdate();
+        });
+        customSection.appendChild(jobsInput);
+
+        const customHelp = document.createElement("p");
+        customHelp.className = "settings-help";
+        customHelp.textContent =
+          "Leave a field empty for automatic values: CPU limit = 100 / max active agents, " +
+          "parallelism = logical cores / max active agents. The parallelism is handed to " +
+          "build tools through their environment (CARGO_BUILD_JOBS, MAKEFLAGS); an explicit " +
+          "value already in the launch environment always wins.";
+        customSection.appendChild(customHelp);
+        resourceSection.appendChild(customSection);
+
         // SPEC-2959/2963: Board provider selector. `local` keeps the Board
         // offline; `slack` / `teams` are network-backed and selectable. Picking
         // a remote provider reveals its config form (client id / channel /
@@ -1022,6 +1277,7 @@ export function createSettingsSurface({
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
+        panel.appendChild(resourceSection);
         panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
         renderSystemPanelStatus(panel);
@@ -1281,6 +1537,7 @@ export function createSettingsSurface({
         agentBackendsState,
         systemSettingsState,
         systemSettingsInteractionGuard,
+        applyAgentResourceSnapshot,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,

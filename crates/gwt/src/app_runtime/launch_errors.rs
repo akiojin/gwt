@@ -66,6 +66,17 @@ pub(super) fn with_launch_wizard_error_log_capture<T>(operation: impl FnOnce() -
 /// SPEC-3151 FR-003: OpenCode joined the table so a missing `opencode` binary
 /// with no available package runner surfaces install guidance rather than
 /// `No viable candidates found in PATH`.
+/// Recovery route appended to the owner-mismatch binding refusal.
+///
+/// Issue #3489: the refusal fails the launch before the PTY starts, so the pane
+/// shows this one line and nothing else. The refusal itself names the Session
+/// and both owners; this names what to do next so the window is not a dead end.
+const EXECUTION_BINDING_OWNER_MISMATCH_RECOVERY: &str = concat!(
+    ". Run the execution.status JSON operation for the exact recovery route, ",
+    "then use Continue work on the owner's Work to create a successor, ",
+    "or start a fresh launch for that owner."
+);
+
 const MISSING_BINARY_INSTALL_HINTS: &[(&str, &str)] = &[
     (
         "agy",
@@ -378,12 +389,21 @@ impl AppRuntime {
             self.launch_error_terminal_details
                 .insert(window_id.clone(), user_detail.clone());
             let mut events = self.handle_runtime_status(
-                window_id,
+                window_id.clone(),
                 WindowProcessStatus::Error,
                 Some(user_detail),
             );
             events.push(terminal_output);
-            if let Some(issue_number) = issue_monitor_issue_number {
+            // Issue #3927 (SPEC #3340 AS-44 / FR-048): a restore carries no
+            // launch context, so a Monitor-owned restored window is
+            // recognised through its Session's Issue link.
+            let monitor_owned_issue = issue_monitor_issue_number.or_else(|| {
+                self.issue_monitor_owned_restore_issue(
+                    &window_id,
+                    issue_monitor_project_root.as_deref(),
+                )
+            });
+            if let Some(issue_number) = monitor_owned_issue {
                 if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
                     events.extend(self.answered_handoff_launch_failure_events(
                         issue_monitor_project_root.as_deref(),
@@ -394,13 +414,30 @@ impl AppRuntime {
                         &detail,
                     ));
                 } else {
-                    events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
-                        issue_monitor_project_root.as_deref(),
-                        issue_number,
-                        &detail,
-                        issue_monitor_delivery_id.as_deref(),
-                        issue_monitor_session_mode,
-                    ));
+                    let (failure_events, committed) = self
+                        .issue_monitor_launch_failed_delivery_committed_events_with_mode(
+                            issue_monitor_project_root.as_deref(),
+                            issue_number,
+                            &detail,
+                            issue_monitor_delivery_id.as_deref(),
+                            issue_monitor_session_mode,
+                        );
+                    events.extend(failure_events);
+                    // FR-048: the concrete reason is already in gwt.log
+                    // (`log_window_launch_error` above) and now durably in
+                    // the Monitor's `error_message`; only then is the
+                    // pre-PTY pane closed. A failed commit retains it.
+                    if committed {
+                        tracing::info!(
+                            target: "gwt::agent_launch",
+                            window_id = %window_id,
+                            issue_number,
+                            "closing the Issue Monitor-owned window that failed before PTY start"
+                        );
+                        events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
                 }
             }
             return events;
@@ -516,9 +553,12 @@ impl AppRuntime {
         })]
     }
 
-    fn user_facing_launch_error_detail(detail: &str) -> String {
+    pub(super) fn user_facing_launch_error_detail(detail: &str) -> String {
         if let Some(hint) = Self::missing_binary_install_hint(detail) {
             return hint.to_string();
+        }
+        if detail.contains(gwt_agent::EXECUTION_BINDING_OWNER_MISMATCH) {
+            return format!("{detail}{EXECUTION_BINDING_OWNER_MISMATCH_RECOVERY}");
         }
         detail.to_string()
     }

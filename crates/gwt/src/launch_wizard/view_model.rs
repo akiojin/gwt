@@ -111,10 +111,14 @@ impl LaunchWizardState {
             show_opencode_options,
             opencode_needs_setup: show_opencode_options && self.opencode_needs_setup,
             hermes_provider: self.hermes_provider.clone(),
-            hermes_provider_options: self.hermes_provider_choices.clone(),
+            hermes_provider_options: self.hermes_choices.providers.clone(),
+            hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
             hermes_profile: self.hermes_profile.clone(),
+            hermes_profile_options: self.hermes_choices.profiles.clone(),
             hermes_toolsets: self.hermes_toolsets.clone(),
+            hermes_toolset_options: self.hermes_choices.toolsets.clone(),
             hermes_skills: self.hermes_skills.clone(),
+            hermes_skill_options: self.hermes_choices.skills.clone(),
             hermes_max_turns: self.hermes_max_turns.clone(),
             hermes_safe_mode: self.hermes_safe_mode,
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
@@ -139,6 +143,9 @@ impl LaunchWizardState {
             launch_summary: self.launch_summary_view(),
             phase: self.current_phase(),
             error: self.error.clone(),
+            // Issue #3962 AC-5: rendered next to the Model field, which the
+            // surface already gates on `show_agent_settings`.
+            model_fallback_notice: self.model_fallback_notice.clone(),
         }
     }
 
@@ -1564,13 +1571,13 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
 
         let configured = state.view();
         assert!(!configured.show_start_methods);
         assert!(configured.show_manual_setup);
-        assert_eq!(configured.selected_model, "gpt-5.4");
+        assert_eq!(configured.selected_model, "gpt-5.5");
 
         state.apply(LaunchWizardAction::Back);
 
@@ -1578,7 +1585,7 @@ mod tests {
         assert!(state.completion.is_none());
         assert!(backed.show_start_methods);
         assert!(!backed.show_manual_setup);
-        assert_eq!(backed.selected_model, "gpt-5.4");
+        assert_eq!(backed.selected_model, "gpt-5.5");
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -1586,7 +1593,7 @@ mod tests {
         let configured_again = state.view();
         assert!(!configured_again.show_start_methods);
         assert!(configured_again.show_manual_setup);
-        assert_eq!(configured_again.selected_model, "gpt-5.4");
+        assert_eq!(configured_again.selected_model, "gpt-5.5");
     }
 
     #[test]
@@ -1636,6 +1643,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             windows_shell: None,
+            hermes: Default::default(),
         };
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260523-1406"),
@@ -1763,11 +1771,20 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
+        // Issue #3962 AC-5: the swap is reported, not silent.
+        let notice = state
+            .model_fallback_notice
+            .as_deref()
+            .expect("a removed Quick Start model must be reported");
+        assert!(
+            notice.contains("gpt-5.2-codex") && notice.contains("gpt-6-astra"),
+            "the notice must name both models: {notice}"
+        );
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+                    assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -2157,7 +2174,7 @@ mod tests {
         state.step = LaunchWizardStep::ModelSelect;
         state.selected = 0;
         state.apply_selection();
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
 
         state.step = LaunchWizardStep::ReasoningLevel;
         state.selected = 1;

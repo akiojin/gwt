@@ -116,7 +116,7 @@ pub(super) fn classify_issue_monitor_failure(
 /// only anchor available.
 pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
     let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
-    Some(provider_usage_limit_failure(&notice, None))
+    Some(provider_usage_limit_failure(&notice, None, None))
 }
 
 /// `pane_agent_id` is the agent the pane is actually running, and it wins over
@@ -126,12 +126,14 @@ pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMo
 pub(super) fn provider_usage_limit_failure(
     notice: &gwt_core::usage::ProviderLimitNotice,
     pane_agent_id: Option<&str>,
+    evidence: Option<gwt::IssueMonitorProviderQuotaHoldEvidence>,
 ) -> gwt::IssueMonitorFailure {
     gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider: provider_label(notice, pane_agent_id),
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        evidence,
     }
 }
 
@@ -195,6 +197,16 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     let Some(tail) = tail else {
         return base;
     };
+    // Issue #3490: several Codex agents initializing the shared `~/.codex`
+    // state directory at once lose the SQLite race, and the provider's answer
+    // is a nested stack trace that tells the operator nothing actionable.
+    // Checked before truncation because the lock refusal is the tail of a long
+    // path-heavy message and would be cut off. The replacement carries the
+    // transient-retry hint, so the Issue Monitor requeues without spending an
+    // attempt on host contention.
+    if gwt_agent::is_codex_shared_state_lock_failure(tail) {
+        return Some(gwt_agent::codex_shared_state_lock_detail());
+    }
     let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
         let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
         truncated.push('…');
@@ -738,14 +750,30 @@ impl AppRuntime {
         // torn down. A clean exit discards the screen entirely (the branch
         // below only composes a detail for `Error`), which is exactly why a
         // quota-dead Codex pane looked like finished work.
-        let quota_notice =
-            self.provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail);
         let quota_agent_id = self.pane_agent_id(&id);
+        // Issue #3923 AC-3: a notice left on the final screen is not a block
+        // while the poller reads the account as usable — the pane exited for
+        // some other reason and the text is stale.
+        let quota_notice = self
+            .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
         match quota_notice.as_ref() {
             Some(notice) => {
+                let recorded_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let screen_text = self
+                    .screen_tail(&id, QUOTA_NOTICE_TAIL_LINES, "\n")
+                    .or_else(|| detail.clone())
+                    .unwrap_or_default();
+                let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    &recorded_at,
+                    &id,
+                    &screen_text,
+                )
+                .with_poller(quota_agent_id.as_deref(), &self.provider_usage_accounts);
                 self.provider_quota_holds.insert(
                     id.clone(),
-                    provider_usage_limit_failure(notice, quota_agent_id.as_deref()),
+                    provider_usage_limit_failure(notice, quota_agent_id.as_deref(), Some(evidence)),
                 );
             }
             None => {
@@ -1064,6 +1092,13 @@ impl AppRuntime {
             .entry(window_id.to_string())
             .or_insert_with(|| super::ProviderQuotaCandidate { first_seen: now })
             .first_seen;
+        // Issue #3923 AC-3: the poller reading the account as usable
+        // contradicts the screen, so the settle window alone must not promote
+        // the notice. The candidate stays pending: a later poller reading can
+        // still corroborate it, and the notice leaving the screen abandons it.
+        if self.provider_reports_healthy_for_pane(agent_id.as_deref(), window_id) {
+            return Vec::new();
+        }
         let corroborated = agent_id.as_deref().is_some_and(|agent_id| {
             gwt::issue_monitor::provider_limit_reached_for_agent(
                 agent_id,
@@ -1078,7 +1113,35 @@ impl AppRuntime {
             return Vec::new();
         }
         self.provider_quota_candidates.remove(window_id);
-        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref())
+        // Millisecond precision so a hold formed right after an operator's
+        // clear is ordered after that release instead of sharing its second.
+        let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+            &now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            window_id,
+            screen.unwrap_or_default(),
+        )
+        .with_poller(agent_id.as_deref(), &self.provider_usage_accounts);
+        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref(), evidence)
+    }
+
+    /// Issue #3923 AC-3: whether the usage poller currently contradicts a
+    /// quota notice on `window_id`'s screen. Logged when it does, because the
+    /// suppressed hold is itself the diagnosis of a stale notice.
+    fn provider_reports_healthy_for_pane(&self, agent_id: Option<&str>, window_id: &str) -> bool {
+        let healthy = agent_id.is_some_and(|agent_id| {
+            gwt::issue_monitor::provider_reports_healthy_for_agent(
+                agent_id,
+                &self.provider_usage_accounts,
+            )
+        });
+        if healthy {
+            tracing::info!(
+                window_id = %window_id,
+                agent_id = ?agent_id,
+                "provider limit notice on screen but the usage poller reads the account as usable; not holding (Issue #3923)"
+            );
+        }
+        healthy
     }
 
     /// Latch the block, project the pane as waiting, and tell the Monitor the
@@ -1094,8 +1157,18 @@ impl AppRuntime {
         window_id: &str,
         notice: &gwt_core::usage::ProviderLimitNotice,
         agent_id: Option<&str>,
+        evidence: gwt::IssueMonitorProviderQuotaHoldEvidence,
     ) -> Vec<OutboundEvent> {
-        let failure = provider_usage_limit_failure(notice, agent_id);
+        tracing::warn!(
+            window_id = %window_id,
+            agent_id = ?agent_id,
+            screen_text = ?evidence.screen_text,
+            poller_state = ?evidence.poller_state,
+            poller_limit_reached = ?evidence.poller_limit_reached,
+            poller_windows = ?evidence.poller_windows,
+            "provider quota hold committed from the pane screen (Issue #3923)"
+        );
+        let failure = provider_usage_limit_failure(notice, agent_id, Some(evidence));
         let detail = gwt_core::usage::describe_provider_limit_notice(
             notice,
             Some(provider_label(notice, agent_id).as_str()),
@@ -1734,6 +1807,42 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::WindowProcessStatus;
+
+    /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
+    /// SQLite race must not show the raw provider stack. The same string is the
+    /// message the Issue Monitor receives, so it also has to classify as a
+    /// transient launch failure — the contention is about the host, not the
+    /// work.
+    #[test]
+    fn codex_shared_state_lock_replaces_the_raw_stack_in_the_pane_detail() {
+        let observed_stack = "/Users/akiojin/.codex/state_5.sqlite: failed to initialize state \
+             runtime at /Users/akiojin/.codex: failed to open log DB at \
+             /Users/akiojin/.codex/logs_2.sqlite: error returned from database: (code: 5) \
+             database is locked";
+
+        let detail = super::compose_agent_error_detail(
+            Some("Agent exited with status 1".to_string()),
+            Some(observed_stack),
+        )
+        .expect("an errored agent pane always carries a detail");
+
+        assert!(
+            !detail.contains("state_5.sqlite"),
+            "the raw Codex stack must not reach the pane: {detail}"
+        );
+        assert!(
+            detail.contains("~/.codex"),
+            "the pane must name the shared state directory as the cause: {detail}"
+        );
+        assert!(
+            detail.contains("max_active"),
+            "the pane must name what the operator can do about it: {detail}"
+        );
+        assert!(
+            gwt_agent::is_transient_launch_failure(&detail),
+            "the Issue Monitor must requeue this without spending an attempt: {detail}"
+        );
+    }
 
     #[test]
     fn late_provider_active_writer_error_is_classified_as_resume_writer_conflict() {

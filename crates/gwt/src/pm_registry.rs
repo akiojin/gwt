@@ -38,9 +38,12 @@ use sha2::{Digest, Sha256};
 /// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
 /// distinguishable from a dead one without a keepalive line in the
 /// conversation (FR-4).
+/// Issue #3868 AC-3: a red, conflicted, or escalation-due open PR is never a
+/// no-change cycle. Kept terse on purpose — this clause rides the PTY wake
+/// prompts, which must stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
-    "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
-     changed, end the cycle with no user-facing output.";
+    "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
+     output only if nothing changed and no open PR is CI-RED, CONFLICTED, or escalation_due.";
 
 /// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
 /// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
@@ -53,6 +56,29 @@ pub const PM_GWTD_EXECUTION_CLAUSE: &str =
      `pane.read`, and every long-running or hang-risk operation to exactly one background task or \
      in-session sub-agent; collect the result only from its task-completion notification, and \
      never duplicate an operation while it is pending.";
+
+/// Issue #3767 AC-1〜AC-3: compact steering obligation shared by the delta
+/// wake, the periodic wake, the Stop-gate continuation, and the PM's
+/// intent-boundary reminder. The generated gwt-pm guidance owns the full
+/// classification and default actions; this clause only keeps every injected
+/// prompt from restoring "observe only" and from judging a cycle unchanged
+/// before the running launches were steered.
+pub const PM_STEERING_CLAUSE: &str =
+    "Steer every running launch before you judge the cycle unchanged: from its \
+     `last_activity_at` and its latest Board posts decide whether it is stalled (no activity for \
+     more than twice the monitor scan interval), drifting outside its owner Issue's scope, or \
+     waiting for its next action, and give the directive through `board.post` with a mention or \
+     `pm.message.send` — the ruling channels only; never inject launch or bootstrap instructions \
+     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle.";
+
+/// Issue #3767 AC-2: the same steering obligation for the two PTY wake prompts.
+/// Kept terse on purpose — those prompts must stay under the 1024-byte PTY
+/// canonical queue (#3825 / #3868), so the delta wake and the periodic tick
+/// carry this line while the Stop-gate continuation and the gwt-pm guidance
+/// carry [`PM_STEERING_CLAUSE`] in full.
+pub const PM_STEERING_WAKE_CLAUSE: &str =
+    "Steer stalled/off-scope/waiting launches (`board.post` mention or `pm.message.send`, never \
+     past the Monitor) before judging no change.";
 
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3976,8 +4002,11 @@ pub fn pm_worktree_store_dir(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let project_dir = pm_dir.parent()?;
-    (project_dir.parent()? == gwt_core::paths::gwt_projects_dir())
-        .then(|| project_dir.to_path_buf())
+    let projects_dir = project_dir.parent()?;
+    let expected_projects_dir = gwt_core::paths::gwt_projects_dir();
+    (gwt_core::paths::normalize_windows_child_process_path(projects_dir)
+        == gwt_core::paths::normalize_windows_child_process_path(&expected_projects_dir))
+    .then(|| project_dir.to_path_buf())
 }
 
 /// Issue #3607 AC-3: whether restoring a session rooted at `session_worktree`
@@ -4509,6 +4538,23 @@ pub fn pm_status_report_for_caller(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #3767 AC-2 / AC-3: the terse wake clause and the full Stop-gate
+    /// clause name the same ruling channels and the same Monitor boundary, so
+    /// the two injected wordings cannot drift into different policies.
+    #[test]
+    fn steering_clauses_name_the_same_channels_and_monitor_boundary() {
+        for clause in [PM_STEERING_CLAUSE, PM_STEERING_WAKE_CLAUSE] {
+            for phrase in ["`board.post`", "`pm.message.send`", "Monitor"] {
+                assert!(
+                    clause.contains(phrase),
+                    "steering clause is missing {phrase}: {clause}"
+                );
+            }
+        }
+        assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
+        assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -5263,15 +5309,26 @@ mod tests {
     #[test]
     fn pm_worktree_path_is_canonical_and_predicate_matches_only_it() {
         let home = tempfile::tempdir().expect("tempdir");
-        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical temp home");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(&canonical_home);
 
         let repo = Path::new("/tmp/some-repo");
         let worktree = pm_worktree_path_for_repo_path(repo);
+        let normalized_worktree = gwt_core::paths::normalize_windows_child_process_path(&worktree);
         assert_eq!(
             worktree,
             gwt_core::paths::gwt_project_dir_for_repo_path(repo).join("pm/worktree")
         );
         assert!(is_pm_worktree(&worktree));
+        #[cfg(windows)]
+        assert_ne!(
+            worktree, normalized_worktree,
+            "the Windows regression fixture must exercise verbatim and normalized spellings"
+        );
+        assert!(
+            is_pm_worktree(&normalized_worktree),
+            "the same PM worktree must match after child-process path normalization"
+        );
 
         let pm_dir = worktree.parent().expect("pm dir");
         assert!(

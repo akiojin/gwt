@@ -80,6 +80,29 @@ test.describe("Provider usage status summary", () => {
     await expect(popover).toContainText(/Weekly\s*80%/);
     await expect(popover).toContainText(/1\/2/);
     await expect(strip).toHaveAttribute("aria-expanded", "true");
+
+    // Issue #3862 — the Claude card lists its sessions (tokens + context
+    // remaining) inside the same popover, most-consumed context first.
+    const claudeSessions = popover.locator(
+      '.op-usage-card[data-provider="claude_code"] .op-usage-sess',
+    );
+    await expect(claudeSessions).toBeVisible();
+    await expect(claudeSessions).toContainText(/Sessions \(2\)/);
+    const sessionRows = claudeSessions.locator(".op-usage-sess__row");
+    await expect(sessionRows).toHaveCount(2);
+    await expect(sessionRows.nth(0)).toContainText("claude-sonnet-5");
+    await expect(sessionRows.nth(0)).toContainText("24k");
+    await expect(sessionRows.nth(0)).toContainText("12%");
+    await expect(sessionRows.nth(0).locator(".op-usage-sess__ctx")).toHaveAttribute(
+      "data-severity",
+      "warning",
+    );
+    await expect(sessionRows.nth(1)).toContainText("claude-fable-5-1");
+    await expect(sessionRows.nth(1)).toContainText("1.2M");
+    await expect(sessionRows.nth(1)).toContainText("58%");
+    await expect(
+      popover.locator('.op-usage-card[data-provider="codex"] .op-usage-sess'),
+    ).toHaveCount(0);
     const popoverBox = await popover.boundingBox();
     const viewport = page.viewportSize();
     expect(popoverBox).not.toBeNull();
@@ -112,6 +135,49 @@ test.describe("Provider usage status summary", () => {
     await strip.click();
     await expect(popover).toBeVisible();
     await expect(page.locator("#provider-usage-popover")).toHaveCount(1);
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
+  });
+
+  test("labels an unknown-length window by its reported minutes (Issue #3860)", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    await page.goto(APP_URL);
+
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    await emitProviderUsage(page, [
+      {
+        provider: "codex",
+        plan: "pro",
+        windows: [
+          { kind: "weekly", used_percent: 5, window_minutes: 10080 },
+          { kind: "unknown", used_percent: 40, window_minutes: 1440 },
+          { kind: "unknown", used_percent: 12 },
+        ],
+        state: { kind: "ok" },
+      },
+    ]);
+    await expect(strip).toContainText("CX 40%");
+
+    await strip.hover();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    await expect(popover).toContainText(/Weekly\s*5%/);
+    await expect(popover).toContainText(/Unknown \(1-day\)\s*40%/);
+    await expect(popover).toContainText(/Unknown\s*12%/);
+    const weekly = popover.locator(".op-usage-win__lbl", { hasText: "Weekly" });
+    await expect(weekly).toHaveAttribute("data-window-minutes", "10080");
+    await expect(weekly).toHaveAttribute("title", "Window length: 7 days");
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });
@@ -305,7 +371,38 @@ async function installProviderUsageBackend(page: any): Promise<void> {
           state: { kind: "ok" },
         },
       ],
-      sessions: [],
+      // Issue #3862 — per-session tokens / context ride the same snapshot and
+      // must be readable from the same popover as the account windows.
+      sessions: [
+        {
+          session_id: "sess-claude-fable",
+          provider: "claude_code",
+          model: "claude-fable-5-1",
+          input_tokens: 1000000,
+          output_tokens: 234567,
+          total_tokens: 1234567,
+          context_used_tokens: 420000,
+          context_limit_tokens: 1000000,
+          context_left_pct: 58,
+          limit_reached: false,
+          eligible: true,
+          state: { kind: "ok" },
+        },
+        {
+          session_id: "sess-claude-sonnet",
+          provider: "claude_code",
+          model: "claude-sonnet-5",
+          input_tokens: 20000,
+          output_tokens: 4000,
+          total_tokens: 24000,
+          context_used_tokens: 176000,
+          context_limit_tokens: 200000,
+          context_left_pct: 12,
+          limit_reached: false,
+          eligible: true,
+          state: { kind: "ok" },
+        },
+      ],
       consumption: [],
     };
 
