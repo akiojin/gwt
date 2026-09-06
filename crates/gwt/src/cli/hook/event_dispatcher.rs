@@ -335,7 +335,13 @@ fn handle_stop(
         ),
         (
             "skill-discussion-stop-check",
-            Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
+            Box::new(|| {
+                skill_discussion_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
         ),
         (
             "skill-plan-spec-stop-check",
