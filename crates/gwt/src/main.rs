@@ -1929,6 +1929,7 @@ mod tests {
     fn daemon_broadcast_issue_monitor_payloads_map_to_frontend_dispatch_and_launch_request() {
         let project_root = Path::new("/tmp/gwt-project");
         let status = gwt::IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,

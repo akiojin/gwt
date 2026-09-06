@@ -419,6 +419,7 @@ export function createKnowledgeKanbanSurface({
         max_active_agents: 1,
         total_candidates: 0,
         autonomous_mode: false,
+        auto_apply_updates: false,
         quota_hold: null,
       };
 
@@ -529,6 +530,17 @@ export function createKnowledgeKanbanSurface({
           autonomous.dataset.enabled = enabled ? "true" : "false";
           autonomous.classList.toggle("primary", enabled);
         }
+        // Issue #3906 AC-1: `auto_apply_updates` is the effective value
+        // (override, else autonomous_mode), so the label shows what happens.
+        const autoApply = panel.querySelector('[data-action="monitor-auto-apply"]');
+        if (autoApply) {
+          const enabled = Boolean(issueMonitorStatus.auto_apply_updates);
+          autoApply.textContent = enabled
+            ? "Auto-apply updates: ON"
+            : "Auto-apply updates: OFF";
+          autoApply.dataset.enabled = enabled ? "true" : "false";
+          autoApply.classList.toggle("primary", enabled);
+        }
       }
 
       function renderAllIssueMonitorControls() {
@@ -602,6 +614,14 @@ export function createKnowledgeKanbanSurface({
             send({
               kind: "set_issue_monitor_autonomous_mode",
               enabled: !Boolean(issueMonitorStatus.autonomous_mode),
+            });
+          });
+        panel
+          .querySelector('[data-action="monitor-auto-apply"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_auto_apply_updates",
+              enabled: !Boolean(issueMonitorStatus.auto_apply_updates),
             });
           });
         const quickTitle = panel.querySelector(".knowledge-monitor-quick-title");
@@ -3139,6 +3159,7 @@ export function createKnowledgeKanbanSurface({
                     </label>
                     <button type="button" class="wizard-button primary" data-action="monitor-toggle">Start</button>
                     <button type="button" class="wizard-button" data-action="monitor-autonomous">Autonomous: OFF</button>
+                    <button type="button" class="wizard-button" data-action="monitor-auto-apply" title="Apply a staged gwt update automatically once no agent is running (default: follows Autonomous)">Auto-apply updates: OFF</button>
                   </div>
                   <div class="knowledge-monitor-quick">
                     <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />

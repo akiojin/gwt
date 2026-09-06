@@ -148,6 +148,7 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,

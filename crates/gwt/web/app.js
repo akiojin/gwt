@@ -5992,6 +5992,8 @@
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
             window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
+            // Issue #3906 AC-12: the update CTA shows the drain progress.
+            updateCtaController.handleIssueMonitorStatus(event.status || {});
             break;
           case "issue_monitor_inbox":
             scheduleIssueMonitorProjectionRefresh();

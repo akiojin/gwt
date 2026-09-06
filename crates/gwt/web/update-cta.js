@@ -16,6 +16,8 @@ export function createUpdateCtaController({
   // ready/failed modal calls this with the latest version, letting the
   // user inspect the changelog before committing to a restart.
   openReleaseNotes = null,
+  // Issue #3906 AC-12: injectable clock so the draining minutes are testable.
+  now = () => Date.now(),
 }) {
   const shellId = "update-cta-shell";
   const modalId = "update-modal";
@@ -23,6 +25,9 @@ export function createUpdateCtaController({
   let pendingVersion = null;
   let status = "idle";
   let lastProgress = null;
+  // Issue #3906 AC-12: the version whose draining CTA the user dismissed, so
+  // the periodic issue_monitor_status ticks do not resurrect it.
+  let dismissedDrainVersion = null;
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -158,6 +163,53 @@ export function createUpdateCtaController({
     return renderCta("error", `Update failed: ${detail} Click to retry.`);
   }
 
+  // Issue #3906 AC-12 — drain-and-apply. `update_drain` on
+  // issue_monitor_status means the Issue Monitor is holding new launches for
+  // a staged update and waiting for the host to go quiet. The CTA names the
+  // version, how many blockers remain and how long the drain has lasted.
+  function drainMinutes(since) {
+    const started = Date.parse(since || "");
+    if (!Number.isFinite(started)) return 0;
+    return Math.max(0, Math.floor((now() - started) / 60000));
+  }
+
+  function showDraining(drain) {
+    const version = drain?.version;
+    if (!version) return null;
+    removeLegacyUpdateSurfaces();
+    pendingVersion = version;
+    const blocking = Array.isArray(drain.blocking) ? drain.blocking.length : 0;
+    const minutes = drainMinutes(drain.since);
+    const entering = status !== "draining";
+    const cta = renderCta(
+      "draining",
+      `Update v${version} pending — draining ${blocking} agents (${minutes} min)`,
+    );
+    // issue_monitor_status ticks every scan; only the transition into the
+    // draining state is worth a sidebar peek.
+    if (entering) announceUpdateAvailable();
+    return cta;
+  }
+
+  function handleIssueMonitorStatus(monitorStatus) {
+    const drain = monitorStatus?.update_drain;
+    if (drain && drain.version) {
+      if (status === "applying") return;
+      if (status === "dismissed" && dismissedDrainVersion === drain.version) return;
+      showDraining(drain);
+      return;
+    }
+    if (status === "draining") {
+      // The drain cleared without a restart (manual clear or apply failure):
+      // fall back to the staged state the CTA was in before.
+      if (pendingVersion) {
+        showReadyPending(pendingVersion);
+      } else if (latestVersion) {
+        showAvailable(latestVersion);
+      }
+    }
+  }
+
   function updateFailureDetail(payload) {
     return payload?.reason || payload?.message || "Unknown reason";
   }
@@ -220,13 +272,14 @@ export function createUpdateCtaController({
     if (shell) {
       shell.remove();
     }
+    dismissedDrainVersion = status === "draining" ? pendingVersion : null;
     status = "dismissed";
     announceUpdateDismissed();
   }
 
   function handleClick() {
     if (status === "applying") return;
-    if (status === "ready" && pendingVersion) {
+    if ((status === "ready" || status === "draining") && pendingVersion) {
       // Re-open the modal at the ready panel; no second download.
       renderCta("applying", "Applying update...");
       renderModalReady(pendingVersion);
@@ -575,6 +628,7 @@ export function createUpdateCtaController({
     handleUpdateReady,
     handleUpdateApplyError,
     handleUpdateApplyPendingPersisted,
+    handleIssueMonitorStatus,
     showAvailable,
     showReadyPending,
     showError,

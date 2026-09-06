@@ -290,6 +290,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
         } => run_monitor_config_set(
             env,
@@ -298,6 +299,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent.as_deref(),
             out,
         )?,
@@ -1499,6 +1501,7 @@ fn apply_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
@@ -1506,6 +1509,7 @@ fn apply_monitor_config_set(
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
     )?;
     let mut candidate =
@@ -1528,6 +1532,9 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
+    if let Some(auto_apply_updates) = auto_apply_updates {
+        candidate.set_auto_apply_updates(Some(auto_apply_updates));
+    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
@@ -1542,6 +1549,7 @@ fn validate_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
@@ -1554,6 +1562,7 @@ fn validate_monitor_config_set(
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
+        && auto_apply_updates.is_none()
         && launch_agent.is_none()
     {
         return Err(io::Error::new(
@@ -1589,6 +1598,7 @@ fn run_monitor_config_set<E: CliEnv>(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -1598,6 +1608,7 @@ fn run_monitor_config_set<E: CliEnv>(
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
     )
     .map_err(io_as_api_error)?;
@@ -1625,6 +1636,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
                 "auto_close_merged_issues": auto_close_merged_issues,
+                "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
             }
         }),
@@ -1643,6 +1655,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                auto_apply_updates,
                 launch_agent,
             )
         })
@@ -1660,6 +1673,10 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
+                .unwrap_or(prefs.autonomous_mode),
+            "auto_apply_updates": prefs.auto_apply_updates,
+            "auto_apply_updates_effective": prefs
+                .auto_apply_updates
                 .unwrap_or(prefs.autonomous_mode),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
@@ -4527,6 +4544,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             },
             &mut out,
@@ -4550,6 +4568,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             },
             &mut out,
@@ -4791,6 +4810,7 @@ mod tests {
                     autonomous_mode,
                     max_active: None,
                     auto_close_merged_issues: None,
+                    auto_apply_updates: None,
                     launch_agent: None,
                 },
                 &mut out,
@@ -5848,6 +5868,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
             },
             &mut out,
@@ -5887,6 +5908,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),
             },
             &mut out,

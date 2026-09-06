@@ -1518,6 +1518,8 @@ enum IssueMonitorControl {
         max_active_agents: Option<usize>,
         /// Issue #3917 AC-5: explicit auto-close override.
         auto_close_merged_issues: Option<bool>,
+        /// Issue #3906 AC-1: explicit auto-apply-updates override.
+        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
     },
@@ -1861,6 +1863,7 @@ fn try_apply_issue_monitor_control(
             autonomous_mode,
             max_active_agents,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
         } => {
             if enabled == Some(true)
@@ -1870,6 +1873,7 @@ fn try_apply_issue_monitor_control(
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
+                    && auto_apply_updates.is_none()
                     && launch_agent.is_none())
             {
                 return None;
@@ -1893,6 +1897,9 @@ fn try_apply_issue_monitor_control(
                 candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
                     auto_close_merged_issues,
                 ))?;
+            }
+            if let Some(auto_apply_updates) = auto_apply_updates {
+                candidate.set_auto_apply_updates(Some(auto_apply_updates));
             }
             *monitor = candidate;
             Some(true)
@@ -2488,6 +2495,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
                 };
+                let auto_apply_updates = match config.get("auto_apply_updates") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
                 // Issue #3923 AC-5: a blank agent name is a malformed control.
                 let launch_agent = match config.get("launch_agent") {
                     None | Some(serde_json::Value::Null) => None,
@@ -2506,6 +2517,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
+                        && auto_apply_updates.is_none()
                         && launch_agent.is_none())
                 {
                     return None;
@@ -2515,6 +2527,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                     auto_close_merged_issues,
+                    auto_apply_updates,
                     launch_agent,
                 });
             }
@@ -8740,9 +8753,37 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             }
         );
+        // Issue #3906 AC-1: the GUI toggle publishes the override alone and
+        // the daemon commits it without touching any other switch.
+        let auto_apply_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "auto_apply_updates": true } }),
+            std::process::id() + 1,
+        );
+        let auto_apply_control =
+            decode_issue_monitor_control(auto_apply_payload).expect("auto-apply control");
+        assert_eq!(
+            auto_apply_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+            }
+        );
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            auto_apply_control
+        ));
+        assert_eq!(monitor.auto_apply_updates(), Some(true));
+        assert!(monitor.auto_apply_updates_enabled());
 
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -8850,6 +8891,7 @@ exit 0
                 autonomous_mode: None,
                 max_active_agents: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
             }
         );
@@ -9055,6 +9097,7 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             },
         ));

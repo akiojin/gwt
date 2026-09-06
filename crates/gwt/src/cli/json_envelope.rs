@@ -395,16 +395,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
+            let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             let launch_agent = optional_string(params, "launch_agent")?;
             if enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
                 && auto_close_merged_issues.is_none()
+                && auto_apply_updates.is_none()
                 && launch_agent.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent",
+                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -421,6 +423,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                auto_apply_updates,
                 launch_agent,
             })
         }
@@ -2313,6 +2316,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: Some(7),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             })
         );
@@ -2324,6 +2328,7 @@ mod tests {
                 autonomous_mode: Some(true),
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             })
         );
@@ -2338,9 +2343,26 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: Some(false),
+                auto_apply_updates: None,
                 launch_agent: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"auto_apply_updates": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+            }),
+            "Issue #3906 AC-1: the auto-apply override is settable on its own"
         );
     }
 
@@ -2358,13 +2380,14 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
             })
         );
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent"
+                "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent"
             )
         ));
     }
@@ -2760,6 +2783,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
             })
         );

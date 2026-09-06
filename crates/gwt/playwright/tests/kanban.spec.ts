@@ -232,6 +232,12 @@ test.describe("Issue Bridge load recovery", () => {
     await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
     await issueSurface.locator('[data-action="monitor-autonomous"]').click();
+    // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
+    // toggle and reports the effective value the backend sent.
+    const autoApply = issueSurface.locator('[data-action="monitor-auto-apply"]');
+    await expect(autoApply).toHaveText("Auto-apply updates: OFF");
+    await expect(autoApply).toHaveAttribute("data-enabled", "false");
+    await autoApply.click();
     await issueSurface.locator('[data-action="monitor-settings"]').click();
     await issueSurface.locator(".knowledge-monitor-quick-title").fill(
       "Investigate flaky release gate",
@@ -258,6 +264,10 @@ test.describe("Issue Bridge load recovery", () => {
     });
     expect(messages).toContainEqual({
       kind: "set_issue_monitor_autonomous_mode",
+      enabled: true,
+    });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_auto_apply_updates",
       enabled: true,
     });
     expect(messages).toContainEqual({ kind: "issue_monitor_configure_profile" });

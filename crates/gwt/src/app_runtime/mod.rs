@@ -6466,6 +6466,21 @@ impl AppRuntime {
                     },
                 )
             }
+            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+                // Issue #3906 AC-1: the override rides the same `config_set`
+                // control the CLI uses, so daemon and local fallback agree.
+                let publication = self.publish_active_issue_monitor_control(
+                    serde_json::json!({ "config_set": { "auto_apply_updates": enabled } }),
+                );
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "auto-apply-updates",
+                    |monitor| {
+                        monitor.set_auto_apply_updates(Some(enabled));
+                    },
+                )
+            }
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
                 let publication = self.publish_active_issue_monitor_control(
                     serde_json::json!({ "max_active_agents": max_active_agents }),
