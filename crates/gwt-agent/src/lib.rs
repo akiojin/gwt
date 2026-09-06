@@ -8,6 +8,7 @@ pub mod audit;
 pub mod backend;
 pub mod backend_store;
 pub mod claude_capabilities;
+pub mod codex_shared_state;
 pub mod custom;
 pub mod detect;
 pub mod environment;
@@ -34,6 +35,10 @@ pub use claude_capabilities::{
     claude_capability_snapshot, claude_ultracode_supported, claude_workflows_enabled,
     detect_claude_version_raw, parse_claude_semver, supports_ultracode, workflows_enabled_from,
     ClaudeCapabilitySnapshot,
+};
+pub use codex_shared_state::{
+    codex_shared_state_lock_detail, is_codex_shared_state_lock_failure, pace_shared_codex_spawn,
+    shares_user_codex_state, CodexSpawnPacer, CODEX_SHARED_STATE_SPAWN_GAP,
 };
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
