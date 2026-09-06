@@ -63,7 +63,54 @@ const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(test)]
+thread_local! {
+    /// Per-test prefs budget (Issue #4033).
+    ///
+    /// Deliberately thread-local rather than an environment variable: a dozen
+    /// sibling tests hold the prefs lock and depend on the *default* budget
+    /// expiring quickly, and none of them take the process-wide env lock. A
+    /// global override would silently make those tests wait out a relaxed
+    /// budget instead. One test per thread makes this override exact.
+    static ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pin the prefs budget for the current test thread until dropped.
+#[cfg(test)]
+struct ScopedIssueMonitorPrefsTimeout {
+    previous: Option<Duration>,
+}
+
+#[cfg(test)]
+impl ScopedIssueMonitorPrefsTimeout {
+    fn set(timeout: Duration) -> Self {
+        Self {
+            previous: ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE
+                .with(|current| current.replace(Some(timeout))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedIssueMonitorPrefsTimeout {
+    fn drop(&mut self) {
+        ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(|current| current.set(self.previous));
+    }
+}
+
+/// The single seam for the prefs read-lock-modify-write budget.
+///
+/// Issue #4033: every prefs transaction must go through this accessor, not
+/// through [`ISSUE_MONITOR_PREFS_TIMEOUT`] directly. A test that asserts on a
+/// transaction's *outcome* is otherwise asserting on how fast the runner's
+/// filesystem happened to be that minute, and a loaded CI host silently
+/// converts a passing state machine into a failing one.
 fn issue_monitor_prefs_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return timeout;
+    }
     #[cfg(test)]
     if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
@@ -312,8 +359,8 @@ async fn run_server_with_shutdown_and_worker_config(
     // settlement and child reaping unfinished.
     let worker_grace = operation_timeout
         .max(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
-        .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT)
-        .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT);
+        .saturating_add(issue_monitor_prefs_timeout())
+        .saturating_add(issue_monitor_prefs_timeout());
     match tokio::time::timeout(worker_grace, &mut issue_monitor_worker).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -1210,7 +1257,7 @@ fn load_issue_monitor_state_for_daemon(
     config: crate::IssueMonitorConfig,
 ) -> LoadedDaemonIssueMonitorState {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let authority_fence = crate::IssueMonitorAuthorityFence::current_process();
     match crate::establish_issue_monitor_authority_fence(
@@ -1378,7 +1425,7 @@ fn revoke_issue_monitor_effect_authority_for_shutdown(
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let mut candidate = monitor.clone();
     match crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
@@ -2316,7 +2363,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration(
         prefs_path,
         monitor,
         accepted,
-        ISSUE_MONITOR_PREFS_TIMEOUT,
+        issue_monitor_prefs_timeout(),
         || {},
     )
 }
@@ -2994,7 +3041,7 @@ fn commit_issue_monitor_scan_if_current(
     captured_authority_epoch: u64,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         return false;
@@ -3087,7 +3134,7 @@ fn fence_next_issue_monitor_effect_with_permit(
     permit: &IssueMonitorEffectPermitToken,
 ) -> Option<crate::PendingIssueMonitorEffect> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
@@ -3514,7 +3561,7 @@ fn commit_issue_monitor_effect_result(
     use gwt_github::issue_auto_claim::ClaimAcquireOutcome;
 
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
 
     let key = completed.effect.attempt_key();
@@ -5299,6 +5346,36 @@ exit 0
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
         fake_gh
+    }
+
+    /// Put a `git` in `dir` that costs `delay` before it does anything real.
+    ///
+    /// Issue #4033 AC-3: a scan reaches its external calls only after real
+    /// `git` subprocess work, and on a saturated CI runner that prologue is
+    /// what consumed the scan budget — the fake `gh` a test wanted to observe
+    /// was never spawned at all. Injecting the delay makes that host
+    /// deterministic instead of waiting for a bad day to reproduce it.
+    ///
+    /// Install it after the fixture's own repository setup so only the code
+    /// under test pays for it.
+    fn write_slow_git_shim(dir: &Path, delay: Duration) {
+        let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|entry| entry != dir)
+            .map(|entry| entry.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("a real git on PATH");
+        let shim = dir.join("git");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nsleep {delay}\nexec '{git}' \"$@\"\n",
+                delay = delay.as_secs_f32(),
+                git = real_git.display()
+            ),
+        )
+        .expect("write slow git shim");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod slow git shim");
     }
 
     fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
@@ -10379,6 +10456,13 @@ exit 0
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+        // Issue #4033: these tests assert on the settlement state machine, not
+        // on how fast this host writes a small JSON file. The production 250 ms
+        // prefs budget decided their verdict on a loaded runner, so give the
+        // transaction the same hang-guard treatment every other wait in this
+        // module gets (Issue #3641): a saturated runner may delay it, never
+        // decide it.
+        let _prefs_timeout = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
 
         let workspace_home = temp.path().join("workspace");
         let bare_repo = workspace_home.join("repo.git");
@@ -10439,23 +10523,31 @@ exit 0
             .cloned()
     }
 
-    /// Fence the proposal on disk and commit the executor outcome, exactly as
-    /// the driver would.
-    fn commit_settlement(
+    /// Fence the proposal on disk exactly as the driver would, and hand back
+    /// the `Attempting` tuple its executor would carry.
+    fn fence_settlement(
         prefs_path: &Path,
         monitor: &mut crate::IssueMonitorState,
         effect: &crate::PendingIssueMonitorEffect,
-        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
-    ) -> bool {
+    ) -> crate::PendingIssueMonitorEffect {
         let key = effect.attempt_key();
         assert!(monitor.mark_pending_effect_attempting(&key));
         crate::save_issue_monitor_prefs(prefs_path, &monitor.prefs()).expect("persist attempting");
-        let attempting = monitor
+        monitor
             .pending_effects()
             .iter()
             .find(|pending| pending.attempt_key() == key)
             .cloned()
-            .expect("attempting effect");
+            .expect("attempting effect")
+    }
+
+    /// Commit the executor outcome for an already fenced proposal.
+    fn commit_fenced_settlement(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        attempting: crate::PendingIssueMonitorEffect,
+        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+    ) -> bool {
         super::commit_issue_monitor_effect_result(
             prefs_path,
             monitor,
@@ -10465,6 +10557,42 @@ exit 0
                 completed_at: "2026-09-01T01:00:00Z".to_string(),
             },
         )
+    }
+
+    /// Fence the proposal on disk and commit the executor outcome, exactly as
+    /// the driver would.
+    fn commit_settlement(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        effect: &crate::PendingIssueMonitorEffect,
+        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+    ) -> bool {
+        let attempting = fence_settlement(prefs_path, monitor, effect);
+        commit_fenced_settlement(prefs_path, monitor, attempting, outcome)
+    }
+
+    /// Hold the prefs lock for `hold` and return once the lock is provably
+    /// taken, so a caller can inject contention without racing the holder.
+    fn hold_prefs_lock_for(prefs_path: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let lock_path = prefs_path.with_extension("lock");
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("open prefs lock");
+            fs2::FileExt::lock_exclusive(&lock).expect("hold prefs lock");
+            acquired_tx.send(()).expect("announce the held prefs lock");
+            std::thread::sleep(hold);
+            fs2::FileExt::unlock(&lock).expect("release prefs lock");
+        });
+        acquired_rx
+            .recv_timeout(MARKER_WAIT_HANG_GUARD)
+            .expect("the injected prefs lock holder must take the lock");
+        holder
     }
 
     #[test]
@@ -10647,6 +10775,50 @@ exit 0
                     || record.state != crate::issue_monitor::IssueClosureState::Closed
             }));
         });
+    }
+
+    /// Issue #4033 AC-3: a saturated runner may delay the settlement commit,
+    /// never decide it.
+    ///
+    /// The settlement transaction used to run under a hard-wired 250 ms
+    /// budget, so on a CI runner whose test binary took three times its usual
+    /// wall time the commit simply returned `false` and reddened a PR that had
+    /// not touched any of this. The contention injected here holds the prefs
+    /// lock four times longer than that former budget: the commit must wait it
+    /// out and still succeed.
+    #[test]
+    fn a_slow_prefs_transaction_still_commits_the_merged_settlement() {
+        with_settlement_scan_fixture(
+            "settle_close",
+            delivered_prefs(true),
+            |_, prefs_path, mut monitor| {
+                let effect =
+                    settlement_effect(&monitor).expect("a merged delivery proposes a close");
+                let attempting = fence_settlement(prefs_path, &mut monitor, &effect);
+
+                let holder = hold_prefs_lock_for(prefs_path, Duration::from_millis(1_000));
+                let committed = commit_fenced_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    attempting,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: true,
+                        already_closed: false,
+                    },
+                );
+                holder.join().expect("prefs lock holder joins");
+
+                assert!(
+                    committed,
+                    "a delayed prefs transaction must still commit the settlement"
+                );
+                assert!(monitor.prefs().closure_records.iter().any(|record| {
+                    record.issue_number == 43
+                        && record.state == crate::issue_monitor::IssueClosureState::Closed
+                }));
+            },
+        );
     }
 
     #[test]
@@ -10858,6 +11030,18 @@ exit 0
         // deadline that kills the hung child, the driver records the expiry as
         // a scan error, and the next tick starts a fresh scan instead of
         // staying silently stalled.
+        //
+        // Issue #4033: the budget below is a hang guard for the scan prologue,
+        // not a calibrated one. The scan spawns real `git` before it ever
+        // reaches the fake `gh` this test wants to hang, so a budget sized to
+        // "just enough" lets a loaded runner spend it before the spawn and
+        // fail the *precondition* — which is how this test reddened PRs that
+        // had not touched the Issue Monitor at all. `GIT_PROLOGUE_DELAY` below
+        // makes that prologue expensive on purpose: the runner may delay the
+        // cut, it may never decide whether the hang was reached.
+        const GIT_PROLOGUE_DELAY: Duration = Duration::from_secs(1);
+        const SCAN_BUDGET: Duration = Duration::from_secs(5);
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10867,9 +11051,9 @@ exit 0
         let _home = ScopedGwtHome::set(&home);
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let scan_started_path = temp.path().join("scan-started");
-        // Deliberately never created: every fake gh invocation hangs until its
-        // deadline terminates the process tree.
-        let release_scan_path = temp.path().join("never-released");
+        // Created only at teardown: until then every fake gh invocation hangs
+        // until its deadline terminates the process tree.
+        let release_scan_path = temp.path().join("release-at-teardown");
         let active_scan_path = temp.path().join("active-scan");
         let overlap_scan_path = temp.path().join("overlap-scan");
         let _path = prepend_fake_gh_to_path(&fake_gh);
@@ -10901,6 +11085,13 @@ exit 0
             },
         )
         .expect("seed issue monitor prefs");
+        // Issue #4033 AC-3: stand in for the loaded runner. Every `git` the
+        // scan prologue spawns now costs a full second — far more than the
+        // three-fold slowdown that reddened unrelated PRs.
+        write_slow_git_shim(
+            fake_gh.parent().expect("fixture directory"),
+            GIT_PROLOGUE_DELAY,
+        );
 
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
@@ -10913,12 +11104,12 @@ exit 0
                 poll_interval_secs: 1,
                 ..crate::IssueMonitorConfig::default()
             },
-            Duration::from_millis(1_500),
+            SCAN_BUDGET,
         );
 
         let first_scan_started = wait_for_path(&scan_started_path).await;
         let expired_status =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(8), |status| {
+            recv_issue_monitor_status_matching(&mut status_rx, MARKER_WAIT_HANG_GUARD, |status| {
                 status.last_error.as_deref().is_some_and(|error| {
                     error.contains("deadline")
                         || error.contains("timed out")
@@ -10928,8 +11119,11 @@ exit 0
             .await;
         let driver_recovered = wait_for_marker_count(&scan_started_path, 2).await;
 
+        // Let the scan that is hanging right now finish instead of making
+        // teardown wait out another full budget.
+        fs::write(&release_scan_path, "release").expect("release the hung fake gh");
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(10), worker)
+        tokio::time::timeout(MARKER_WAIT_HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -12279,18 +12473,29 @@ exit 1
         let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
 
+        // Issue #4033: the contended load is the subject here, so pin the
+        // budget it must give up within instead of inheriting whatever the
+        // ambient one happens to be, and bound the assertion by a multiple of
+        // that budget rather than by a wall-clock second.
+        const CONTENDED_BUDGET: Duration = Duration::from_millis(250);
         let started = Instant::now();
-        let blocked = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        let blocked = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(CONTENDED_BUDGET);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < CONTENDED_BUDGET * 8);
         assert!(blocked.recovery_blocked);
         assert!(marker.exists());
         assert_eq!(fs::read(&prefs_path).expect("reload locked prefs"), before);
         FileExt::unlock(&lock).expect("release prefs lock");
 
+        // The retry is not the subject: it must prove recovery, so a saturated
+        // runner may delay it but never decide it (Issue #3641 / #4033).
+        let _retry_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let retried = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
@@ -12408,6 +12613,9 @@ exit 1
         crate::persist_issue_monitor_authority_fence(&prefs_path, &exited_fence)
             .expect("model prior daemon process exit");
 
+        // Issue #4033: the replacement load must prove that authority is taken
+        // over, not that this host writes JSON inside 250 ms.
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let replacement = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),

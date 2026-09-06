@@ -243,6 +243,7 @@ pub use launch::{
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
 use profile::ProfileSaveRequest;
+pub(crate) use project_tabs::initial_project_tab_incarnations;
 #[cfg(test)]
 use project_tabs::parse_github_repository_search_results;
 use project_tabs::recovery_state_label;
@@ -864,6 +865,81 @@ pub struct ProjectOpenTarget {
     pub(crate) needs_migration: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectIncarnation {
+    pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
+    pub(crate) generation: u64,
+    pub(crate) project_root: PathBuf,
+    pub(crate) migration_pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProjectNavigationSource {
+    Open,
+    Clone { workspace_home: PathBuf },
+    Switch { tab_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectNavigationRequest {
+    pub(crate) id: u64,
+    pub(crate) source: ProjectNavigationSource,
+    pub(crate) expected_active_tab_id: Option<String>,
+    pub(crate) expected_active_incarnation: Option<ProjectIncarnation>,
+    pub(crate) target_incarnation: Option<ProjectIncarnation>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedProjectOpen {
+    pub(crate) target: ProjectOpenTarget,
+    pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
+    pub(crate) workspace: gwt::PersistedWindowCanvasState,
+    pub(crate) window_restores: Vec<PreparedProjectWindowRestore>,
+    pub(crate) recent_path: PathBuf,
+    pub(crate) migration: Option<PreparedMigrationSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PreparedProjectWindowRestore {
+    Agent {
+        session: Box<gwt_agent::Session>,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+    },
+    Process {
+        window_id: String,
+        preset: WindowPreset,
+        geometry: WindowGeometry,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedProjectSwitch {
+    pub(crate) tab_id: String,
+    pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedMigrationSnapshot {
+    pub(crate) branch: Option<String>,
+    pub(crate) has_dirty: bool,
+    pub(crate) has_locked: bool,
+    pub(crate) has_submodules: bool,
+    pub(crate) has_backup: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ProjectNavigationPayload {
+    Open(PreparedProjectOpen),
+    Switch(PreparedProjectSwitch),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectNavigationPrepared {
+    pub(crate) request: ProjectNavigationRequest,
+    pub(crate) result: Result<ProjectNavigationPayload, String>,
+}
+
 /// SPEC-3075 FR-006: at most this many Workspaces get an AI-polished summary per
 /// scan, bounding both the git calls and the AI prompt size for large repos.
 const AI_SUMMARY_BRANCH_CAP: usize = 40;
@@ -991,6 +1067,13 @@ pub(crate) enum WindowCloseMonitorResult {
 pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
+    /// Canonical ProjectKey plus process-lifetime incarnation for every open
+    /// tab. Kept outside `ProjectTabRuntime` so persisted/test tab fixtures do
+    /// not grow a second identity field.
+    pub(crate) project_tab_incarnations: HashMap<String, ProjectIncarnation>,
+    pub(crate) next_project_incarnation: u64,
+    pub(crate) project_navigation_request: u64,
+    pub(crate) pending_project_navigation: Option<ProjectNavigationRequest>,
     pub(crate) recent_projects: Vec<gwt::RecentProjectEntry>,
     pub(crate) profile_selections: HashMap<String, String>,
     pub(crate) profile_config_path: Option<PathBuf>,
@@ -2336,6 +2419,8 @@ impl AppRuntime {
             })
             .collect::<std::io::Result<Vec<_>>>()?;
         let active_tab_id = normalize_active_tab_id(&tabs, persisted.active_tab_id);
+        let (project_tab_incarnations, next_project_incarnation) =
+            initial_project_tab_incarnations(&tabs);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
         let launch_wizard_cache = LaunchWizardMemoryCache::load(&sessions_dir);
@@ -2345,6 +2430,10 @@ impl AppRuntime {
         let mut app = Self {
             tabs,
             active_tab_id,
+            project_tab_incarnations,
+            next_project_incarnation,
+            project_navigation_request: 0,
+            pending_project_navigation: None,
             recent_projects: prune_missing_recent_projects(dedupe_recent_projects(
                 normalize_recent_projects(persisted.recent_projects),
             )),
@@ -2504,6 +2593,16 @@ impl AppRuntime {
     /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
     /// intake → reconcile order (plan decision 9).
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
+        let project_key = gwt_core::paths::resolve_project_scope(&project_root).hash;
+        self.spawn_work_events_ingest_for_project_key(project_root, project_key, force);
+    }
+
+    pub(crate) fn spawn_work_events_ingest_for_project_key(
+        &self,
+        project_root: PathBuf,
+        project_key: gwt_core::repo_hash::ProjectKey,
+        force: bool,
+    ) {
         if !self.note_work_events_ingest_attempt(&project_root, force) {
             return;
         }
@@ -2518,13 +2617,9 @@ impl AppRuntime {
         // process-global and parallel unit tests scope it per test
         // (ScopedEnvVar, #3022) — a late resolution inside the worker would
         // race those scopes and write into another test's home.
-        let work_items_path =
-            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-        let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(
-            &project_root,
-        );
-        let projection_path =
-            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
+        let work_items_path = gwt_core::paths::gwt_workspace_work_items_path(&project_key);
+        let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
+        let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
         thread::spawn(move || {
             let summary = crate::work_events_ingest::ingest_project_work_events_paths(
                 &project_root,
@@ -7883,10 +7978,15 @@ impl AppRuntime {
                 .tabs
                 .iter()
                 .map(|tab| {
-                    (
-                        workspace_state_path(&tab.project_root),
-                        self.persistable_workspace_state(tab),
-                    )
+                    let workspace_path = self
+                        .project_tab_incarnations
+                        .get(&tab.id)
+                        .map(|incarnation| {
+                            gwt_core::paths::gwt_project_dir(&incarnation.project_key)
+                                .join("workspace.json")
+                        })
+                        .unwrap_or_else(|| workspace_state_path(&tab.project_root));
+                    (workspace_path, self.persistable_workspace_state(tab))
                 })
                 .collect(),
         };
