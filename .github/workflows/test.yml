@@ -171,6 +171,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
+      # Compiling inside the timed loop would charge the first iteration for the
+      # build and let a slow compile read as an unstable suite — the exact
+      # confusion this job exists to remove. Build first, on its own budget.
+      - name: Build the default-parallel suites
+        run: cargo test -p gwt-core -p gwt --all-features --no-run
+        timeout-minutes: 45
+      # windows-latest gives 4 logical processors, and one pass over these
+      # suites costs ~16 minutes there, so three passes need a budget in the
+      # 60-minute range before runner variance. A cap that the honest run
+      # brushes against is itself a wall-clock deadline, and this job would
+      # then fail on timing rather than on determinism.
       - name: Prove default-parallel Rust suites are stable
         shell: pwsh
         run: |
@@ -183,7 +194,7 @@ jobs:
               exit $LASTEXITCODE
             }
           }
-        timeout-minutes: 60
+        timeout-minutes: 90
 
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch, ${{ matrix.provider }}/${{ matrix.selector }})

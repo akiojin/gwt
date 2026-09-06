@@ -328,6 +328,14 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
     testWorkflow.indexOf("  test-windows-default-parallel:")
   );
   assert.match(defaultParallelJob, /1\.\.3 \| ForEach-Object/);
+  // The build must sit outside the timed loop, or the first iteration is
+  // charged for the compile and a slow build reads as an unstable suite.
+  assert.match(defaultParallelJob, /--all-features --no-run/);
+  assert.ok(
+    defaultParallelJob.indexOf("--all-features --no-run") <
+      defaultParallelJob.indexOf("1..3 | ForEach-Object"),
+    "the --no-run build must precede the timed three-run loop"
+  );
   for (const command of [
     "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
     "cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary",
