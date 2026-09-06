@@ -3087,7 +3087,7 @@ pub enum KnowledgePhaseUpdateResult {
     /// Phase write-back succeeded. `fresh_entry` is the rebuilt cache
     /// entry (with the new labels / state / phase) so the optimistic
     /// Kanban card can be overwritten with authoritative data.
-    Ok { fresh_entry: KnowledgeListItem },
+    Ok { fresh_entry: Box<KnowledgeListItem> },
     /// Phase write-back failed. `message` is human-readable so the
     /// toast / log can show it directly; the frontend rolls back the
     /// optimistic UI from `state.dndSnapshot`.

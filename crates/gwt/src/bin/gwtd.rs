@@ -226,6 +226,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.questions | issue.monitor.question.answer",
         "  issue.monitor.wait",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
+        "  issue.monitor.reconcile",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -1067,6 +1068,10 @@ mod tests {
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",
+            // Issue #3883 AC-6: the only recovery for launches that are still
+            // running but no longer tracked. Undiscoverable here means the
+            // operator hand-edits the state file, which is the bug.
+            "issue.monitor.reconcile",
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             "launch_agent",
             "project_root",

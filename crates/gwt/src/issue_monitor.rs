@@ -870,6 +870,27 @@ pub struct IssueMonitorPrefs {
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
+    /// Issue #3883 AC-4: the driver of the last scan, so the next one can tell
+    /// concurrent drive and an unattended queue apart from healthy operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_driver: Option<IssueMonitorScanDriver>,
+    /// Issue #3883 AC-2: the last recovery that reset durable state instead of
+    /// restoring it. Cleared by the next successful launch commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prefs_reset: Option<IssueMonitorPrefsReset>,
+    /// Issue #3883: which Issue each launched agent window belongs to, keyed by
+    /// window id and kept independent of slot accounting.
+    ///
+    /// `launched_issues` is a projection of `launched_windows`, and every path
+    /// that frees a slot erases that projection: the over-cap restore (#3627),
+    /// an operator stop, a stale cross-process writer. Each of those is right
+    /// about the slot and wrong about the window — the agent is still running
+    /// on its worktree — so the monitor loses the only evidence that the Issue
+    /// is being worked and launches a duplicate. This ledger is written where
+    /// the window is bound, is never capped, and is pruned only once the
+    /// window has actually left the owning tab's canvas.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launch_bindings: BTreeMap<String, u64>,
     /// Durable launch generation keyed by Issue number. Kept separate from the
     /// compatibility `launched_issues` rows so older struct consumers remain
     /// source-compatible while new readers can reject delayed window closes.
@@ -1002,6 +1023,9 @@ impl Default for IssueMonitorPrefs {
             provider_quota_hold_releases: BTreeMap::new(),
             generation_reclaim: None,
             launched_issues: Vec::new(),
+            last_scan_driver: None,
+            last_prefs_reset: None,
+            launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
@@ -1193,6 +1217,79 @@ impl IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+}
+
+/// Issue #3883 AC-2: a malformed-prefs recovery that had no committed
+/// generation to fall back to, and therefore reset durable state.
+///
+/// Durable rather than a log line: the state it destroys — launch records, the
+/// autonomous opt-in, `enabled` — is exactly what an operator would otherwise
+/// have to infer from the absence of things.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPrefsReset {
+    /// Where the unreadable bytes were kept for diagnosis.
+    pub quarantine_path: String,
+    pub reason: String,
+    pub at: String,
+}
+
+/// Issue #3883 AC-4: which process drove a scan.
+///
+/// The Issue Monitor has two possible drivers and no rule that exactly one of
+/// them runs: the resident daemon, and the GUI front door that scans when no
+/// daemon is up. In the reported incident `daemon.status` was `stopped` while
+/// the front door kept scanning, and nothing anywhere said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorScanDriverKind {
+    Daemon,
+    GuiFrontDoor,
+}
+
+impl IssueMonitorScanDriverKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::GuiFrontDoor => "GUI front door",
+        }
+    }
+}
+
+/// Issue #3883 AC-4: the last scan's driver, kept durable so the next scan —
+/// in either process — can tell whether it is alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorScanDriver {
+    pub kind: IssueMonitorScanDriverKind,
+    pub pid: u32,
+    pub at: String,
+}
+
+/// Issue #3883 AC-4: two scans from different drivers closer together than this
+/// are concurrent drive, not a handover. Sized above the scheduled tick so an
+/// ordinary daemon takeover after a GUI restart does not read as a conflict.
+pub const ISSUE_MONITOR_DUAL_DRIVE_WINDOW_SECS: i64 = 90;
+
+/// Issue #3883 AC-4: no scan for this long means nothing was driving the
+/// queue — the failure mode with no symptom, since an unattended queue simply
+/// looks idle.
+pub const ISSUE_MONITOR_DRIVE_GAP_SECS: i64 = 900;
+
+/// Issue #3883: what one pass of [`IssueMonitorState::reconcile_launch_bindings`]
+/// changed. Both lists are sorted so a caller can report them verbatim.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchBindingReconciliation {
+    /// Issues whose still-running agent window was put back under slot
+    /// accounting, which is what stops a duplicate launch for them.
+    pub readopted: Vec<u64>,
+    /// Window ids whose binding was dropped: the window left the canvas, or
+    /// the Issue reached a terminal state that this pass must not overturn.
+    pub pruned: Vec<String>,
+}
+
+impl IssueMonitorLaunchBindingReconciliation {
+    pub fn is_empty(&self) -> bool {
+        self.readopted.is_empty() && self.pruned.is_empty()
+    }
 }
 
 /// #3223 follow-up: one claimed-but-unbound launch with its claim anchor.
@@ -2596,6 +2693,17 @@ pub struct IssueMonitorState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
     launched_windows: BTreeMap<u64, String>,
+    /// Issue #3883 AC-4: the driver of the last recorded scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_scan_driver: Option<IssueMonitorScanDriver>,
+    /// Issue #3883 AC-2: the last durable-state reset, surfaced in status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_prefs_reset: Option<IssueMonitorPrefsReset>,
+    /// Issue #3883: window id → Issue for every window this project ever bound,
+    /// independent of `launched_windows` and its slot cap. See
+    /// [`IssueMonitorPrefs::launch_bindings`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    launch_bindings: BTreeMap<String, u64>,
     /// Durable generation for each launched window binding. A successor launch
     /// receives a new claim even when its issue and window ids are reused.
     launched_claims: BTreeMap<u64, String>,
@@ -3377,7 +3485,34 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
-    durable_atomic_write(path, content.as_bytes())
+    durable_atomic_write(path, content.as_bytes())?;
+    // Issue #3883 AC-2: keep the generation this commit just made readable from
+    // somewhere the canonical file's own corruption cannot reach. The recovery
+    // below needs a floor, and without one it resets to `Default` — losing
+    // every launch record, the operator's `autonomous_mode`, and `enabled` in a
+    // single write while the agents those launches describe keep running.
+    //
+    // Written after the canonical rename and never allowed to fail the commit:
+    // a missing sidecar only costs the recovery its floor, whereas failing here
+    // would lose a write that already succeeded.
+    let _ = durable_atomic_write(&committed_prefs_generation_path(path), content.as_bytes());
+    Ok(())
+}
+
+/// Issue #3883 AC-2: the sibling holding the last successfully committed prefs.
+fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
+    path.with_extension("committed.json")
+}
+
+/// Issue #3883 AC-2: the newest generation this recovery may fall back to.
+///
+/// Only a snapshot that parses is a floor. The sidecar is written after the
+/// canonical file, so it is never newer than what was committed, and being a
+/// separate inode it does not share the canonical file's torn write.
+fn last_committed_prefs_generation(path: &Path) -> Option<IssueMonitorPrefs> {
+    let sidecar = committed_prefs_generation_path(path);
+    let content = fs::read_to_string(&sidecar).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3779,17 +3914,41 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 let quarantine = unique_corrupt_prefs_path(path);
                 fs::copy(path, &quarantine)?;
-                (recovery_baseline.clone(), Some((quarantine, error)))
+                // Issue #3883 AC-2/AC-5: prefer the last committed generation.
+                // The caller's baseline is `recovery_default()` on the GUI's
+                // main transaction, i.e. `Default` — so without this the
+                // recovery erases every launch record, the operator's
+                // `autonomous_mode`, and `enabled`, all while the agents those
+                // launches describe are still running. That single write is
+                // what emptied `active_launches` at max_active 3 with three
+                // launches, and what reverted `autonomous_mode` on restart.
+                match last_committed_prefs_generation(path) {
+                    Some(committed) => (committed, Some((quarantine, error, true))),
+                    None => {
+                        let mut baseline = recovery_baseline.clone();
+                        // No floor: the reset stands, but it may not be silent.
+                        // A `tracing::warn!` alone is why the incident ran for
+                        // minutes with nobody able to say what had happened.
+                        baseline.last_prefs_reset = Some(IssueMonitorPrefsReset {
+                            quarantine_path: quarantine.display().to_string(),
+                            reason: error.to_string(),
+                            at: chrono::Utc::now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        });
+                        (baseline, Some((quarantine, error, false)))
+                    }
+                }
             }
             Err(error) => return Err(error),
         };
         let result = mutation(&mut prefs);
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
-        if let Some((quarantine, error)) = recovery {
+        if let Some((quarantine, error, restored_generation)) = recovery {
             tracing::warn!(
                 path = %path.display(),
                 quarantine = %quarantine.display(),
                 error = %error,
+                restored_generation,
                 "recovered malformed issue monitor prefs"
             );
         }
@@ -4279,6 +4438,9 @@ impl IssueMonitorState {
             provider_quota_hold_releases: BTreeMap::new(),
             generation_reclaim: None,
             launched_windows: BTreeMap::new(),
+            last_scan_driver: None,
+            last_prefs_reset: None,
+            launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
@@ -4329,6 +4491,13 @@ impl IssueMonitorState {
         state.generation_reclaim = prefs.generation_reclaim;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
+        // Issue #3883: restored ahead of — and deliberately outside — the cap
+        // below. The cap is right about how many slots may be held and says
+        // nothing about which windows exist, so capping the ledger too would
+        // erase exactly the evidence that keeps a running agent attributable.
+        state.launch_bindings = prefs.launch_bindings;
+        state.last_scan_driver = prefs.last_scan_driver;
+        state.last_prefs_reset = prefs.last_prefs_reset;
         // Issue #3627: restore used to re-inject every persisted launch into
         // `active_launches` without consulting `config.max_active`, so a disk
         // snapshot holding more launches than the cap (11 slots against a cap
@@ -4375,6 +4544,13 @@ impl IssueMonitorState {
             if launched.window_id.is_empty() {
                 continue;
             }
+            // Issue #3883: back-fill the ledger from a pre-#3883 snapshot, and
+            // do it before the cap so the launches dropped just below stay
+            // attributable to the windows still running them.
+            state
+                .launch_bindings
+                .entry(launched.window_id.clone())
+                .or_insert(launched.issue_number);
             if !state.active_launches.contains(&launched.issue_number)
                 && state.active_launches.len() >= bound_capacity
             {
@@ -4512,6 +4688,9 @@ impl IssueMonitorState {
                     window_id: window_id.clone(),
                 })
                 .collect(),
+            launch_bindings: self.launch_bindings.clone(),
+            last_scan_driver: self.last_scan_driver.clone(),
+            last_prefs_reset: self.last_prefs_reset.clone(),
             launched_claims: self.launched_claims.clone(),
             launching_issues: self
                 .active_launches
@@ -7364,6 +7543,16 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         reopened_completion_fences: &BTreeSet<u64>,
     ) {
+        // Issue #3883: the ledger is a union across processes. Absence in a
+        // snapshot this process may have started before is not evidence that a
+        // window is gone — only the canvas is — so a rebase may add bindings
+        // and never removes them. A binding another process legitimately
+        // pruned is re-pruned by the next reconciliation, which is idempotent.
+        for (window_id, issue_number) in &disk.launch_bindings {
+            self.launch_bindings
+                .entry(window_id.clone())
+                .or_insert(*issue_number);
+        }
         for launched in &disk.launched_issues {
             if launched.window_id.is_empty()
                 || self.merged_issues.contains(&launched.issue_number)
@@ -7564,12 +7753,29 @@ impl IssueMonitorState {
         now: &str,
         quota_hold: Option<IssueMonitorProviderQuotaHold>,
     ) -> IssueMonitorStatusView {
-        let last_error = self.last_error.clone().or_else(|| {
-            self.failed_issues
-                .iter()
-                .next()
-                .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
-        });
+        // Issue #3883 AC-2: a durable-state reset outranks a per-issue failure
+        // banner. It is the one condition where the rest of this view is
+        // describing state that was destroyed rather than state that happened,
+        // so a reader must see it before drawing any conclusion from the queue.
+        let last_error = self
+            .last_prefs_reset
+            .as_ref()
+            .map(|reset| {
+                format!(
+                    "Issue Monitor preferences were reset after unreadable state at {at}: launches, \
+                     autonomous mode, and enabled were lost. Quarantined bytes: {quarantine} ({reason})",
+                    at = reset.at,
+                    quarantine = reset.quarantine_path,
+                    reason = reset.reason,
+                )
+            })
+            .or_else(|| self.last_error.clone())
+            .or_else(|| {
+                self.failed_issues
+                    .iter()
+                    .next()
+                    .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
+            });
         IssueMonitorStatusView {
             enabled: self.config.enabled,
             state: if !self.config.enabled {
@@ -9454,6 +9660,14 @@ impl IssueMonitorState {
         }
         self.launched_windows
             .insert(issue_number, window_id.clone());
+        // Issue #3883: the one place a launch is confirmed is the one place the
+        // durable binding is written. Everything downstream may free the slot;
+        // nothing downstream may make the running window anonymous.
+        self.launch_bindings.insert(window_id.clone(), issue_number);
+        // A completed launch is proof the monitor recovered, so the reset
+        // banner has said what it needed to say and stops crowding out the
+        // per-issue errors it outranks.
+        self.last_prefs_reset = None;
         match claim_id {
             Some(claim_id) => {
                 self.launched_claims.insert(issue_number, claim_id);
@@ -9620,6 +9834,190 @@ impl IssueMonitorState {
             })
             .cloned()
             .collect()
+    }
+
+    /// Issue #3883: restore slot accounting from the windows that are actually
+    /// running, and drop the bindings of the ones that are not.
+    ///
+    /// [`Self::vanished_launched_windows`] answers "this tracked launch has no
+    /// window"; this answers the mirror question, "this window has no tracked
+    /// launch", which is the one that produced thirteen duplicate launches. The
+    /// two directions share a judgement source on purpose: window existence on
+    /// the owning tab's canvas, never a pid.
+    ///
+    /// A re-adopted Issue re-enters `active_launches` and leaves the queue, so
+    /// admission suppresses a second window for it without any separate rule.
+    /// Re-adoption is deliberately narrow — it never resurrects a merged Issue
+    /// or one an operator revoked through `stop`, both of which are terminal
+    /// decisions this pass has no standing to overturn — and it never disturbs
+    /// an Issue that already holds its slot, so a tracking hand-off between two
+    /// live windows is left exactly as it is.
+    ///
+    /// Absence is judged only for windows qualified with `project_tab_id`,
+    /// matching `vanished_launched_windows`: another tab's window (including
+    /// another gwt instance's) and a bare legacy id prove nothing from here.
+    /// A terminal Issue is the exception — merged work and a revoked launch are
+    /// decided facts wherever the window lives, and pruning them regardless of
+    /// tab is also what keeps the ledger from accumulating the windows of tabs
+    /// this process will never see again.
+    pub fn reconcile_launch_bindings(
+        &mut self,
+        project_tab_id: &str,
+        live_window_ids: &BTreeSet<String>,
+    ) -> IssueMonitorLaunchBindingReconciliation {
+        let mut outcome = IssueMonitorLaunchBindingReconciliation {
+            readopted: self.readopt_live_launch_bindings(live_window_ids),
+            pruned: Vec::new(),
+        };
+        let stale = self
+            .launch_bindings
+            .iter()
+            .map(|(window_id, issue_number)| (window_id.clone(), *issue_number))
+            .filter(|(window_id, issue_number)| {
+                let terminal = self.merged_issues.contains(issue_number)
+                    || self.failed_issues.contains_key(issue_number);
+                let vanished_here = issue_monitor_qualified_window_id(window_id)
+                    .is_some_and(|(tab_id, _)| tab_id == project_tab_id)
+                    && !live_window_ids
+                        .iter()
+                        .any(|live| issue_monitor_window_ids_match(window_id, live));
+                terminal || vanished_here
+            })
+            .map(|(window_id, _)| window_id)
+            .collect::<Vec<_>>();
+        for window_id in stale {
+            self.launch_bindings.remove(&window_id);
+            outcome.pruned.push(window_id);
+        }
+        outcome.pruned.sort();
+        outcome
+    }
+
+    /// Issue #3883 AC-4: record this scan's driver and report if the queue is
+    /// being driven by both processes at once, or was being driven by neither.
+    ///
+    /// Returns the banner to publish, or `None` when the drive looks healthy.
+    /// Both findings are invisible without this: concurrent drive shows up only
+    /// as inexplicably doubled GitHub spend and racing writers, and an
+    /// unattended queue shows up as nothing at all — the incident that opened
+    /// this Issue ran with `daemon.status: stopped` and no report anywhere.
+    ///
+    /// A handover is not a conflict. The other driver has to have scanned
+    /// within [`ISSUE_MONITOR_DUAL_DRIVE_WINDOW_SECS`] to count, so a daemon
+    /// taking over from a GUI that stopped scanning stays quiet. An unparsable
+    /// or missing previous timestamp reports nothing rather than guessing.
+    pub fn diagnose_scan_drive(
+        &mut self,
+        kind: IssueMonitorScanDriverKind,
+        pid: u32,
+        now: &str,
+    ) -> Option<String> {
+        let previous = self.last_scan_driver.replace(IssueMonitorScanDriver {
+            kind,
+            pid,
+            at: now.to_string(),
+        });
+        let now_at = parse_rfc3339_utc(now)?;
+        let previous = previous?;
+        let previous_at = parse_rfc3339_utc(&previous.at)?;
+        let elapsed = (now_at - previous_at).num_seconds();
+        if elapsed < 0 {
+            return None;
+        }
+        if (previous.kind != kind || previous.pid != pid)
+            && elapsed <= ISSUE_MONITOR_DUAL_DRIVE_WINDOW_SECS
+        {
+            return Some(format!(
+                "Issue Monitor is being scanned by two drivers at once: {} (pid {}) {elapsed}s ago \
+                 and {} (pid {pid}) now. Stop one of them — concurrent drive doubles GitHub API \
+                 spend and races every launch decision.",
+                previous.kind.label(),
+                previous.pid,
+                kind.label(),
+            ));
+        }
+        if elapsed >= ISSUE_MONITOR_DRIVE_GAP_SECS {
+            return Some(format!(
+                "Issue Monitor was unattended for {elapsed}s before this scan: nothing drove the \
+                 queue since {} (pid {}) at {}. Check that the daemon is running.",
+                previous.kind.label(),
+                previous.pid,
+                previous.at,
+            ));
+        }
+        None
+    }
+
+    /// Issue #3883 AC-6: the half of the reconciliation that only ever adds
+    /// tracking back, for callers that cannot prove a window is gone.
+    ///
+    /// A live window id is positive evidence no matter which tab reports it, so
+    /// re-adoption needs no ownership check. Absence is the opposite: only the
+    /// owning tab's canvas can distinguish "this window closed" from "I cannot
+    /// see that tab from here" (#3627). A PM running `issue.monitor.reconcile`
+    /// against one gwt instance is in exactly that position, so it re-adopts
+    /// and never prunes — which is also what makes the recovery safe to run
+    /// while six agents are working: no pane is touched and no slot is taken
+    /// away, tracking is only restored.
+    pub fn readopt_live_launch_bindings(&mut self, live_window_ids: &BTreeSet<String>) -> Vec<u64> {
+        let recoverable = self
+            .launch_bindings
+            .iter()
+            .map(|(window_id, issue_number)| (window_id.clone(), *issue_number))
+            .filter(|(window_id, issue_number)| {
+                !self.active_launches.contains(issue_number)
+                    && !self.merged_issues.contains(issue_number)
+                    && !self.failed_issues.contains_key(issue_number)
+                    && live_window_ids
+                        .iter()
+                        .any(|live| issue_monitor_window_ids_match(window_id, live))
+            })
+            .collect::<Vec<_>>();
+
+        let mut readopted = Vec::new();
+        for (window_id, issue_number) in recoverable {
+            if self.active_launches.contains(&issue_number) {
+                // A ledger holding two live windows for one Issue (the reported
+                // tracking hand-off) resolves to whichever this pass saw first;
+                // the second is left alone rather than flip-flopped.
+                continue;
+            }
+            self.readopt_live_launch(issue_number, &window_id);
+            readopted.push(issue_number);
+        }
+        readopted.sort_unstable();
+        if !readopted.is_empty() {
+            tracing::warn!(
+                issues = ?readopted,
+                "issue monitor re-adopted running agent windows whose launch tracking was lost"
+            );
+        }
+        readopted
+    }
+
+    /// Put one still-running agent window back under slot accounting.
+    ///
+    /// Narrower than [`Self::complete_active_launch_with_claim`] by design:
+    /// that path is a *new* launch and therefore clears merged/failed
+    /// tombstones and re-stamps the activity clock. Neither is true here —
+    /// nothing was launched, an older window was found again — so the recovery
+    /// restores the binding and the queue position and touches nothing else.
+    fn readopt_live_launch(&mut self, issue_number: u64, window_id: &str) {
+        self.launching_claimed_at.remove(&issue_number);
+        self.active_launches.push(issue_number);
+        self.launched_windows
+            .insert(issue_number, window_id.to_string());
+        self.queue.retain(|queued| *queued != issue_number);
+        self.pending_launches
+            .retain(|pending| pending.issue_number != issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Launched;
+            item.launched_window_id = Some(window_id.to_string());
+        }
     }
 
     /// Reverse-lookup the Issue associated with a launched agent `window_id`.
@@ -11553,7 +11951,21 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
             expected_project_tab_id,
         );
     }
-    scan_issue_monitor_candidates(monitor, issues, now)
+    // Issue #3883 AC-4: a GUI scan carries a project tab identity and a daemon
+    // scan cannot, so the shared transition already knows which of the two
+    // drove it. Recorded after the reconciliation above and before the scan
+    // below, because `scan_issue_monitor_candidates` clears `last_error`.
+    let driver = if expected_project_tab_id.is_some() {
+        IssueMonitorScanDriverKind::GuiFrontDoor
+    } else {
+        IssueMonitorScanDriverKind::Daemon
+    };
+    let drive_diagnosis = monitor.diagnose_scan_drive(driver, std::process::id(), now);
+    let summary = scan_issue_monitor_candidates(monitor, issues, now);
+    if let Some(diagnosis) = drive_diagnosis {
+        monitor.last_error = Some(diagnosis);
+    }
+    summary
 }
 
 fn expiry_from_now_lexical(now: &str, ttl_secs: u64) -> String {
@@ -14699,6 +15111,98 @@ mod tests {
         );
     }
 
+    /// Issue #3883 AC-6: the reported recovery, at the reported scale — six
+    /// running agent windows against `max_active: 3`, brought back into
+    /// agreement without killing any of them.
+    ///
+    /// Sized at six deliberately. The restore truncates to the cap, so a
+    /// one-over-cap fixture leaves a single orphan and never exercises the case
+    /// the operator actually faces: *half* the running agents untracked, with
+    /// the monitor reporting three free slots it would spend on Issues that are
+    /// already being worked. `readopt_live_launch_bindings` is the PM-surface
+    /// half — additive only, so it can run against a project mid-flight.
+    #[test]
+    fn six_running_agents_against_a_cap_of_three_are_all_readopted_without_closing_one() {
+        let cohort = [
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+            (3857, "project-a::agent-5"),
+            (3860, "project-a::agent-6"),
+            (3864, "project-a::agent-7"),
+        ];
+        let mut monitor = launched_cohort(&cohort);
+        assert_eq!(monitor.active_count(), 6);
+
+        // The operator's cap is three; the six launches reached disk anyway,
+        // which is exactly the reported 22:47:53 state.
+        monitor.set_max_active_agents(3);
+        let restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(
+            restored.active_count(),
+            3,
+            "#3627: restore truncates slot accounting to the cap"
+        );
+        assert_eq!(
+            restored.prefs().launch_bindings.len(),
+            6,
+            "but all six running windows stay attributable"
+        );
+        let orphaned = cohort
+            .iter()
+            .filter(|(issue_number, _)| !restored.active_issue_numbers().contains(issue_number))
+            .count();
+        assert_eq!(
+            orphaned, 3,
+            "three of the six are running untracked — the state the PM has to recover from"
+        );
+
+        let mut recovered = restored;
+        let readopted = recovered.readopt_live_launch_bindings(&live_windows(
+            &cohort
+                .iter()
+                .map(|(_, window_id)| *window_id)
+                .collect::<Vec<_>>(),
+        ));
+
+        assert_eq!(
+            readopted.len(),
+            3,
+            "every untracked-but-running window comes back, and only those"
+        );
+        assert_eq!(recovered.active_count(), 6);
+        for (issue_number, window_id) in cohort {
+            assert_eq!(
+                recovered.launched_window_id(issue_number).as_deref(),
+                Some(window_id),
+                "issue #{issue_number} must point back at its own live window"
+            );
+        }
+        assert!(
+            recovered
+                .next_launch_request("2026-09-01T22:47:53Z")
+                .is_none(),
+            "AC-6: and the monitor stops reporting capacity it does not have"
+        );
+        assert_eq!(
+            recovered.prefs().launched_issues.len(),
+            6,
+            "the recovery is durable, so the next scan does not redo it"
+        );
+        assert!(
+            recovered
+                .readopt_live_launch_bindings(&live_windows(
+                    &cohort
+                        .iter()
+                        .map(|(_, window_id)| *window_id)
+                        .collect::<Vec<_>>(),
+                ))
+                .is_empty(),
+            "and it is idempotent — a second pass changes nothing"
+        );
+    }
+
     /// Issue #3627: a launch whose agent window is gone from the owning tab's
     /// canvas no longer holds a slot.
     ///
@@ -14890,6 +15394,492 @@ mod tests {
             restored.active_count(),
             0,
             "and the next reload must not resurrect them"
+        );
+    }
+
+    /// Issue #3883: build the reported 22:43:45 cohort — `max_active` bound
+    /// launches, each on its own live agent window of `project-a`.
+    fn launched_cohort(bindings: &[(u64, &str)]) -> IssueMonitorState {
+        let candidates = bindings
+            .iter()
+            .map(|(issue_number, _)| issue(*issue_number))
+            .collect::<Vec<_>>();
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: bindings.len(),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-09-01T22:43:45Z");
+        for (issue_number, window_id) in bindings {
+            monitor.complete_active_launch(*issue_number, *window_id);
+        }
+        assert_eq!(monitor.active_count(), bindings.len());
+        monitor
+    }
+
+    fn live_windows(window_ids: &[&str]) -> BTreeSet<String> {
+        window_ids
+            .iter()
+            .map(|window_id| (*window_id).to_string())
+            .collect()
+    }
+
+    /// Issue #3883 AC-2/AC-3: an agent window that is still on the canvas is
+    /// re-adopted from its durable binding instead of being relaunched.
+    ///
+    /// Slot accounting is deliberately erasable. `with_prefs` caps it
+    /// (#3627), `stop` revokes it, and a stale cross-process writer can round
+    /// -trip it away — while [`IssueMonitorState::prefs`] rebuilds
+    /// `launched_issues` out of that same accounting. So the only durable
+    /// record that a running agent window belongs to an Issue disappears
+    /// together with the slot: the monitor then sees free capacity and starts a
+    /// second window on a worktree that is already being worked (the reported
+    /// 22:45:18 → 22:46:36 sequence, and twelve further duplicates after it).
+    ///
+    /// The binding ledger is written where the window is bound and is never
+    /// capped, so a live window stays attributable for exactly as long as the
+    /// canvas still has it.
+    #[test]
+    fn a_live_agent_window_is_readopted_after_its_launch_tracking_is_lost() {
+        let cohort = [
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+        ];
+        let monitor = launched_cohort(&cohort);
+
+        // The reported loss: slot accounting is gone from the durable snapshot
+        // while all three agent windows are still running.
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues.clear();
+        prefs.launched_claims.clear();
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            restored.active_count(),
+            0,
+            "the reproduction must start from lost tracking"
+        );
+
+        // The next scan sees the same three Issues still open and queues them.
+        let candidates = cohort
+            .iter()
+            .map(|(issue_number, _)| issue(*issue_number))
+            .collect::<Vec<_>>();
+        scan_issue_monitor_candidates(&mut restored, &candidates, "2026-09-01T22:46:36Z");
+        restored.set_gui_connected(true);
+        assert_eq!(restored.queue_len(), 3);
+
+        let live = live_windows(&[
+            "project-a::agent-2",
+            "project-a::agent-3",
+            "project-a::agent-4",
+        ]);
+        let reconciliation = restored.reconcile_launch_bindings("project-a", &live);
+
+        assert_eq!(
+            reconciliation.readopted,
+            vec![3865, 3868, 3873],
+            "every live window must be re-adopted before admission is decided"
+        );
+        assert!(reconciliation.pruned.is_empty());
+        assert_eq!(restored.active_count(), 3);
+        assert_eq!(
+            restored.queue_len(),
+            0,
+            "a re-adopted Issue is being worked, so it leaves the launch queue"
+        );
+        assert!(
+            restored
+                .next_launch_request("2026-09-01T22:46:36Z")
+                .is_none(),
+            "AC-1/AC-3: the recovered slots must suppress the second cohort"
+        );
+        for (issue_number, window_id) in cohort {
+            assert_eq!(
+                restored.launched_window_id(issue_number).as_deref(),
+                Some(window_id),
+                "issue #{issue_number} must point back at its own live window"
+            );
+            assert_eq!(
+                restored.inbox_item(issue_number).expect("inbox item").state,
+                MonitorInboxState::Launched
+            );
+        }
+    }
+
+    /// Issue #3883 AC-2: the binding ledger outlives the over-cap restore that
+    /// #3627 deliberately performs on slot accounting. Dropping the excess slot
+    /// is correct — the queue could never recover otherwise — but dropping the
+    /// window identity with it is what leaves a running agent untracked.
+    #[test]
+    fn launch_bindings_survive_the_over_cap_restore_that_drops_slot_accounting() {
+        let monitor = launched_cohort(&[
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+        ]);
+
+        let mut prefs = monitor.prefs();
+        prefs.max_active_agents = 1;
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+
+        assert_eq!(
+            restored.active_count(),
+            1,
+            "#3627: restore still caps slot accounting at max_active"
+        );
+        assert_eq!(
+            restored.prefs().launch_bindings.len(),
+            3,
+            "but every live window stays attributable to its Issue"
+        );
+
+        let live = live_windows(&[
+            "project-a::agent-2",
+            "project-a::agent-3",
+            "project-a::agent-4",
+        ]);
+        let reconciliation = restored.reconcile_launch_bindings("project-a", &live);
+        assert_eq!(reconciliation.readopted.len(), 2);
+        assert_eq!(
+            restored.active_count(),
+            3,
+            "three running agents hold three slots, however small the cap is"
+        );
+        assert!(restored
+            .next_launch_request("2026-09-01T22:46:36Z")
+            .is_none());
+    }
+
+    /// Issue #3883 AC-3: reconciliation judges exactly what `#3627` judges.
+    /// A window this tab no longer has is pruned (its slot is released by the
+    /// existing liveness reclaim), another tab's window is not this tab's to
+    /// judge, and an Issue the operator already revoked stays revoked.
+    #[test]
+    fn reconciliation_prunes_dead_bindings_and_never_revives_a_revoked_launch() {
+        let monitor = launched_cohort(&[
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+        ]);
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues.clear();
+        prefs.launched_claims.clear();
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        restored.record_launch_failed(3868, "stopped: duplicate launch");
+
+        let reconciliation =
+            restored.reconcile_launch_bindings("project-a", &live_windows(&["project-a::agent-2"]));
+
+        assert_eq!(
+            reconciliation.readopted,
+            vec![3873],
+            "only the window that is both live and unrevoked comes back"
+        );
+        assert_eq!(
+            reconciliation.pruned,
+            vec![
+                "project-a::agent-3".to_string(),
+                "project-a::agent-4".to_string()
+            ],
+            "a revoked launch and a vanished window both leave the ledger"
+        );
+        assert_eq!(
+            restored.prefs().launch_bindings.len(),
+            1,
+            "and the prune is durable, so the next scan does not redo it"
+        );
+
+        let foreign = launched_cohort(&[(42, "project-b::agent-9")]);
+        let mut foreign = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: Vec::new(),
+                ..foreign.prefs()
+            },
+        );
+        let foreign_outcome = foreign.reconcile_launch_bindings("project-a", &BTreeSet::new());
+        assert!(
+            foreign_outcome.readopted.is_empty() && foreign_outcome.pruned.is_empty(),
+            "another tab's window is invisible from here, not dead (#3627)"
+        );
+        assert_eq!(foreign.prefs().launch_bindings.len(), 1);
+    }
+
+    /// Issue #3883 AC-1: the reported reproduction — a restart taken while a
+    /// provider quota hold is in force, then the hold released — must not
+    /// launch past `max_active`. The hold is what makes the window wide: no
+    /// launch can be admitted while it is held, so every slot the restart
+    /// mis-restores is spent the instant it clears.
+    #[test]
+    fn a_restart_during_a_quota_hold_never_launches_past_max_active_when_it_clears() {
+        let cohort = [
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+        ];
+        let mut monitor = launched_cohort(&cohort);
+        monitor.set_launch_profile_pool(vec![test_launch_profile("codex")]);
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                3873,
+                "project-a::agent-2",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-02T03:58:00Z"),
+                None,
+                "2026-09-01T22:44:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+
+        // Restart: only the durable snapshot survives, and it reached disk
+        // without the first cohort's slot accounting.
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues.clear();
+        prefs.launched_claims.clear();
+        let mut restarted = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        restarted.set_gui_connected(true);
+        let second_cohort = [3857, 3860, 3864];
+        let candidates = cohort
+            .iter()
+            .map(|(issue_number, _)| issue(*issue_number))
+            .chain(second_cohort.iter().map(|number| issue(*number)))
+            .collect::<Vec<_>>();
+        scan_issue_monitor_candidates(&mut restarted, &candidates, "2026-09-01T22:46:00Z");
+
+        let live = live_windows(&[
+            "project-a::agent-2",
+            "project-a::agent-3",
+            "project-a::agent-4",
+        ]);
+        restarted.reconcile_launch_bindings("project-a", &live);
+
+        restarted.clear_provider_quota_hold(
+            "codex",
+            "PM: Codex is not rate limited",
+            "2026-09-01T22:46:30Z",
+        );
+
+        let mut admitted = Vec::new();
+        while let Some(request) = restarted.next_launch_request("2026-09-01T22:46:36Z") {
+            admitted.push(request.issue_number);
+        }
+        assert!(
+            admitted.is_empty(),
+            "the three running agents already fill max_active; admitted {admitted:?}"
+        );
+        assert_eq!(
+            restarted.active_count(),
+            3,
+            "AC-1: launched_issues never exceeds max_active across the restart"
+        );
+        assert_eq!(
+            restarted.prefs().launched_issues.len(),
+            3,
+            "and the durable snapshot agrees with the running agents"
+        );
+    }
+
+    /// Issue #3883 AC-4: the queue has two possible drivers and no rule that
+    /// exactly one runs. Both failures — both driving, neither driving — are
+    /// otherwise silent, which is why the reported incident ran with
+    /// `daemon.status: stopped` and nobody could tell from the monitor.
+    #[test]
+    fn concurrent_and_absent_scan_drivers_are_reported_in_last_error() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+
+        assert_eq!(
+            monitor.diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                101,
+                "2026-09-01T22:40:00Z"
+            ),
+            None,
+            "the first recorded scan has nothing to compare against"
+        );
+
+        let concurrent = monitor
+            .diagnose_scan_drive(
+                IssueMonitorScanDriverKind::GuiFrontDoor,
+                202,
+                "2026-09-01T22:40:20Z",
+            )
+            .expect("two drivers 20s apart are driving the same queue");
+        assert!(concurrent.contains("two drivers at once"), "{concurrent}");
+        assert!(concurrent.contains("daemon"), "{concurrent}");
+        assert!(concurrent.contains("GUI front door"), "{concurrent}");
+
+        assert_eq!(
+            monitor.diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                101,
+                "2026-09-01T22:45:00Z"
+            ),
+            None,
+            "a handover after the other driver went quiet is ordinary operation"
+        );
+
+        let unattended = monitor
+            .diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                101,
+                "2026-09-01T23:05:00Z",
+            )
+            .expect("a twenty minute gap means nothing was driving the queue");
+        assert!(unattended.contains("unattended for 1200s"), "{unattended}");
+
+        assert_eq!(
+            monitor
+                .prefs()
+                .last_scan_driver
+                .expect("durable driver")
+                .pid,
+            101,
+            "the driver outlives the process so the next one can compare"
+        );
+    }
+
+    /// Issue #3883 AC-2/AC-5: the launch-record loss path, reproduced at the
+    /// reported conditions.
+    ///
+    /// The incident had `max_active: 3` and exactly three launches, so no
+    /// over-cap rule can explain `active_launches` going to `[]`. The mechanism
+    /// is the malformed-prefs recovery: a syntax/EOF read error quarantines the
+    /// file and commits `IssueMonitorPrefs::recovery_default()` — which is
+    /// `Default`, so every launch record, the operator's `autonomous_mode`
+    /// opt-in, and `enabled` are reset in one write. That single event produces
+    /// both reported symptoms at once: launches disappearing while their panes
+    /// keep running, and `autonomous_mode` reverting `true` → `false` across
+    /// the restart.
+    ///
+    /// The recovery must not regress below the last committed generation. It
+    /// has one — the sidecar the writer keeps, which is exactly the snapshot
+    /// the restart restore and the front-door scan last agreed on.
+    #[test]
+    fn malformed_prefs_recovery_keeps_the_last_committed_generation() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        let mut monitor = launched_cohort(&[
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+        ]);
+        monitor.set_autonomous_mode(true);
+        save_issue_monitor_prefs(&path, &monitor.prefs()).expect("commit the good generation");
+
+        // A torn write leaves JSON the parser rejects with Syntax/Eof — the
+        // only class this recovery accepts.
+        fs::write(&path, "{\"enabled\": true, \"launched_iss").expect("tear the prefs file");
+
+        let (recovered, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("recovery commits");
+
+        assert_eq!(
+            recovered.launched_issues.len(),
+            3,
+            "AC-2: recovery must not erase launches whose agents are still running"
+        );
+        assert_eq!(
+            recovered.max_active_agents, 3,
+            "AC-2: nor the cap those launches are accounted against"
+        );
+        assert!(
+            recovered.autonomous_mode,
+            "AC-5: nor the operator's autonomous opt-in"
+        );
+        assert!(
+            recovered.enabled,
+            "AC-5: nor the monitor's own enabled state"
+        );
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered);
+        assert_eq!(
+            restored.active_count(),
+            3,
+            "AC-1: the three running agents still hold their three slots"
+        );
+        assert!(
+            restored.autonomous_mode(),
+            "and the restored monitor comes back autonomous"
+        );
+
+        assert!(
+            fs::read_dir(path.parent().expect("state dir"))
+                .expect("list state dir")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
+            "the unreadable bytes are still quarantined for diagnosis"
+        );
+    }
+
+    /// Issue #3883 AC-2/AC-5: with no committed generation to fall back to the
+    /// reset stays — but it stops being silent.
+    ///
+    /// Losing every launch and the autonomous opt-in behind nothing but a
+    /// `tracing::warn!` is what let the incident run unnoticed, so the durable
+    /// state itself has to carry the fact.
+    #[test]
+    fn an_unrecoverable_prefs_reset_is_reported_instead_of_being_silent() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        fs::create_dir_all(path.parent().expect("state dir")).expect("create state dir");
+        fs::write(&path, "{\"enabled\": true, \"launched_iss").expect("write torn prefs");
+
+        let (recovered, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("recovery commits");
+
+        assert!(recovered.launched_issues.is_empty());
+        let reset = recovered
+            .last_prefs_reset
+            .as_ref()
+            .expect("AC-2: a reset that loses durable state must be recorded");
+        assert!(
+            reset.quarantine_path.contains(".corrupt-"),
+            "the record must point at the quarantined bytes: {reset:?}"
+        );
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered);
+        assert!(
+            monitor
+                .agent_status_at("2026-09-01T22:45:18Z")
+                .last_error
+                .is_some_and(|error| error.contains("reset")),
+            "AC-2/AC-4: and it must be visible where operators already look"
+        );
+    }
+
+    /// Issue #3883 AC-5: `autonomous_mode` is durable through the ordinary
+    /// writer too. Kept alongside the recovery test above so a regression in
+    /// either path is attributed to the right one.
+    #[test]
+    fn autonomous_mode_survives_the_on_disk_restart_round_trip() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        let mut monitor = launched_cohort(&[(3873, "project-a::agent-2")]);
+        monitor.set_autonomous_mode(true);
+
+        save_issue_monitor_prefs(&path, &monitor.prefs()).expect("save prefs");
+        let reloaded = load_issue_monitor_prefs(&path).expect("reload prefs");
+
+        assert!(
+            reloaded.autonomous_mode,
+            "AC-5: the operator's opt-in must outlive the process that took it"
+        );
+        assert!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), reloaded)
+                .autonomous_mode(),
+            "and the restored monitor must come back autonomous"
         );
     }
 
