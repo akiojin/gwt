@@ -472,6 +472,26 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
             refresh: optional_bool(params, "refresh")?.unwrap_or(false),
         }),
+        // Issue #3516: interrupted-release standing check. Read-only unless the
+        // caller explicitly opts into opening the missing Release PR.
+        "release.status" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "release_branch",
+                    "base_branch",
+                    "scan_commits",
+                    "ensure_release_pr",
+                ],
+                "release.status",
+            )?;
+            CliCommand::Release(super::release::ReleaseCommand::Status {
+                release_branch: optional_string(params, "release_branch")?,
+                base_branch: optional_string(params, "base_branch")?,
+                scan_commits: optional_u64(params, "scan_commits")?,
+                ensure_release_pr: optional_bool(params, "ensure_release_pr")?.unwrap_or(false),
+            })
+        }
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -3231,6 +3251,45 @@ mod tests {
         assert!(matches!(
             err("intake.outcome.record", json!({"number": 1})),
             CliParseError::MissingFlag("kind")
+        ));
+    }
+
+    /// Issue #3516: the standing check is read-only until the caller opts in.
+    #[test]
+    fn release_status_defaults_to_a_read_only_check() {
+        assert!(matches!(
+            ok("release.status", json!({})),
+            CliCommand::Release(crate::cli::release::ReleaseCommand::Status {
+                release_branch: None,
+                base_branch: None,
+                scan_commits: None,
+                ensure_release_pr: false,
+            })
+        ));
+    }
+
+    #[test]
+    fn release_status_accepts_the_reconcile_and_topology_params() {
+        let parsed = ok(
+            "release.status",
+            json!({
+                "release_branch": "develop",
+                "base_branch": "main",
+                "scan_commits": 50,
+                "ensure_release_pr": true,
+            }),
+        );
+        assert!(matches!(
+            parsed,
+            CliCommand::Release(crate::cli::release::ReleaseCommand::Status {
+                scan_commits: Some(50),
+                ensure_release_pr: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            err("release.status", json!({"ensure": true})),
+            CliParseError::InvalidJson(_)
         ));
     }
 
