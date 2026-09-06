@@ -28,6 +28,11 @@ use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutp
 pub struct WorkflowContext {
     pub title_summary_missing: bool,
     pub pending_discussion_goal: Option<PendingDiscussionGoal>,
+    /// Issue #3984: this session is an independent-review dispatch window
+    /// (`suppress_execution_control`, no Workspace Work, no Execution Control
+    /// Record). Its contract is the inverse of a producing session's: publish
+    /// the verdict, touch nothing the implementer produced.
+    pub review_dispatch_session: bool,
 }
 
 impl WorkflowContext {
@@ -47,6 +52,11 @@ impl WorkflowContext {
         self.pending_discussion_goal = pending;
         self
     }
+
+    pub fn with_review_dispatch_session(mut self, review_dispatch_session: bool) -> Self {
+        self.review_dispatch_session = review_dispatch_session;
+        self
+    }
 }
 
 pub fn evaluate_with_context(
@@ -63,7 +73,18 @@ pub fn evaluate_with_context(
     if trusted_state != HookOutput::Silent {
         return Ok(trusted_state);
     }
-    let title_summary = evaluate_title_summary_guard(event, context.title_summary_missing)?;
+    let review_dispatch = evaluate_review_dispatch_guard(event, context.review_dispatch_session)?;
+    if review_dispatch != HookOutput::Silent {
+        return Ok(review_dispatch);
+    }
+    // Issue #3984 (AC-1/AC-4): a review dispatch window owns no Workspace Work,
+    // so `workspace.update` can never succeed there. Demanding the title first
+    // would deny every non-read-only command — including the verdict publish
+    // that is the window's entire job — for the whole life of the session.
+    let title_summary = evaluate_title_summary_guard(
+        event,
+        context.title_summary_missing && !context.review_dispatch_session,
+    )?;
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
     }
@@ -76,13 +97,17 @@ pub fn evaluate_with_context(
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
-    let context = WorkflowContext::default()
-        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
-        .with_pending_discussion_goal(
-            crate::discussion_resume::load_pending_goal(worktree_root)
-                .ok()
-                .flatten(),
-        );
+    let context =
+        WorkflowContext::default()
+            .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
+            .with_pending_discussion_goal(
+                crate::discussion_resume::load_pending_goal(worktree_root)
+                    .ok()
+                    .flatten(),
+            )
+            .with_review_dispatch_session(
+                crate::issue_monitor_review::review_dispatch_session_active(),
+            );
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -175,6 +200,85 @@ Use the configured narrative language for the purpose. Keep progress, completion
     }
 
     Ok(HookOutput::Silent)
+}
+
+/// Issue #3984 (AC-2): the review window's own guard.
+///
+/// With the title gate lifted, the review session must not inherit a producing
+/// session's write surface. It may publish its verdict
+/// (`issue.monitor.review_verdict`), explain it on the Board, and read whatever
+/// it needs; it must not rewrite what the implementer produced. The denial is
+/// keyed on the canonical JSON envelope operation, which is how every skill
+/// invokes gwtd.
+fn evaluate_review_dispatch_guard(
+    event: &HookEvent,
+    review_dispatch_session: bool,
+) -> Result<HookOutput, HookError> {
+    if !review_dispatch_session {
+        return Ok(HookOutput::Silent);
+    }
+    // The title gate used to stop file edits in a review window as a side
+    // effect of denying everything. Lifting it must not open that door: the
+    // file tools are the most direct way to rewrite the very diff under review.
+    if matches!(
+        event.tool_name.as_deref(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch")
+    ) {
+        return Ok(review_dispatch_denial("editing files"));
+    }
+    if event.tool_name.as_deref() != Some("Bash") {
+        return Ok(HookOutput::Silent);
+    }
+    let Some(command) = event.command() else {
+        return Ok(HookOutput::Silent);
+    };
+    let Some(operation) = json_envelope_operation(command) else {
+        return Ok(HookOutput::Silent);
+    };
+    if !is_review_dispatch_denied_operation(&operation) {
+        return Ok(HookOutput::Silent);
+    }
+    Ok(review_dispatch_denial(&format!("`{operation}`")))
+}
+
+fn review_dispatch_denial(subject: &str) -> HookOutput {
+    HookOutput::pre_tool_use_permission(
+        format!("{subject} is outside the independent review contract"),
+        "This window is an independent-review dispatch session (SPEC #3200): it judges the implementation, it never produces or settles it. \
+Editing files, and the operations that rewrite the implementer's artifacts or authority — `pr.*`, `issue.spec.*`, `execution.*`, `workspace.*`, `build.*`, `verify.*` — belong to the implementing session and are refused here.\n\n\
+Publish the verdict instead, then report it on the Board:\n\
+  gwtd <<'JSON'\n\
+  {\"schema_version\":1,\"operation\":\"issue.monitor.review_verdict\",\"params\":{\"issue_number\":<n>,\"reviewed_sha\":\"<sha>\",\"verdict\":\"<verdict json>\"}}\n\
+  JSON\n\n\
+Read-only inspection (`git log`, `git diff`, the target test run, `issue.view`, `pr.view`, `execution.status`, `verify.lease.status`) stays available.",
+    )
+}
+
+/// The envelope operations a review dispatch session must not run. Read-only
+/// operations inside the same families (`execution.status`, `pr.view`,
+/// `workspace.candidates`, `verify.lease.status`, ...) stay available:
+/// refusing them would blind the reviewer without protecting anything, and
+/// AC-4 requires the review to be able to inspect the state it is judging.
+///
+/// `verify.*` is denied for a stronger reason than the rest: `verify.run`
+/// executes arbitrary commands and persists verification evidence, and its
+/// caller-authority check returns empty authority precisely because a review
+/// window has no Execution Control Record — so only this hook stands between a
+/// reviewer and the implementer's evidence bundle.
+fn is_review_dispatch_denied_operation(operation: &str) -> bool {
+    if is_read_only_json_envelope_operation(operation) || is_read_only_verify_operation(operation) {
+        return false;
+    }
+    operation.starts_with("execution.")
+        || operation.starts_with("workspace.")
+        || operation.starts_with("build.")
+        || operation.starts_with("pr.")
+        || operation.starts_with("issue.spec.")
+        || operation.starts_with("verify.")
+}
+
+fn is_read_only_verify_operation(operation: &str) -> bool {
+    matches!(operation, "verify.lease.status" | "verify.lease-status")
 }
 
 fn evaluate_pending_discussion_goal_guard(
@@ -934,6 +1038,183 @@ mod tests {
         assert!(detail.contains(r#""purpose""#));
         assert!(detail.contains("work name"), "{detail}");
         assert!(detail.contains("which window is doing what"), "{detail}");
+    }
+
+    fn bash_event(command: &str) -> HookEvent {
+        HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            transcript_path: None,
+            cwd: None,
+        }
+    }
+
+    fn envelope_command(operation: &str, params: &str) -> String {
+        format!(
+            "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{params}}}\nJSON"
+        )
+    }
+
+    fn review_context() -> WorkflowContext {
+        // The review window is launched with the title missing and no
+        // Workspace Work — exactly the state that used to deny everything.
+        WorkflowContext::unknown()
+            .with_title_summary_missing(true)
+            .with_review_dispatch_session(true)
+    }
+
+    /// Issue #3984 AC-1/AC-2: the review window publishes its verdict and
+    /// explains it on the Board even though its identity can never be set.
+    #[test]
+    fn review_dispatch_session_may_publish_its_verdict_and_post_to_the_board() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            envelope_command(
+                "issue.monitor.review_verdict",
+                r#"{"issue_number":3984,"reviewed_sha":"abc123","verdict":"{}"}"#,
+            ),
+            envelope_command("board.post", r#"{"kind":"status","body":"verdict: fail"}"#),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &review_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-2: the reviewer still cannot rewrite what the
+    /// implementing session produced, or settle its authority.
+    #[test]
+    fn review_dispatch_session_cannot_write_the_implementation_artifacts() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for (operation, params) in [
+            ("pr.edit", r#"{"number":4000,"body":"approved"}"#),
+            ("execution.complete", "{}"),
+            ("issue.spec.edit", r#"{"number":3984,"section":"tasks"}"#),
+            (
+                "workspace.update",
+                r#"{"purpose":"review","current_focus":"review"}"#,
+            ),
+            // `verify.run` executes arbitrary commands and writes the
+            // implementer's evidence bundle; its own caller-authority check is
+            // empty for a session with no Execution Control Record, so this
+            // hook is the only thing denying it.
+            ("verify.run", r#"{"commands":["cargo test -p gwt"]}"#),
+            ("verify.plan", r#"{"derive":true}"#),
+        ] {
+            let command = envelope_command(operation, params);
+            let output = evaluate_with_context(&bash_event(&command), worktree, &review_context())
+                .expect("guard output");
+            let HookOutput::PreToolUsePermission {
+                summary, detail, ..
+            } = output
+            else {
+                panic!("expected {operation} to be denied, got {output:?}");
+            };
+            assert!(summary.contains(operation), "{summary}");
+            assert!(
+                detail.contains("issue.monitor.review_verdict"),
+                "the denial must route to the verdict publish: {detail}"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-2: lifting the title gate must not open the file tools.
+    /// Before this change they were denied only as a side effect of that gate,
+    /// and they are the most direct way to rewrite the diff under review.
+    #[test]
+    fn review_dispatch_session_cannot_edit_files() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for tool in ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"] {
+            let event = HookEvent {
+                tool_name: Some(tool.to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("crates/gwt/src/lib.rs").to_string_lossy()
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+            let output =
+                evaluate_with_context(&event, worktree, &review_context()).expect("guard output");
+            assert!(
+                matches!(output, HookOutput::PreToolUsePermission { .. }),
+                "{tool} must be denied in a review window, got {output:?}"
+            );
+        }
+    }
+
+    /// The read-only half of the denied families stays available — refusing it
+    /// would blind the reviewer without protecting anything (AC-4).
+    #[test]
+    fn review_dispatch_session_keeps_the_read_only_half_of_denied_families() {
+        for operation in [
+            "execution.status",
+            "pr.view",
+            "pr.checks",
+            "workspace.candidates",
+            "verify.lease.status",
+        ] {
+            assert!(
+                !is_review_dispatch_denied_operation(operation),
+                "{operation} is read-only and must stay available"
+            );
+        }
+        for operation in [
+            "verify.run",
+            "verify.plan",
+            "verify.adjudicate",
+            "verify.lease.acquire",
+            "build.complete",
+        ] {
+            assert!(
+                is_review_dispatch_denied_operation(operation),
+                "{operation} must be denied"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-4: review-necessary read-only work runs. `cargo test` is
+    /// not read-only, but nothing about a review window should block it —
+    /// before this change the title gate denied it outright.
+    #[test]
+    fn review_dispatch_session_may_run_review_commands() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            "git log --oneline -20",
+            "git diff origin/develop...HEAD",
+            "cargo test -p gwt --bin gwt review_dispatch",
+            "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON",
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(command), worktree, &review_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Non-regression: the review contract applies only to review windows. An
+    /// ordinary producing session keeps both the title gate and its full
+    /// write surface.
+    #[test]
+    fn an_ordinary_session_is_unaffected_by_the_review_contract() {
+        let command = envelope_command("pr.edit", r#"{"number":4000,"body":"x"}"#);
+        assert_eq!(
+            evaluate_review_dispatch_guard(&bash_event(&command), false).expect("guard output"),
+            HookOutput::Silent
+        );
+        assert!(matches!(
+            evaluate_title_summary_guard(&bash_event("cargo test -p gwt"), true)
+                .expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     #[test]
