@@ -250,7 +250,10 @@ fn is_version_heading(line: &str, bare: &str) -> bool {
 }
 
 /// Run the standing check against a repository.
-pub fn fetch_release_check(repo_path: &Path, options: &ReleaseCheckOptions) -> Result<ReleaseCheck> {
+pub fn fetch_release_check(
+    repo_path: &Path,
+    options: &ReleaseCheckOptions,
+) -> Result<ReleaseCheck> {
     fetch_release_check_with(
         repo_path,
         options,
@@ -521,8 +524,7 @@ mod tests {
 
     #[test]
     fn classifies_an_open_release_pr_as_pr_open() {
-        let check =
-            classify_release_check(&input(&["chore(release): v9.91.0"], &[], Some(3513)));
+        let check = classify_release_check(&input(&["chore(release): v9.91.0"], &[], Some(3513)));
         assert_eq!(check.state, ReleaseCheckState::PrOpen);
         assert_eq!(check.release_pr, Some(3513));
         assert!(!check.is_stalled());
@@ -530,8 +532,11 @@ mod tests {
 
     #[test]
     fn a_tag_wins_over_a_still_open_pull_request() {
-        let check =
-            classify_release_check(&input(&["chore(release): v9.91.0"], &["v9.91.0"], Some(3513)));
+        let check = classify_release_check(&input(
+            &["chore(release): v9.91.0"],
+            &["v9.91.0"],
+            Some(3513),
+        ));
         assert_eq!(check.state, ReleaseCheckState::Released);
     }
 
