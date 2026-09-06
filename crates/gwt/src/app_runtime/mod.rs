@@ -1953,12 +1953,14 @@ fn completed_claim_candidates(
 fn run_scheduled_issue_monitor_scan(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
+    live_window_ids: Option<&std::collections::BTreeSet<String>>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
     run_scheduled_issue_monitor_scan_with_budgets(
         project_root,
         expected_project_tab_id,
+        live_window_ids,
         now,
         issue_client_factory,
         ISSUE_MONITOR_SCAN_BUDGET,
@@ -2021,6 +2023,7 @@ fn reap_scan_defunct_active_generations(project_root: &Path) {
 fn run_scheduled_issue_monitor_scan_with_budgets(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
+    live_window_ids: Option<&std::collections::BTreeSet<String>>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
     scan_budget: std::time::Duration,
@@ -2174,6 +2177,29 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         &mut monitor,
         |latest| {
             latest.expire_stale_unbound_launches(now);
+            // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
+            // are still on the canvas, inside the transaction that persists
+            // this scan. Same store, same generation as the restart restore
+            // this closure just rebased on — a separate transaction was the
+            // hole: it wrote durable state ahead of the authority probe and
+            // the `enabled` gate above, so a live daemon or a disabled monitor
+            // got a fork instead of a deferral.
+            //
+            // Ordered before the candidate pass below on purpose:
+            // `record_candidate` reads `launched_windows`, so a re-adopted
+            // Issue is recorded as Launched and never re-enters the queue.
+            if let (Some(project_tab_id), Some(live_window_ids)) =
+                (expected_project_tab_id, live_window_ids)
+            {
+                let reconciliation =
+                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids);
+                if !reconciliation.readopted.is_empty() {
+                    tracing::warn!(
+                        issues = ?reconciliation.readopted,
+                        "issue monitor recovered launches whose agent windows were still running"
+                    );
+                }
+            }
             if let Some(loaded) = &loaded_for_commit {
                 gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                     latest,
@@ -5510,9 +5536,17 @@ impl AppRuntime {
                         &live_windows_per_tab,
                         fallback_commit_timeout,
                     );
+                // Issue #3883: the scan owns the re-adoption, so it happens
+                // inside the same authority-gated transaction that persists
+                // the scan rather than in a fork of its own.
+                let expected_live_windows = live_windows_per_tab
+                    .iter()
+                    .find(|(tab_id, _)| *tab_id == worker_expected_project_tab_id)
+                    .map(|(_, live_window_ids)| live_window_ids);
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
+                    expected_live_windows,
                     &worker_now,
                     &issue_client_factory,
                 );

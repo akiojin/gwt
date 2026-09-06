@@ -197,6 +197,16 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     let Some(tail) = tail else {
         return base;
     };
+    // Issue #3490: several Codex agents initializing the shared `~/.codex`
+    // state directory at once lose the SQLite race, and the provider's answer
+    // is a nested stack trace that tells the operator nothing actionable.
+    // Checked before truncation because the lock refusal is the tail of a long
+    // path-heavy message and would be cut off. The replacement carries the
+    // transient-retry hint, so the Issue Monitor requeues without spending an
+    // attempt on host contention.
+    if gwt_agent::is_codex_shared_state_lock_failure(tail) {
+        return Some(gwt_agent::codex_shared_state_lock_detail());
+    }
     let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
         let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
         truncated.push('…');
@@ -1797,6 +1807,42 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::WindowProcessStatus;
+
+    /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
+    /// SQLite race must not show the raw provider stack. The same string is the
+    /// message the Issue Monitor receives, so it also has to classify as a
+    /// transient launch failure — the contention is about the host, not the
+    /// work.
+    #[test]
+    fn codex_shared_state_lock_replaces_the_raw_stack_in_the_pane_detail() {
+        let observed_stack = "/Users/akiojin/.codex/state_5.sqlite: failed to initialize state \
+             runtime at /Users/akiojin/.codex: failed to open log DB at \
+             /Users/akiojin/.codex/logs_2.sqlite: error returned from database: (code: 5) \
+             database is locked";
+
+        let detail = super::compose_agent_error_detail(
+            Some("Agent exited with status 1".to_string()),
+            Some(observed_stack),
+        )
+        .expect("an errored agent pane always carries a detail");
+
+        assert!(
+            !detail.contains("state_5.sqlite"),
+            "the raw Codex stack must not reach the pane: {detail}"
+        );
+        assert!(
+            detail.contains("~/.codex"),
+            "the pane must name the shared state directory as the cause: {detail}"
+        );
+        assert!(
+            detail.contains("max_active"),
+            "the pane must name what the operator can do about it: {detail}"
+        );
+        assert!(
+            gwt_agent::is_transient_launch_failure(&detail),
+            "the Issue Monitor must requeue this without spending an attempt: {detail}"
+        );
+    }
 
     #[test]
     fn late_provider_active_writer_error_is_classified_as_resume_writer_conflict() {

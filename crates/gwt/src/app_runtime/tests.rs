@@ -53,11 +53,12 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 use super::continuation::set_durable_launch_recovery_directory_sync_test_hook;
 use super::continuation::{
     clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
-    durable_launch_recovery_exists, durable_launch_recovery_session_identity,
-    nonlocal_runtime_index_scan_metrics, persist_durable_launch_recovery,
-    reset_nonlocal_runtime_index_scan_metrics, resolve_split_workspace_state_external_commit,
+    continuation_launch_config, durable_launch_recovery_exists,
+    durable_launch_recovery_session_identity, nonlocal_runtime_index_scan_metrics,
+    persist_durable_launch_recovery, reset_nonlocal_runtime_index_scan_metrics,
+    resolve_split_workspace_state_external_commit,
     set_fresh_execution_pre_work_commit_hook_for_test, set_missing_session_cleanup_hook_for_test,
-    ActiveOwnerLiveness, DurableLaunchRecoveryKind,
+    ActiveOwnerLiveness, ContinueWorkLaunchSeed, DurableLaunchRecoveryKind,
 };
 use super::{
     active_work_projection_from_saved, continue_work_readiness_decision,
@@ -51474,8 +51475,189 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
     );
 }
 
+/// Issue #3967: materialize a real linked git worktree so the launch-path
+/// trust registration is exercised against the same `.codex/hooks.json` layout
+/// Codex actually discovers (worktree-local plus workspace-home).
+fn codex_hook_trust_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).expect("create repo dir");
+    let git = |args: &[&str], cwd: &Path| {
+        let status = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
+        assert!(status.success(), "git {args:?} failed with {status}");
+    };
+    git(&["init", "--initial-branch=develop"], &repo);
+    git(&["config", "user.email", "test@example.com"], &repo);
+    git(&["config", "user.name", "Test User"], &repo);
+    // The repo-owned Stop hook is tracked content in this repository, so a
+    // fresh worktree always carries it alongside the five managed hooks.
+    fs::create_dir_all(repo.join(".codex")).expect("create .codex dir");
+    fs::write(
+        repo.join(".codex/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true",
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .unwrap(),
+    )
+    .expect("seed tracked codex hooks");
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-m", "seed"], &repo);
+
+    let worktree = root.join("issue-worktree");
+    let status = gwt_core::process::hidden_command("git")
+        .args(["worktree", "add", "-b", "work/issue-3967"])
+        .arg(&worktree)
+        .arg("develop")
+        .current_dir(&repo)
+        .status()
+        .expect("materialize linked worktree");
+    assert!(status.success(), "git worktree add failed with {status}");
+    (repo, worktree)
+}
+
+/// Every hook handler present in `hooks_path` must have a `[hooks.state]`
+/// entry in `config`, otherwise Codex reports it as "new or changed" and
+/// blocks the pane on `Hooks need review`.
+fn assert_every_codex_hook_is_trusted(config: &toml::Value, hooks_path: &Path) {
+    let events = [
+        ("SessionStart", "session_start"),
+        ("UserPromptSubmit", "user_prompt_submit"),
+        ("PreToolUse", "pre_tool_use"),
+        ("PostToolUse", "post_tool_use"),
+        ("Stop", "stop"),
+    ];
+    let canonical = fs::canonicalize(hooks_path).expect("canonicalize hooks path");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(hooks_path).expect("read hooks.json"))
+            .expect("parse hooks.json");
+    let state = config
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("Codex config has no [hooks.state]: {config:?}"));
+    let mut checked = 0usize;
+    for (event_json, event_snake) in events {
+        let Some(groups) = hooks["hooks"].get(event_json).and_then(|g| g.as_array()) else {
+            continue;
+        };
+        for (group_index, group) in groups.iter().enumerate() {
+            let handlers = group["hooks"].as_array().expect("hook handlers");
+            for handler_index in 0..handlers.len() {
+                let key = format!(
+                    "{}:{event_snake}:{group_index}:{handler_index}",
+                    canonical.display()
+                );
+                assert!(
+                    state.contains_key(&key),
+                    "hook {key} is not trusted; Codex would prompt. state keys: {:?}",
+                    state.keys().collect::<Vec<_>>()
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "fixture must contain at least one hook");
+}
+
+/// Issue #3967 AC-3: a Monitor launch into a fresh linked worktree must leave
+/// no `.codex/hooks.json` that Codex would flag as "new or changed" — neither
+/// the worktree-local copy nor the workspace-home copy.
 #[test]
-fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
+fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let fixture_root = tempdir().expect("fixture tempdir");
+    let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
+
+    // Both copies exist on disk in a real worktree: the workspace-home copy is
+    // written by the launch refresh, the worktree-local copy is tracked content
+    // refreshed by the `Both`-mode managed-asset writers.
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
+        .expect("refresh managed codex hooks");
+
+    let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &profile_config_path,
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        None,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .expect("launch trust registration must succeed")
+    .expect("Codex host launch registers trust");
+
+    assert!(
+        report.untrusted_gwt_hooks.is_empty(),
+        "no gwt hook may be left for human review: {report:?}"
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&report.config_path).expect("read codex config"))
+            .expect("parse codex config");
+    assert_every_codex_hook_is_trusted(&config, &worktree.join(".codex/hooks.json"));
+    assert_every_codex_hook_is_trusted(&config, &repo.join(".codex/hooks.json"));
+}
+
+/// Issue #3967 AC-4: a pre-registration that cannot vouch for the gwt hooks
+/// must fail the launch with a concrete reason instead of handing the agent a
+/// human-only prompt that silently holds the Issue Monitor slot.
+#[test]
+fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let worktree = tempdir().expect("worktree tempdir");
+    gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    let hooks_path = worktree.path().join(".codex/hooks.json");
+    let mut hooks_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    hooks_json["hooks"]["Stop"][0]["hooks"][0]["command"] =
+        serde_json::Value::String("'/tmp/attacker/gwtd' hook event Stop".to_string());
+    fs::write(
+        &hooks_path,
+        serde_json::to_string_pretty(&hooks_json).unwrap(),
+    )
+    .unwrap();
+
+    let result = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &profile_config_path,
+        worktree.path(),
+        &gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        None,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    );
+
+    let error = result.expect_err("untrusted gwt hook must abort the launch");
+    assert!(
+        error.contains("Hooks need review") && error.contains("stop:0:0"),
+        "launch failure must name the cause and the hook: {error}"
+    );
+}
+
+/// Issue #3967 AC-4: an unwritable Codex config used to be swallowed as a
+/// warning, which launched the agent straight into `Hooks need review` and let
+/// the pane hold its Issue Monitor slot in silence. The launch now fails with
+/// the reason so the slot is released and the cause is visible.
+#[test]
+fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
     let profile_config_path = home.path().join(".gwt/config.toml");
@@ -51495,13 +51677,10 @@ fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
     );
 
+    let error = result.expect_err("unwritable Codex trust state must abort the launch");
     assert!(
-        result.is_ok(),
-        "optional trust registration must not abort launch: {result:?}"
-    );
-    assert!(
-        result.unwrap().is_none(),
-        "skip paths must not create Codex config"
+        error.contains("Codex hook trust"),
+        "launch failure must name the cause: {error}"
     );
 }
 
@@ -60966,6 +61145,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         "2026-08-12T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::ZERO,
@@ -61047,6 +61227,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
     let _outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         "2026-09-04T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -61119,6 +61300,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         "2026-09-05T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -62969,5 +63151,203 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
             .window("agent-7")
             .map(|window| window.status),
         Some(WindowProcessStatus::Error)
+    );
+}
+
+/// Issue #3489: build the durable Session seed the Continue work fixtures use
+/// for owner-linkage regression coverage.
+fn issue_3489_durable_seed(linked_issue_number: Option<u64>) -> ContinueWorkLaunchSeed {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "durable-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = linked_issue_number;
+    ContinueWorkLaunchSeed::DurableSession(Box::new(session))
+}
+
+/// Issue #3489: mint the binding Continue work installs for the Work owner and
+/// prove the launch Session accepts it. `set_execution_binding` runs before the
+/// PTY starts, so a rejection here is exactly the pre-PTY launch failure.
+fn issue_3489_binding_installs(config: &gwt_agent::LaunchConfig, owner_number: u64) -> bool {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "continuation-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = config.linked_issue_number;
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: "repo-3489".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3489".to_string(),
+            binding_id: "binding-3489".to_string(),
+            ledger_head_hash: "head-3489".to_string(),
+        },
+        capability_generation: 1,
+    };
+    session.set_execution_binding(Some(binding)).is_ok()
+}
+
+/// Issue #3489 AC-1: a durable Session that carries no owner linkage must not
+/// seed the continuation with `None`. Continue work mints the binding from the
+/// Work owner, so an inherited `None` fails the binding install before the PTY
+/// starts and leaves the pane with a bare invariant string.
+#[test]
+fn continue_work_durable_seed_without_owner_linkage_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &issue_3489_durable_seed(None),
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert!(
+        issue_3489_binding_installs(&config, owner.number),
+        "an unbound durable seed must still install the owner binding before the PTY starts"
+    );
+}
+
+/// Issue #3489 AC-2: a durable Session linked to another owner must be
+/// re-resolved to the Work owner the continuation binding is minted for.
+#[test]
+fn continue_work_durable_seed_with_foreign_owner_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &issue_3489_durable_seed(Some(3464)),
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert!(
+        issue_3489_binding_installs(&config, owner.number),
+        "a foreign-owner durable seed must be re-resolved before the PTY starts"
+    );
+}
+
+/// Issue #3489 AC-2: the Work projection seed keeps the same single source of
+/// owner truth, so both seeds stay interchangeable for the binding install.
+#[test]
+fn continue_work_projection_seed_resolves_to_work_owner() {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3489,
+    };
+    let (config, _outcome) = continuation_launch_config(
+        &ContinueWorkLaunchSeed::WorkProjection {
+            agent_id: gwt_agent::AgentId::Codex,
+            display_name: Some("Projection seed".to_string()),
+            branch: "work/issue-3489".to_string(),
+        },
+        Path::new("/tmp/gwt-issue-3489/work"),
+        owner,
+        None,
+    );
+
+    assert_eq!(config.linked_issue_number, Some(owner.number));
+    assert_eq!(config.display_name, "Projection seed");
+}
+
+/// Issue #3489 AC-4: the owner-mismatch refusal fails before the PTY starts, so
+/// the pane only ever shows this one line. It must name both sides of the
+/// mismatch and the recovery route instead of the bare invariant string.
+#[test]
+fn owner_mismatch_launch_failure_names_both_owners_and_the_recovery_route() {
+    let mut session = gwt_agent::Session::new(
+        Path::new("/tmp/gwt-issue-3489"),
+        "work/issue-3489",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "continuation-3489".to_string();
+    session.repo_hash = Some("repo-3489".to_string());
+    session.linked_issue_number = Some(3464);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: "repo-3489".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number: 3489,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3489".to_string(),
+            binding_id: "binding-3489".to_string(),
+            ledger_head_hash: "head-3489".to_string(),
+        },
+        capability_generation: 1,
+    };
+    let detail = session
+        .set_execution_binding(Some(binding))
+        .expect_err("a foreign linked owner must be refused");
+
+    assert!(
+        detail.contains("continuation-3489") && detail.contains("3464") && detail.contains("3489"),
+        "the refusal must name the Session and both owners: {detail}"
+    );
+
+    let diagnostic = String::from_utf8(AppRuntime::launch_error_terminal_bytes(
+        &AppRuntime::user_facing_launch_error_detail(&detail),
+    ))
+    .expect("diagnostic bytes are UTF-8");
+    assert!(
+        diagnostic.contains("execution.status"),
+        "the pane diagnostic must name the recovery probe: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("Continue work"),
+        "the pane diagnostic must name the continuation route: {diagnostic}"
+    );
+}
+
+/// Issue #3489 AC-4: unrelated launch failures keep their exact detail, so the
+/// recovery hint never widens beyond the owner-mismatch refusal.
+#[test]
+fn unrelated_launch_failure_detail_is_not_rewritten_with_the_owner_hint() {
+    let detail = "execution binding session does not match the durable Session";
+
+    assert_eq!(
+        AppRuntime::user_facing_launch_error_detail(detail),
+        detail,
+        "only the owner mismatch gains the recovery route"
+    );
+}
+
+/// Issue #3489 AC-1: the owner-linkage regression above proves the binding
+/// install accepts the resolved config. That only matters because the install
+/// runs on the pre-PTY path — pin that ordering so a later refactor cannot move
+/// the refusal behind a started pane, where it would stop being a launch
+/// failure at all.
+#[test]
+fn launch_worker_installs_the_execution_binding_before_the_process_launch() {
+    let source = include_str!("launch.rs");
+    let worker = source
+        .split("fn spawn_agent_window_async_with_claim")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn close_work").next())
+        .expect("async launch worker body");
+    let install = worker
+        .find("set_execution_binding(Some(binding.clone()))?")
+        .expect("prepared continuation binding install");
+    let process_launch = worker
+        .find("let process_launch = ProcessLaunch {")
+        .expect("process launch construction");
+    assert!(
+        install < process_launch,
+        "the execution binding must be installed before the PTY process launch is built"
     );
 }
