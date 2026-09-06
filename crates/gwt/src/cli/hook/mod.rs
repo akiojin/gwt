@@ -449,7 +449,12 @@ pub fn run_daemon_hook<E: CliEnv>(
         }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
-            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_discussion_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
             Ok(emit_hook_output(env, &output))
         }
         HookKind::SkillPlanSpecStopCheck => {
