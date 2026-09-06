@@ -400,6 +400,10 @@ impl CliEnv for DefaultCliEnv {
             job_id,
         )
     }
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
+    }
     fn run_internal_command(
         &mut self,
         args: &[String],
