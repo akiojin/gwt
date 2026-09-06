@@ -65,6 +65,7 @@ impl AppRuntime {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.migration_pending = false;
         }
+        self.refresh_project_tab_incarnation(tab_id);
         Vec::new()
     }
 
@@ -95,6 +96,7 @@ impl AppRuntime {
                 }
             }
         }
+        self.refresh_project_tab_incarnation(tab_id);
         let _ = self.persist();
 
         vec![
@@ -118,6 +120,7 @@ impl AppRuntime {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.migration_pending = false;
         }
+        self.refresh_project_tab_incarnation(tab_id);
         vec![OutboundEvent::broadcast(BackendEvent::MigrationError {
             tab_id: tab_id.to_string(),
             phase: phase.as_str().to_string(),
