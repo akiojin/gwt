@@ -363,9 +363,10 @@ fn sort_json_objects(value: &mut Value) {
 
 /// A hook gwt may pre-trust on the user's behalf: either a generated managed
 /// event command, or the repo-owned `gwt-self-improvement-stop` Stop hook that
-/// this repository ships as tracked content. Both are matched against the exact
-/// strings gwt itself emits — never by shape — so a tampered command or a
-/// swapped binary path is still left for Codex's `/hooks` review.
+/// this repository used to ship as tracked content and that older worktrees
+/// still carry. Both are matched against the exact strings gwt itself emits —
+/// never by shape — so a tampered command or a swapped binary path is still
+/// left for Codex's `/hooks` review.
 fn is_trusted_gwt_hook_command(
     command: &str,
     event_json_name: &str,
