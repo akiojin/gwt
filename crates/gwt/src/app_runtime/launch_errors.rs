@@ -66,6 +66,17 @@ pub(super) fn with_launch_wizard_error_log_capture<T>(operation: impl FnOnce() -
 /// SPEC-3151 FR-003: OpenCode joined the table so a missing `opencode` binary
 /// with no available package runner surfaces install guidance rather than
 /// `No viable candidates found in PATH`.
+/// Recovery route appended to the owner-mismatch binding refusal.
+///
+/// Issue #3489: the refusal fails the launch before the PTY starts, so the pane
+/// shows this one line and nothing else. The refusal itself names the Session
+/// and both owners; this names what to do next so the window is not a dead end.
+const EXECUTION_BINDING_OWNER_MISMATCH_RECOVERY: &str = concat!(
+    ". Run the execution.status JSON operation for the exact recovery route, ",
+    "then use Continue work on the owner's Work to create a successor, ",
+    "or start a fresh launch for that owner."
+);
+
 const MISSING_BINARY_INSTALL_HINTS: &[(&str, &str)] = &[
     (
         "agy",
@@ -542,9 +553,12 @@ impl AppRuntime {
         })]
     }
 
-    fn user_facing_launch_error_detail(detail: &str) -> String {
+    pub(super) fn user_facing_launch_error_detail(detail: &str) -> String {
         if let Some(hint) = Self::missing_binary_install_hint(detail) {
             return hint.to_string();
+        }
+        if detail.contains(gwt_agent::EXECUTION_BINDING_OWNER_MISMATCH) {
+            return format!("{detail}{EXECUTION_BINDING_OWNER_MISMATCH_RECOVERY}");
         }
         detail.to_string()
     }
