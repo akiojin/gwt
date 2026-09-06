@@ -7464,19 +7464,12 @@ impl AppRuntime {
 
 impl AppRuntime {
     pub(crate) fn app_state_view(&self) -> gwt::AppStateView {
-        self.app_state_view_with(WorktreeFormProjection::Resolve)
-    }
-
-    fn app_state_view_with(
-        &self,
-        worktree_form_projection: WorktreeFormProjection,
-    ) -> gwt::AppStateView {
         gwt::AppStateView {
             app_version: crate::runtime_support::current_app_version().to_string(),
             tabs: self
                 .tabs
                 .iter()
-                .map(|tab| self.project_tab_view(tab, worktree_form_projection))
+                .map(|tab| self.project_tab_view(tab, WorktreeFormProjection::Resolve))
                 .collect(),
             active_tab_id: self.active_tab_id.clone(),
             recent_projects: self
@@ -7593,15 +7586,6 @@ impl AppRuntime {
     pub(crate) fn workspace_state_broadcast(&self) -> OutboundEvent {
         OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
             workspace: self.app_state_view(),
-        })
-    }
-
-    /// Process-free project navigation snapshot. The persisted worktree form
-    /// is sufficient for immediate tab convergence; the normal hydration and
-    /// projection follow-ups refresh richer derived state asynchronously.
-    pub(crate) fn workspace_state_broadcast_process_free(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
-            workspace: self.app_state_view_with(WorktreeFormProjection::Persisted),
         })
     }
 

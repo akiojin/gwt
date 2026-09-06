@@ -11638,6 +11638,66 @@ fn project_navigation_commit_rejects_a_foreign_project_key_payload() {
     );
 }
 
+/// SPEC #3170 T-962: moving the heavy switch apply off the tao thread must not
+/// downgrade what the switch broadcasts. `worktree_form` is only ever `Unknown`
+/// on disk, so a persisted-only projection would strip the ephemeral /
+/// branch-backed chrome from every live agent window on each tab switch.
+#[test]
+fn select_project_tab_broadcast_keeps_the_resolved_agent_worktree_form() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&second).expect("second project");
+    let tabs = vec![
+        sample_project_tab("tab-first", "First", first, ProjectKind::NonRepo, &[]),
+        sample_project_tab_with_window_at(
+            "tab-second",
+            "agent-1",
+            second.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-first"));
+    let (blocking_tasks, _queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    let window_id = combined_window_id("tab-second", "agent-1");
+    let mut session = sample_active_agent_session("tab-second", &window_id);
+    session.worktree_path = second;
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+
+    let events = runtime.select_project_tab_events("tab-second");
+
+    let workspace = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("WindowCanvasState broadcast for the selected tab");
+    let form = workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.id == "tab-second")
+        .and_then(|tab| {
+            tab.workspace
+                .windows
+                .iter()
+                .find(|window| window.id == window_id)
+        })
+        .map(|window| window.worktree_form)
+        .expect("projected agent window");
+    assert_eq!(
+        form,
+        gwt::WindowWorktreeForm::BranchBacked,
+        "a tab switch must keep the resolved worktree form instead of reporting `Unknown`"
+    );
+}
+
 /// SPEC #3170 T-963: pin the single-entry contract itself so a later
 /// project-per-tab consumer cannot reintroduce a synchronous open fallback or
 /// a second project identity beside `project_tab_incarnations`.

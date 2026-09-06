@@ -548,7 +548,7 @@ impl AppRuntime {
         }
         let _ = self.persist();
 
-        let mut events = vec![self.workspace_state_broadcast_process_free()];
+        let mut events = vec![self.workspace_state_broadcast()];
         if new_tab {
             events.extend(
                 self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
@@ -593,14 +593,23 @@ impl AppRuntime {
         events
     }
 
+    /// Issue #2867: Recent Projects は同一プロジェクトの worktree で埋め尽く
+    /// されないよう、`target.project_root` を workspace home に正規化してから
+    /// 登録する。タブ open 時の direct-pick semantics は `target.title` 側で
+    /// 保持する（例: git subdir を選んだ場合の選択ディレクトリ名）。
     fn remember_prepared_recent_project(&mut self, prepared: &PreparedProjectOpen) {
+        let title = if prepared.recent_path == prepared.target.project_root {
+            prepared.target.title.clone()
+        } else {
+            gwt::project_title_from_path(&prepared.recent_path)
+        };
         self.recent_projects
             .retain(|entry| !same_worktree_path(&entry.path, &prepared.recent_path));
         self.recent_projects.insert(
             0,
             gwt::RecentProjectEntry {
                 path: prepared.recent_path.clone(),
-                title: gwt::project_title_from_path(&prepared.recent_path),
+                title,
                 kind: prepared.target.kind,
             },
         );
@@ -743,7 +752,7 @@ impl AppRuntime {
         {
             self.pending_project_navigation = None;
         }
-        let mut events = vec![self.workspace_state_broadcast_process_free()];
+        let mut events = vec![self.workspace_state_broadcast()];
         if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
             events.push(event);
         }
