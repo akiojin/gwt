@@ -26,7 +26,6 @@ pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
 pub mod forward;
-pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
 pub mod pm_loop_stop_check;
@@ -89,7 +88,6 @@ pub enum HookKind {
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
     SkillRegisterSpecStopCheck,
-    GwtSelfImprovementStop,
 }
 
 impl HookKind {
@@ -112,7 +110,6 @@ impl HookKind {
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
             "skill-register-spec-stop-check" => Some(Self::SkillRegisterSpecStopCheck),
-            "gwt-self-improvement-stop" => Some(Self::GwtSelfImprovementStop),
             _ => None,
         }
     }
@@ -256,9 +253,9 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, gwt_self_improvement_stop, provider_event,
-        skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
-        skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
+        block_bash_policy, event_dispatcher, provider_event, skill_build_spec_stop_check,
+        skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+        workflow_policy, HookKind, HookOutput,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -452,7 +449,12 @@ pub fn run_daemon_hook<E: CliEnv>(
         }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
-            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_discussion_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
             Ok(emit_hook_output(env, &output))
         }
         HookKind::SkillPlanSpecStopCheck => {
@@ -483,10 +485,6 @@ pub fn run_daemon_hook<E: CliEnv>(
                 &stdin,
                 current_session.as_deref(),
             );
-            Ok(emit_hook_output(env, &output))
-        }
-        HookKind::GwtSelfImprovementStop => {
-            let output = gwt_self_improvement_stop::handle_with_input(env, &stdin);
             Ok(emit_hook_output(env, &output))
         }
     }

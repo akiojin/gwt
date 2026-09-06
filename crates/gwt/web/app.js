@@ -24,7 +24,6 @@
         formatLifecycleStateLabel,
         mergeActiveWorkProjectionPatch,
       } from "/workspace-kanban-surface.js";
-      import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
         createAgentKanbanSurface,
@@ -473,9 +472,6 @@
         active_tab_id: null,
         recent_projects: [],
       };
-      let improvementCandidates = [];
-      let improvementCandidatesRevision = 0;
-      let improvementCandidatesProjectRoot = null;
       let renderedProjectTabsKey = "";
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
@@ -542,10 +538,6 @@
         }
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
-        if (windows.some((windowData) => presetSurface(windowData?.preset) === "improvement")) {
-          appendRenderKeyPart(parts, "improvement_candidates_revision");
-          appendRenderKeyPart(parts, improvementCandidatesRevision);
-        }
         for (const windowData of windows) {
           const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
@@ -893,9 +885,6 @@
         }
         if (preset === "work" || preset === "workspace") {
           return "work";
-        }
-        if (preset === "improvement" || preset === "improvements") {
-          return "improvement";
         }
         if (preset === "console") {
           return "console";
@@ -1352,14 +1341,6 @@
         );
       }
 
-      function improvementEventMatchesActiveProject(event) {
-        const eventProjectRoot = event?.project_root;
-        if (!eventProjectRoot) {
-          return true;
-        }
-        return eventProjectRoot === activeProjectTab()?.project_root;
-      }
-
       function activeWorkspace() {
         return activeProjectTab()?.workspace || emptyWorkspace();
       }
@@ -1748,15 +1729,6 @@
               active_tab_id: null,
               recent_projects: [],
             };
-            const activeProjectRoot = activeProjectTab()?.project_root || null;
-            if (
-              improvementCandidatesProjectRoot &&
-              improvementCandidatesProjectRoot !== activeProjectRoot
-            ) {
-              improvementCandidates = [];
-              improvementCandidatesRevision += 1;
-              improvementCandidatesProjectRoot = null;
-            }
             setVersionState(appState.app_version, versionState.latest);
             const nextProjectTabsKey = projectTabsRenderKey(appState);
             if (renderedProjectTabsKey !== nextProjectTabsKey) {
@@ -4895,11 +4867,6 @@
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
       });
-      const improvementInboxSurface = createImprovementInboxSurface({
-        createNode,
-        send,
-      });
-
       // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (wizard state,
       // interaction guard, field builders, state transitions,
       // renderLaunchWizard, chrome listeners, Esc-close path) moved to
@@ -5093,7 +5060,6 @@
           "surface-knowledge",
           "surface-index",
           "surface-work",
-          "surface-improvement",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -5205,14 +5171,6 @@
           return;
         }
 
-        if (surface === "improvement") {
-          improvementInboxSurface.mount(body, {
-            ...windowData,
-            improvement_candidates: improvementCandidates,
-          });
-          return;
-        }
-
         if (surface === "console") {
           // SPEC-2809 — Console window mount: register a controller for
           // this windowId and attach its DOM to the window body. The
@@ -5274,18 +5232,6 @@
             </div>
           `;
           scroll.appendChild(section);
-        }
-      }
-
-      function refreshMountedImprovementInboxWindows() {
-        for (const element of document.querySelectorAll(
-          '.workspace-window[data-preset="improvement"]',
-        )) {
-          const body = element.querySelector(".window-body");
-          if (!body) continue;
-          improvementInboxSurface.mount(body, {
-            improvement_candidates: improvementCandidates,
-          });
         }
       }
 
@@ -6028,26 +5974,6 @@
           // in the project shell surface.
           case "window_list":
             applyWindowListEvent(event);
-            break;
-          case "improvement_candidates":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
-            improvementCandidatesProjectRoot = event.project_root || null;
-            improvementCandidatesRevision += 1;
-            {
-              const workspace = activeWorkspace() || emptyWorkspace();
-              renderWorkspace(workspace);
-              refreshMountedImprovementInboxWindows();
-            }
-            break;
-          case "improvement_action_result":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            // Candidate list refresh is delivered as a separate
-            // improvement_candidates snapshot; no extra UI state is needed here.
-            break;
-          case "improvement_action_error":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            window.alert(`Improvement action error: ${event.message}`);
             break;
           case "provider_usage":
             applyProviderUsageUi({
