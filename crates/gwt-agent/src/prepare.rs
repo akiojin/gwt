@@ -1241,6 +1241,21 @@ where
     if config.agent_id.builtin_descriptor().is_none() {
         return Ok(HostRunnerHealthReport::default());
     }
+    // Issue #3972: the package runner stored on the config was resolved from
+    // the gwt process PATH before the launch profile existed. Bind it to the
+    // launch environment before anything probes or spawns it, so the runner
+    // that is health-checked is the runner this launch will use.
+    if command_matches_runner(&config.command, "bunx")
+        || command_matches_runner(&config.command, "npx")
+    {
+        if let Some(rebound) = crate::launch::rebind_package_runner_to_effective_env(
+            &config.command,
+            &config.env_vars,
+            config.working_dir.as_deref(),
+        ) {
+            config.command = rebound;
+        }
+    }
     if is_targeted_windows_host_package_launch(config) && config.tool_runtime_provenance.is_some() {
         return resolve_targeted_windows_host_package_plan(
             config,
@@ -6411,6 +6426,65 @@ mod tests {
 
         assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("package-runner probe failed"));
+    }
+
+    /// Issue #3972: `AgentLaunchBuilder::build` picks `bunx`/`npx` before the
+    /// launch profile is merged, so it resolves them from the gwt process
+    /// `PATH` and stores an absolute host executable. Health-checking that
+    /// stored command spawns the host runner no matter what the launch `PATH`
+    /// says, which is why a test that pins fixture runners still reached the
+    /// machine's real `npx` and missed the five-second probe budget on a loaded
+    /// host. The health check must re-bind the runner to the launch `PATH`
+    /// before probing it.
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_health_check_rebinds_the_command_to_the_launch_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let host_bin = temp.path().join("host-bin");
+        let launch_bin = temp.path().join("launch-bin");
+        for dir in [&host_bin, &launch_bin] {
+            fs::create_dir_all(dir).expect("create runner bin dir");
+            let runner = dir.join("npx");
+            fs::write(&runner, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write fixture npx");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
+                .expect("chmod fixture npx");
+        }
+        let host_npx = host_bin.join("npx").display().to_string();
+        let launch_npx = launch_bin.join("npx").display().to_string();
+
+        let mut config = sample_versioned_launch_config(temp.path());
+        config.command = host_npx.clone();
+        config.args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+        ];
+        config
+            .env_vars
+            .insert("PATH".to_string(), launch_bin.display().to_string());
+
+        let mut probed = Vec::new();
+        resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            host_npx.clone(),
+            None,
+            |kind, command, _args, _env, _remove_env, _cwd| {
+                probed.push((kind, command.to_string()));
+                HostRunnerProbeOutcome::success()
+            },
+            |_candidate| panic!("a healthy runner must not repair the npx cache"),
+        )
+        .expect("package runner health check");
+
+        assert!(
+            probed.iter().all(|(_, command)| command == &launch_npx),
+            "every probe must run the runner the launch PATH selects, got {probed:?}"
+        );
+        assert_eq!(
+            config.command, launch_npx,
+            "the launch must spawn the runner it health-checked"
+        );
     }
 
     #[cfg(unix)]
