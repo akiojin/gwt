@@ -514,7 +514,6 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
@@ -556,9 +555,6 @@ impl AppRuntime {
             .is_some_and(|wizard| wizard.tab_id == tab_id);
         if wizard_closed {
             self.launch_wizard = None;
-        }
-        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
-            self.schedule_active_improvement_candidates_refresh();
         }
         let _ = self.persist();
 
