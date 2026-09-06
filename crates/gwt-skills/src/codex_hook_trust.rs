@@ -118,6 +118,17 @@ fn scan_codex_hook_trust_from_path(
         return Ok(CodexHookTrustScan::default());
     }
 
+    // #3567: what the generator was allowed to write into THIS file is not
+    // always the binary the caller resolved — a git-tracked config keeps the
+    // canonical portable fallback, and a foreign checkout's build output is
+    // never pinned here. Trust has to expect the same value, or gwt vouches for
+    // nothing and Codex stops the launch on `Hooks need review`.
+    let sanitized_expected_gwt_bin = expected_gwt_bin.map_or_else(
+        || crate::settings_local::managed_hook_bin_for_config_path(hooks_path),
+        |bin| crate::settings_local::sanitize_hook_bin_for_config_path(hooks_path, bin),
+    );
+    let expected_gwt_bin = Some(sanitized_expected_gwt_bin.as_str());
+
     let key_source = fs::canonicalize(hooks_path)?;
     let content = fs::read_to_string(hooks_path)?;
     let root: Value = serde_json::from_str(&content).map_err(|err| {
@@ -609,6 +620,138 @@ mod tests {
         assert!(entries.iter().any(|entry| entry
             .key
             .starts_with(&worktree_hooks_path.display().to_string())));
+    }
+
+    /// #3567: a git-tracked `.codex/hooks.json` carries the canonical portable
+    /// fallback, not the running binary's absolute path. Trust registration must
+    /// expect the same thing, or every launch into a repo that commits its hook
+    /// config stops on `Hooks need review`.
+    #[test]
+    fn tracked_hooks_are_trusted_against_the_canonical_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let codex_dir = repo.join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": codex_event_hook_commands_with_bin(
+                                    crate::CANONICAL_HOOK_BIN,
+                                    event,
+                                )
+                                .into_iter()
+                                .next()
+                                .unwrap(),
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]),
+            );
+        }
+        fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "-A"],
+            vec!["commit", "-qm", "hooks"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(repo)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let entries = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            repo,
+            Some("/Applications/GWT.app/Contents/MacOS/gwtd"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries.len(),
+            5,
+            "a tracked hook config must be trusted against the canonical fallback it carries"
+        );
+    }
+
+    /// #3567: when the resolved binary is a foreign checkout's build output, the
+    /// generator writes the canonical fallback instead of pinning it. Trust must
+    /// apply the same reduction to the caller's expected binary — this is the
+    /// shape a developer running `target/debug/gwtd` against any other worktree
+    /// hits on every launch.
+    #[test]
+    fn foreign_build_output_hooks_are_trusted_against_the_canonical_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let foreign_build_output = "/repo/work/issue-1/target/debug/gwtd";
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": codex_event_hook_commands_with_bin(
+                                    crate::CANONICAL_HOOK_BIN,
+                                    event,
+                                )
+                                .into_iter()
+                                .next()
+                                .unwrap(),
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]),
+            );
+        }
+        fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            dir.path(),
+            Some(foreign_build_output),
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries.len(),
+            5,
+            "trust must reduce a foreign build output the same way generation did"
+        );
     }
 
     #[test]
