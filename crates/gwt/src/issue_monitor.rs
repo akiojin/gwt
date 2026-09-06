@@ -15111,6 +15111,98 @@ mod tests {
         );
     }
 
+    /// Issue #3883 AC-6: the reported recovery, at the reported scale — six
+    /// running agent windows against `max_active: 3`, brought back into
+    /// agreement without killing any of them.
+    ///
+    /// Sized at six deliberately. The restore truncates to the cap, so a
+    /// one-over-cap fixture leaves a single orphan and never exercises the case
+    /// the operator actually faces: *half* the running agents untracked, with
+    /// the monitor reporting three free slots it would spend on Issues that are
+    /// already being worked. `readopt_live_launch_bindings` is the PM-surface
+    /// half — additive only, so it can run against a project mid-flight.
+    #[test]
+    fn six_running_agents_against_a_cap_of_three_are_all_readopted_without_closing_one() {
+        let cohort = [
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+            (3857, "project-a::agent-5"),
+            (3860, "project-a::agent-6"),
+            (3864, "project-a::agent-7"),
+        ];
+        let mut monitor = launched_cohort(&cohort);
+        assert_eq!(monitor.active_count(), 6);
+
+        // The operator's cap is three; the six launches reached disk anyway,
+        // which is exactly the reported 22:47:53 state.
+        monitor.set_max_active_agents(3);
+        let restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(
+            restored.active_count(),
+            3,
+            "#3627: restore truncates slot accounting to the cap"
+        );
+        assert_eq!(
+            restored.prefs().launch_bindings.len(),
+            6,
+            "but all six running windows stay attributable"
+        );
+        let orphaned = cohort
+            .iter()
+            .filter(|(issue_number, _)| !restored.active_issue_numbers().contains(issue_number))
+            .count();
+        assert_eq!(
+            orphaned, 3,
+            "three of the six are running untracked — the state the PM has to recover from"
+        );
+
+        let mut recovered = restored;
+        let readopted = recovered.readopt_live_launch_bindings(&live_windows(
+            &cohort
+                .iter()
+                .map(|(_, window_id)| *window_id)
+                .collect::<Vec<_>>(),
+        ));
+
+        assert_eq!(
+            readopted.len(),
+            3,
+            "every untracked-but-running window comes back, and only those"
+        );
+        assert_eq!(recovered.active_count(), 6);
+        for (issue_number, window_id) in cohort {
+            assert_eq!(
+                recovered.launched_window_id(issue_number).as_deref(),
+                Some(window_id),
+                "issue #{issue_number} must point back at its own live window"
+            );
+        }
+        assert!(
+            recovered
+                .next_launch_request("2026-09-01T22:47:53Z")
+                .is_none(),
+            "AC-6: and the monitor stops reporting capacity it does not have"
+        );
+        assert_eq!(
+            recovered.prefs().launched_issues.len(),
+            6,
+            "the recovery is durable, so the next scan does not redo it"
+        );
+        assert!(
+            recovered
+                .readopt_live_launch_bindings(&live_windows(
+                    &cohort
+                        .iter()
+                        .map(|(_, window_id)| *window_id)
+                        .collect::<Vec<_>>(),
+                ))
+                .is_empty(),
+            "and it is idempotent — a second pass changes nothing"
+        );
+    }
+
     /// Issue #3627: a launch whose agent window is gone from the owning tab's
     /// canvas no longer holds a slot.
     ///
