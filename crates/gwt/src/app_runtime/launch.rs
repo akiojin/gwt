@@ -1973,22 +1973,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
     WindowProcessStatus::Running
 }
 
-/// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this tab.
-/// A canvas Issue window is preferred over one that is itself contained, and creation
-/// order breaks ties so repeated launches land in the same pane.
-fn issue_preview_host_window_id(workspace: &gwt::WindowCanvasState) -> Option<String> {
-    let windows = &workspace.persisted().windows;
-    windows
-        .iter()
-        .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
-        .or_else(|| {
-            windows
-                .iter()
-                .find(|window| window.preset.hosts_issue_preview())
-        })
-        .map(|window| window.id.clone())
-}
-
 #[derive(Debug, Clone)]
 enum AgentWindowPlacement {
     Centered(WindowGeometry),
@@ -4381,6 +4365,11 @@ impl AppRuntime {
         let _ = tab
             .workspace
             .set_agent_id(&window.id, config.agent_id.command().to_string());
+        // SPEC-3885 FR-011: an Issue-originated launch produces an Issue window, not a
+        // bare terminal, wherever it is drawn. FR-013 leaves a non-Issue session `None`.
+        let _ = tab
+            .workspace
+            .set_linked_issue_number(&window.id, config.linked_issue_number);
         if let Some(target) = agent_kanban_target.as_ref() {
             let _ = tab.workspace.place_agent_window_in_kanban(
                 &window.id,
@@ -4393,7 +4382,7 @@ impl AppRuntime {
             // window instead of opening a canvas window. FR-003 keeps every manual
             // launch (Start Work / Launch Agent) on the canvas, and a tab with no
             // Issue window keeps the canvas fallback so the agent is never invisible.
-            if let Some(issue_window_id) = issue_preview_host_window_id(&tab.workspace) {
+            if let Some(issue_window_id) = tab.workspace.issue_preview_host_window_id() {
                 let _ = tab.workspace.place_agent_window_in_issue_preview(
                     &window.id,
                     &issue_window_id,
