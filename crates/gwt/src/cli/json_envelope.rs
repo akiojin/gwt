@@ -210,6 +210,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
+        "branch.prune_merged" | "branch.prune-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "branch.prune_merged",
+            )?;
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                // Deleting remote branches is not reversible from here, so an
+                // unqualified call only reports candidates (Issue #3970 AC-3).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
@@ -337,6 +351,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 project_root: optional_path(params, "project_root")?,
             })
         }
+        "issue.monitor.reconcile" => CliCommand::Issue(IssueCommand::MonitorReconcile {
+            project_root: optional_path(params, "project_root")?,
+        }),
         "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
                 project_root: optional_path(params, "project_root")?,
@@ -1806,6 +1823,52 @@ mod tests {
         }
     }
 
+    /// Issue #3970 AC-3: an unqualified `branch.prune_merged` only reports.
+    #[test]
+    fn branch_prune_merged_defaults_to_a_dry_run() {
+        match ok("branch.prune_merged", json!({})) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_accepts_apply_base_and_branch_filter() {
+        match ok(
+            "branch.prune-merged",
+            json!({
+                "dry_run": false,
+                "base": "develop",
+                "branches": ["work/issue-1", "work/issue-2"],
+            }),
+        ) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("develop"));
+                assert_eq!(branches, vec!["work/issue-1", "work/issue-2"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_rejects_an_unknown_param() {
+        let error = err("branch.prune_merged", json!({ "dryrun": false }));
+        assert!(format!("{error}").contains("dryrun"), "{error}");
+    }
+
     #[test]
     fn workspace_update_maps_purpose_to_title_summary() {
         let _guard = crate::env_test_lock()
@@ -2479,6 +2542,26 @@ mod tests {
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
         ));
+    }
+
+    /// Issue #3883 AC-6: the PM's recovery for launches that are still running
+    /// but no longer tracked. It takes no target and no reason because it
+    /// revokes nothing — it only re-adopts what the canvas already shows.
+    #[test]
+    fn issue_monitor_reconcile_parses_with_an_optional_project_scope() {
+        assert_eq!(
+            ok("issue.monitor.reconcile", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorReconcile { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.reconcile",
+                json!({"project_root": "/tmp/gwt-project"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorReconcile {
+                project_root: Some(std::path::PathBuf::from("/tmp/gwt-project")),
+            })
+        );
     }
 
     /// Issue #3923 AC-1: provider quota holds are listed and cleared through
