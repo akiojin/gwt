@@ -100,6 +100,75 @@ pub fn gwt_index_worktree_dir(repo: &RepoHash, worktree: &WorktreeHash) -> PathB
         .join(worktree.as_str())
 }
 
+/// Return the additive Phase 71 file-index root for `repo`.
+///
+/// This deliberately lives beside (rather than below) the legacy
+/// `worktrees/` tree so a v2 writer cannot be mistaken for an old per-worktree
+/// database by a mixed-version process.
+pub fn gwt_file_index_v2_root(repo: &RepoHash) -> PathBuf {
+    gwt_index_repo_dir(repo).join("file-index-v2")
+}
+
+fn checked_artifact_id(artifact_id: &str) -> Result<&str> {
+    let mut bytes = artifact_id.bytes();
+    let is_safe = artifact_id.len() <= 128
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !is_safe {
+        return Err(GwtError::Other(format!(
+            "unsafe file-index-v2 artifact id: {artifact_id:?}"
+        )));
+    }
+    Ok(artifact_id)
+}
+
+/// Return an immutable canonical Base generation directory.
+pub fn gwt_file_index_v2_base_dir(repo: &RepoHash, generation_id: &str) -> Result<PathBuf> {
+    Ok(gwt_file_index_v2_root(repo)
+        .join("bases")
+        .join(checked_artifact_id(generation_id)?))
+}
+
+/// Return the repo-scoped exact-input Embedding CAS directory.
+pub fn gwt_file_index_v2_cas_dir(repo: &RepoHash) -> PathBuf {
+    gwt_file_index_v2_root(repo).join("cas")
+}
+
+fn gwt_file_index_v2_worktree_dir(repo: &RepoHash, worktree: &WorktreeHash) -> PathBuf {
+    gwt_file_index_v2_root(repo)
+        .join("worktrees")
+        .join(worktree.as_str())
+}
+
+/// Return an immutable worktree Overlay generation directory.
+pub fn gwt_file_index_v2_overlay_dir(
+    repo: &RepoHash,
+    worktree: &WorktreeHash,
+    generation_id: &str,
+) -> Result<PathBuf> {
+    Ok(gwt_file_index_v2_worktree_dir(repo, worktree)
+        .join("overlays")
+        .join(checked_artifact_id(generation_id)?))
+}
+
+/// Return an immutable Worktree View descriptor directory.
+pub fn gwt_file_index_v2_view_dir(
+    repo: &RepoHash,
+    worktree: &WorktreeHash,
+    view_id: &str,
+) -> Result<PathBuf> {
+    Ok(gwt_file_index_v2_worktree_dir(repo, worktree)
+        .join("views")
+        .join(checked_artifact_id(view_id)?))
+}
+
+/// Return the only mutable v2 publication pointer for a worktree.
+pub fn gwt_file_index_v2_head_path(repo: &RepoHash, worktree: &WorktreeHash) -> PathBuf {
+    gwt_file_index_v2_worktree_dir(repo, worktree).join("head.json")
+}
+
 /// Return the on-disk DB directory for the given (repo, worktree, scope) tuple.
 ///
 /// Returns `Err` for worktree-scoped scopes when `worktree` is `None`. The

@@ -11,8 +11,8 @@ use super::{
     action_obligation_stop_check, autonomous_question_guard, board_reminder, diagnostics,
     execution_control_stop_check, pm_loop_stop_check, skill_build_spec_stop_check,
     skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
-    work_event_settlement_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
-    IntentBoundaryEvent,
+    work_event_settlement_stop_check, workflow_policy, workspace_identity, GwtSessionId,
+    HookAgentSessionId, HookError, HookOutput, IntentBoundaryEvent, RawHookEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -99,9 +99,15 @@ fn handle_user_prompt_submit(
     input: &str,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
+    let pm_refresh_context = pm_loop_stop_check::handle_user_prompt_submit(worktree_root)?;
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
+    run_value(event, "autonomous-answer-receipt", || {
+        if let Err(error) = handle_autonomous_answer_receipt(worktree_root, input) {
+            tracing::warn!(%error, "autonomous answer receipt was rejected");
+        }
+    });
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward(input)
     })?;
@@ -122,13 +128,14 @@ fn handle_user_prompt_submit(
     run_value(event, "action-obligation-record", || {
         action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
-    // SPEC-3431 FR-012: user contact re-arms the PM's resident-loop budget.
-    run_value(event, "pm-loop-reset", || {
-        pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
-    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::UserPromptSubmit,
+        pm_refresh_context,
+    );
     let output = append_additional_context(
         output,
         IntentBoundaryEvent::UserPromptSubmit,
@@ -142,6 +149,122 @@ fn handle_user_prompt_submit(
         IntentBoundaryEvent::UserPromptSubmit,
         pending_goal,
     ))
+}
+
+/// Finalize one autonomous answer only when the exact managed Session and
+/// native conversation that own the protected prompt observe UserPromptSubmit.
+fn handle_autonomous_answer_receipt(worktree_root: &Path, input: &str) -> Result<bool, String> {
+    let Some(raw) = RawHookEvent::read_from_str(input).map_err(|error| error.to_string())? else {
+        return Ok(false);
+    };
+    let Some(prompt) = raw.prompt() else {
+        return Ok(false);
+    };
+    let Some(marker) =
+        crate::autonomous_handoff::parse_protected_autonomous_handoff_answer_prompt(prompt)
+    else {
+        return Ok(false);
+    };
+    let Some(current_gwt_session_id) = GwtSessionId::from_env() else {
+        return Ok(false);
+    };
+    let sessions_dir = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .map(std::path::PathBuf::from)
+        .and_then(|path| gwt_agent::sessions_dir_from_runtime_path(&path))
+        .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
+    let current = gwt_agent::Session::load(
+        &sessions_dir.join(format!("{}.toml", current_gwt_session_id.as_str())),
+    )
+    .map_err(|error| format!("current Session receipt identity is unavailable: {error}"))?;
+    if current.id != current_gwt_session_id.as_str() {
+        return Ok(false);
+    }
+    let source =
+        gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", marker.session_id)))
+            .map_err(|error| format!("asking Session receipt identity is unavailable: {error}"))?;
+    let provider_session_id = match super::resolve_hook_agent_session_id(Some(&current), Some(&raw))
+    {
+        HookAgentSessionId::Provided(session_id) => session_id.into_string(),
+        HookAgentSessionId::MissingRequiredForCodex
+            if current.agent_id == gwt_agent::AgentId::Codex =>
+        {
+            let Some(session_id) = current.exact_resume_session_id() else {
+                return Ok(false);
+            };
+            session_id.to_string()
+        }
+        HookAgentSessionId::MissingRequiredForCodex | HookAgentSessionId::MissingOptional => {
+            return Ok(false);
+        }
+    };
+    let Some(current_native_id) = current.exact_resume_session_id() else {
+        return Ok(false);
+    };
+    let Some(source_native_id) = source.exact_resume_session_id() else {
+        return Ok(false);
+    };
+    let current_project_state_root =
+        match crate::agent_project_state::validated_project_state_root_for_session_recovery(
+            &current,
+        ) {
+            Ok(root) => root,
+            Err(_) => return Ok(false),
+        };
+    let source_project_state_root =
+        match crate::agent_project_state::validated_project_state_root_for_session_recovery(&source)
+        {
+            Ok(root) => root,
+            Err(_) => return Ok(false),
+        };
+    let issue_number = std::env::var(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let resolved_worktree = gwt_core::paths::resolve_current_worktree_root(worktree_root);
+    if current.agent_id != source.agent_id
+        || current_native_id != source_native_id
+        || provider_session_id != current_native_id
+        || current.linked_issue_number.is_none()
+        || current.linked_issue_number != source.linked_issue_number
+        || current.linked_issue_number != issue_number
+        || current.repo_hash.is_none()
+        || current.repo_hash != source.repo_hash
+        || !same_receipt_path(&current.worktree_path, &resolved_worktree)
+        || !same_receipt_path(&source.worktree_path, &resolved_worktree)
+        || !same_receipt_path(&current_project_state_root, &source_project_state_root)
+    {
+        return Ok(false);
+    }
+    let prefs_path =
+        crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&resolved_worktree);
+    let receipt_identity = crate::autonomous_handoff::AutonomousHandoffReceiptIdentity {
+        gwt_session_id: current.id.clone(),
+        native_session_id: current_native_id.to_string(),
+        provider: current.agent_id.to_string(),
+        issue_number: current
+            .linked_issue_number
+            .expect("validated linked Issue identity"),
+        repo_hash: current
+            .repo_hash
+            .clone()
+            .expect("validated repository identity"),
+        project_state_root: current_project_state_root.to_string_lossy().into_owned(),
+    };
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    crate::issue_monitor::acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
+        &prefs_path,
+        &source.id,
+        &receipt_identity,
+        prompt,
+        &now,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn same_receipt_path(left: &Path, right: &Path) -> bool {
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
@@ -206,11 +329,19 @@ fn handle_stop(
         // the loop continuation must not be shadowed by one of them.
         (
             "pm-loop-stop-check",
-            Box::new(|| pm_loop_stop_check::handle_with_input(worktree_root, input)),
+            Box::new(|| {
+                pm_loop_stop_check::handle_with_input(worktree_root, input, current_session)
+            }),
         ),
         (
             "skill-discussion-stop-check",
-            Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
+            Box::new(|| {
+                skill_discussion_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
         ),
         (
             "skill-plan-spec-stop-check",
@@ -398,6 +529,150 @@ mod tests {
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
+    }
+
+    /// Issue #3716: a physical launch/write is not an answer receipt. Only a
+    /// protected prompt observed by the exact native conversation may commit
+    /// delivered_at; a forged provider session id remains silent.
+    #[test]
+    fn grok_user_prompt_submit_receipts_the_exact_autonomous_answer() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("create repo");
+        init_git_repo(&worktree);
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/receipt-test.git",
+            ])
+            .current_dir(&worktree)
+            .status()
+            .expect("configure origin");
+        assert!(remote.success(), "configure origin failed");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+        let _autonomous_issue =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3716");
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let native_id = "01a0195c-fbd7-7352-8d29-da6f6f755016";
+        let mut source = Session::new(&worktree, "work/issue-3716", AgentId::GrokBuild);
+        source.id = "asking-gwt-session".to_string();
+        source.agent_session_id = Some(native_id.to_string());
+        source.linked_issue_number = Some(3716);
+        source.project_state_root = Some(worktree.clone());
+        source.repo_hash = Some(
+            gwt_core::repo_hash::detect_repo_hash(&worktree)
+                .expect("origin repo hash")
+                .as_str()
+                .to_string(),
+        );
+        source.save(&sessions_dir).expect("save asking Session");
+        let mut current = source.clone();
+        current.id = "resumed-gwt-session".to_string();
+        current.save(&sessions_dir).expect("save resumed Session");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &current.id);
+
+        let handoff = crate::autonomous_handoff::AutonomousQuestionHandoff::new(
+            "handoff-3716-receipt".to_string(),
+            &crate::autonomous_handoff::AutonomousExecutionContext {
+                issue_number: 3716,
+                session_id: source.id.clone(),
+            },
+            &current.agent_id.to_string(),
+            "ask_user_question",
+            crate::autonomous_handoff::ExtractedQuestion {
+                question: "Proceed with the release?".to_string(),
+                options: Vec::new(),
+            },
+            "2026-08-20T00:00:00Z",
+        );
+        let mut monitor = crate::issue_monitor::IssueMonitorState::with_prefs(
+            crate::issue_monitor::IssueMonitorConfig::default(),
+            crate::issue_monitor::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::issue_monitor::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.absorb_autonomous_handoffs(vec![handoff]);
+        monitor.apply_pending_autonomous_handoffs("2026-08-20T00:00:30Z");
+        assert!(monitor.answer_autonomous_handoff(
+            "handoff-3716-receipt",
+            "Proceed",
+            "2026-08-20T00:01:00Z",
+        ));
+        monitor.resume_answered_autonomous_handoffs("2026-08-20T00:01:30Z");
+        monitor.complete_active_launch(3716, "tab-1::agent-receipt");
+        let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+            .expect("seed handoff");
+        let prepared = crate::issue_monitor::prepare_autonomous_handoff_delivery_from_prefs(
+            &prefs_path,
+            3716,
+            "2026-08-20T00:02:00Z",
+        )
+        .expect("prepare answer")
+        .expect("pending handoff");
+        let crate::issue_monitor::AutonomousHandoffDeliveryPreparation::Ready(prepared) = prepared
+        else {
+            panic!("expected ready answer delivery");
+        };
+        let project_state_root =
+            crate::agent_project_state::validated_project_state_root_for_session_recovery(&current)
+                .expect("validated receipt Project State");
+        assert!(
+            crate::issue_monitor::bind_autonomous_handoff_delivery_target_from_prefs(
+                &prefs_path,
+                &prepared.handoff_id,
+                &prepared.session_id,
+                prepared.attempt,
+                &crate::autonomous_handoff::AutonomousHandoffDeliveryTarget {
+                    gwt_session_id: current.id.clone(),
+                    native_session_id: native_id.to_string(),
+                    provider: current.agent_id.to_string(),
+                    issue_number: 3716,
+                    repo_hash: current.repo_hash.clone().expect("repo hash"),
+                    project_state_root: project_state_root.to_string_lossy().into_owned(),
+                    window_id: "tab-1::agent-receipt".to_string(),
+                    materializer_id: "receipt-test-materializer".to_string(),
+                    materializer_pid: std::process::id(),
+                    materializer_started_at: crate::process::host_process_start_time(
+                        std::process::id(),
+                    )
+                    .expect("receipt test materializer start time"),
+                    delivery_id: None,
+                },
+            )
+            .expect("bind receipt target")
+        );
+
+        let forged = serde_json::json!({
+            "sessionId": "different-native-session",
+            "prompt": prepared.prompt,
+        })
+        .to_string();
+        assert!(!handle_autonomous_answer_receipt(&worktree, &forged).expect("forged receipt"));
+        let pending = crate::issue_monitor::load_issue_monitor_prefs(&prefs_path)
+            .expect("load pending receipt");
+        assert!(pending.autonomous_handoffs[0].delivered_at.is_none());
+
+        let receipt = serde_json::json!({
+            "sessionId": native_id,
+            "prompt": prepared.prompt,
+        })
+        .to_string();
+        assert!(handle_autonomous_answer_receipt(&worktree, &receipt).expect("exact receipt"));
+        let delivered = crate::issue_monitor::load_issue_monitor_prefs(&prefs_path)
+            .expect("load delivered receipt");
+        assert!(delivered.autonomous_handoffs[0].delivered_at.is_some());
     }
 
     /// Issue #3478 (AC-3): the question guard runs on PreToolUse, and it must
@@ -816,10 +1091,6 @@ mod tests {
                 "only the uniform obligation gate may block here: {reason}"
             );
         }
-        assert!(
-            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
-            "no auto-capture side effect may fire for the removed gate"
-        );
     }
 
     // SPEC-3248 P8a (T-108/T-116 subset): a launch-written Execution Control

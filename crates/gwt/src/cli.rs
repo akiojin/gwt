@@ -9,6 +9,7 @@ pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;
+pub(crate) mod branch;
 mod build;
 mod commands;
 pub mod daemon;
@@ -17,13 +18,10 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
-pub mod improvement;
-pub mod improvement_contract;
-mod improvement_owner;
-mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -45,16 +43,15 @@ mod title_summary_guard;
 pub mod tray;
 pub mod trusted_store;
 pub mod update;
+pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
 
-use std::{
-    io::{self},
-    path::PathBuf,
-};
+use std::{io, path::PathBuf};
 
+pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
@@ -63,7 +60,6 @@ pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
-pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
@@ -78,6 +74,10 @@ pub struct LinkedPrSummary {
     pub url: String,
     #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
     pub will_close_target: bool,
+    /// GitHub merge instant used to prove that an ordinary Issue has not
+    /// advanced since the closing work was delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -162,8 +162,9 @@ pub enum CliCommand {
     Pr(PrCommand),
     Actions(ActionsCommand),
     Board(BoardCommand),
+    /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
+    Branch(branch::BranchCommand),
     Hook(HookCommand),
-    Improvement(ImprovementCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
     Intake(intake_outcome::IntakeCommand),
@@ -179,6 +180,8 @@ pub enum CliCommand {
     Update(UpdateCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
+    /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
+    VerifyLease(verification_lease::VerificationLeaseCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
@@ -189,6 +192,7 @@ pub enum CliCommand {
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
+    GithubBudget(github_budget::GithubBudgetCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -204,6 +208,9 @@ pub enum DaemonCommand {
     /// fan-out pipeline.
     Subscribe {
         channels: Vec<String>,
+        /// SPEC-3431 FR-141: optional explicit project daemon authority for the
+        /// event stream; `None` preserves the legacy cwd-derived scope.
+        project_root: Option<PathBuf>,
         /// SPEC-3431 FR-025: bound the read so an unattended caller can run
         /// subscribe → reconcile in a loop without an external supervisor.
         timeout_seconds: Option<u64>,
@@ -262,6 +269,19 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
+    /// fold project stores that a pre-#3466 build split apart back into the
+    /// repository's canonical store.
+    ///
+    /// The dry run reports the plan and issues its `manifest_hash`; applying
+    /// requires that hash back *and* the recorded dry run that issued it, so a
+    /// store nobody reviewed can never be moved. `project_root` names the
+    /// project explicitly; authority still comes from the ambient Session.
+    StoreConsolidate {
+        project_root: Option<PathBuf>,
+        dry_run: bool,
+        manifest_hash: Option<String>,
+    },
     /// Issue #3448: settle incomplete Works whose owner Issue is already
     /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
     /// reports the plan without emitting close events. `project_root` targets
@@ -272,15 +292,6 @@ pub enum WorkspaceCommand {
         ids: Vec<String>,
         project_root: Option<String>,
     },
-}
-
-/// SPEC-1942 command model for `actions.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionsCommand {
-    /// `actions.logs`.
-    Logs { run_id: u64 },
-    /// `actions.job_logs`.
-    JobLogs { job_id: u64 },
 }
 
 /// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.
@@ -627,7 +638,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
-        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
+        CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
@@ -635,6 +646,8 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
+        CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
+        CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
@@ -788,6 +801,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -856,6 +870,7 @@ mod tests {
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
             will_close_target: true,
+            merged_at: None,
         }];
 
         assert!(

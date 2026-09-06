@@ -1,10 +1,11 @@
 use std::{
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
 use crate::cli::gwtd_resolver::default_installed_candidates;
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
+use fs2::FileExt;
 use gwt_agent::AgentId;
 use gwt_skills::pm_guidance::{generate_pm_guidance_for_claude, generate_pm_guidance_for_codex};
 use gwt_skills::{
@@ -27,6 +28,32 @@ use gwt_skills::{
 /// Codex version it is actually about to run.
 pub const MANAGED_CODEX_HOOK_DISCOVERY_MODE: CodexHookDiscoveryMode = CodexHookDiscoveryMode::Both;
 
+fn with_managed_asset_lock<T>(
+    worktree: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let identity_root = gwt_git::worktree::main_worktree_root(worktree).unwrap_or_else(|_| {
+        dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf())
+    });
+    let identity = gwt_core::repo_hash::compute_path_hash(&identity_root);
+    let lock_dir = gwt_core::paths::gwt_home().join("locks/managed-assets");
+    fs::create_dir_all(&lock_dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_dir.join(format!("{identity}.lock")))?;
+    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    let result = operation();
+    let unlock = FileExt::unlock(&lock);
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 /// Every `.codex/hooks.json` gwt owns for `worktree`: the worktree-local copy
 /// (read by Codex before 0.131.0-alpha.21) and the workspace-home copy (read by
 /// newer Codex). Deduplicated when both resolve to the same file.
@@ -34,18 +61,543 @@ pub fn managed_codex_hook_paths(worktree: &Path) -> Vec<PathBuf> {
     gwt_skills::codex_hooks_paths_for_codex_discovery(worktree, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
 }
 
+/// Whether a present worktree-local merged hook config contains only
+/// gwt-generated content. Callers may discard such a file at an explicit
+/// lifecycle boundary, but must keep deletions, symlinks/reparse points, and
+/// any config containing user-owned keys or hooks.
+pub fn managed_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
+    if entry != ".claude/settings.local.json" && entry != ".codex/hooks.json" {
+        return false;
+    }
+    let path = worktree.join(entry);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    !gwt_skills::managed_hook_config_has_user_content(&path)
+}
+
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
-    crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
-    crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
-    materialize_managed_gwt_assets_for_targets(
-        worktree,
-        &ManagedAssetTarget::ALL,
-        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
-        worktree_is_ephemeral(worktree),
-    )?;
-    update_git_exclude(worktree).map_err(|error| {
-        io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+    with_managed_asset_lock(worktree, || {
+        crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
+        crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
+        materialize_managed_gwt_assets_for_targets(
+            worktree,
+            &ManagedAssetTarget::ALL,
+            MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+            worktree_is_ephemeral(worktree),
+        )?;
+        update_git_exclude(worktree).map_err(|error| {
+            io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+        })?;
+        Ok(())
+    })
+}
+
+/// Refresh the resident PM's own managed assets without mutating the linked
+/// main checkout's workspace-home Codex hooks. Launch materialization owns
+/// provider-specific workspace-home discovery; safe-boundary refreshes are
+/// confined to the canonical PM checkout.
+pub fn refresh_managed_gwt_assets_for_pm_worktree(worktree: &Path) -> io::Result<()> {
+    if !crate::pm_registry::is_pm_worktree(worktree) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a canonical PM worktree: {}", worktree.display()),
+        ));
+    }
+    with_managed_asset_lock(worktree, || {
+        let snapshot = PmManagedAssetSnapshot::capture(worktree)?;
+        let refresh = (|| {
+            materialize_managed_gwt_assets_for_targets(
+                worktree,
+                &ManagedAssetTarget::ALL,
+                CodexHookDiscoveryMode::WorktreeLocal,
+                false,
+            )?;
+            update_git_exclude(worktree).map_err(|error| {
+                io::Error::other(format!("failed to update PM managed excludes: {error}"))
+            })
+        })();
+        match refresh {
+            Ok(()) => {
+                snapshot.discard();
+                crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
+                crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
+                Ok(())
+            }
+            Err(error) => match snapshot.restore() {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(io::Error::other(format!(
+                    "{error}; restoring prior PM managed assets also failed: {restore_error}"
+                ))),
+            },
+        }
+    })
+}
+
+const PM_MANAGED_ASSET_TRANSACTION_ROOTS: &[&str] = &[
+    ".claude",
+    ".codex",
+    ".gwt/opencode",
+    ".gwt/openclaw",
+    ".gwt/hermes",
+];
+
+struct PmManagedAssetSnapshot {
+    entries: Vec<PmManagedAssetSnapshotEntry>,
+    gwt_parent: PathBuf,
+    gwt_parent_existed: bool,
+    backup_root: PathBuf,
+}
+
+struct PmManagedAssetSnapshotEntry {
+    target: PathBuf,
+    backup: PathBuf,
+    existed: bool,
+}
+
+impl PmManagedAssetSnapshot {
+    fn capture(worktree: &Path) -> io::Result<Self> {
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| io::Error::other("canonical PM worktree has no project-state root"))?
+            .join("project-state");
+        ensure_real_pm_managed_asset_directory(&project_state)?;
+        let gwt_parent = worktree.join(".gwt");
+        let gwt_parent_existed = pm_managed_asset_node_exists(&gwt_parent)?;
+        if gwt_parent_existed {
+            let metadata = fs::symlink_metadata(&gwt_parent)?;
+            reject_pm_managed_asset_indirection(&gwt_parent, &metadata)?;
+            if !metadata.file_type().is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "PM managed provider-home parent is not a directory: {}",
+                        gwt_parent.display()
+                    ),
+                ));
+            }
+        }
+        let mut targets = PM_MANAGED_ASSET_TRANSACTION_ROOTS
+            .iter()
+            .map(|relative| worktree.join(relative))
+            .collect::<Vec<_>>();
+        targets.push(resolve_git_exclude_path(worktree)?);
+        let exclude_backup = unique_pm_managed_asset_sibling(
+            targets
+                .last()
+                .expect("Git exclude is always appended to the transaction targets"),
+            "backup",
+        )?;
+        let target_presence = targets
+            .iter()
+            .map(|target| pm_managed_asset_node_exists(target))
+            .collect::<io::Result<Vec<_>>>()?;
+        let backup_parent = project_state.join("pm-managed-assets-backups");
+        ensure_real_pm_managed_asset_directory(&backup_parent)?;
+        let backup_root =
+            backup_parent.join(format!("{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        fs::create_dir(&backup_root)?;
+        let mut entries: Vec<PmManagedAssetSnapshotEntry> = Vec::with_capacity(targets.len());
+        for (index, (target, existed)) in targets.into_iter().zip(target_presence).enumerate() {
+            let backup = if index < PM_MANAGED_ASSET_TRANSACTION_ROOTS.len() {
+                backup_root.join(index.to_string())
+            } else {
+                exclude_backup.clone()
+            };
+            if existed {
+                if let Err(error) = copy_pm_managed_asset_node(&target, &backup) {
+                    let mut cleanup_failures = Vec::new();
+                    if let Err(cleanup_error) = remove_pm_managed_asset_node(&backup) {
+                        cleanup_failures.push(format!("{}: {cleanup_error}", backup.display()));
+                    }
+                    for captured in &entries {
+                        if let Err(cleanup_error) = remove_pm_managed_asset_node(&captured.backup) {
+                            cleanup_failures
+                                .push(format!("{}: {cleanup_error}", captured.backup.display()));
+                        }
+                    }
+                    if cleanup_failures.is_empty() {
+                        if let Err(cleanup_error) = fs::remove_dir(&backup_root) {
+                            cleanup_failures
+                                .push(format!("{}: {cleanup_error}", backup_root.display()));
+                        }
+                    }
+                    if !cleanup_failures.is_empty() {
+                        return Err(io::Error::other(format!(
+                            "{error}; incomplete PM managed asset capture cleanup retained recovery data under {}: {}",
+                            backup_root.display(), cleanup_failures.join("; ")
+                        )));
+                    }
+                    return Err(error);
+                }
+            }
+            entries.push(PmManagedAssetSnapshotEntry {
+                target,
+                backup,
+                existed,
+            });
+        }
+        Ok(Self {
+            entries,
+            gwt_parent,
+            gwt_parent_existed,
+            backup_root,
+        })
+    }
+
+    fn restore(self) -> io::Result<()> {
+        let mut failures = Vec::new();
+        for entry in &self.entries {
+            let quarantine = match unique_pm_managed_asset_sibling(&entry.target, "failed") {
+                Ok(path) => path,
+                Err(error) => {
+                    failures.push(format!(
+                        "prepare rollback for {}: {error}; backup retained at {}",
+                        entry.target.display(),
+                        entry.backup.display()
+                    ));
+                    continue;
+                }
+            };
+            let target_present = match pm_managed_asset_node_exists(&entry.target) {
+                Ok(present) => present,
+                Err(error) => {
+                    failures.push(format!(
+                        "inspect changed {}: {error}; backup retained at {}",
+                        entry.target.display(),
+                        entry.backup.display()
+                    ));
+                    continue;
+                }
+            };
+            if target_present {
+                if let Err(error) = fs::rename(&entry.target, &quarantine) {
+                    failures.push(format!(
+                        "quarantine changed {}: {error}; backup retained at {}",
+                        entry.target.display(),
+                        entry.backup.display()
+                    ));
+                    continue;
+                }
+            }
+            if entry.existed {
+                if let Err(error) = fs::rename(&entry.backup, &entry.target) {
+                    let put_back = if target_present {
+                        fs::rename(&quarantine, &entry.target)
+                            .map_err(|restore_error| restore_error.to_string())
+                    } else {
+                        Ok(())
+                    };
+                    failures.push(format!(
+                        "restore {}: {error}; changed-tree recovery={put_back:?}; backup retained at {}",
+                        entry.target.display(),
+                        entry.backup.display()
+                    ));
+                    continue;
+                }
+            }
+            if target_present {
+                if let Err(error) = remove_pm_managed_asset_node(&quarantine) {
+                    failures.push(format!(
+                        "remove failed PM managed asset quarantine {}: {error}",
+                        quarantine.display()
+                    ));
+                }
+            }
+        }
+        if !self.gwt_parent_existed {
+            match fs::remove_dir(&self.gwt_parent) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => failures.push(format!(
+                    "remove newly-created empty PM provider-home parent {}: {error}",
+                    self.gwt_parent.display()
+                )),
+            }
+        }
+        if failures.is_empty() {
+            if let Err(error) = fs::remove_dir(&self.backup_root) {
+                tracing::warn!(
+                    path = %self.backup_root.display(),
+                    %error,
+                    "restored PM managed assets but could not discard the empty external recovery directory"
+                );
+            }
+            Ok(())
+        } else {
+            failures.push(format!(
+                "external PM managed asset recovery directory retained at {}",
+                self.backup_root.display()
+            ));
+            Err(io::Error::other(failures.join("; ")))
+        }
+    }
+
+    fn discard(self) {
+        for entry in &self.entries {
+            if let Err(error) = remove_pm_managed_asset_node(&entry.backup) {
+                tracing::warn!(
+                    path = %entry.backup.display(),
+                    %error,
+                    "failed to discard PM managed asset transaction backup"
+                );
+            }
+        }
+        if let Err(error) = remove_pm_managed_asset_node(&self.backup_root) {
+            tracing::warn!(
+                path = %self.backup_root.display(),
+                %error,
+                "PM managed assets committed with an external recovery residue"
+            );
+        }
+    }
+}
+
+fn ensure_real_pm_managed_asset_directory(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            reject_pm_managed_asset_indirection(path, &metadata)?;
+            if metadata.file_type().is_dir() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "PM managed asset transaction path is not a directory: {}",
+                        path.display()
+                    ),
+                ))
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(path),
+        Err(error) => Err(error),
+    }
+}
+
+fn pm_managed_asset_node_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn unique_pm_managed_asset_sibling(target: &Path, role: &str) -> io::Result<PathBuf> {
+    let parent = target.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("PM managed asset path has no parent: {}", target.display()),
+        )
     })?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("managed-asset");
+    Ok(parent.join(format!(
+        ".{name}.gwt-pm-{role}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    )))
+}
+
+fn resolve_git_exclude_path(worktree: &Path) -> io::Result<PathBuf> {
+    let output = gwt_core::process::run_git_logged(
+        &["rev-parse", "--git-path", "info/exclude"],
+        Some(worktree),
+    )?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "resolve PM Git exclude path: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if path.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resolve PM Git exclude path: Git returned an empty path",
+        ));
+    }
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        worktree.join(path)
+    })
+}
+
+fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    reject_pm_managed_asset_indirection(path, &metadata)?;
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn copy_pm_managed_asset_node(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_pm_managed_asset_node_at(source, destination, source)
+}
+
+fn copy_pm_managed_asset_node_at(
+    source: &Path,
+    destination: &Path,
+    transaction_root: &Path,
+) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        if !pm_managed_asset_symlink_is_allowed(transaction_root, source) {
+            reject_pm_managed_asset_indirection(source, &metadata)?;
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        return copy_pm_managed_asset_symlink(source, destination, &metadata);
+    }
+    reject_pm_managed_asset_indirection(source, &metadata)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if metadata.file_type().is_dir() {
+        fs::create_dir(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_pm_managed_asset_node_at(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                transaction_root,
+            )?;
+        }
+        fs::set_permissions(destination, metadata.permissions())?;
+        return Ok(());
+    }
+    if metadata.file_type().is_file() {
+        fs::copy(source, destination)?;
+        fs::set_permissions(destination, metadata.permissions())?;
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "unsupported node in PM managed asset transaction: {}",
+            source.display()
+        ),
+    ))
+}
+
+fn pm_managed_asset_symlink_is_allowed(transaction_root: &Path, source: &Path) -> bool {
+    transaction_root.file_name().and_then(|name| name.to_str()) == Some("hermes")
+        && transaction_root
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(".gwt")
+        && source.parent() == Some(transaction_root)
+        && matches!(
+            source.file_name().and_then(|name| name.to_str()),
+            Some(".env" | "auth.json")
+        )
+}
+
+#[cfg(unix)]
+fn copy_pm_managed_asset_symlink(
+    source: &Path,
+    destination: &Path,
+    _metadata: &fs::Metadata,
+) -> io::Result<()> {
+    std::os::unix::fs::symlink(fs::read_link(source)?, destination)
+}
+
+#[cfg(windows)]
+fn copy_pm_managed_asset_symlink(
+    source: &Path,
+    destination: &Path,
+    metadata: &fs::Metadata,
+) -> io::Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file, FileTypeExt};
+
+    let target = fs::read_link(source)?;
+    if metadata.file_type().is_symlink_dir() {
+        symlink_dir(target, destination)
+    } else if metadata.file_type().is_symlink_file() {
+        symlink_file(target, destination)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "unsupported symlink in PM managed asset transaction: {}",
+                source.display()
+            ),
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn copy_pm_managed_asset_symlink(
+    source: &Path,
+    _destination: &Path,
+    _metadata: &fs::Metadata,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "symlink backup is unsupported on this platform: {}",
+            source.display()
+        ),
+    ))
+}
+
+#[cfg(windows)]
+fn reject_pm_managed_asset_indirection(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    if metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "indirect node is not allowed in PM managed asset transaction: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_pm_managed_asset_indirection(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "symlink is not allowed in PM managed asset transaction: {}",
+                path.display()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -64,34 +616,38 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
     is_ephemeral: bool,
 ) -> io::Result<()> {
-    let targets = managed_targets_for_agent(agent_id)
-        .into_iter()
-        .collect::<Vec<_>>();
-    materialize_managed_gwt_assets_for_targets(
-        worktree,
-        &targets,
-        codex_hook_discovery_mode,
-        is_ephemeral,
-    )?;
-    let exclude_targets = detect_existing_managed_asset_targets(worktree);
-    update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
-        io::Error::other(format!("failed to update gwt managed excludes: {error}"))
-    })?;
-    Ok(())
+    with_managed_asset_lock(worktree, || {
+        let targets = managed_targets_for_agent(agent_id)
+            .into_iter()
+            .collect::<Vec<_>>();
+        materialize_managed_gwt_assets_for_targets(
+            worktree,
+            &targets,
+            codex_hook_discovery_mode,
+            is_ephemeral,
+        )?;
+        let exclude_targets = detect_existing_managed_asset_targets(worktree);
+        update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
+            io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+        })?;
+        Ok(())
+    })
 }
 
 pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
-    let targets = detect_existing_managed_asset_targets(worktree);
-    materialize_managed_gwt_assets_for_targets(
-        worktree,
-        &targets,
-        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
-        worktree_is_ephemeral(worktree),
-    )?;
-    update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
-        io::Error::other(format!("failed to update gwt managed excludes: {error}"))
-    })?;
-    Ok(())
+    with_managed_asset_lock(worktree, || {
+        let targets = detect_existing_managed_asset_targets(worktree);
+        materialize_managed_gwt_assets_for_targets(
+            worktree,
+            &targets,
+            MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+            worktree_is_ephemeral(worktree),
+        )?;
+        update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
+            io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+        })?;
+        Ok(())
+    })
 }
 
 /// Whether a non-launch (re-)materialization targets an ephemeral worktree.
@@ -177,12 +733,14 @@ fn materialize_managed_gwt_assets_for_targets(
 }
 
 pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<()> {
-    let targets = detect_existing_managed_asset_targets(worktree);
-    regenerate_managed_hook_configs_for_targets(
-        worktree,
-        &targets,
-        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
-    )
+    with_managed_asset_lock(worktree, || {
+        let targets = detect_existing_managed_asset_targets(worktree);
+        regenerate_managed_hook_configs_for_targets(
+            worktree,
+            &targets,
+            MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+        )
+    })
 }
 
 fn regenerate_managed_hook_configs_for_targets(
@@ -237,6 +795,7 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
         AgentId::OpenCode => Some(ManagedAssetTarget::OpenCode),
         AgentId::OpenClaw => Some(ManagedAssetTarget::OpenClaw),
         AgentId::Hermes => Some(ManagedAssetTarget::Hermes),
+        AgentId::GrokBuild => Some(ManagedAssetTarget::ClaudeCode),
         AgentId::Antigravity | AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
     }
 }

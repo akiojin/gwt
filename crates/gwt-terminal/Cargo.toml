@@ -15,6 +15,7 @@ tracing.workspace = true
 vt100 = "0.16"
 
 [target.'cfg(unix)'.dependencies]
+libc.workspace = true
 nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -24,6 +25,7 @@ gwt-core.workspace = true
 gwt-core.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 libc.workspace = true

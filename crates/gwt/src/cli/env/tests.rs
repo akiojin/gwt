@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use super::*;
@@ -18,10 +18,7 @@ use gwt_agent::session::GWT_SESSION_ID_ENV;
 use gwt_core::workspace_projection::load_or_default_workspace_projection;
 use gwt_git::PrStatus;
 use gwt_github::{
-    client::{
-        fake::FakeIssueClient, IssueClient, OwnerRepositoryClient, RepositoryIdentity,
-        ResolutionDeadline,
-    },
+    client::{fake::FakeIssueClient, IssueClient, ResolutionDeadline},
     IssueNumber, SpecListFilter,
 };
 
@@ -145,6 +142,30 @@ match args.as_slice() {
         print!("job log 91");
         ExitCode::SUCCESS
     }
+    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/runs/90" => {
+        println!("{{\"id\":90,\"repository\":{{\"full_name\":\"akiojin/gwt\"}}}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91" => {
+        println!("{{\"id\":91,\"run_url\":\"https://api.github.com/repos/akiojin/gwt/actions/runs/90\"}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint]
+        if api == "api" && endpoint.starts_with("/repos/akiojin/gwt/actions/") =>
+    {
+        eprintln!("gh: Not Found (HTTP 404)");
+        ExitCode::FAILURE
+    }
+    [api, method_flag, method, endpoint]
+        if api == "api"
+            && method_flag == "--method"
+            && method == "POST"
+            && (endpoint == "/repos/akiojin/gwt/actions/runs/90/rerun-failed-jobs"
+                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun") =>
+    {
+        println!("{{}}");
+        ExitCode::SUCCESS
+    }
     [api, graphql, ..] if api == "api" && graphql == "graphql" => {
         let joined = args.join("\n");
         if joined.contains("timelineItems") {
@@ -220,6 +241,9 @@ fn with_fake_gh<T>(test: impl FnOnce(&Path) -> T) -> T {
     fs::create_dir_all(&repo_path).expect("create repo");
     let outcome = {
         let _path = crate::cli::test_support::ScopedEnvVar::set("PATH", joined_path);
+        // Issue #3675: mark the fake as installed so the unsandboxed-gh spawn
+        // guard lets ProcessKind::Gh spawns through inside this scope.
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&repo_path)))
     };
     assert_eq!(
@@ -254,14 +278,6 @@ fn fake_gh_helper_restores_path_when_callback_panics() {
 
 fn failing_factory(counter: Arc<AtomicUsize>) -> Arc<IssueClientFactory> {
     Arc::new(move |_, _| {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Err(gwt_github::client::ApiError::Unauthorized)
-    })
-}
-
-fn failing_owner_factory(counter: Arc<AtomicUsize>) -> Arc<OwnerClientFactory> {
-    Arc::new(move |owner, repo, _deadline| {
-        assert_eq!((owner, repo), ("akiojin", "gwt"));
         counter.fetch_add(1, Ordering::SeqCst);
         Err(gwt_github::client::ApiError::Unauthorized)
     })
@@ -304,59 +320,10 @@ fn default_cli_env_construction_does_not_touch_issue_client_factory() {
 }
 
 #[test]
-fn lazy_owner_client_is_upstream_fixed_and_preserves_typed_auth_failure() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
-    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
-
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
-        .expect_err("auth failure");
-    assert_eq!(error, gwt_github::client::ApiError::Unauthorized);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn lazy_owner_client_rejects_non_upstream_repository_before_auth_or_network() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
-    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
-
-    let error = client
-        .list_issues(&RepositoryIdentity::new("example", "target"), &deadline)
-        .expect_err("non-upstream repository must be rejected");
-
-    assert!(matches!(
-        error,
-        gwt_github::client::ApiError::RepositoryMismatch { .. }
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn lazy_owner_client_rejects_an_expired_deadline_before_factory_resolution() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
-    let deadline = ResolutionDeadline::at(
-        Instant::now() - Duration::from_millis(1),
-        Duration::from_secs(1),
-    );
-
-    let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
-        .expect_err("expired owner deadline");
-
-    assert!(matches!(
-        error,
-        gwt_github::client::ApiError::Timeout { .. }
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
 fn owner_runtime_override_requires_complete_explicit_loopback_environment() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     const KEYS: [&str; 4] = [
         "GWT_OWNER_GITHUB_TEST_MODE",
         "GWT_OWNER_GITHUB_REST_BASE",
@@ -394,22 +361,10 @@ fn owner_runtime_override_requires_complete_explicit_loopback_environment() {
 }
 
 #[test]
-fn test_env_uses_a_distinct_owner_repository_client() {
-    let env = TestEnv::new(PathBuf::from("cache-root"));
-    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
-    assert!(!std::ptr::eq(&env.client, &env.owner_client));
-    assert!(env
-        .improvement_owner_client(&deadline)
-        .expect("owner client")
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
-        .expect("owner list")
-        .items()
-        .is_empty());
-}
-
-#[test]
 fn new_for_hooks_keeps_detached_cache_root() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let env = DefaultCliEnv::new_for_hooks();
 
     assert_eq!(
@@ -440,6 +395,7 @@ fn test_env_records_io_and_pr_side_effects() {
             state: "OPEN".to_string(),
             url: "https://example.test/pr/128".to_string(),
             will_close_target: true,
+            merged_at: None,
         }],
     );
     assert_eq!(
@@ -581,7 +537,9 @@ fn test_env_records_io_and_pr_side_effects() {
 
 #[test]
 fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _forward_url =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
     let _forward_token =
@@ -637,7 +595,9 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 
 #[test]
 fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
     let stable_hook_bin = temp
         .path()
@@ -699,7 +659,9 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 
 #[test]
 fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
@@ -740,7 +702,9 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
 
 #[test]
 fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
     let git_status = gwt_core::process::hidden_command("git")
         .args(["init", "-q"])
@@ -836,6 +800,58 @@ fn dispatch_json_envelope_actions_logs_uses_json_params() {
     let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
     assert!(stdout.contains(r#""operation":"actions.logs""#), "{stdout}");
     assert!(stdout.contains("run log from JSON envelope"), "{stdout}");
+}
+
+/// Issue #3865 AC-1: `issue.edit` updates a plain Issue body and the change
+/// is readable through `issue.view` with `refresh:true`.
+#[test]
+fn dispatch_json_envelope_issue_edit_roundtrips_through_issue_view_refresh() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.client.seed(sample_issue_snapshot(7, &["bug"]));
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.edit",
+        "params": {
+            "number": 7,
+            "body": "Corrected: the official curl installer exists"
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_eq!(
+        code,
+        0,
+        "issue.edit JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(stdout.contains(r#""operation":"issue.edit""#), "{stdout}");
+    assert!(stdout.contains("updated issue #7"), "{stdout}");
+
+    env.stdout.clear();
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.view",
+        "params": { "number": 7, "refresh": true }
+    }"#
+    .to_string();
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&env.stderr));
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains("Corrected: the official curl installer exists"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Issue 7"),
+        "title must be untouched: {stdout}"
+    );
+    assert!(
+        stdout.contains("labels: bug"),
+        "labels must be untouched: {stdout}"
+    );
 }
 
 #[test]
@@ -988,6 +1004,32 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             "job log 91"
         );
 
+        // Issue #3515: `actions.rerun` reaches gh for both target shapes, and
+        // refuses a run id that the current repository does not own.
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 90,
+                failed_only: true,
+            })
+            .expect("rerun failed jobs")
+            .contains("run 90"));
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
+            .expect("rerun job")
+            .contains("job 91"));
+        let refused = env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 777,
+                failed_only: false,
+            })
+            .expect_err("a run owned by another repository must be refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("run 777 does not belong to akiojin/gwt"),
+            "unexpected error: {refused}"
+        );
+
         let note_path = repo_path.join("note.md");
         fs::write(&note_path, "hello").expect("write note");
         assert_eq!(
@@ -1068,6 +1110,60 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
 // (`gwt` vs `gwtd`), not a hardcoded `"gwt"`. `gwt` and `gwtd` share this
 // `dispatch()`, so a hardcoded prefix makes `gwtd` errors read as `gwt ...`,
 // which misleads users into thinking the wrong binary was used.
+
+/// Issue #3655 AC-2: the escalation must be raised by the JSON envelope
+/// surface itself, not by a helper nobody calls.
+///
+/// `execution.adopt` with no ambient session is a genuine governance refusal
+/// that needs no fixture, so this exercises the real dispatch path end to end
+/// rather than the classifier in isolation.
+#[test]
+fn dispatch_escalates_a_governance_refusal_to_the_board() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = r#"{"schema_version":1,"operation":"execution.adopt","params":{"reason":"crash recovery"}}"#
+        .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_ne!(code, 0, "the operation itself must still report failure");
+
+    let open = gwt_core::coordination::load_open_escalations(temp.path())
+        .expect("read the escalation index");
+    assert_eq!(
+        open.len(),
+        1,
+        "a refused governance operation must reach the Board on its own"
+    );
+    assert!(
+        open[0].body.contains("execution.adopt"),
+        "the escalation must name the refused operation: {:?}",
+        open[0]
+    );
+}
+
+/// A failure the agent can fix by calling differently must stay quiet, or the
+/// PM learns to ignore escalations.
+#[test]
+fn dispatch_does_not_escalate_an_ordinary_operation_failure() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin =
+        r#"{"schema_version":1,"operation":"issue.view","params":{"number":999999}}"#.to_string();
+
+    dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert!(gwt_core::coordination::load_open_escalations(temp.path())
+        .expect("read the escalation index")
+        .is_empty());
+}
 
 fn dispatch_stderr(program: &str) -> String {
     let mut env = TestEnv::new(PathBuf::from("cache-root"));

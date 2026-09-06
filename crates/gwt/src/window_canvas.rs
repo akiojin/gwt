@@ -414,6 +414,14 @@ impl WindowCanvasState {
         {
             self.undock_agent_windows_for_board(id);
         }
+        // SPEC-3671: a preview without its Issue window has nowhere to render, so
+        // release it to the canvas instead of stranding an invisible pane.
+        if self
+            .window(id)
+            .is_some_and(|window| window.preset.hosts_issue_preview())
+        {
+            self.release_issue_previews_for_issue_window(id);
+        }
         self.persisted.windows.retain(|window| window.id != id);
         let changed = self.persisted.windows.len() != initial_len;
         if changed {
@@ -556,6 +564,40 @@ impl WindowCanvasState {
         true
     }
 
+    /// SPEC-3671 FR-002: bind an agent window to the Issue window that mirrors it,
+    /// taking it off the canvas. Returns `false` when the pair is not eligible so the
+    /// caller keeps the window on the canvas rather than hiding it with no host.
+    pub fn place_agent_window_in_issue_preview(
+        &mut self,
+        id: &str,
+        issue_window_id: &str,
+        issue_number: u64,
+    ) -> bool {
+        let Some(source_index) = self.window_index(id) else {
+            return false;
+        };
+        let Some(issue_index) = self.window_index(issue_window_id) else {
+            return false;
+        };
+        if source_index == issue_index
+            || !self.persisted.windows[source_index]
+                .preset
+                .is_agent_terminal()
+            || !self.persisted.windows[issue_index]
+                .preset
+                .hosts_issue_preview()
+            || self.persisted.windows[source_index].tab_group_id.is_some()
+        {
+            return false;
+        }
+
+        self.persisted.windows[source_index].placement = WindowPlacement::IssuePreview {
+            issue_window_id: issue_window_id.to_string(),
+            issue_number,
+        };
+        true
+    }
+
     pub fn move_agent_kanban_card(
         &mut self,
         id: &str,
@@ -615,14 +657,14 @@ impl WindowCanvasState {
         true
     }
 
+    /// Return an off-canvas agent window to the canvas and focus it. This is the
+    /// Kanban "undock" control and, since SPEC-3671 FR-010, the Issue preview's
+    /// "Windowize" action — both are the same state transition.
     pub fn undock_agent_window(&mut self, id: &str, geometry: Option<WindowGeometry>) -> bool {
         let Some(index) = self.window_index(id) else {
             return false;
         };
-        if !matches!(
-            self.persisted.windows[index].placement,
-            WindowPlacement::AgentKanban { .. }
-        ) {
+        if !self.persisted.windows[index].placement.is_off_canvas() {
             return false;
         }
         self.persisted.windows[index].placement = WindowPlacement::Canvas;
@@ -891,6 +933,20 @@ impl WindowCanvasState {
         }
     }
 
+    fn release_issue_previews_for_issue_window(&mut self, issue_window_id: &str) {
+        for window in &mut self.persisted.windows {
+            if matches!(
+                &window.placement,
+                WindowPlacement::IssuePreview {
+                    issue_window_id: host_id,
+                    ..
+                } if host_id == issue_window_id
+            ) {
+                window.placement = WindowPlacement::Canvas;
+            }
+        }
+    }
+
     fn bring_to_front(&mut self, index: usize) {
         if let Some(window) = self.persisted.windows.get_mut(index) {
             window.z_index = self.persisted.next_z_index;
@@ -1119,6 +1175,110 @@ mod tests {
             workspace.window(&agent.id).expect("agent").placement,
             WindowPlacement::Canvas
         );
+    }
+
+    // SPEC-3671 FR-002 / FR-004: an Issue-preview placement takes the agent window off
+    // the canvas and binds it to the Issue window that mirrors it.
+    #[test]
+    fn placing_agent_window_in_issue_preview_sets_off_canvas_placement() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
+
+        let agent = workspace.window(&agent.id).expect("agent window");
+        assert_eq!(
+            agent.placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: issue.id.clone(),
+                issue_number: 3671,
+            }
+        );
+        assert!(agent.placement.is_off_canvas());
+    }
+
+    #[test]
+    fn issue_preview_rejects_non_agent_sources_and_non_issue_hosts() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let board = workspace.add_window(WindowPreset::Board, arrange_bounds());
+        let shell = workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+
+        assert!(!workspace.place_agent_window_in_issue_preview(&shell.id, &issue.id, 3671));
+        assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, &board.id, 3671));
+        assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, "missing-window", 3671));
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::Canvas
+        );
+    }
+
+    // SPEC-3671 FR-010: Windowize reuses the existing undock operation — an off-canvas
+    // window becomes a normal, focused canvas window.
+    #[test]
+    fn undocking_issue_preview_window_returns_it_to_the_canvas() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
+
+        let geometry = WindowGeometry {
+            x: 40.0,
+            y: 60.0,
+            width: 900.0,
+            height: 600.0,
+        };
+        assert!(workspace.undock_agent_window(&agent.id, Some(geometry.clone())));
+
+        let undocked = workspace.window(&agent.id).expect("agent");
+        assert_eq!(undocked.placement, WindowPlacement::Canvas);
+        assert_eq!(undocked.geometry, geometry);
+        assert_eq!(
+            undocked.z_index,
+            workspace.persisted().next_z_index - 1,
+            "Windowize must focus the window it puts back on the canvas"
+        );
+    }
+
+    // SPEC-3671: closing the Issue window that hosts a preview must release the preview
+    // rather than stranding a window nothing can render.
+    #[test]
+    fn closing_issue_window_releases_its_previews_to_the_canvas() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let other_issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        let kept = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
+        assert!(workspace.place_agent_window_in_issue_preview(&kept.id, &other_issue.id, 3672));
+
+        assert!(workspace.close_window(&issue.id));
+
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::Canvas
+        );
+        assert_eq!(
+            workspace.window(&kept.id).expect("kept agent").placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: other_issue.id,
+                issue_number: 3672,
+            }
+        );
+    }
+
+    #[test]
+    fn focus_cycle_skips_issue_preview_contained_agents() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
+
+        let focused = workspace.cycle_focus(FocusCycleDirection::Forward, arrange_bounds());
+
+        assert_eq!(focused.as_deref(), Some(issue.id.as_str()));
     }
 
     #[test]

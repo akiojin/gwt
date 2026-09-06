@@ -40,8 +40,9 @@ pub use hooks::{
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
-    hermes_is_configured_global, hermes_provider_choices, hermes_provider_choices_global,
-    hermes_source_home, opencode_is_configured, opencode_is_configured_global,
+    hermes_is_configured_global, hermes_launch_choices, hermes_launch_choices_global,
+    hermes_provider_choices, hermes_source_home, opencode_is_configured,
+    opencode_is_configured_global, HermesLaunchChoices,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
@@ -742,6 +743,21 @@ mod tests {
                 issue_skill.contains("- [ ] AC-1:"),
                 "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
             );
+            // Issue #3930 AC-1: the readiness format is spelled out where
+            // Issues are authored — every heading the classifier scans, the
+            // one it does not, and the un-prefixed checkbox fallback.
+            for phrase in [
+                "`## Acceptance Criteria`, `## 受け入れ基準`,\n    `## 受け入れ条件`",
+                "`## 成功基準` is not scanned",
+                "numbered by position",
+                "Do not mix the two styles",
+                "body or comment",
+            ] {
+                assert!(
+                    issue_skill.contains(phrase),
+                    "expected the readiness format note {phrase:?} in: {relative}"
+                );
+            }
             assert!(
                 issue_skill.contains("\"labels\":[\"auto-merge\"]"),
                 "expected the auto-merge label applied by default at issue.create: {relative}"
@@ -904,6 +920,14 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
+                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
+                // the host-wide lease, and verify.run's own admission is
+                // documented where the loop is defined.
+                "verify.lease.acquire",
+                "verify.lease.release",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -914,6 +938,30 @@ mod tests {
                 !execute_skill.contains("adopt is also the repair path"),
                 "{relative} must not direct integrity-failed records to adopt"
             );
+        }
+
+        // Issue #3913 AC-2: the verification skill's serialization section
+        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let verify_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "## Heavy verification serialization",
+                "`cargo test`",
+                "`cargo clippy`",
+                "verify.lease.acquire",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
+            ] {
+                assert!(
+                    verify_skill.contains(required),
+                    "expected gwt-verify serialization guidance in {relative}: {required}"
+                );
+            }
         }
 
         let execute_command =
@@ -1440,6 +1488,33 @@ mod tests {
     }
 
     #[test]
+    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let claude =
+            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
+                .expect("read Claude gwt-execute skill");
+        let codex =
+            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-execute/SKILL.md"))
+                .expect("read Codex gwt-execute skill");
+
+        assert_eq!(
+            claude, codex,
+            "Claude and Codex gwt-execute guidance must stay byte-identical"
+        );
+        for (relative, guidance) in [
+            (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
+            (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
+        ] {
+            assert!(
+                guidance.contains(
+                    "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
+                ),
+                "{relative} must require scoped abort-before-blocked order"
+            );
+        }
+    }
+
+    #[test]
     fn public_task_entrypoints_are_documented() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
@@ -1583,6 +1658,7 @@ mod tests {
                     && content.contains("\"operation\":\"issue.monitor.config.set\"")
                     && content.contains("enabled=true")
                     && content.contains("autonomous_mode=true")
+                    && content.contains("including the registered PM")
                     && content.contains("next scan")
                     && content.contains("params.targets")
                     && content.contains("handoff")
@@ -1598,6 +1674,11 @@ mod tests {
                     && !content.contains("<pane-id> <message>")
                     && !content.contains("broadcast <message>"),
                 "unexpected bare pane or direct communication contract in {relative}"
+            );
+            assert!(
+                !content.contains("one exception is the project's resident PM")
+                    && !content.contains("caller_is_registered_pm"),
+                "obsolete PM ON exception remains in {relative}"
             );
         }
 

@@ -1,6 +1,761 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.90.0] - 2026-09-05
+
+### Bug Fixes
+
+- **issue-monitor:** Stranded generation を各スキャンで回収し agent_failed 行を自動 requeue する
+- **issue-monitor:** Open-pr-readback を scan あたり 1 回の一括取得にしてキュー長に比例した deadline 超過を防ぐ (#3963)
+- **issue-monitor:** Quota_hold.clear を daemon の権威状態へ届け、採用を確認できなければ拒否する
+- **issue-monitor:** Resume 経路でも候補 skip 理由の toast を出す
+- **issue-monitor:** CodeRabbit 指摘に沿って自動 requeue に live launch guard を入れ reclaim 比較を RFC3339 で行う
+
+### Documentation
+
+- **issue-monitor:** Quota_hold_clear の doc comment の AC 参照を Issue #3961 の AC-4 に揃える
+- **issue-monitor:** Launch pool の選択ルール文言を selector 契約と SPEC 参照に揃える
+
+### Features
+
+- **issue-monitor:** 起動プロファイルを候補プール化し hold 中の provider を避けて自動選択する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3964 作業中に生成された Work event shard を追跡に追加
+- **work:** Issue #3963 の Work events shard を追加
+- **work:** Issue #3963 の Work events shard を追加
+- **work:** Issue #3961 作業中に生成された Work event shard を追跡に追加
+- **work:** Issue #3961 の PR 作成時に生成された Work event shard を追跡に追加
+- **work:** Issue #3961 の完了処理で生成された Work event shard を追跡に追加
+- **work:** Issue #3914 の Work event shard を記録
+- **work:** Issue #3914 の Work event shard を記録
+- **work:** Issue #3914 の Work event shard を記録
+- **work:** Issue #3914 の terminal Work event shard を記録
+- **work:** Issue #3963 の Work events shard を追加
+- **work:** Issue #3964 の完了処理で生成された Work event shard を追跡に追加
+- **ci:** Npx package-runner probe timeout の既知 flake で落ちた Test (Rust) を再走させる
+- **work:** Issue #3521 の Work event shard を記録
+- **work:** Issue #3521 の Work event shard を記録
+- **work:** Issue #3521 の Work event shard を記録
+
+### Testing
+
+- **gwt:** Deadline テストの fake git を子プロセス書き出しにして ETXTBSY 競合を排除する
+
+## [9.89.0] - 2026-09-04
+
+### Bug Fixes
+
+- **issue-monitor:** Provider quota hold の誤検知を防ぎ一覧と解除の operation を追加する
+- **issue-monitor:** CI の clippy 引数数 lint と gwt-agent skill asset parity を修正する
+- **issue-monitor:** テストの clone slice を slice::from_ref に置き換え clippy を通す
+- **issue-monitor:** CodeRabbit 指摘に沿って quota hold fence と launch_agent の境界条件を締める
+
+### Features
+
+- **issue-monitor:** Config.set に launch_agent を追加し CLI から launch profile の agent を切り替える
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3923 の Work events shard を追加
+
+## [9.88.0] - 2026-09-04
+
+### Bug Fixes
+
+- **index:** File index v2の世代契約をSPECへ整合する
+- **index:** File index v2 の生成処理を有界化する
+- **index:** Bare repository と Chroma client を fail-closed 化する
+- **index:** Legacy fallback の v2 reader が leases/ を作らないようにする
+- **index:** Windows で v2 生成物の fsync が EBADF になる回帰と reader pin の gate を直す
+- **issue-monitor:** Scan の段階失敗で launch 段階が失われないようにする (#3933)
+- **issue-monitor:** 前回結果からの launch を live 状態確認で fail-closed にする (#3933)
+- **gui:** エラーは通知センター 1 箇所に集約し通知対象を agent pane に限定する
+- **launch:** Dead host の holder generation を回収し scan ごとに reaper を実行する (#3934)
+- **runtime:** Terminal convergence のレビュー指摘を反映 (#3927)
+- **git:** Git 2.50 の batched ref update 拒否を fetch 競合として再試行する (#3941 AC-4)
+- **launch:** Exact 版 npx probe の timeout をローカルキャッシュで補い probe を同時起動間で共有する (#3941)
+- **issue-monitor:** Transient な起動失敗を attempt 消費なしで自動 requeue する (#3941 AC-3)
+
+### Features
+
+- **index:** File index v2 の共有基盤を実装する
+- **index:** Worktree viewを原子的に公開する
+- **index:** Base Overlay検索をViewに統合する
+- **index:** V2移行と復旧経路を有効化する
+- **index:** 到達可能性GCとleaseを実装する
+- **index:** Host-wide Refresh Broker で startup/status を intent 化する (#3909)
+- **gui:** 通知センターの履歴 sink と toast-host の dismissOnActivate を追加する
+- **gui:** Operator rail に通知ベルと未読バッジを追加し通知センタードロワーを結線する
+- **gui:** 全通知種別を通知センター履歴に記録する
+- **gui:** Issue ウィンドウのエラー表示を通知センターの error 行と compact インジケータに集約する
+- **gui:** 右上の autonomous-notifications region を廃止し通知センターへ一本化する
+- **issue-monitor:** Autonomous mode の needs_human を破壊的変更承認とユーザー選択に限定する
+- **runtime:** 終了した agent window を runtime が自動で閉じる (#3927)
+
+### Miscellaneous Tasks
+
+- **work:** #3909 の Work event shard を追加する
+- **ci:** Rerun after flaky lease admission test (#3937)
+- **work:** Issue #3206 の Work event shard を追跡に含める
+- **work:** Issue #3206 の verify 完了 Work event shard を記録する
+- **work:** Issue #3206 の develop 取り込み後 Work event shard を記録する
+- **work:** Issue #3206 の browser-check 完了 Work event shard を記録する
+- **work:** Issue #3934 の Work event shard を追跡に含める
+- **work:** Issue #3944 の Work event shard を追跡に含める
+- **work:** Issue #3944 の Work event shard を追跡に含める
+- **work:** Issue #3927 の Work event shard を追跡に含める
+- **work:** Issue #3927 の Work event shard を追跡に含める（レビュー対応後）
+- **work:** Issue #3941 セッションの events shard を追加
+
+### Testing
+
+- **index:** File index v2 の共有 CAS 契約を RED にする
+- **index:** Cover atomic worktree view publication
+- **index:** Base Overlay検索マージ契約を固定する
+- **index:** 移行リカバリ契約を固定する
+- **index:** V2 repair配線契約を固定する
+- **index:** Reachability GC契約を固定する
+- **index:** Refresh BrokerのRED契約を固定する
+- **gwt:** PTY 終了と Windows パス検証を安定化する
+
+## [9.87.0] - 2026-09-04
+
+### Bug Fixes
+
+- **issue-monitor:** 待機申告 issue.monitor.wait で正当な待機を stuck と誤判定しない (#3844)
+- **test:** Gwt-agent のテストからプロセス全体の PATH 差し替えを排除
+- **test:** Process resolver contract を detect_claude_version_raw_in_env に追従
+- **test:** PATH 書き換え lint の照合を大文字小文字非区別にする
+- **verify:** Verify.run が host 排他を取り他 worktree の heavy を待ってから開始する (#3913)
+- **verify:** Lease 待機を issue.monitor.wait の待機申告と整合させる (#3913)
+- **verify:** Admission モジュールの intra-doc link を外し rustdoc --document-private-items を通す (#3913)
+- Scope pane operations to the current gwt home
+- Remove needless pane scope borrow
+- **issue-monitor:** AC 判定が spec section と未 prefix の checkbox を読み、失敗理由に欠落要素を名指しする (#3930)
+
+### Documentation
+
+- **skills:** AC ブロックで明示 id と未 prefix を混在させない旨を明記 (#3930)
+
+### Features
+
+- **gui:** Issue 行を主バッジ 1・副情報 2・操作 2 に整理し inline terminal を拡大可能にする
+- **gui:** Usage popover にセッション別トークン/context を表示する
+- **pm:** 稼働中 launch への steering を gwt-pm 契約と wake/tick/Stop prompt に組み込む
+- **pm:** Wake prompt の steering 義務を PTY 予算内の短縮 clause で運ぶ
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3885 の Work event shard を記録
+- **work:** Issue #3844 の Work event shard を追跡に含める
+- **work:** Issue #3862 の Work event shard を記録する
+- **work:** Issue #3862 の終端 Work event shard を記録する
+- **work:** Issue #3862 の verify 完了 Work event shard を記録する
+- **work:** Settle issue 3895 delivery
+- **work:** Issue #3878 の Work event shard を記録する
+- **work:** 二重起動 window の Work event shard を記録する
+- **work:** Issue #3878 の settle 前 Work event shard を記録する
+- **work:** Issue #3913 の Work event shard を追跡に含める
+- **work:** Issue #3913 の Work event shard を追跡に含める（develop 取り込み後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（admission 移動後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（develop 再取り込み後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（rustdoc 修正後）
+- **work:** Issue #3930 の Work event shard を追跡に含める
+- **work:** Issue #3930 の verify.run 後の Work event shard を追跡に含める
+- **work:** Issue #3930 の develop 取り込み後の Work event shard を追跡に含める
+- **work:** Issue #3930 の Done receipt に伴う Work event shard を追跡に含める
+- **work:** Issue 3767 の完了状態を記録
+- **work:** Issue #3937 の verify.run 後の Work event shard を追跡に含める
+
+### Refactor
+
+- **gui:** SPEC #3885 改訂に合わせて行内 terminal の拡大トグルを撤去する
+- **verify:** Admission モジュールを verification_lease 配下へ移し cli.rs の行数予算を守る (#3913)
+
+### Testing
+
+- **gwt:** Durable delivery の fallback commit 予算を test runtime の明示依存にする
+- **verification-lease:** Admission の解放判定を有界待ちにし holder と lease パスを診断に出す (#3937)
+- Seed pane runtime in windows launch mock
+
+## [9.86.0] - 2026-09-02
+
+### Bug Fixes
+
+- **terminal:** Start gate が存在しない target を release 前の spawn 失敗として報告する
+- **terminal:** Unix の agent 優先度を PRIO_PGRP でプロセスグループ全体に適用する
+- **terminal:** Start gate の accept 済み socket を blocking に戻してから handshake を読む
+- Preserve live agent from stale launch failure
+- **issue-monitor:** Auto-merge Issue の AC ブロック形式を作成時に検証する
+- **usage:** Codex の rate-limit ウィンドウを window_minutes の実値で分類する
+- **test:** Fake gh の atomic owner readiness を待機する
+- **gwtd:** Issue.edit を単一 PATCH に統合し labels null を省略扱いにする
+- **launch:** Owner ledger 確立後の worktree pointer 欠落を起動時に self-heal する
+- **pm:** Wake prompt を PTY canonical queue の 1024 バイト以下に保つ (#3868)
+- **core:** 担当が自力で解消できる拒否を自動起票の対象から外す (#3868)
+- **terminal:** Unix 専用テストの Instant import を cfg で制限する
+- **hook:** Normalize PM worktree path comparison
+- **gui:** Issue 行に inline terminal を常設しプレビュー配置をミニマップから外す
+- **gui:** Issue 行の agent 表示を読み取り専用 status row に縮退する
+- **gui:** Agent status row の活動行を 2 行目に回しタイトルの切れを防ぐ
+- **gui:** Agent status row の Windowize を活動行より前に配置する
+
+### Features
+
+- **agent:** エージェントプロセスツリーを低優先度で隔離し cargo 並列度を制限する
+- **agent:** 資源分離にプリセットを追加しビルド並列度を汎用化する
+- **gwtd:** Plain Issue を更新する issue.edit を追加し gwt-spec 判定基準を明文化する
+- **gwtd:** Issue.edit に auto-merge の受け入れ基準ガードを適用する
+- **pm:** Open PR の駆動フォールバック・滞留時限・quota 契約を定義 (#3868)
+- **launch:** Hermes の Model / Profile / Toolsets / Skills を config 実読みの選択式にし前回設定を復元する
+- **gh:** GitHub API 予算に供給側キャッシュと需要側の間引きを導入 (#3891)
+
+### Miscellaneous Tasks
+
+- **work:** #3813 の Work event shard を取り込む
+- Satisfy stable clippy for provider hold
+- **work:** Issue #3865 の Work event shard を追加
+- **work:** Issue #3865 の検証 Work event shard を追加
+- **work:** Issue #3873 の Work event shard を記録
+- **work:** Issue #3860 の Work event shard を記録
+- **work:** Issue #3860 の Work event shard を記録（Done 終端）
+- **work:** Issue #3865 の終端 Work event shard を追加
+- **work:** Record issue 3759 delivery state
+- **work:** Record issue 3759 verification state
+- **work:** #3868 の Work event shard を追跡（develop 取り込み後）
+- **work:** #3868 の終端 Work event shard を追跡
+- **work:** Settle issue 3759 delivery
+- **work:** Record issue 3863 work events
+- **work:** Issue #3874 の backfill event を記録
+- **work:** Settle issue 3863 delivery
+- **work:** Issue #3884 の Work event shard を記録
+
+### Refactor
+
+- **cli:** Github.budget の command model を tuple variant にして cli.rs の行数予算を守る (#3891)
+
+## [9.85.0] - 2026-09-01
+
+### Bug Fixes
+
+- **test:** LaunchFeedbackContext 初期化子に autonomous handoff フィールドを補完 (#3671)
+- **test:** Data URL ロードで launch-pending-controller の相対 import を差し替える
+- **issue-monitor:** JSON からの自動運転再有効化を拒否する
+- **test:** Direct Stop の settlement fixture を安定化する
+- **verify:** Honor Board decisions at pr.ready
+- Requeue open issues after merged work
+
+### Documentation
+
+- **test:** Clarify settlement reserve assertion
+
+### Features
+
+- **window:** Issue Monitor 自動起動をキャンバス外プレビューにする
+- **window:** Issue 行に Work 情報と Work 操作を移設し面の命名を揃える
+- **pm:** 常駐報告と周回駆動規範を恒久化する
+- **verify:** Add typed failure quarantine gate
+- **perf:** Add performance record persistence foundation
+
+### Miscellaneous Tasks
+
+- **ci:** Migration_e2e t107 の単発 flake を再トリガー — ローカル 10/10 PASS (#3612)
+- **coordination:** Issue 3814 の検証経過を記録する
+- **coordination:** Issue 3814 の配送状態を記録する
+- **coordination:** PR 3831 の監視状態を記録する
+- **work:** Issue 3791 の配送状態を記録する
+- **work:** Issue 3848 の配送状態を記録する
+- **work:** Record Issue #3832 completion
+- **work:** Record issue 3841 terminal receipt
+
+### Testing
+
+- **pr:** Isolate verification guard home
+
+
+## [9.84.0] - 2026-08-31
+
+### Bug Fixes
+
+- **issue-monitor:** Gate launches on provider quota holds
+- **test:** Managed hook の Windows 回帰を CI で固定する
+- **daemon:** Unix 専用 subscribe scope を Windows から除外する
+- **clippy:** Windows ターゲットの unused_mut / dead_code を cfg_attr で許容 (#3534)
+- **test:** Ci_apt_lock_contract_test を unix 限定に gate する (#3534)
+- **clippy:** Windows で未使用の window_id を cfg_attr で許容する (#3534)
+- **issue:** Enforce per-resource cache freshness
+- **test:** LinkedPrSummary 初期化子に merged_at を補完 (#3391)
+- **issue-monitor:** 期限切れ stale claim による blocked_by_claim 恒久化と起動飢餓を解消する
+- **issue-monitor:** Claim block release を attempts 監査付き release 契約へ追随させる (#3683)
+- **test:** Requeued パターンを attempts フィールド追加へ追随させる (#3683)
+- **clippy:** Windows で未使用の claim probe helper を cfg_attr で許容する (#3683)
+- **deps:** Update whoami and auto-launch compatibility (#3782)
+- **clippy:** Windows autostart 経路の needless_return を除去する (#3782)
+- **launch:** Fresh launch の branch materialization 競合を防ぐ (#3774)
+- **launch:** Issue Resume の相関と失敗回復を修正
+- **test:** Continue_work 系 2 テストに ScopedGwtHome を追加する (#3471)
+- **execution:** Adopt 後の Session authority を復元する
+- **pm:** 入力中の supervision tick 混入を防ぐ
+- Pane close 後の bridge deadlock を解消
+- **index:** 不健全な Issue 検索を修復前に遮断する
+
+### Documentation
+
+- **issue-monitor:** Add quota hold screenshots
+- **agents:** 最小十分アプローチの実行規範と gwt 専用機能の恒久実装方針を追記
+- **agents:** 最小十分アプローチにモデル配分の節を追加する
+
+### Features
+
+- **gui:** USAGE ステータス表示を再設計する
+- **observability:** Persist gwt/gwtd errors in a host-wide ledger
+- **pm:** 依頼インテイクをサブエージェントへ委任する
+- **pm:** Isolate gwtd execution from resident PM turns
+- **pm:** Inventory open PRs in the resident PM loop
+
+### Miscellaneous Tasks
+
+- **work:** Record autonomous verification handoff
+- **work:** Draft PR handoff を記録する
+- **work:** Settle issue 3391 Work event
+- **work:** #3683 の Work イベントを記録する
+- **work:** #3683 の Work イベントを記録する
+- **ci:** E2E ランナーの apt 障害で失敗した CI を再実行する
+- **ci:** App_runtime テストの並列 flake で失敗した CI を再実行する
+- **work:** Issue 3782 の最終検証ハンドオフを記録する
+- **work:** Issue 3782 の Draft PR handoff を記録する
+- **ci:** Windows scheduled tick timing flake の再トリガー (#3612)
+- **ci:** Durable delivery timing flake の再トリガー — 毎回別の単発 timing test (#3612)
+- **ci:** 変更外 managed_assets 単発 flake の再トリガー — 毎回別テスト・diff は deps/autostart のみ (#3612)
+- **ci:** 4連続の変更外単発 timing flake を再トリガー — 該当4テストはローカル直列で全PASS実測 (#3612)
+- **work:** Issue 3471 の検証待機状態を更新
+- **work:** Issue 3471 の依存待ち状態を更新
+- **work:** Issue 3471 の検証準備を更新
+- **work:** Issue 3471 の delivery 記録を更新
+- **work:** Issue 3471 の Draft 準備を更新
+- **work:** Issue 3471 の終端記録を更新
+- **ci:** PTY teardown timing flake の再トリガー — #3798 でローカル直列 PASS 実測済みの既知単発 (#3612)
+- **work:** Issue 3458 の再開記録を反映する
+- **ci:** Pane_sync timing flake の再トリガー — #3792 と同一の負荷起因単発 (#3612)
+- **work:** Record PR inventory verification handoff
+- **work:** Record issue 3781 Draft PR handoff
+- **work:** Issue #3702 の検証待ち Work event を記録する
+- **ci:** PTY teardown timing flake の再トリガー — #3798/#3800 と同一の既知単発 (#3612)
+
+### Testing
+
+- **issue-monitor:** Initialize quota hold after develop merge
+- **app-runtime:** Stabilize approval settle timer (#3782)
+
+### Ci
+
+- **test:** Timeout の孤児 apt-get が dpkg lock で後続 attempt を全滅させる問題を解消する
+- **test:** GTK 依存インストールの apt を硬化して Test (Rust) ジョブの無限ハングを防ぐ
+
+## [9.83.6] - 2026-08-29
+
+### Bug Fixes
+
+- **pm:** Refresh resident worktree at safe boundaries
+- **pm:** Preserve fresh spawn without remote evidence
+- **pm:** Preserve caller head during degraded spawn
+- **issue-monitor:** Retry tracking ref CAS conflicts
+- **test:** Pm_launch_config テストに env_test_lock を追加 (#3572)
+- **board:** Close overflowed blocked escalations via params.resolves
+- **pane:** Finalize close teardown off the GUI thread
+- **pane:** PR #3787 レビュー指摘3件を修正 (#3783)
+- Deliver Grok handoffs through semantic receipts
+- **test:** PM close fixture で queued finalizer を drain する (#3572)
+- **issue-monitor:** Converge closed issue state
+- **issue-monitor:** Issue_updated_at 欠落時の live Open 行を fail-open にする (#3602)
+- **launch:** Readiness 上限で生存 pane を kill しない
+
+### Miscellaneous Tasks
+
+- **work:** Settle issue 3783 delivery events
+- **ci:** Daemon subscribe_resolver flake (2738 pass / 1 fail) の再トリガー (#3612)
+- **ci:** Timing flake 再トリガー2回目 — 各回別テスト（subscribe_resolver→pane_sync bounded）のCI負荷起因 (#3612)
+- Satisfy latest stable clippy slice fill lint
+- **ci:** Durable delivery 3テスト同時flakeの再トリガー — 直列x4/並列x3 全PASS実測 (#3612)
+- **ci:** Timing flake 再トリガー — 3件クラスタは再発せず毎回別の単発 timing test のみ (#3612)
+- **ci:** Daemon server flake の再トリガー (#3612)
+- **ci:** Daemon zombie-marker flake の再トリガー (#3612)
+- **ci:** Daemon zombie-marker flake の再トリガー (#3612)
+
+### Testing
+
+- **pm:** Materialize canonical restore fixture
+- **pm:** Isolate generated config fixture home
+- **pane:** Stabilize close verification contracts
+- **daemon:** Isolate deadline-sensitive contracts
+
+
+## [9.83.5] - 2026-08-27
+
+### Bug Fixes
+
+- **workspace:** 同一 container duplicate Work への二重 attach を遮断し ensure を self-heal 化 (#3684)
+- **daemon:** Respect subscribed project scope
+- Requeue 後の stale retry 復活を防止
+- **verify:** Persist bounded failure output tails
+- **pane:** GUIイベントループのPTY待機を解消する
+- **daemon:** Fence保持デーモンのendpoint descriptor消失をself-healで復旧 (#3766)
+- **daemon:** Descriptor self-healの同期I/Oをspawn_blockingへ退避 (#3766)
+
+### Miscellaneous Tasks
+
+- **ci:** Base 誤り PR #3687 close 後の CI 再実行トリガー (#3684)
+- **ci:** Test (Rust) の 105 分ハングを再トリガーで解消する (#3684)
+- **ci:** Build job の 60 分ハングを再トリガーで解消する (#3684)
+- **work:** Issue 3757 の完了状態を記録
+- **work:** Issue 3757 の開始記録を補完
+- **work:** Record issue 3596 delivery state
+- **work:** Settle issue 3596 delivery
+- **work:** Issue 3765 の実行イベント記録を追加 (#3765)
+
+
+## [9.83.4] - 2026-08-25
+
+### Bug Fixes
+
+- Reset autonomous attempts when requeueing failures
+- 起動時に stale generation を安全に回収する
+
+## [9.83.3] - 2026-08-25
+
+### Bug Fixes
+
+- **pane:** Keep pane operations answering after live PTY closes
+- **gwtd:** Issue.monitor.* の応答に着地した project store を明示する
+- **launch:** 滞留 Active generation の自己回復と owner-kind 正準化で脱出不能動線を解消する
+- **launch:** Owner-kind heal を activation まで通し、自己回復の権限安全性を強化する
+- **test:** Windows で unix 限定 import が -D warnings を落とす問題を修正
+- **test:** Trusted-store のパス比較を Windows 短縮名に対応させる
+- **execution:** Terminal Work の PR ゲート拒否に到達可能な脱出路を示す
+- **test:** Unix 限定 fixture の無条件定義が Windows の -D warnings を落とす問題を修正
+- **ci:** Wait out dpkg lock on Ubuntu apt steps
+- **launch:** 死んだ session が保持する generation を fresh launch が supersede できるようにする
+- **launch:** Completed generation を持つ owner の fresh launch を successor 経路へ通す
+- **lint:** Scrollback の clear を fill(None) に置き換える
+- **test:** Quota-hold テストの reset 時刻を実時刻からの相対値にする
+
+### Miscellaneous Tasks
+
+- **lint:** Windows でだけ落ちる clippy 指摘 4 件を解消する
+- **work:** Record #3426 work events
+- **work:** Record #3426 PR handoff work event
+- **work:** Record #3426 work events
+- **work:** Record #3426 work events
+- **work:** Issue #3472 の no-action 終端を記録
+- **work:** Issue #3472 の Work イベントを記録する
+- **work:** Issue #3472 の terminal Work update を記録する
+- **work:** Issue #3472 の Work イベント shard を記録
+- **work:** Issue #3472 の Work イベント shard を記録する
+- **work:** Issue #3472 の完了 Work イベント shard を記録する
+
+### Testing
+
+- **daemon:** Tolerate tight local readiness retry budgets
+- **daemon:** Readiness deadline の試行回数 assert を負荷耐性にする
+- **index:** Git context 比較テストを env_test_lock で直列化する
+- **launch:** Completed predecessor が Ready 前も current のまま残ることを pin する
+
+## [9.83.2] - 2026-08-19
+
+### Bug Fixes
+
+- **windows:** PTY start gate を console subsystem の gwtd で実行する
+- **test:** Gh 依存テストの実 GitHub API 到達を遮断する unsandboxed-gh guard を導入
+- **pane:** PM セッションから残置 agent pane を close / stop できるようにする
+- **test:** 新規 pane close テストに gwt home の所有を強制する
+
+### Miscellaneous Tasks
+
+- **lint:** Windows 専用テストの result_large_err を許可する
+- **work:** Issue #3631 の start event を記録する
+- **work:** Work event shard を追記 (#3675 done 終端)
+- **work:** Work event shard を追跡へ追加
+- **work:** Work event shard を追跡へ追加
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+
+### Testing
+
+- **windows:** Agent launch E2E の marker 待ちを飽和耐性の予算と診断に変更 (#3656)
+- **launch:** PTY start gate の sibling 解決テストを POSIX host でも成立させる
+- **pane:** #3503 / #3552 の受け入れ条件を回帰ロックとして固定する
+
+
+## [9.83.1] - 2026-08-18
+
+### Bug Fixes
+
+- **verify:** Derive を CI gate の package 絞り込みへ統一し未検証 target を塞ぐ
+- **coordination:** Agent の blocked を PM へ届く経路に配線する
+- **execution:** Settle 済み session の pane 観測を接続時 409 で拒否しない (#3667)
+- **issue-monitor:** Resume が launch_profile を無視して未認証 provider へ再束縛するのを防ぐ
+- **pane:** Gwtd pane.close を全 window で機能させ close 結果を明示応答にする
+
+### Miscellaneous Tasks
+
+- **work:** #3640 の終端 Work event shard を追加
+- **work:** Issue #3655 の Work event を記録する
+- **work:** Issue #3655 の terminal Work event を記録する
+- **work:** Issue #3667 の Work event を記録する
+- **work:** Issue #3676 の Work event を記録する
+- **work:** Issue #3676 の done 遷移 Work event を記録する
+- Cargo fmt を適用する
+- **work:** Issue #3629 の Work event を記録する
+
+### Performance
+
+- **git:** Workspace-home layout の解決を fs 判定にして失敗確定 spawn を根絶する
+
+
+## [9.83.0] - 2026-08-18
+
+### Bug Fixes
+
+- **test:** Daemon scan marker の待機を固定 2 秒から子プロセスの状態観測へ置き換える
+- **launch:** Provider の quota 枯渇を終端扱いせず hold として扱う
+- **launch:** Quota 枯渇を live pane でも検出し provider 跨ぎで閉じる
+- **launch:** Rustdoc の HTML タグ誤認と timezone 依存テストを修正
+- **agent:** エージェント PTY の終了を exit code / signal / 終了時刻付きで記録する
+- Initialize Grok quick-start issue lineage
+
+### Features
+
+- Grok Build エージェント対応を追加
+- Configure Grok models and PM launch profiles
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3641 の Work event を記録する
+- **work:** #3659 の Work event shard を記帳する
+- **work:** #3659 の Work event shard を追記する
+- **work:** Issue #3616 の Work receipt を settle する
+- **work:** Issue #3341 の Work event を記録する
+- **work:** Issue #3341 の verification event を記録する
+- **work:** Issue #3341 の完了 Work event を記録する
+- **work:** Issue #3608 の完了 event を記録する
+
+### Security
+
+- **test:** Playwright ブラウザ実体化を phase 分離と timeout/retry/cache で耐障害化する
+
+### Styling
+
+- **launch:** コンフリクト解決後の pub use を rustfmt 正準形に戻す
+
+### Testing
+
+- Grok Build の live E2E を安定化
+- Grok Build 選択の backend 反映を待機
+- **launch:** 実 PTY で quota notice から Waiting までを検証する
+
+## [9.82.0] - 2026-08-18
+
+### Bug Fixes
+
+- **test:** Claim driver defer テストの fixture を thread-local gwt home に固定する
+- **pm:** PM の一意性を project store ではなくリポジトリ単位で判定する
+- **pm:** 常駐ループ gate の呼び出し元 Session を dispatcher から注入する
+- **github:** GraphQL レート制限を識別可能にし枯渇時の無駄な発行を止める
+- **test:** App_runtime の共有 runtime fixture から process-global HOME 解決を除去し機械検出を追加する
+- **test:** Intake session テストの Start Work 予約ディレクトリを自テストの home へ固定する
+- **issue-monitor:** Canvas から消えた agent window のスロットを回収する
+- **workspace:** Detached HEAD の worktree で workspace.update の失敗理由と次アクションを伝える
+- **pm:** Pm.message.send が送達成功を失敗と誤報告する問題を修正
+- **cli:** Avoid terminal snapshots in pane list
+- **gwtd:** 失敗した JSON operation を ok:false envelope で返す
+- **cli:** Pane.list を旧backendへフォールバックさせる
+- **cli:** Pane 応答待ちの budget を GUI stall に合わせる
+- **daemon:** 長い runtime path で Unix socket が bind できない問題を修正
+- **execution:** Terminal Work でも settlement receipt 要求で完了できなくする閉ループを解消
+- **work:** Workイベントをimmutable shardへ分割する
+- **work:** Shard移行後の回帰契約を修正する
+- **work:** Work event shard intakeをbucket化する
+- **pm:** 変化の無い周回で PM が digest を報告しないようにする
+- **test:** AppRuntime を組み立てる bin gwt テスト 184 件に gwt home の所有を強制する
+- **test:** Tempdir を作る bin gwt テスト 231 件に gwt home の所有を強制する
+- **test:** Lock 無しの ScopedEnvVar を排除し crate 全体で env 直列化を機械検証する
+- **test:** Env lock の poison 復帰を crate 全体へ広げ cascade で真因が隠れるのを止める
+- **daemon:** GUI front door が daemon endpoint スロットへ sentinel を書き込むのをやめる
+- **test:** Develop 取り込みで増えた tempdir テスト 24 件に gwt home の所有を強制する
+- **workspace:** 同一ブランチの別 worktree が execution container 統合で失われるのを防ぐ
+- **workspace:** 分裂 project store の移行を復活させ writer 排他と eventless Work 欠落を修正する
+- **workspace:** Store_consolidate の apply authority と dry-run 審査ゲートを塞ぐ
+- **pane:** 無応答 backend を timeout ではなく識別可能な条件として返す
+- **windows:** Tray 起動失敗の診断をプロジェクトログへ確実に残す
+- **workspace:** 登録済み PM の detached worktree から Work を更新できるようにする
+- **workspace:** #3491 の typed branch identity と PM の branchless authority を統合する
+- **hooks:** 本ブランチが持ち込んだ .codex/hooks.json の machine-local パスを戻す
+- **daemon:** GUI を runtime daemon の起動・監視主体にする
+- **issue-monitor:** 手動復旧後の failure hold を operator が解除できるようにする
+
+### Features
+
+- **pm:** Pm.stop で孤児 PM を CLI から停止・登録解除できるようにする
+
+### Miscellaneous Tasks
+
+- **work:** #3607 の Work event ログを記録する
+- **work:** Issue #3611 の Work event を settle する
+- **work:** #3604 の Work イベントを記録する
+- **work:** #3604 の終端 Work イベントを記録する
+- **work:** Work イベントログを更新
+- **work:** Issue #3491 の Work lifecycle event を記録する
+- **work:** Issue #3608 の Work event を記録する
+- **work:** Issue #3608 の resume event を記録する
+- **work:** Record issue 3510 completion
+- **work:** Record issue 3510 work events
+- **work:** Record issue 3510 verification and completion events
+- **work:** Record issue 3510 verification events
+- **work:** Issue #3476 の Work event を記録する
+- **work:** Work event を同期する
+- **work:** Terminal Work event を記録する
+- CI の Rust テストを再実行する
+- **work:** Issue #3476 の完了状態を記録する
+- **work:** #3560 引き継ぎ時点の Work event を記録する
+- **work:** #3560 再開時点の Work event を記録する
+- **work:** #3560 Ready 化時点の Work event を記録する
+- **work:** Issue #3632 の Work event を記録する
+- **work:** Issue #2338 の Work event を記録する
+- **work:** Issue #2338 の Work を done で終端する
+- **work:** #3607 の Work 完了イベントを記録する
+- **work:** #3606 の作業 Work event を記録
+- **work:** #3606 の完了 Work event を記録
+- **work:** #1764 の Work event ledger を更新する
+- **work:** #1764 の Work を done として記帳する
+- **work:** Issue #3477 の作業イベントと managed hook 更新を記録
+- **work:** Issue #3477 の作業イベントを記録
+- **work:** Issue #3477 の完了 Work event を記録
+- **work:** Issue #3633 の Work イベントを記録する
+- **work:** Issue #3633 の Work 完了状態を記録する
+- **work:** Issue #3645 の Work event を記録する
+
+### Performance
+
+- **gui:** Work/branch scan の同期 git 実行を projection から除去する
+
+### Testing
+
+- **gui:** #3611 の projection テスト 2 件を 1 件へ統合する
+- **work:** App runtimeのshard回帰契約を更新する
+- **work:** Workspace CLIのshard回帰契約を更新する
+- **work:** Bucket shardのapp runtime回帰契約を修正する
+- **work:** Symlink 拒否契約の digest bucket ケースを実行可能にする
+- **work:** Bucket shardの配布契約とCLI回帰契約を追随させる
+- **work:** Develop の受領テストを shard delivery に追随させる
+- **workspace:** 再起動を跨いだ store 解決の安定性と PM worktree の identity を固定する
+- **gwt:** Env lock guard を poison 耐性にし 1 件の flake が 7 件の失敗に化けるのを止める
+- **daemon:** Daemon の終了理由抽出にテストを足す
+
+## [9.81.0] - 2026-08-15
+
+### Bug Fixes
+
+- **workspace:** Project store identity の曖昧性を拒否する
+- **issue-monitor:** 単一 PR の merge で Issue を終端 merged 扱いしない
+- **test:** Fake docker の ETXTBSY spawn を再試行する
+
+### Features
+
+- **workspace:** Project store を repository identity へ収束させ分裂 store を移行する
+- **pane:** Surface agent approval waits
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3466 の完了 Work event を記録
+- **work:** #3466 の検証準備を記録する
+
+## [9.80.0] - 2026-08-15
+
+### Bug Fixes
+
+- **verify:** Lease control dir の掃除で生きた holder を消さないようにする
+- Enable Windows PM immediate monitor scans
+- **launch:** Readiness SessionStart の bounded retry と daemon fan-out nonce 欠落を解消する
+- **execution:** Stranded lifecycle の回復誘導を整合させる
+- **pr:** Work receipt の前提を撤去
+
+### Features
+
+- **verify:** 重量級検証をホスト単位 lease で直列化する
+
+### Miscellaneous Tasks
+
+- **work:** Record #3576 work events and lockfile refresh
+- **work:** Record #3576 PR handoff receipt
+- Update Issue 3569 verification state
+- **work:** Record Issue 3569 continuation
+- **work:** Issue 3587 の検証証跡を記録する
+- **work:** #3581 の handoff receipt を記録
+
+### Testing
+
+- **ci:** Cover Windows launch_now control path
+- **ci:** Enforce authenticated Windows monitor wake
+- **ci:** Cover Windows launch_now dispatch
+
+## [9.79.1] - 2026-08-15
+
+### Bug Fixes
+
+- **test:** Stabilize issue monitor daemon synchronization
+- **test:** Observe issue monitor scan ownership directly
+- **execution:** Recover blocked build aborts
+- **execution:** Harden blocked abort reconciliation
+- **execution:** Bound blocked abort diagnostics
+
+### Miscellaneous Tasks
+
+- Refresh lockfile for v9.79.0
+- Record issue monitor verification
+- Record issue monitor PR handoff
+- Settle issue monitor work handoff
+- **work:** Record issue monitor PR handoff receipt
+
+
+## [9.79.0] - 2026-08-14
+
+### Bug Fixes
+
+- Recover manual launches from terminal generations
+- **launch:** Stabilize segmented wizard commits
+- **test:** Stabilize Windows agent launch E2E
+- **test:** Warm Windows metadata probe in E2E
+- **test:** Isolate manual launch authority fixtures
+
+### Features
+
+- **launch:** Harden manual successor handoff
+
+### Miscellaneous Tasks
+
+- Record issue 3547 verification status
+
+### Testing
+
+- **launch:** Fence live wizard state cleanup
+- **playwright:** Isolate logs preset from launch wizard
+
+## [9.78.3] - 2026-08-14
+
+### Bug Fixes
+
+- **pm:** Guarantee verified pane message delivery
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger release checks for v9.78.2
+- **work:** Record issue 3550 completion
+- **ci:** Retrigger checks for PR #3565
+
 
 ## [9.78.2] - 2026-08-14
 
