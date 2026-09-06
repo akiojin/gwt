@@ -91,9 +91,10 @@ pub use session::{
     PendingDiscussionResume, Session, SessionActiveLaunchHandshake, SessionActiveLaunchPhase,
     SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt,
     SessionManualHandoffFence, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
-    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind, GWT_BIN_PATH_ENV,
-    GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
+    EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,
