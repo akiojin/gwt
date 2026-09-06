@@ -164,6 +164,40 @@ fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
     Ok((gate_program, gate_args))
 }
 
+/// Apply an agent resource policy to a gated launch without letting a
+/// rejection fail it.
+///
+/// Issue #3942: the tree-wide priority of SPEC #1921 Phase 86 (#3813) is an
+/// optimization for GUI responsiveness, not a precondition for running an
+/// agent. `setpriority` returns EPERM on every host where the launcher may not
+/// renice the target's process group, and propagating that turned an ordinary
+/// launch into a user-facing `PTY creation failed: setpriority permission
+/// denied`. This returns nothing on purpose: the spawn routes never hold an
+/// outcome they could propagate, panic on, or drop silently.
+pub(crate) fn best_effort_apply_policy(
+    window_id: &str,
+    pending: &gwt_terminal::PendingPane,
+    policy: gwt_terminal::pty::ProcessPolicy,
+) {
+    note_unapplied_agent_resource_policy(window_id, pending.apply_policy(policy));
+}
+
+/// Warn about a rejected policy and let the target run at the inherited
+/// priority. Split from `best_effort_apply_policy` so the warning contract is
+/// testable without a live PTY.
+pub(crate) fn note_unapplied_agent_resource_policy(
+    window_id: &str,
+    outcome: Result<(), gwt_terminal::TerminalError>,
+) {
+    if let Err(error) = outcome {
+        tracing::warn!(
+            window_id = %window_id,
+            error = %error,
+            "agent resource policy was not applied; continuing launch at the inherited priority"
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingToolRuntimeMigration {
     source: gwt_agent::Session,
@@ -2620,28 +2654,47 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                 .map(|home| home.join("config.toml"))
                 .or_else(|| codex_config_path_for_profile_config(profile_config_path))
             else {
+                // Not a registration failure: gwt simply cannot locate this
+                // profile's Codex config, which says nothing about whether the
+                // hooks are trusted. Blocking the launch here would strand
+                // every Codex launch under a non-standard profile layout, so
+                // keep it a warning — Issue #3967 AC-4 covers registrations
+                // that actually fail.
                 tracing::warn!(
                     profile_config = %profile_config_path.display(),
                     "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
                 );
                 return Ok(None);
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // Issue #3967 AC-1: trust every managed hooks file that can exist
+            // on disk, not just the one this launch would generate. The
+            // `Both`-mode managed-asset writers (startup self-heal, hook front
+            // door, health repair, SessionStart re-materialization) keep the
+            // worktree-local copy refreshed even when generation targets the
+            // workspace-home copy, and Codex discovers whichever it finds
+            // first. Narrowing trust to the generation mode left the other copy
+            // orphaned — present, gwt-generated, and untrusted. Trust state is
+            // keyed by absolute hooks path, so entries for a file Codex does
+            // not read are inert.
+            let report = gwt_skills::register_codex_managed_hook_trust_for_mode(
                 worktree_path,
                 &codex_config_path,
-                codex_hook_discovery_mode,
-            ) {
-                Ok(report) => Ok(Some(report)),
-                Err(error) => {
-                    tracing::warn!(
-                        worktree = %worktree_path.display(),
-                        codex_config = %codex_config_path.display(),
-                        error = %error,
-                        "failed to register gwt-managed Codex hook trust; continuing launch"
-                    );
-                    Ok(None)
-                }
+                gwt::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+            )
+            .map_err(|error| {
+                format!(
+                    "Codex hook trust registration failed for worktree {} (config {}): {error}",
+                    worktree_path.display(),
+                    codex_config_path.display()
+                )
+            })?;
+            if !report.untrusted_gwt_hooks.is_empty() {
+                return Err(format!(
+                    "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}",
+                    report.untrusted_gwt_hooks.join(", ")
+                ));
             }
+            Ok(Some(report))
         }
         gwt_agent::LaunchRuntimeTarget::Docker => {
             if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
@@ -3781,9 +3834,7 @@ impl AppRuntime {
                 uuid::Uuid::new_v4().to_string(),
             )
             .map_err(|error| error.to_string())?;
-            pending
-                .apply_policy(policy)
-                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            best_effort_apply_policy(id, &pending, policy);
             pending.release().map_err(|error| error.to_string())?
         } else {
             Pane::new_with_spawn_config(id.to_string(), spawn_config)
@@ -3872,9 +3923,7 @@ impl AppRuntime {
         // after identity proof and before release, so the target never runs
         // ungoverned.
         if let Some(policy) = resource_policy {
-            pending
-                .apply_policy(policy)
-                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            best_effort_apply_policy(id, &pending, policy);
         }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);
@@ -4855,6 +4904,24 @@ impl AppRuntime {
                 pending_tool_runtime_migration,
                 resource_policy,
             };
+            // Issue #3490 AC-1: without a Backend Override profile every Codex
+            // process shares the user's `~/.codex`, and two of them
+            // initializing its SQLite state together lose the race with
+            // `database is locked`. gwt fans launches out in parallel, so it
+            // owns the mitigation: hold the last step before dispatch until
+            // the previous shared-`~/.codex` spawn has cleared its
+            // initialization window. This runs on the per-launch worker
+            // thread, never on the UI thread, and a worktree-local CODEX_HOME
+            // has no contention to pace.
+            if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
+                let waited = gwt_agent::pace_shared_codex_spawn();
+                if !waited.is_zero() {
+                    tracing::debug!(
+                        waited_ms = waited.as_millis() as u64,
+                        "paced Codex spawn to avoid shared ~/.codex state contention"
+                    );
+                }
+            }
             Ok((
                 process_launch,
                 session_id,

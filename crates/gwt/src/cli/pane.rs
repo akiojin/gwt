@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -220,6 +220,23 @@ pub(super) fn run<E: CliEnv>(
         .map_err(config_error)?;
     out.push_str(&output);
     Ok(0)
+}
+
+/// Issue #3883 AC-6: the ids of the agent windows this project currently has on
+/// the canvas, read from the same live source `pane.list` reads.
+///
+/// `issue.monitor.reconcile` needs the canvas, not the durable snapshot: the
+/// whole failure it recovers from is a durable snapshot that disagrees with the
+/// windows that are actually running.
+pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(default_project_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create pane runtime: {err}"))?;
+    let windows = runtime.block_on(request_window_list(&ws_url, &project_root))?;
+    Ok(windows.into_iter().map(|window| window.id).collect())
 }
 
 async fn run_async(

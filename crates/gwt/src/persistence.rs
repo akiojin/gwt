@@ -184,8 +184,27 @@ pub struct PersistedWindowState {
 pub struct PersistedWindowCanvasState {
     #[serde(default = "default_canvas_viewport")]
     pub viewport: CanvasViewport,
+    #[serde(deserialize_with = "deserialize_restorable_windows")]
     pub windows: Vec<PersistedWindowState>,
     pub next_z_index: u32,
+}
+
+/// Drop windows a newer gwt can no longer describe instead of failing the
+/// whole restore. A retired preset (Issue #3164's Improvement Inbox) still
+/// appears in workspaces saved while that window was open; rejecting the file
+/// would wipe every other window the user had arranged, so an unreadable entry
+/// costs only itself.
+fn deserialize_restorable_windows<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PersistedWindowState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<PersistedWindowState>(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1089,6 +1108,50 @@ mod tests {
         .expect("legacy memo workspace write");
 
         let loaded = load_workspace_state(&path).expect("legacy memo load should not fail");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "board-1");
+        assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
+        assert_eq!(loaded.next_z_index, 3);
+    }
+
+    // Issue #3164: the Improvement Inbox preset was retired outright rather
+    // than kept as a legacy `WindowPreset` variant. A workspace saved while
+    // that window was open still names it, so an unknown preset must drop
+    // just its own window instead of failing the whole restore and wiping the
+    // user's layout.
+    #[test]
+    fn load_workspace_state_drops_windows_with_an_unknown_preset() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "improvement-1",
+      "title": "Improvement Inbox",
+      "preset": "improvement",
+      "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true
+    },
+    {
+      "id": "board-1",
+      "title": "Board",
+      "preset": "board",
+      "geometry": { "x": 40.0, "y": 60.0, "width": 520.0, "height": 480.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("retired preset workspace write");
+
+        let loaded = load_workspace_state(&path).expect("unknown preset must not fail the restore");
         assert_eq!(loaded.windows.len(), 1);
         assert_eq!(loaded.windows[0].id, "board-1");
         assert_eq!(loaded.windows[0].preset, WindowPreset::Board);

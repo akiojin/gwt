@@ -1,4 +1,4 @@
-use std::{fmt, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,6 +49,8 @@ pub enum IssueMonitorScanStage {
     StatusCheckReadback,
     MergeCommitReadback,
     ClaimCompletionReadback,
+    /// Issue #3917: PR body / Issue comment readback for delegation evidence.
+    MergedIssueSettlementReadback,
     ProposalReturn,
 }
 
@@ -66,6 +68,7 @@ impl IssueMonitorScanStage {
             Self::StatusCheckReadback => "status-check-readback",
             Self::MergeCommitReadback => "merge-commit-readback",
             Self::ClaimCompletionReadback => "claim-completion-readback",
+            Self::MergedIssueSettlementReadback => "merged-issue-settlement-readback",
             Self::ProposalReturn => "proposal-return",
         }
     }
@@ -123,6 +126,11 @@ pub enum IssueMonitorScanContinuation {
     /// A shared prerequisite failed, so the stage kept the previous scan's
     /// successful result rather than throwing this pass away.
     PreviousCandidates,
+    /// Issue #3928 AC-2: the pre-launch readback of a candidate was refused by
+    /// GitHub's rate limit. That candidate is left unconfirmed — it cannot be
+    /// claimed from cache alone — and stays queued for the scan after the
+    /// backoff window; every other candidate and stage is unaffected.
+    DeferredCandidates,
 }
 
 impl IssueMonitorScanContinuation {
@@ -130,8 +138,18 @@ impl IssueMonitorScanContinuation {
         match self {
             Self::StaleReadback => "continued_with_stale_readback",
             Self::PreviousCandidates => "continued_with_previous_candidates",
+            Self::DeferredCandidates => "continued_with_deferred_candidates",
         }
     }
+}
+
+/// Issue #3928: whether a stage failure is GitHub's rate limit — either the
+/// identified refusal (`github_rate_limited: … reset_at=…`) or GitHub's own
+/// wording — as opposed to a transport or lookup failure. A rate limit is a
+/// wait, not a fault, so the scan degrades the stage instead of aborting.
+pub fn is_rate_limit_failure(detail: &str) -> bool {
+    detail.contains(gwt_core::github_quota::RATE_LIMITED_ERROR_CODE)
+        || gwt_core::github_quota::is_rate_limit_stderr(detail)
 }
 
 impl fmt::Display for IssueMonitorScanContinuation {
@@ -893,11 +911,29 @@ pub fn reconcile_issue_monitor_merges(
     repo_path: &Path,
     owner: &str,
     repo: &str,
-) -> gwt_core::Result<Vec<u64>> {
-    if monitor.active_launched_branches().is_empty() && !monitor.has_open_launch_plan_candidates() {
-        return Ok(Vec::new());
+) -> gwt_core::Result<IssueMonitorMergeReconciliation> {
+    if monitor.active_launched_branches().is_empty()
+        && !monitor.has_open_launch_plan_candidates()
+        && !monitor.has_merged_issue_settlement_prospects()
+    {
+        return Ok(IssueMonitorMergeReconciliation::default());
     }
-    let merged_branches = gwt_git::pr_status::fetch_merged_pr_branches(repo_path)?;
+    let merged_prs = gwt_git::pr_status::fetch_merged_pr_deliveries(repo_path)?;
+    let merged_branches = merged_prs.branches;
+    let deliveries = merged_prs
+        .deliveries
+        .into_iter()
+        .map(|(branch, delivery)| {
+            (
+                branch,
+                crate::MergedIssueDelivery {
+                    pr_number: delivery.number,
+                    merge_sha: delivery.merge_sha,
+                    merged_at: delivery.merged_at,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut merged = monitor.reconcile_merged_branches(&merged_branches);
     if !merged.is_empty() {
         tracing::info!(
@@ -930,7 +966,149 @@ pub fn reconcile_issue_monitor_merges(
             }
         }
     }
-    Ok(merged)
+    Ok(IssueMonitorMergeReconciliation { merged, deliveries })
+}
+
+/// Result of one merged-branch reconciliation: the Issues whose slots were
+/// freed plus, keyed by head branch, the latest merged delivery the same
+/// query returned (Issue #3917).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueMonitorMergeReconciliation {
+    pub merged: Vec<u64>,
+    pub deliveries: BTreeMap<String, crate::MergedIssueDelivery>,
+}
+
+/// Delete the remote `work/issue-*` branches whose delivery this scan just
+/// confirmed (Issue #3970 AC-1).
+///
+/// The trigger is a *new* reconciliation, not the merged-PR list: that list
+/// keeps naming branches long after their heads are gone, so pruning off it
+/// every scan would push hundreds of no-op deletions forever. Gating on
+/// `reconciliation.merged` makes the pass cost nothing on an ordinary scan and
+/// run exactly when a delivery lands.
+///
+/// The pass then sweeps every `work/issue-*` branch the remote still has, not
+/// only the one that just merged, so a backlog that accumulated before this
+/// existed drains through the same safe rules instead of needing a separate
+/// migration.
+pub fn prune_delivered_work_branches(
+    repo_path: &Path,
+    base_branch: &str,
+    reconciliation: &IssueMonitorMergeReconciliation,
+) -> gwt_git::merged_branch_prune::PruneReport {
+    let mut report = gwt_git::merged_branch_prune::PruneReport::default();
+    if reconciliation.merged.is_empty() {
+        return report;
+    }
+    // Mirrors the gh command root: a workspace home resolves to its child bare
+    // repo, anything else runs where the caller pointed us.
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let repo_path = git_root.as_path();
+    if let Err(error) = gwt_git::merged_branch_prune::refresh_remote_refs(repo_path) {
+        report.skipped_reason = Some(format!("git fetch origin --prune failed: {error}"));
+        return report;
+    }
+    let branches = match gwt_git::merged_branch_prune::list_remote_work_branches(repo_path) {
+        Ok(branches) => branches,
+        Err(error) => {
+            report.skipped_reason = Some(format!("git ls-remote failed: {error}"));
+            return report;
+        }
+    };
+    // The merged-PR inventory this scan already paid for is reused, so the
+    // prune adds one `gh` call (the open-PR inventory), not two.
+    let merged = reconciliation
+        .deliveries
+        .iter()
+        .map(|(branch, delivery)| (branch.clone(), delivery.pr_number))
+        .collect::<BTreeMap<_, _>>();
+    let mut environment =
+        gwt_git::merged_branch_prune::GitPruneEnvironment::new(repo_path, base_branch)
+            .with_merged_prs(merged);
+    prune_delivered_work_branches_with(&mut environment, reconciliation, &branches)
+}
+
+/// Injectable core of [`prune_delivered_work_branches`].
+pub fn prune_delivered_work_branches_with<E: gwt_git::merged_branch_prune::PruneEnvironment>(
+    env: &mut E,
+    reconciliation: &IssueMonitorMergeReconciliation,
+    remote_branches: &[String],
+) -> gwt_git::merged_branch_prune::PruneReport {
+    if reconciliation.merged.is_empty() {
+        return gwt_git::merged_branch_prune::PruneReport::default();
+    }
+    gwt_git::merged_branch_prune::prune_merged_branches(env, remote_branches, false)
+}
+
+/// Issue #3917: propose settling every delivered Issue whose work branch
+/// merged. Side-effect free like the rest of the scan: it only prepares
+/// `SettleMergedIssue` effects for the durable executor. Delegation
+/// evidence (PR body, Issue comments) is read only when unchecked criteria
+/// remain; a failed readback defers that Issue to the next scan instead of
+/// escalating it. Returns the Issue numbers proposed this scan.
+pub fn propose_merged_issue_settlements(
+    monitor: &mut IssueMonitorState,
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    deliveries: &BTreeMap<String, crate::MergedIssueDelivery>,
+) -> Vec<u64> {
+    if !monitor.config.enabled || deliveries.is_empty() {
+        return Vec::new();
+    }
+    let auto_close = monitor.auto_close_merged_issues_enabled();
+    let mut proposed = Vec::new();
+    for (issue, delivery) in monitor.merged_issue_settlement_candidates(deliveries) {
+        let issue_number = issue.number;
+        let pr_number = delivery.pr_number;
+        let evidence = |_unmet: &[String]| -> Option<bool> {
+            match fetch_delegation_evidence(repo_path, owner, repo, issue_number, pr_number) {
+                Ok(texts) => Some(crate::delegation_recorded(texts.iter().map(String::as_str))),
+                Err(error) => {
+                    tracing::warn!(
+                        issue = issue_number,
+                        pr = pr_number,
+                        error = %error,
+                        "merged issue settlement evidence readback failed; deferring to the next scan"
+                    );
+                    None
+                }
+            }
+        };
+        let Some(action) = crate::decide_merged_issue_settlement(&issue, auto_close, evidence)
+        else {
+            continue;
+        };
+        if monitor.propose_merged_issue_settlement(issue_number, &delivery, action) {
+            proposed.push(issue_number);
+        }
+    }
+    proposed
+}
+
+/// PR body plus Issue comment bodies, the two places a delegation record may
+/// live (Issue #3917 AC-2).
+fn fetch_delegation_evidence(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    issue_number: u64,
+    pr_number: u64,
+) -> Result<Vec<String>, IssueMonitorScanFailure> {
+    let mut texts = Vec::new();
+    if let Some(body) =
+        run_scan_stage(IssueMonitorScanStage::MergedIssueSettlementReadback, || {
+            gwt_git::pr_status::try_fetch_pr_body(repo_path, pr_number)
+        })?
+    {
+        texts.push(body);
+    }
+    texts.extend(run_scan_stage(
+        IssueMonitorScanStage::MergedIssueSettlementReadback,
+        || gwt_git::issue::fetch_issue_comment_bodies(owner, repo, issue_number),
+    )?);
+    Ok(texts)
 }
 
 /// Parse `git symbolic-ref --short refs/remotes/origin/HEAD` output (e.g.
@@ -2716,7 +2894,7 @@ mod tests {
         let cache = Cache::new(dir.path().to_path_buf());
         let mut expected: Vec<(u64, Vec<&str>)> = Vec::new();
         let mut number = 100;
-        for heading in ["Acceptance Criteria", "受け入れ基準"] {
+        for heading in ["Acceptance Criteria", "受け入れ基準", "受け入れ条件"] {
             for prefixed in [true, false] {
                 for in_comment in [false, true] {
                     number += 1;
@@ -2782,6 +2960,73 @@ mod tests {
             );
             assert_eq!(criteria.ids, *want, "live #{number}");
         }
+    }
+
+    /// Issue #3959 AC-1: #3864's own shape, as it was stored in production —
+    /// `plan` and `spec` both routed to comments, so the Issue body is nothing
+    /// but the section header and the `tasks` artifact, while the
+    /// `- [ ] AC-N:` block lives in the spec comment. Duplicating that block
+    /// into the body was the only thing that un-quarantined it, which is the
+    /// proof the classifier never saw the comment.
+    #[test]
+    fn issue_3864_comment_resident_spec_reaches_the_acceptance_classifier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let spec_comment = 5_502_609_215_u64;
+        let plan_comment = 5_494_509_117_u64;
+        let acceptance = (1..=14)
+            .map(|index| format!("- [ ] AC-{index}: 受け入れ条件 {index}\n"))
+            .collect::<String>();
+        let snapshot = IssueSnapshot {
+            number: IssueNumber(3864),
+            title: "SPEC 3864".to_string(),
+            body: format!(
+                "<!-- gwt-spec id=3864 version=1 -->\n\
+                 <!-- sections:\n\
+                 plan=comment:{plan_comment}\n\
+                 spec=comment:{spec_comment}\n\
+                 tasks=body\n\
+                 -->\n\n\
+                 <!-- artifact:tasks BEGIN -->\n- [x] T-001: 実装\n<!-- artifact:tasks END -->"
+            ),
+            labels: vec!["gwt-spec".to_string(), "auto-merge".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: vec![
+                CommentSnapshot {
+                    id: CommentId(plan_comment),
+                    body: "<!-- artifact:plan BEGIN -->\n## 実装計画\n\nPhase 1\n\
+                           <!-- artifact:plan END -->"
+                        .to_string(),
+                    updated_at: UpdatedAt::new("t1"),
+                },
+                CommentSnapshot {
+                    id: CommentId(spec_comment),
+                    body: format!(
+                        "<!-- artifact:spec BEGIN -->\n# Spec\n\n## 受け入れ基準\n\n{acceptance}\
+                         <!-- artifact:spec END -->"
+                    ),
+                    updated_at: UpdatedAt::new("t1"),
+                },
+            ],
+        };
+        cache.write_snapshot(&snapshot).expect("write spec");
+        let want: Vec<String> = (1..=14).map(|index| format!("AC-{index}")).collect();
+
+        let candidates = load_cached_issue_monitor_candidates(dir.path()).expect("load cache");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.number == 3864)
+            .expect("cached candidate");
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+            candidate.body.as_deref().unwrap_or(""),
+        );
+        assert!(
+            criteria.machine_checkable,
+            "the comment-resident block must reach the classifier: {:?}",
+            candidate.body
+        );
+        assert_eq!(criteria.ids, want);
     }
 
     #[test]

@@ -136,6 +136,9 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
+        /// stored value untouched).
+        auto_close_merged_issues: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
     },
@@ -199,6 +202,12 @@ pub enum IssueCommand {
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.
     MonitorQuotaHoldList {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3883 AC-6: put the still-running agent windows back under slot
+    /// accounting. Additive only — no pane is closed and no slot is taken
+    /// away — so it is safe to run against a project mid-flight.
+    MonitorReconcile {
         project_root: Option<std::path::PathBuf>,
     },
     /// Issue #3923 AC-1: release one provider's quota hold on the operator's

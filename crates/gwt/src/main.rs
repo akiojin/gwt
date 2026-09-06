@@ -1179,12 +1179,6 @@ pub(crate) struct DockerBundleMounts {
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
-#[derive(Debug, Clone)]
-enum ImprovementActionOutcome {
-    Success(String),
-    Error(String),
-}
-
 #[cfg_attr(
     windows,
     allow(
@@ -1467,18 +1461,6 @@ enum UserEvent {
         agent: gwt_agent::BuiltinAgentId,
         generation: u64,
         event: BackendEvent,
-    },
-    ImprovementActionComplete {
-        project_root: PathBuf,
-        client_id: ClientId,
-        action: String,
-        id: String,
-        outcome: ImprovementActionOutcome,
-    },
-    ImprovementCandidatesLoaded {
-        project_root: PathBuf,
-        epoch: u64,
-        result: Result<Vec<serde_json::Value>, String>,
     },
     /// #2995: a disk-fresh session set loaded off-thread by the branch load.
     /// Applied to the Launch Wizard cache on the main thread so branch Resume
@@ -3222,8 +3204,6 @@ mod tests {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
-            improvement_refresh_epoch: 0,
-            improvement_latest_refresh_epochs: HashMap::new(),
             agent_backend_probe_generation: 0,
             agent_backend_latest_probe_generations: HashMap::new(),
         };
@@ -3444,35 +3424,9 @@ mod tests {
             "Repo",
             repo.clone(),
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree, WindowPreset::Improvement],
+            &[WindowPreset::FileTree],
         );
-        fs::create_dir_all(repo.join(".gwt/improvements")).expect("create improvement dir");
-        fs::write(
-            repo.join(".gwt/improvements/candidates.json"),
-            serde_json::json!({
-                "candidates": [{
-                    "id": "impr-sync",
-                    "created_at": "2026-06-23T00:00:00Z",
-                    "updated_at": "2026-06-23T00:00:00Z",
-                    "source": "agent-failure",
-                    "target_artifact": "skill",
-                    "classification": "gwt-caused",
-                    "confidence": "high",
-                    "state": "pending",
-                    "dedupe_key": "skill:sync",
-                    "occurrences": 1,
-                    "sanitized_summary": "Sync candidate",
-                    "sanitized_details": null,
-                    "evidence_digest": null,
-                    "local_evidence": [],
-                    "linked_issue": null,
-                    "dismissed_reason": null
-                }]
-            })
-            .to_string(),
-        )
-        .expect("write improvement candidates");
-        let (mut runtime, recorded_events) =
+        let (mut runtime, _recorded_events) =
             sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
         let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         runtime
@@ -3505,39 +3459,6 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
-        )));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event.event, BackendEvent::ImprovementCandidates { .. })));
-        wait_for_recorded_event(
-            "asynchronous improvement candidates",
-            &recorded_events,
-            |events| {
-                events
-                    .iter()
-                    .any(|event| matches!(event, UserEvent::ImprovementCandidatesLoaded { .. }))
-            },
-        );
-        let (project_root, epoch, result) = recorded_events
-            .lock()
-            .expect("event log")
-            .iter()
-            .find_map(|event| match event {
-                UserEvent::ImprovementCandidatesLoaded {
-                    project_root,
-                    epoch,
-                    result,
-                } => Some((project_root.clone(), *epoch, result.clone())),
-                _ => None,
-            })
-            .expect("asynchronous improvement snapshot");
-        let snapshot_events =
-            runtime.handle_improvement_candidates_loaded(project_root, epoch, result);
-        assert!(snapshot_events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ImprovementCandidates { candidates, .. }
-                if candidates.first().and_then(|candidate| candidate.get("id")).and_then(serde_json::Value::as_str)
-                    == Some("impr-sync")
         )));
     }
 
@@ -3920,7 +3841,6 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -6112,7 +6032,13 @@ mod tests {
         let ok = crate::probe_host_package_runner_with_timeout(
             command,
             args,
-            &HashMap::new(),
+            // The "runner" here is a shell fixture, not the host package
+            // runner, so the Issue #3972 guard must let it through — otherwise
+            // this asserts the refusal instead of the timeout it is about.
+            &HashMap::from([(
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            )]),
             &[],
             None,
             Duration::from_millis(100),
@@ -9195,32 +9121,6 @@ fn main() -> std::io::Result<()> {
             }) => {
                 clients.dispatch(app.handle_agent_backend_connection_probe_complete(
                     client_id, agent, generation, event,
-                ));
-            }
-            Event::UserEvent(UserEvent::ImprovementActionComplete {
-                project_root,
-                client_id,
-                action,
-                id,
-                outcome,
-            }) => {
-                clients.dispatch(app.handle_improvement_action_complete(
-                    &project_root,
-                    &client_id,
-                    &action,
-                    &id,
-                    outcome,
-                ));
-            }
-            Event::UserEvent(UserEvent::ImprovementCandidatesLoaded {
-                project_root,
-                epoch,
-                result,
-            }) => {
-                clients.dispatch(app.handle_improvement_candidates_loaded(
-                    project_root,
-                    epoch,
-                    result,
                 ));
             }
             Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {

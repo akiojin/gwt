@@ -1045,24 +1045,6 @@ pub enum FrontendEvent {
         work_id: String,
         close_kind: String,
     },
-    ImprovementPromoteIssue {
-        id: String,
-    },
-    ImprovementResolve {
-        id: String,
-        #[serde(default)]
-        expected_resolver_revision: Option<String>,
-    },
-    ImprovementSelectOwner {
-        id: String,
-        owner_number: u64,
-        resolver_revision: String,
-    },
-    ImprovementDismiss {
-        id: String,
-        #[serde(default)]
-        reason: Option<String>,
-    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
@@ -1685,22 +1667,6 @@ pub enum BackendEvent {
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
-    },
-    ImprovementCandidates {
-        project_root: String,
-        candidates: Vec<serde_json::Value>,
-    },
-    ImprovementActionResult {
-        project_root: String,
-        id: String,
-        action: String,
-        message: Option<String>,
-    },
-    ImprovementActionError {
-        project_root: Option<String>,
-        id: Option<String>,
-        action: String,
-        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -2492,21 +2458,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
-        "improvement_candidates",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::PreserveOrder,
-    ),
-    BackendEventPolicy::new(
-        "improvement_action_result",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "improvement_action_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2996,9 +2947,6 @@ impl BackendEvent {
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
-            BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
-            BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
-            BackendEvent::ImprovementActionError { .. } => "improvement_action_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -3139,7 +3087,7 @@ pub enum KnowledgePhaseUpdateResult {
     /// Phase write-back succeeded. `fresh_entry` is the rebuilt cache
     /// entry (with the new labels / state / phase) so the optimistic
     /// Kanban card can be overwritten with authoritative data.
-    Ok { fresh_entry: KnowledgeListItem },
+    Ok { fresh_entry: Box<KnowledgeListItem> },
     /// Phase write-back failed. `message` is human-readable so the
     /// toast / log can show it directly; the frontend rolls back the
     /// optimistic UI from `state.dndSnapshot`.
