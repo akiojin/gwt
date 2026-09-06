@@ -1540,10 +1540,10 @@ pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GhCliOutput {
-    success: bool,
-    stdout: String,
-    stderr: String,
+pub(crate) struct GhCliOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Authoritative remote state used to reconcile an auto-merge effect.
@@ -1627,7 +1627,7 @@ where
     parse_rest_pr_list_json(&rest.stdout)
 }
 
-fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+pub(crate) fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     run_gh_command_with(repo_path, args, spawn_gh_command)
 }
 
