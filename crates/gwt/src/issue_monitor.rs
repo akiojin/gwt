@@ -874,6 +874,10 @@ pub struct IssueMonitorPrefs {
     /// concurrent drive and an unattended queue apart from healthy operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_driver: Option<IssueMonitorScanDriver>,
+    /// Issue #3883 AC-2: the last recovery that reset durable state instead of
+    /// restoring it. Cleared by the next successful launch commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prefs_reset: Option<IssueMonitorPrefsReset>,
     /// Issue #3883: which Issue each launched agent window belongs to, keyed by
     /// window id and kept independent of slot accounting.
     ///
@@ -1020,6 +1024,7 @@ impl Default for IssueMonitorPrefs {
             generation_reclaim: None,
             launched_issues: Vec::new(),
             last_scan_driver: None,
+            last_prefs_reset: None,
             launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
@@ -1212,6 +1217,20 @@ impl IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+}
+
+/// Issue #3883 AC-2: a malformed-prefs recovery that had no committed
+/// generation to fall back to, and therefore reset durable state.
+///
+/// Durable rather than a log line: the state it destroys — launch records, the
+/// autonomous opt-in, `enabled` — is exactly what an operator would otherwise
+/// have to infer from the absence of things.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPrefsReset {
+    /// Where the unreadable bytes were kept for diagnosis.
+    pub quarantine_path: String,
+    pub reason: String,
+    pub at: String,
 }
 
 /// Issue #3883 AC-4: which process drove a scan.
@@ -2677,6 +2696,9 @@ pub struct IssueMonitorState {
     /// Issue #3883 AC-4: the driver of the last recorded scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_scan_driver: Option<IssueMonitorScanDriver>,
+    /// Issue #3883 AC-2: the last durable-state reset, surfaced in status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_prefs_reset: Option<IssueMonitorPrefsReset>,
     /// Issue #3883: window id → Issue for every window this project ever bound,
     /// independent of `launched_windows` and its slot cap. See
     /// [`IssueMonitorPrefs::launch_bindings`].
@@ -3463,7 +3485,34 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
-    durable_atomic_write(path, content.as_bytes())
+    durable_atomic_write(path, content.as_bytes())?;
+    // Issue #3883 AC-2: keep the generation this commit just made readable from
+    // somewhere the canonical file's own corruption cannot reach. The recovery
+    // below needs a floor, and without one it resets to `Default` — losing
+    // every launch record, the operator's `autonomous_mode`, and `enabled` in a
+    // single write while the agents those launches describe keep running.
+    //
+    // Written after the canonical rename and never allowed to fail the commit:
+    // a missing sidecar only costs the recovery its floor, whereas failing here
+    // would lose a write that already succeeded.
+    let _ = durable_atomic_write(&committed_prefs_generation_path(path), content.as_bytes());
+    Ok(())
+}
+
+/// Issue #3883 AC-2: the sibling holding the last successfully committed prefs.
+fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
+    path.with_extension("committed.json")
+}
+
+/// Issue #3883 AC-2: the newest generation this recovery may fall back to.
+///
+/// Only a snapshot that parses is a floor. The sidecar is written after the
+/// canonical file, so it is never newer than what was committed, and being a
+/// separate inode it does not share the canonical file's torn write.
+fn last_committed_prefs_generation(path: &Path) -> Option<IssueMonitorPrefs> {
+    let sidecar = committed_prefs_generation_path(path);
+    let content = fs::read_to_string(&sidecar).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3865,17 +3914,41 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 let quarantine = unique_corrupt_prefs_path(path);
                 fs::copy(path, &quarantine)?;
-                (recovery_baseline.clone(), Some((quarantine, error)))
+                // Issue #3883 AC-2/AC-5: prefer the last committed generation.
+                // The caller's baseline is `recovery_default()` on the GUI's
+                // main transaction, i.e. `Default` — so without this the
+                // recovery erases every launch record, the operator's
+                // `autonomous_mode`, and `enabled`, all while the agents those
+                // launches describe are still running. That single write is
+                // what emptied `active_launches` at max_active 3 with three
+                // launches, and what reverted `autonomous_mode` on restart.
+                match last_committed_prefs_generation(path) {
+                    Some(committed) => (committed, Some((quarantine, error, true))),
+                    None => {
+                        let mut baseline = recovery_baseline.clone();
+                        // No floor: the reset stands, but it may not be silent.
+                        // A `tracing::warn!` alone is why the incident ran for
+                        // minutes with nobody able to say what had happened.
+                        baseline.last_prefs_reset = Some(IssueMonitorPrefsReset {
+                            quarantine_path: quarantine.display().to_string(),
+                            reason: error.to_string(),
+                            at: chrono::Utc::now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        });
+                        (baseline, Some((quarantine, error, false)))
+                    }
+                }
             }
             Err(error) => return Err(error),
         };
         let result = mutation(&mut prefs);
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
-        if let Some((quarantine, error)) = recovery {
+        if let Some((quarantine, error, restored_generation)) = recovery {
             tracing::warn!(
                 path = %path.display(),
                 quarantine = %quarantine.display(),
                 error = %error,
+                restored_generation,
                 "recovered malformed issue monitor prefs"
             );
         }
@@ -4366,6 +4439,7 @@ impl IssueMonitorState {
             generation_reclaim: None,
             launched_windows: BTreeMap::new(),
             last_scan_driver: None,
+            last_prefs_reset: None,
             launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
@@ -4423,6 +4497,7 @@ impl IssueMonitorState {
         // erase exactly the evidence that keeps a running agent attributable.
         state.launch_bindings = prefs.launch_bindings;
         state.last_scan_driver = prefs.last_scan_driver;
+        state.last_prefs_reset = prefs.last_prefs_reset;
         // Issue #3627: restore used to re-inject every persisted launch into
         // `active_launches` without consulting `config.max_active`, so a disk
         // snapshot holding more launches than the cap (11 slots against a cap
@@ -4615,6 +4690,7 @@ impl IssueMonitorState {
                 .collect(),
             launch_bindings: self.launch_bindings.clone(),
             last_scan_driver: self.last_scan_driver.clone(),
+            last_prefs_reset: self.last_prefs_reset.clone(),
             launched_claims: self.launched_claims.clone(),
             launching_issues: self
                 .active_launches
@@ -7677,12 +7753,29 @@ impl IssueMonitorState {
         now: &str,
         quota_hold: Option<IssueMonitorProviderQuotaHold>,
     ) -> IssueMonitorStatusView {
-        let last_error = self.last_error.clone().or_else(|| {
-            self.failed_issues
-                .iter()
-                .next()
-                .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
-        });
+        // Issue #3883 AC-2: a durable-state reset outranks a per-issue failure
+        // banner. It is the one condition where the rest of this view is
+        // describing state that was destroyed rather than state that happened,
+        // so a reader must see it before drawing any conclusion from the queue.
+        let last_error = self
+            .last_prefs_reset
+            .as_ref()
+            .map(|reset| {
+                format!(
+                    "Issue Monitor preferences were reset after unreadable state at {at}: launches, \
+                     autonomous mode, and enabled were lost. Quarantined bytes: {quarantine} ({reason})",
+                    at = reset.at,
+                    quarantine = reset.quarantine_path,
+                    reason = reset.reason,
+                )
+            })
+            .or_else(|| self.last_error.clone())
+            .or_else(|| {
+                self.failed_issues
+                    .iter()
+                    .next()
+                    .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
+            });
         IssueMonitorStatusView {
             enabled: self.config.enabled,
             state: if !self.config.enabled {
@@ -9571,6 +9664,10 @@ impl IssueMonitorState {
         // durable binding is written. Everything downstream may free the slot;
         // nothing downstream may make the running window anonymous.
         self.launch_bindings.insert(window_id.clone(), issue_number);
+        // A completed launch is proof the monitor recovered, so the reset
+        // banner has said what it needed to say and stops crowding out the
+        // per-issue errors it outranks.
+        self.last_prefs_reset = None;
         match claim_id {
             Some(claim_id) => {
                 self.launched_claims.insert(issue_number, claim_id);
@@ -15554,11 +15651,125 @@ mod tests {
         );
     }
 
-    /// Issue #3883 AC-5: `autonomous_mode` is durable, so a restart that
-    /// reverted it to `false` was never an intentional safe-side reset — there
-    /// is nothing to display, only persistence to hold onto. Pinned here
-    /// through the real on-disk writer, because the in-memory round trip
-    /// already passed while the reported restart still lost the flag.
+    /// Issue #3883 AC-2/AC-5: the launch-record loss path, reproduced at the
+    /// reported conditions.
+    ///
+    /// The incident had `max_active: 3` and exactly three launches, so no
+    /// over-cap rule can explain `active_launches` going to `[]`. The mechanism
+    /// is the malformed-prefs recovery: a syntax/EOF read error quarantines the
+    /// file and commits `IssueMonitorPrefs::recovery_default()` — which is
+    /// `Default`, so every launch record, the operator's `autonomous_mode`
+    /// opt-in, and `enabled` are reset in one write. That single event produces
+    /// both reported symptoms at once: launches disappearing while their panes
+    /// keep running, and `autonomous_mode` reverting `true` → `false` across
+    /// the restart.
+    ///
+    /// The recovery must not regress below the last committed generation. It
+    /// has one — the sidecar the writer keeps, which is exactly the snapshot
+    /// the restart restore and the front-door scan last agreed on.
+    #[test]
+    fn malformed_prefs_recovery_keeps_the_last_committed_generation() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        let mut monitor = launched_cohort(&[
+            (3873, "project-a::agent-2"),
+            (3868, "project-a::agent-3"),
+            (3865, "project-a::agent-4"),
+        ]);
+        monitor.set_autonomous_mode(true);
+        save_issue_monitor_prefs(&path, &monitor.prefs()).expect("commit the good generation");
+
+        // A torn write leaves JSON the parser rejects with Syntax/Eof — the
+        // only class this recovery accepts.
+        fs::write(&path, "{\"enabled\": true, \"launched_iss").expect("tear the prefs file");
+
+        let (recovered, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("recovery commits");
+
+        assert_eq!(
+            recovered.launched_issues.len(),
+            3,
+            "AC-2: recovery must not erase launches whose agents are still running"
+        );
+        assert_eq!(
+            recovered.max_active_agents, 3,
+            "AC-2: nor the cap those launches are accounted against"
+        );
+        assert!(
+            recovered.autonomous_mode,
+            "AC-5: nor the operator's autonomous opt-in"
+        );
+        assert!(
+            recovered.enabled,
+            "AC-5: nor the monitor's own enabled state"
+        );
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered);
+        assert_eq!(
+            restored.active_count(),
+            3,
+            "AC-1: the three running agents still hold their three slots"
+        );
+        assert!(
+            restored.autonomous_mode(),
+            "and the restored monitor comes back autonomous"
+        );
+
+        assert!(
+            fs::read_dir(path.parent().expect("state dir"))
+                .expect("list state dir")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
+            "the unreadable bytes are still quarantined for diagnosis"
+        );
+    }
+
+    /// Issue #3883 AC-2/AC-5: with no committed generation to fall back to the
+    /// reset stays — but it stops being silent.
+    ///
+    /// Losing every launch and the autonomous opt-in behind nothing but a
+    /// `tracing::warn!` is what let the incident run unnoticed, so the durable
+    /// state itself has to carry the fact.
+    #[test]
+    fn an_unrecoverable_prefs_reset_is_reported_instead_of_being_silent() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        fs::create_dir_all(path.parent().expect("state dir")).expect("create state dir");
+        fs::write(&path, "{\"enabled\": true, \"launched_iss").expect("write torn prefs");
+
+        let (recovered, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("recovery commits");
+
+        assert!(recovered.launched_issues.is_empty());
+        let reset = recovered
+            .last_prefs_reset
+            .as_ref()
+            .expect("AC-2: a reset that loses durable state must be recorded");
+        assert!(
+            reset.quarantine_path.contains(".corrupt-"),
+            "the record must point at the quarantined bytes: {reset:?}"
+        );
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered);
+        assert!(
+            monitor
+                .agent_status_at("2026-09-01T22:45:18Z")
+                .last_error
+                .is_some_and(|error| error.contains("reset")),
+            "AC-2/AC-4: and it must be visible where operators already look"
+        );
+    }
+
+    /// Issue #3883 AC-5: `autonomous_mode` is durable through the ordinary
+    /// writer too. Kept alongside the recovery test above so a regression in
+    /// either path is attributed to the right one.
     #[test]
     fn autonomous_mode_survives_the_on_disk_restart_round_trip() {
         let home = tempfile::tempdir().expect("temp home");

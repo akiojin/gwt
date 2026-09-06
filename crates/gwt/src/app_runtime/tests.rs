@@ -61279,6 +61279,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         "2026-08-12T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::ZERO,
@@ -61360,6 +61361,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
     let _outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         "2026-09-04T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -61432,6 +61434,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         "2026-09-05T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
