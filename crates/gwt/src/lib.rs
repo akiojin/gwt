@@ -174,9 +174,10 @@ pub use knowledge_bridge::{
     KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{
-    build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
-    has_gwt_spec_label, knowledge_launch_target_branch_name, load_agent_options, AgentOption,
-    DockerWizardContext, LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
+    default_wizard_version_cache_path, has_gwt_spec_label, knowledge_launch_target_branch_name,
+    load_agent_options, AgentOption, AgentSetupAffordance, AgentSetupKind, DockerWizardContext,
+    LaunchTargetKind, LaunchWizardAction, LaunchWizardAgentSetupView, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
     LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardLiveSessionView,
     LaunchWizardMode, LaunchWizardOptionView, LaunchWizardPreviousProfile,
