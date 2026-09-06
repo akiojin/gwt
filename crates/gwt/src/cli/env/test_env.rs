@@ -72,6 +72,10 @@ pub struct TestEnv {
     pub run_log_call_log: Vec<u64>,
     pub job_logs: HashMap<u64, String>,
     pub job_log_call_log: Vec<u64>,
+    /// Issue #3515: every `actions.rerun` target the command layer requested.
+    pub rerun_call_log: Vec<crate::cli::ActionsRerunTarget>,
+    /// Issue #3515: when set, `rerun_actions` refuses with this message.
+    pub rerun_rejection: Option<String>,
     pub internal_command_call_log: Vec<InternalCommandCall>,
 }
 
@@ -117,6 +121,8 @@ impl TestEnv {
             run_log_call_log: Vec::new(),
             job_logs: HashMap::new(),
             job_log_call_log: Vec::new(),
+            rerun_call_log: Vec::new(),
+            rerun_rejection: None,
             internal_command_call_log: Vec::new(),
         }
     }
@@ -167,6 +173,11 @@ impl TestEnv {
 
     pub fn seed_run_log(&mut self, run_id: u64, log: impl Into<String>) {
         self.run_logs.insert(run_id, log.into());
+    }
+
+    /// Issue #3515: make the next `actions.rerun` fail the repository guard.
+    pub fn seed_rerun_rejection(&mut self, message: impl Into<String>) {
+        self.rerun_rejection = Some(message.into());
     }
 
     pub fn seed_job_log(&mut self, job_id: u64, log: impl Into<String>) {
@@ -375,6 +386,13 @@ impl CliEnv for TestEnv {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no job log: {job_id}")))
+    }
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        self.rerun_call_log.push(target.clone());
+        if let Some(message) = self.rerun_rejection.clone() {
+            return Err(io::Error::other(message));
+        }
+        Ok(format!("rerun requested for {target:?}"))
     }
     fn run_internal_command(
         &mut self,
