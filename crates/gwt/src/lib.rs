@@ -161,9 +161,10 @@ pub use issue_monitor::{
     IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver,
     IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
     IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
-    IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary, LaunchProfileSelection,
-    LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement, MergedIssueSettlementAction,
-    MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainReason,
+    IssueMonitorWaitSummary, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
+    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
+    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
