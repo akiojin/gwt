@@ -11379,7 +11379,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     let mut session = gwt_agent::Session::new(&repo, "feature/demo", gwt_agent::AgentId::Codex);
-    session.model = Some("gpt-5.4".to_string());
+    session.model = Some("gpt-5.5".to_string());
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
     session.session_mode = gwt_agent::SessionMode::Continue;
@@ -11408,7 +11408,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
         .view();
     assert!(!view.is_hydrating);
     assert_eq!(view.selected_agent_id, "codex");
-    assert_eq!(view.selected_model, "gpt-5.4");
+    assert_eq!(view.selected_model, "gpt-5.5");
     assert_eq!(view.selected_reasoning, "high");
     assert_eq!(view.selected_version, "latest");
     assert_eq!(view.selected_execution_mode, "continue");
@@ -38072,7 +38072,7 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
         gwt_agent::Session::new(&repo, "work/board-origin", gwt_agent::AgentId::Codex);
     session.id = "session-origin".to_string();
     session.agent_session_id = Some("codex-resume-123".to_string());
-    session.model = Some("gpt-5.4".to_string());
+    session.model = Some("gpt-5.5".to_string());
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
     session.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
@@ -38098,7 +38098,7 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
         Some("codex-resume-123")
     );
     assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
-    assert_eq!(config.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(config.reasoning_level.as_deref(), Some("high"));
     assert_eq!(
         config.tool_runtime_provenance, session.tool_runtime_provenance,
@@ -45239,7 +45239,7 @@ fn monitor_relaunch_fixture(
     source.agent_session_id = Some(native_conversation_id.clone());
     source.project_state_root = Some(repo.clone());
     source.linked_issue_number = Some(3165);
-    source.model = Some("gpt-5.4".to_string());
+    source.model = Some("gpt-5.5".to_string());
     source.reasoning_level = Some("low".to_string());
     source.tool_version = Some("latest".to_string());
     source.skip_permissions = true;
@@ -45710,7 +45710,7 @@ fn assert_monitor_exact_resume(result: AgentLaunchResult, fixture: &MonitorRelau
         Some(fixture.native_conversation_id.as_str()),
         "exact Resume must retain the provider conversation identity",
     );
-    assert_eq!(resumed.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(resumed.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(resumed.reasoning_level.as_deref(), Some("low"));
     let monitor_prefs = gwt::load_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
