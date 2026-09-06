@@ -5538,6 +5538,18 @@ impl IssueMonitorState {
             );
         }
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        // Issue #3967 AC-4: keep the reason on the row the PM reads. A launch
+        // that aborted because gwt could not pre-trust the Codex hooks releases
+        // its slot, but without this the row is an ordinary queued row and the
+        // cause survives only in the lossy notice ring — or, at the attempt
+        // cap, in a steering request. Mirrors `record_transient_launch_retry`.
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = Some(message);
+        }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
@@ -21038,6 +21050,38 @@ mod tests {
                 .and_then(|r| r.active_launch_id.clone()),
             None,
             "active launch id clears when the attempt's launch ends"
+        );
+    }
+
+    /// Issue #3967 AC-4: a launch that failed because gwt could not pre-trust
+    /// the Codex hooks frees its slot, but the operator still has to be able to
+    /// tell *why* it is back in the queue. The reason belongs on the row the
+    /// PM reads from `issue.monitor.status`, exactly as the transient-launch
+    /// path already records it (Issue #3941 AC-3) — the autonomous notice ring
+    /// is lossy, and steering only speaks at the attempt cap.
+    #[test]
+    fn autonomous_failure_keeps_its_reason_on_the_status_row() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.set_active_launch_id(42, Some("tab-1::agent-1".to_string()));
+
+        monitor.record_autonomous_failure(
+            42,
+            "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for /repo/.codex/hooks.json:stop:1:0",
+            "2026-09-05T00:00:00Z",
+        );
+
+        assert_eq!(monitor.active_count(), 0, "the slot is released");
+        let reason = monitor
+            .agent_status()
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 42)
+            .and_then(|row| row.error_message)
+            .expect("the status row must carry the failure reason");
+        assert!(
+            reason.contains("Hooks need review"),
+            "the row must name why the launch failed, got: {reason}"
         );
     }
 

@@ -8,9 +8,37 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
 import { createNotificationCenter, renderNotificationBell } from "../notification-center.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const appCss = readFileSync(resolve(here, "..", "styles", "app.css"), "utf8");
+
+/** Every `selector { ... }` rule in app.css that mentions the notification center. */
+function notificationCenterRules() {
+  const rules = [];
+  const pattern = /([^{}]+)\{([^{}]*)\}/g;
+  let match = pattern.exec(appCss);
+  while (match) {
+    const selector = match[1].trim();
+    if (selector.includes("notification-center")) {
+      rules.push({ selector, body: match[2] });
+    }
+    match = pattern.exec(appCss);
+  }
+  return rules;
+}
+
+function ruleBlock(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = appCss.match(new RegExp(`(^|\\s)${escaped}\\s*\\{([^}]*)\\}`, "m"));
+  assert.ok(match, `expected CSS rule for ${selector} in app.css`);
+  return match[2];
+}
 
 function setup(opts = {}) {
   const { document } = parseHTML(
@@ -294,4 +322,154 @@ test("a dismissed error row does not resurrect on recurrence", () => {
   const fresh = center.recordError({ key: "k", title: "t", message: "m" });
   assert.notEqual(fresh, row, "a new row is created after the old one was dismissed");
   assert.equal(fresh.querySelector(".notification-center__count"), null, "count starts over (single occurrence shows no ×N)");
+});
+
+// --- Issue #3979: triage row layout (user ruling 2026-09-05) ---
+//
+// The drawer is where unhandled notices get CLEARED, not read, so every row
+// leads with a severity marker and keeps title / time / dismiss on one scan
+// line. Severity is encoded twice — color AND marker shape/glyph — and never
+// through the accent, so it survives color-blind viewing and theme swaps.
+
+const SEVERITY_CASES = [
+  { level: "error", severity: "critical" },
+  { level: "warn", severity: "warning" },
+  { level: "success", severity: "good" },
+  { level: "info", severity: "neutral" },
+  { level: "done", severity: "neutral" },
+  { level: "neutral", severity: "neutral" },
+];
+
+test("every row carries a severity derived from its level", () => {
+  const { document, center } = setup();
+  for (const { level } of SEVERITY_CASES) {
+    center.record({ kind: "attention", level, title: level });
+  }
+  const rows = items(document);
+  // newest-on-top, so the recorded order is reversed in the DOM.
+  const recorded = [...SEVERITY_CASES].reverse();
+  rows.forEach((row, index) => {
+    assert.equal(
+      row.dataset.severity,
+      recorded[index].severity,
+      `level ${recorded[index].level} must triage as ${recorded[index].severity}`,
+    );
+  });
+});
+
+test("the severity marker leads the row with a per-severity glyph and an accessible name", () => {
+  const { document, center } = setup();
+  const glyphs = new Map();
+  for (const { level, severity } of SEVERITY_CASES) {
+    center.record({ kind: "attention", level, title: level, message: "why" });
+    const row = items(document)[0];
+    const marker = row.querySelector(".notification-center__severity");
+    assert.ok(marker, `level ${level} must render a severity marker`);
+    assert.equal(row.firstElementChild, marker, "the marker leads the row (DOM + reading order)");
+    assert.equal(marker.dataset.severity, severity);
+    assert.ok(marker.textContent.trim().length > 0, "the marker carries a glyph, not just a color");
+    assert.equal(marker.getAttribute("role"), "img");
+    assert.ok(marker.getAttribute("aria-label"), "the severity is named for screen readers");
+    glyphs.set(severity, marker.textContent.trim());
+  }
+  assert.equal(
+    new Set(glyphs.values()).size,
+    glyphs.size,
+    "each severity needs its own glyph so color is never the only cue",
+  );
+});
+
+test("the triage row keeps marker, title, dismiss, message and time in one scan structure", () => {
+  const { document, center } = setup();
+  center.record({ kind: "attention", level: "error", title: "Agent error", message: "boom" });
+  const row = items(document)[0];
+  assert.deepEqual(
+    [...row.children].map((child) => child.className),
+    [
+      "notification-center__severity",
+      "notification-center__title",
+      "notification-center__dismiss",
+      "notification-center__message",
+      "notification-center__time",
+    ],
+    "triage row children (grid areas place them; DOM order stays reader-friendly)",
+  );
+});
+
+test("the row grid puts severity, title, time and dismiss on the header line", () => {
+  const body = ruleBlock(".notification-center__item");
+  assert.match(body, /display:\s*grid/, "the triage row is a grid, not a stacked card");
+  const areas = body.match(/grid-template-areas:([^;]*);/);
+  assert.ok(areas, "the triage row declares named grid areas");
+  const [headerRow, messageRow] = areas[1].match(/"[^"]*"/g) || [];
+  assert.ok(headerRow && messageRow, "the triage row has a header line and a message line");
+  for (const area of ["severity", "headline", "time", "dismiss"]) {
+    assert.ok(headerRow.includes(area), `${area} belongs on the header scan line`);
+  }
+  assert.ok(messageRow.includes("message"), "the message wraps under the header line");
+  for (const [selector, area] of [
+    [".notification-center__severity", "severity"],
+    [".notification-center__title", "headline"],
+    [".notification-center__time", "time"],
+    [".notification-center__dismiss", "dismiss"],
+    [".notification-center__message", "message"],
+  ]) {
+    assert.match(ruleBlock(selector), new RegExp(`grid-area:\\s*${area}\\s*;`), `${selector} → ${area}`);
+  }
+});
+
+test("severity markers differ in shape, not only in color", () => {
+  const shapes = new Map();
+  for (const severity of ["critical", "warning", "good", "neutral"]) {
+    const body = ruleBlock(`.notification-center__severity[data-severity="${severity}"]`);
+    const radius = body.match(/border-radius:\s*([^;]+);/);
+    assert.ok(radius, `${severity} marker must declare its own border-radius`);
+    shapes.set(severity, radius[1].trim());
+  }
+  assert.ok(
+    new Set(shapes.values()).size >= 3,
+    `severity markers must be tellable apart by shape alone, got ${JSON.stringify([...shapes])}`,
+  );
+});
+
+test("the row stripe is driven by severity, and the retired per-level rims are gone", () => {
+  for (const severity of ["critical", "warning", "good", "neutral"]) {
+    assert.match(
+      ruleBlock(`.notification-center__item[data-severity="${severity}"]`),
+      /border-left-color:\s*var\(--[a-z-]+\)/,
+      `${severity} rows need a token-driven severity stripe`,
+    );
+  }
+  assert.deepEqual(
+    notificationCenterRules()
+      .map((rule) => rule.selector)
+      .filter((selector) => selector.includes("__item[data-level=")),
+    [],
+    "the pre-triage per-level rim rules must not survive alongside the severity stripe",
+  );
+});
+
+test("notification-center CSS is token-only (no raw hex / rgb / rgba)", () => {
+  for (const { selector, body } of notificationCenterRules()) {
+    assert.ok(
+      !/#[0-9a-fA-F]{3,8}\b/.test(body),
+      `${selector} must not hard-code a hex color: ${body.trim()}`,
+    );
+    assert.ok(
+      !/\brgba?\s*\(/.test(body),
+      `${selector} must not hard-code an rgb/rgba color: ${body.trim()}`,
+    );
+  }
+});
+
+test("severity styling never borrows the accent color", () => {
+  for (const { selector, body } of notificationCenterRules()) {
+    if (!selector.includes("severity")) {
+      continue;
+    }
+    assert.ok(
+      !/--color-focus-ring|--color-state-active/.test(body),
+      `${selector} must encode severity independently of the accent: ${body.trim()}`,
+    );
+  }
 });

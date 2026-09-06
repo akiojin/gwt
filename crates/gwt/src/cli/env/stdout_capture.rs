@@ -146,6 +146,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_actions_job_log(job_id)
     }
 
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        self.inner.rerun_actions(target)
+    }
+
     fn run_internal_command(
         &mut self,
         args: &[String],

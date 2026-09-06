@@ -263,6 +263,7 @@ Detailed logic in `references/check-flow.md`.
 - Reviews: `pr.reviews`
 - Unresolved threads: `pr.review_threads`
 - Actions logs: `actions.logs` / `actions.job_logs`
+- Actions re-run: `actions.rerun` (`run_id` + `failed_only`, or `job_id`)
 
 ### Output Contract
 
