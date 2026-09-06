@@ -1086,7 +1086,9 @@ fn issue_monitor_daemon_user_event(
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
             Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus { status },
+                BackendEvent::IssueMonitorStatus {
+                    status: Box::new(status),
+                },
             )]))
         }
         "inbox" => {
@@ -1942,6 +1944,7 @@ mod tests {
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
             quota_hold: None,
+            update_drain: None,
             launch_profile_candidates: Vec::new(),
             provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
@@ -1961,7 +1964,7 @@ mod tests {
                 assert!(events.iter().any(|event| {
                     matches!(
                         &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if actual == &status
+                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
                     )
                 }));
             }
@@ -2368,6 +2371,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
             is_pm: false,
         }
     }

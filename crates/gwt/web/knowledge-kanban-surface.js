@@ -311,6 +311,119 @@ export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds) {
   });
 }
 
+// SPEC #3885 Phase 2b (T-015 / FR-011): the canvas face of a Windowized agent is one
+// composite piece — an Issue header above the interactive terminal — not a bare
+// terminal window. The header reuses the row's own badge and secondary vocabulary so
+// the same agent reads identically in the list and on the canvas.
+export const ISSUE_WINDOW_HEADER_ACTION_LIMIT = 2;
+
+const ISSUE_WINDOW_HEADER_ACTIONS = Object.freeze([
+  Object.freeze({
+    action: "return-to-list",
+    label: "Return to list",
+    aria: (number) => `Return the agent for Issue #${number} to the Issue list`,
+  }),
+  Object.freeze({
+    action: "open-issue",
+    label: "Open Issue",
+    aria: (number) => `Open Issue #${number} in the Issue window`,
+  }),
+]);
+
+export function issueWindowHeaderModel({
+  windowData = null,
+  entry = null,
+  work = null,
+  attention = null,
+} = {}) {
+  // FR-013: a session with no Issue behind it stays a bare terminal window.
+  const issueNumber = Number(windowData?.linked_issue_number);
+  if (!Number.isFinite(issueNumber) || issueNumber <= 0) return null;
+  // The header is the canvas face only; in the list the same agent is the row's
+  // read-only status row, and two headers for one agent would double the controls.
+  if ((windowData?.placement?.kind || "canvas") !== "canvas") return null;
+  const primary = issueRowPrimaryView({
+    entry,
+    attention,
+    inlineWindow: null,
+    canvasWindow: windowData,
+  });
+  return {
+    issueNumber,
+    title: String(entry?.title || "").trim(),
+    primary,
+    secondary: issueRowSecondaryItems({ entry, work, attention, primary }),
+    actions: ISSUE_WINDOW_HEADER_ACTIONS.slice(0, ISSUE_WINDOW_HEADER_ACTION_LIMIT).map(
+      (view) => ({
+        action: view.action,
+        label: view.label,
+        aria: view.aria(issueNumber),
+      }),
+    ),
+  };
+}
+
+export function renderIssueWindowHeader(doc, model, onAction = () => {}) {
+  if (!model) return null;
+  const header = doc.createElement("header");
+  header.className = "issue-window-header";
+  header.setAttribute("data-issue-number", String(model.issueNumber));
+
+  const main = doc.createElement("div");
+  main.className = "issue-window-header-main";
+  const number = doc.createElement("span");
+  number.className = "issue-window-header-number";
+  number.textContent = `#${model.issueNumber}`;
+  const title = doc.createElement("span");
+  title.className = "issue-window-header-title";
+  title.textContent = model.title;
+  const badge = doc.createElement("span");
+  // Reuse the row badge's tone styling so one agent reads identically in both faces.
+  badge.className = "issue-window-header-badge knowledge-row-badge";
+  badge.setAttribute("data-tone", model.primary.tone);
+  badge.setAttribute("data-state-key", model.primary.key);
+  badge.textContent = model.primary.label;
+  main.appendChild(number);
+  main.appendChild(title);
+  main.appendChild(badge);
+  header.appendChild(main);
+
+  if (model.secondary.length > 0) {
+    const secondary = doc.createElement("div");
+    secondary.className = "issue-window-header-secondary";
+    for (const item of model.secondary) {
+      const node = doc.createElement("span");
+      node.className = "issue-window-header-secondary-item knowledge-row-secondary-item";
+      node.setAttribute("data-kind", item.kind);
+      node.setAttribute("data-key", item.key);
+      node.textContent = item.label;
+      if (item.title) node.title = item.title;
+      secondary.appendChild(node);
+    }
+    header.appendChild(secondary);
+  }
+
+  const actions = doc.createElement("div");
+  actions.className = "issue-window-header-actions";
+  actions.setAttribute("role", "group");
+  for (const action of model.actions) {
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.className = "wizard-button";
+    button.setAttribute("data-action", action.action);
+    button.setAttribute("aria-label", action.aria);
+    button.textContent = action.label;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onAction(action.action);
+    });
+    actions.appendChild(button);
+  }
+  header.appendChild(actions);
+  return header;
+}
+
 export function createKnowledgeKanbanSurface({
   send,
   // Semantic search must never use the reconnect queue. This dependency
@@ -3583,8 +3696,32 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
+      // SPEC #3885 FR-011: the Windowized agent lives on the canvas, but its header
+      // still shows the Issue. This is the one place that answers "what do we know
+      // about Issue #N right now" so the canvas never re-derives Issue state.
+      function issueContextForNumber(issueNumber) {
+        const number = Number(issueNumber);
+        if (!Number.isFinite(number)) return null;
+        let entry = null;
+        for (const state of knowledgeBridgeStateMap.values()) {
+          const lists = [state?.entries, state?.baseEntries];
+          for (const list of lists) {
+            if (!Array.isArray(list)) continue;
+            const found = list.find((candidate) => Number(candidate?.number) === number);
+            if (found) {
+              entry = found;
+              break;
+            }
+          }
+          if (entry) break;
+        }
+        const work = entry ? issueWorkRowForEntry(getActiveWorkProjection?.(), entry) : null;
+        return { entry, work, attention: work ? workAttentionFor?.(work) || null : null };
+      }
+
       return {
         knowledgeBridgeStateMap,
+        issueContextForNumber,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,

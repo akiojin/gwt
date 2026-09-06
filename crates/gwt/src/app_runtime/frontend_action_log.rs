@@ -209,6 +209,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::UndockAgentWindow { id, .. } => {
             FrontendUserActionLog::new("undock_agent_window", "window").window(id)
         }
+        FrontendEvent::DockAgentWindowToIssue { id } => {
+            FrontendUserActionLog::new("dock_agent_window_to_issue", "window").window(id)
+        }
         FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
             FrontendUserActionLog::new("set_agent_kanban_card_collapsed", "window")
                 .window(id)

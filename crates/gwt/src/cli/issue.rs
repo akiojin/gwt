@@ -292,6 +292,7 @@ pub(super) fn run<E: CliEnv>(
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent,
+            update_drain,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
@@ -301,6 +302,7 @@ pub(super) fn run<E: CliEnv>(
             auto_close_merged_issues,
             auto_apply_updates,
             launch_agent.as_deref(),
+            update_drain,
             out,
         )?,
         IssueCommand::MonitorProfiles { project_root } => {
@@ -1495,6 +1497,7 @@ fn issue_monitor_stop_mismatch_label(mismatch: crate::IssueMonitorStopMismatch) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_monitor_config_set(
     prefs: &mut crate::IssueMonitorPrefs,
     enabled: Option<bool>,
@@ -1503,6 +1506,7 @@ fn apply_monitor_config_set(
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
+    update_drain: Option<bool>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
         enabled,
@@ -1511,6 +1515,7 @@ fn apply_monitor_config_set(
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
+        update_drain,
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -1540,8 +1545,27 @@ fn apply_monitor_config_set(
             .switch_launch_profile_agent(launch_agent)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     }
+    apply_update_drain(&mut candidate, update_drain);
     *prefs = candidate.prefs();
     Ok(())
+}
+
+/// Issue #4037 AC-5: a CLI-raised drain is a manual one, stamped with the
+/// running gwt version. Whether a staged update manifest exists is not this
+/// surface's question (#3906 wires that); the drain only pauses admission.
+pub(crate) fn apply_update_drain(
+    monitor: &mut crate::IssueMonitorState,
+    update_drain: Option<bool>,
+) {
+    match update_drain {
+        Some(true) => monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Manual,
+            env!("CARGO_PKG_VERSION"),
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        Some(false) => monitor.clear_update_drain(),
+        None => {}
+    }
 }
 
 fn validate_monitor_config_set(
@@ -1551,6 +1575,7 @@ fn validate_monitor_config_set(
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
+    update_drain: Option<bool>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
         return Err(io::Error::new(
@@ -1564,6 +1589,7 @@ fn validate_monitor_config_set(
         && auto_close_merged_issues.is_none()
         && auto_apply_updates.is_none()
         && launch_agent.is_none()
+        && update_drain.is_none()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1600,6 +1626,7 @@ fn run_monitor_config_set<E: CliEnv>(
     auto_close_merged_issues: Option<bool>,
     auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
+    update_drain: Option<bool>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -1610,6 +1637,7 @@ fn run_monitor_config_set<E: CliEnv>(
         auto_close_merged_issues,
         auto_apply_updates,
         launch_agent,
+        update_drain,
     )
     .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
@@ -1638,6 +1666,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "auto_close_merged_issues": auto_close_merged_issues,
                 "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
+                "update_drain": update_drain,
             }
         }),
         std::process::id(),
@@ -1657,6 +1686,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 auto_close_merged_issues,
                 auto_apply_updates,
                 launch_agent,
+                update_drain,
             )
         })
         .map_err(io_as_api_error)?;
@@ -1681,6 +1711,7 @@ fn run_monitor_config_set<E: CliEnv>(
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
             }),
+            "update_drain": prefs.update_drain,
         })
         .to_string(),
     );
@@ -3697,6 +3728,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             usage_threshold_percent: 80,
@@ -3723,6 +3755,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             usage_threshold_percent: 80,
@@ -3818,6 +3851,7 @@ mod tests {
                 autonomous_mode: true,
                 has_launch_profile: true,
                 quota_hold: None,
+                update_drain: None,
                 launch_profile_summary: String::new(),
                 launch_profile_candidates: Vec::new(),
                 usage_threshold_percent: 80,
@@ -3887,6 +3921,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             usage_threshold_percent: 80,
@@ -4517,6 +4552,97 @@ mod tests {
         .is_err());
     }
 
+    /// Issue #4037 AC-3 / AC-5: `update_drain:true` records a manual drain in
+    /// the durable prefs and `update_drain:false` clears it, neither touching
+    /// the launch ledgers the way `enabled:false` does.
+    #[test]
+    fn issue_monitor_config_set_update_drain_is_non_destructive_without_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let seeded = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            launch_bindings: std::collections::BTreeMap::from([("tab-1::agent-1".to_string(), 42)]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &seeded).expect("save prefs");
+        let before = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let ledgers = |prefs: &crate::IssueMonitorPrefs| {
+            (
+                prefs.enabled,
+                prefs.autonomous_mode,
+                prefs.max_active_agents,
+                prefs.launched_issues.clone(),
+                prefs.launch_bindings.clone(),
+                prefs.launched_claims.clone(),
+                prefs.launching_issues.clone(),
+                prefs.pending_effects.clone(),
+                prefs.pending_launch_deliveries.clone(),
+                prefs.effect_authority_epoch,
+            )
+        };
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(true),
+            },
+            &mut out,
+        )
+        .expect("config set");
+        assert_eq!(code, 0);
+        let drained = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let drain = drained.update_drain.clone().expect("drain recorded");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Manual);
+        assert_eq!(drain.version, env!("CARGO_PKG_VERSION"));
+        assert!(!drain.since.is_empty());
+        assert_eq!(
+            ledgers(&drained),
+            ledgers(&before),
+            "the drain must not touch the launch ledgers"
+        );
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
+        assert_eq!(reply["update_drain"]["reason"], "manual");
+        assert_eq!(reply["enabled"], true);
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(false),
+            },
+            &mut out,
+        )
+        .expect("config clear");
+        assert_eq!(code, 0);
+        let cleared = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(cleared.update_drain.is_none());
+        assert_eq!(ledgers(&cleared), ledgers(&before));
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
+        assert!(reply["update_drain"].is_null());
+    }
+
     #[test]
     fn issue_monitor_config_set_falls_back_safely_when_daemon_is_absent() {
         let tmp = TempDir::new().expect("tempdir");
@@ -4546,6 +4672,7 @@ mod tests {
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
+                update_drain: None,
             },
             &mut out,
         )
@@ -4570,6 +4697,7 @@ mod tests {
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: None,
+                update_drain: None,
             },
             &mut out,
         )
@@ -4812,6 +4940,7 @@ mod tests {
                     auto_close_merged_issues: None,
                     auto_apply_updates: None,
                     launch_agent: None,
+                    update_drain: None,
                 },
                 &mut out,
             );
@@ -5870,6 +5999,7 @@ mod tests {
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
+                update_drain: None,
             },
             &mut out,
         )
@@ -5910,6 +6040,7 @@ mod tests {
                 auto_close_merged_issues: None,
                 auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),
+                update_drain: None,
             },
             &mut out,
         )

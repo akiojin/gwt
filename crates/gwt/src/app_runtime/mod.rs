@@ -4672,7 +4672,7 @@ impl AppRuntime {
                     let mut status = monitor.status_view();
                     self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorStatus {
-                        status,
+                        status: Box::new(status),
                     }));
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                         items: monitor.inbox,
@@ -5870,7 +5870,9 @@ impl AppRuntime {
         }
         let mut status = monitor.status_view();
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
-        let status_event = BackendEvent::IssueMonitorStatus { status };
+        let status_event = BackendEvent::IssueMonitorStatus {
+            status: Box::new(status),
+        };
         let inbox_event = BackendEvent::IssueMonitorInbox {
             items: monitor.inbox,
         };
@@ -6085,6 +6087,9 @@ impl AppRuntime {
             } => self.move_agent_kanban_card_events(&id, &board_id, lane_id, order),
             FrontendEvent::UndockAgentWindow { id, geometry } => {
                 self.undock_agent_window_events(&id, geometry)
+            }
+            FrontendEvent::DockAgentWindowToIssue { id } => {
+                self.dock_agent_window_to_issue_events(&id)
             }
             FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
                 self.set_agent_kanban_card_collapsed_events(&id, collapsed)
@@ -6524,7 +6529,9 @@ impl AppRuntime {
                             );
                             events.push(OutboundEvent::reply(
                                 client_id.clone(),
-                                BackendEvent::IssueMonitorStatus { status },
+                                BackendEvent::IssueMonitorStatus {
+                                    status: Box::new(status),
+                                },
                             ));
                         }
                         return events;
