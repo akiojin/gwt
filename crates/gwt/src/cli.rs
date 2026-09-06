@@ -21,10 +21,6 @@ mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
-pub mod improvement;
-pub mod improvement_contract;
-mod improvement_owner;
-mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -62,7 +58,6 @@ pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
-pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
@@ -166,7 +161,6 @@ pub enum CliCommand {
     Actions(ActionsCommand),
     Board(BoardCommand),
     Hook(HookCommand),
-    Improvement(ImprovementCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
     Intake(intake_outcome::IntakeCommand),
@@ -649,7 +643,6 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
-        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
