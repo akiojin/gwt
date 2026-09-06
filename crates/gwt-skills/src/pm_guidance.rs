@@ -661,6 +661,32 @@ quota:
   later cycle — never by `gh api rate_limit`, which reports remaining
   budget while a secondary limit still refuses every call.
 
+## Interrupted release check
+
+`/release` bumps the version on `develop` and only then opens the
+`develop -> main` Release PR. When it stops between those two steps the
+bump sits on the branch with nothing driving it to a release, and the
+gap stays invisible until someone happens to look (Issue #3516).
+
+- Every resident cycle, run JSON operation `release.status`. It is a
+  local git read whenever no bump is pending, so it costs no GitHub
+  budget on an ordinary cycle and never needs `refresh`.
+- Act on `state`, not on your own reading of the log: `no_bump`,
+  `released` (the version is already tagged) and `pr_open` are quiet
+  states with nothing to do. Only `stalled` — bump landed, version
+  untagged, no Release PR — asks for anything.
+- On `stalled`, run `release.status` again with
+  `params.ensure_release_pr:true` in the same cycle. That opens the
+  missing Release PR with the CHANGELOG section for the bumped version
+  as its body, and reports the new PR under `release_pr_url`. Name the
+  recovered release in the digest.
+- The reconcile is idempotent: it reclassifies before it creates, so a
+  repeated call over a release that already has its PR (or its tag)
+  creates nothing and returns the quiet state. Re-running after a
+  failure is safe.
+- A `stalled` release is never a no-change cycle. Recover it or say in
+  the digest why the recovery failed.
+
 ## GitHub read budget
 
 Your own survey is the most likely cause of a shared-quota exhaustion
@@ -1438,6 +1464,25 @@ mod tests {
     /// wake prompts took it. Both halves are pinned: silence on no change, and
     /// liveness proven outside the conversation so the PM is not tempted to
     /// emit a keepalive.
+    /// Issue #3516 AC-2 / AC-3: the resident loop carries the interrupted-
+    /// release standing check, its single actionable state, the opt-in
+    /// reconcile, and the promise that repeating the reconcile is safe.
+    #[test]
+    fn contract_carries_the_interrupted_release_standing_check() {
+        let body = body();
+        for phrase in [
+            "Every resident cycle, run JSON operation `release.status`",
+            "`no_bump`, `released` (the version is already tagged) and `pr_open` are quiet states",
+            "Only `stalled` — bump landed, version untagged, no Release PR — asks for anything",
+            "`params.ensure_release_pr:true`",
+            "`release_pr_url`",
+            "The reconcile is idempotent: it reclassifies before it creates",
+            "A `stalled` release is never a no-change cycle",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
     /// Issue #3868 AC-2 / AC-3 / AC-5 / AC-6: a row the Monitor cannot act on
     /// has a fixed fallback order, a red or conflicted PR forbids a silent
     /// cycle, and dwell / no-progress counts reach the digest with what was
