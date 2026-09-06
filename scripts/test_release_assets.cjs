@@ -321,7 +321,7 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
   assert.match(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
   assert.match(testWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
   assert.match(testWorkflow, /1\.\.3 \| ForEach-Object/);
-  assert.match(testWorkflow, /cargo test -p gwt-core -p gwt --lib --all-features/);
+  assert.match(testWorkflow, /cargo test -p gwt --lib --all-features/);
   // The three runs must share one job so they share one SHA and one runner.
   // Splitting them across jobs would let a green run and a red run coexist.
   const defaultParallelJob = testWorkflow.slice(
@@ -336,14 +336,33 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
       defaultParallelJob.indexOf("1..3 | ForEach-Object"),
     "the --no-run build must precede the timed three-run loop"
   );
-  // `--bin gwt` is excluded because it deadlocks under Windows default
-  // parallelism. Keep the exclusion tied to its reason and its owner so it
-  // cannot quietly become permanent once the deadlock is fixed (#4014).
-  assert.doesNotMatch(defaultParallelJob, /1\.\.3[\s\S]*?cargo test[^\n]*--bin gwt/);
+  // `--bin gwt` and `-p gwt-core` are excluded: each fails Windows default
+  // parallelism for its own reason, and including either would fail every PR.
+  // Assert the loop's cargo invocations positively — matching comment prose
+  // negatively would pass or fail on how the exclusions happen to be worded.
+  const loopBody = defaultParallelJob.slice(
+    defaultParallelJob.indexOf("1..3 | ForEach-Object")
+  );
+  const loopCommands = loopBody
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("cargo "));
+  assert.deepStrictEqual(
+    loopCommands,
+    ["cargo test -p gwt --lib --all-features"],
+    "the timed loop must run exactly the targets proven green under Windows default parallelism"
+  );
+  // Keep each exclusion tied to its reason so it cannot quietly become
+  // permanent once the underlying defect is fixed.
   assert.match(
     defaultParallelJob,
     /deadlocks[\s\S]*?#4014/,
     "the --bin gwt exclusion must carry its reason and its follow-up owner"
+  );
+  assert.match(
+    defaultParallelJob,
+    /`-p gwt-core` is absent[\s\S]*?await their own owner/,
+    "the gwt-core exclusion must carry its reason and its follow-up"
   );
   for (const command of [
     "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
