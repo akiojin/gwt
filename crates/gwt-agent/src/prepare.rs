@@ -1515,6 +1515,10 @@ where
     };
     let mut report = HostRunnerHealthReport::default();
     probe_exact_npx_package_plan(&plan, config, npx_cache_base, probe, repair, &mut report)?;
+    // Issue #3481 AC-2: the exact version resolved here is the same snapshot
+    // that builds `package_prefix`, so readiness decisions read the identity of
+    // the package this launch will actually run rather than the selector alias.
+    report.version_output = Some(resolved_exact_version.clone());
     report.switched_to_fallback = switched_to_fallback;
     if switched_to_fallback {
         report
@@ -2070,7 +2074,14 @@ where
             cwd.clone(),
         );
         if bunx_probe.success {
-            return Ok(HostRunnerHealthReport::default());
+            // Issue #3481: this probe ran the exact package spec that will be
+            // spawned, so its version is the discovery evidence for the
+            // launched executable — including when the selector is the
+            // `latest` alias, which carries no capability information itself.
+            return Ok(HostRunnerHealthReport {
+                version_output: strict_semver_probe_evidence(&bunx_probe),
+                ..HostRunnerHealthReport::default()
+            });
         }
     }
 
@@ -2116,6 +2127,7 @@ where
         cwd.clone(),
     );
     if first_npx_probe.success {
+        report.version_output = strict_semver_probe_evidence(&first_npx_probe);
         return Ok(finish(config, report));
     }
     if first_npx_probe.timed_out {
@@ -2195,6 +2207,7 @@ where
         ));
     }
 
+    report.version_output = strict_semver_probe_evidence(&second_npx_probe);
     Ok(finish(config, report))
 }
 
@@ -4887,6 +4900,27 @@ mod tests {
         config
     }
 
+    /// Issue #3481: the `codex@latest` Host launch shape. `latest` never
+    /// reaches the direct runner, so the bunx/npx package-runner probe is the
+    /// only discovery of the executable that will be spawned.
+    fn sample_codex_latest_bunx_launch_config(worktree: &Path) -> LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(worktree)
+            .branch("feature/demo")
+            .version("latest")
+            .session_mode(SessionMode::Normal)
+            .build();
+        config.command = "bunx".to_string();
+        config.args = vec![
+            "@openai/codex@latest".to_string(),
+            "--no-alt-screen".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(worktree.to_path_buf());
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config
+    }
+
     fn sample_direct_codex_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(worktree)
@@ -6228,6 +6262,139 @@ mod tests {
         let version_output = report.version_output.expect("version output evidence");
         assert_eq!(version_output, "0.133.0");
         assert!(!version_output.contains(SECRET));
+    }
+
+    /// Issue #3481 AC-1/AC-2: `codex@latest` resolves through the package
+    /// runner, so the runner probe is the only discovery of the executable that
+    /// will actually be spawned. Its version evidence must reach the report
+    /// instead of being discarded, otherwise downstream readiness decisions
+    /// fall back to the alias string.
+    #[test]
+    fn healthy_latest_package_runner_report_carries_probe_version_evidence() {
+        const SECRET: &str = "latest-package-version-sentinel-31481";
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+        config
+            .env_vars
+            .insert("RUNNER_API_TOKEN".to_string(), SECRET.to_string());
+        let mut probe_calls = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Runner);
+                HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: format!("codex-cli 0.130.0 https://user:{SECRET}@example.test/runner"),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy latest package runner");
+
+        assert_eq!(probe_calls, 1);
+        assert!(!report.switched_to_fallback);
+        let version_output = report.version_output.expect("version output evidence");
+        assert_eq!(version_output, "0.130.0");
+        assert!(!version_output.contains(SECRET));
+    }
+
+    /// Issue #3481 AC-2: the npx fallback probe runs the same package spec that
+    /// will be launched, so its evidence is the authoritative snapshot too.
+    #[test]
+    fn latest_npx_fallback_report_carries_probe_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+        let mut probe_calls = 0;
+        let fallback = if cfg!(windows) { "npx.cmd" } else { "npx" };
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            fallback.to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Runner);
+                if probe_calls == 1 {
+                    HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                } else {
+                    HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "codex-cli 0.133.0".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    }
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy npx fallback");
+
+        assert_eq!(probe_calls, 2);
+        assert!(report.switched_to_fallback);
+        assert_eq!(report.version_output.as_deref(), Some("0.133.0"));
+    }
+
+    /// Issue #3481 AC-3: a runner probe that answers without any parseable
+    /// version must not synthesize evidence. The absent snapshot is what lets
+    /// the consumer choose its diagnosable fallback instead of trusting the
+    /// alias string.
+    #[test]
+    fn latest_package_runner_without_semver_output_reports_no_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome {
+                success: true,
+                exit_code: Some(0),
+                stdout: "unexpected output".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+                error: None,
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy latest package runner");
+
+        assert_eq!(report.version_output, None);
+    }
+
+    /// Issue #3481 AC-3/AC-4: when no runner can be proven, the alias must not
+    /// stand in for the missing discovery. The launch fails closed instead of
+    /// producing a readiness snapshot from the selector string.
+    #[test]
+    fn latest_package_runner_missing_binary_fails_closed_without_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                HostRunnerProbeOutcome::failure_with_stderr("command not found")
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect_err("an unproven package runner must fail closed");
+
+        assert!(
+            error.contains("@openai/codex@latest"),
+            "the failure must name the package spec it could not prove: {error}"
+        );
     }
 
     #[cfg(windows)]
