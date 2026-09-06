@@ -4096,6 +4096,17 @@ fn scan_issue_monitor_once_blocking(
                 &now,
             )?,
         );
+        // Issue #3970 AC-1: a confirmed delivery retires its work branch. The
+        // prune is self-reporting and never fails the scan — an unreadable or
+        // rate-limited remote just leaves the branches for the next delivery.
+        let prune = crate::issue_monitor_worker::prune_delivered_work_branches(
+            &scope.project_root,
+            gwt_git::pr_status::SETTLEMENT_BASE_BRANCH,
+            &merge_reconciliation,
+        );
+        for line in prune.log_lines() {
+            tracing::info!("{line}");
+        }
         // Issue #3917: settle delivered Issues (close / annotate) whose work
         // branch merged. Runs after the autonomous advance so a SHA-mismatch
         // escalation wins over a close, and only proposes: the durable
