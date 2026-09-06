@@ -423,7 +423,7 @@ fn terminate_pid_gracefully(pid: u32) {
     if pid == 0 {
         return;
     }
-    match std::process::Command::new("taskkill")
+    match gwt_core::process::hidden_command("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
         .output()
     {
