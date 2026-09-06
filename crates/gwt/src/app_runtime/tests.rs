@@ -45,7 +45,7 @@ use gwt_github::{
     ApiError, Cache, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient,
     IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
 };
-use gwt_terminal::{Pane, PaneStatus};
+use gwt_terminal::{Pane, PaneStatus, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT};
 use tracing::{field::Visit, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
@@ -4921,11 +4921,27 @@ fn agent_pane_sync_completion_distinguishes_snapshot_unavailable_and_poisoned() 
     assert!(failed_log.fields.contains_key("elapsed_ms"));
 }
 
-/// Issue #3755 AC-3: removing mutex waits must not hide a new multi-pane
-/// serialization stall. Four panes at the replay cap still finish as one
-/// bounded GUI dispatch on the debug build used by regression tests.
+/// Issue #3755 AC-3 / Issue #3988: removing mutex waits must not hide a new
+/// multi-pane serialization stall. The original guard was a 300ms wall-clock
+/// budget, which turned every saturated CI runner red without saying anything
+/// about the invariant, so the guard is structural now. Two properties make a
+/// stall impossible and both are decidable without a clock: a pane whose mutex
+/// is held is reported busy instead of awaited, and every snapshot the dispatch
+/// emits stays clamped to the scrollback replay cap however much the pane
+/// printed. The only timeout left is a deadlock guard on the holder thread, so
+/// a regression that waits on the mutex fails an assertion instead of hanging
+/// the test binary.
 #[test]
 fn agent_pane_sync_with_full_scrollback_stays_bounded() {
+    // Rows of `long_running_test_pane`, which the snapshot replays on top of
+    // the capped scrollback.
+    const PANE_ROWS: usize = 24;
+    // The holder releases as soon as the dispatch returns, so this only bounds
+    // the failing path where the dispatch waits on the mutex forever.
+    const HOLDER_DEADLOCK_GUARD: Duration = Duration::from_secs(60);
+    // Print well past the cap so the clamp is exercised rather than assumed.
+    let printed_lines = SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + PANE_ROWS + 1_000;
+
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
@@ -4950,45 +4966,105 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
         .map(|window| combined_window_id("tab-project", &window.id))
         .collect::<Vec<_>>();
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let replay = (0..5_000)
-        .map(|line| format!("snapshot-line-{line:04}\n"))
+    let replay = (0..printed_lines)
+        .map(|line| format!("snapshot-line-{line:06}\n"))
         .collect::<String>();
+    let contended_window_id = window_ids[0].clone();
+    let mut contended_pane = None;
     for window_id in &window_ids {
         let mut pane = long_running_test_pane(window_id);
         pane.process_bytes(replay.as_bytes());
+        let pane = Arc::new(Mutex::new(pane));
+        if window_id == &contended_window_id {
+            contended_pane = Some(Arc::clone(&pane));
+        }
         runtime.runtimes.insert(
             window_id.clone(),
-            WindowRuntime::new(
-                super::next_window_runtime_incarnation(),
-                Arc::new(Mutex::new(pane)),
-            ),
+            WindowRuntime::new(super::next_window_runtime_incarnation(), pane),
         );
     }
+    let contended_pane = contended_pane.expect("contended pane runtime");
+
+    // Explicit sync points replace the old sleep: the holder owns the mutex
+    // before the dispatch starts and releases it only after the dispatch has
+    // returned, so contention covers the whole dispatch on any host speed.
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = thread::spawn(move || {
+        let _guard = contended_pane.lock().expect("hold contended pane mutex");
+        held_tx.send(()).expect("signal held mutex");
+        let _ = release_rx.recv_timeout(HOLDER_DEADLOCK_GUARD);
+    });
+    held_rx.recv().expect("contended pane mutex acquired");
+
     let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
         .expect("authenticated principal");
-
-    let started = Instant::now();
     let events = runtime.handle_agent_frontend_event(
         "pane-client".to_string(),
         principal,
         AgentFrontendRequest::Ready,
     );
-    let elapsed = started.elapsed();
+    let _ = release_tx.send(());
+    holder.join().expect("contended pane holder");
 
     assert!(
-        elapsed < Duration::from_millis(300),
-        "four full-scrollback snapshots blocked the GUI dispatch for {elapsed:?}"
+        events.iter().any(|outbound| matches!(
+            &outbound.event,
+            BackendEvent::PaneSyncComplete {
+                empty_window_ids,
+                busy_window_ids,
+                unavailable_window_ids,
+                failed_window_ids,
+            } if busy_window_ids == &vec![contended_window_id.clone()]
+                && empty_window_ids.is_empty()
+                && unavailable_window_ids.is_empty()
+                && failed_window_ids.is_empty()
+        )),
+        "a full-scrollback pane holding its mutex must be reported busy, never awaited: {events:?}"
     );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|outbound| matches!(outbound.event, BackendEvent::TerminalSnapshot { .. }))
-            .count(),
-        window_ids.len()
-    );
-    assert!(events
+
+    let snapshots = events
         .iter()
-        .any(|outbound| matches!(outbound.event, BackendEvent::PaneSyncComplete { .. })));
+        .filter_map(|outbound| match &outbound.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } => {
+                Some((id.clone(), data_base64.clone()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut expected_snapshot_ids = window_ids
+        .iter()
+        .filter(|id| *id != &contended_window_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    expected_snapshot_ids.sort();
+    assert_eq!(
+        snapshots.keys().cloned().collect::<Vec<_>>(),
+        expected_snapshot_ids,
+        "every uncontended full-scrollback pane must still be snapshotted in the same dispatch"
+    );
+
+    let newest_line = format!("snapshot-line-{:06}", printed_lines - 1);
+    for (window_id, data_base64) in &snapshots {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .expect("snapshot base64");
+        let snapshot = String::from_utf8_lossy(&decoded);
+        let replayed_lines = snapshot.matches("snapshot-line-").count();
+        assert!(
+            replayed_lines <= SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + PANE_ROWS,
+            "{window_id} replayed {replayed_lines} lines, past the \
+             {SNAPSHOT_SCROLLBACK_REPLAY_LIMIT}-row scrollback replay cap"
+        );
+        assert!(
+            snapshot.contains(&newest_line),
+            "{window_id} dropped the newest line {newest_line} from its snapshot"
+        );
+        assert!(
+            !snapshot.contains("snapshot-line-000000"),
+            "{window_id} replayed a line older than the scrollback replay cap"
+        );
+    }
 }
 
 /// Issue #3755 AC-2/AC-3: close removes the runtime and window synchronously,
