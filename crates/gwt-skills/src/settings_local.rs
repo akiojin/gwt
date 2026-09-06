@@ -538,7 +538,7 @@ pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
 /// (`<root>/target/[<triple>/]{debug,release}/gwt[d][.exe]`), else `None`.
 ///
 /// Returned in the normalized forward-slash form both platforms can compare;
-/// see [`path_is_inside`].
+/// see the private `path_is_inside` helper.
 pub fn build_output_owner_root(bin: &Path) -> Option<String> {
     let normalized = normalize_path_text(bin);
     let segments = normalized
