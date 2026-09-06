@@ -2159,16 +2159,22 @@ mod tests {
     #[test]
     fn board_projection_watcher_sync_only_for_project_tab_changes() {
         assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::OpenProjectDialog
-        ));
-        assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::ReopenRecentProject {
-                path: "/tmp/repo".to_string()
-            }
-        ));
-        assert!(super::frontend_event_may_change_project_tabs(
             &gwt::FrontendEvent::CloseProjectTab {
                 tab_id: "tab-1".to_string()
+            }
+        ));
+
+        // SPEC #3170: opening a project no longer mutates the tab set inside
+        // the frontend dispatch — the tab appears when the prepared navigation
+        // commits, and the `ProjectNavigationPrepared` arm syncs the watchers
+        // there instead. Syncing on dispatch would only walk the unchanged tab
+        // set.
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::OpenProjectDialog
+        ));
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::ReopenRecentProject {
+                path: "/tmp/repo".to_string()
             }
         ));
 
@@ -4760,7 +4766,9 @@ mod tests {
         assert!(!runtime
             .handle_frontend_event("client-1".to_string(), gwt::FrontendEvent::FrontendReady)
             .is_empty());
-        assert!(!runtime
+        // SPEC #3170: the reopen dispatch returns nothing because the open is
+        // prepared off-thread; the tab and its broadcast arrive with the commit.
+        assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::ReopenRecentProject {
@@ -4768,6 +4776,14 @@ mod tests {
                 },
             )
             .is_empty());
+        let prepared = take_project_navigation_completion(&events);
+        assert!(!runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty());
+        assert!(runtime
+            .tabs
+            .iter()
+            .any(|tab| crate::same_worktree_path(&tab.project_root, &scratch)));
         assert!(!runtime
             .handle_frontend_event(
                 "client-1".to_string(),

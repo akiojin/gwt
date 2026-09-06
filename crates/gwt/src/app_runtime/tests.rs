@@ -11248,6 +11248,19 @@ fn drain_queued_blocking_tasks(tasks: &BlockingTestTaskQueue) {
     }
 }
 
+/// SPEC #3170: project open / switch is prepared off the tao thread, so a
+/// focused test drives the queued worker and the generation-checked commit
+/// explicitly instead of reading a tab straight out of the dispatch call.
+fn commit_pending_project_navigation(
+    runtime: &mut AppRuntime,
+    queued_tasks: &BlockingTestTaskQueue,
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    drain_queued_blocking_tasks(queued_tasks);
+    let prepared = take_project_navigation_completion(recorded_events);
+    runtime.handle_project_navigation_prepared(prepared)
+}
+
 #[test]
 fn project_prepare_open_returns_before_repo_restore_and_preserves_cancel() {
     let temp = tempdir().expect("tempdir");
@@ -51246,9 +51259,17 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         "git init --bare failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
 
-    let events = runtime.handle_clone_project_done(&workspace_home);
+    assert!(
+        runtime
+            .handle_clone_project_done(&workspace_home)
+            .is_empty(),
+        "the clone completion is prepared off-thread"
+    );
+    let events = commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     assert_eq!(runtime.tabs.len(), 1);
     assert_eq!(
@@ -51470,8 +51491,12 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
 
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let open_events = runtime.open_project_path_events(project.clone());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    runtime.open_project_path_events(project.clone());
+    let open_events =
+        commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
     let tab_id = runtime.active_tab_id.clone().expect("active tab");
 
     assert!(open_events.iter().any(|event| matches!(
@@ -51493,8 +51518,16 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
         }
     ));
 
-    let mut next_runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let next_events = next_runtime.open_project_path_events(project);
+    let (mut next_runtime, next_recorded_events) =
+        sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (next_blocking_tasks, next_queued_tasks) = BlockingTaskSpawner::queued();
+    next_runtime.blocking_tasks = next_blocking_tasks;
+    next_runtime.open_project_path_events(project);
+    let next_events = commit_pending_project_navigation(
+        &mut next_runtime,
+        &next_queued_tasks,
+        &next_recorded_events,
+    );
 
     assert!(
         next_events.iter().any(|event| matches!(
@@ -51550,8 +51583,11 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
     fs::create_dir_all(project.join(gwt_core::migration::backup::BACKUP_DIR_NAME))
         .expect("migration backup dir");
 
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let events = runtime.open_project_path_events(project.clone());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+    runtime.open_project_path_events(project.clone());
+    let events = commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     assert!(
         events.iter().any(|event| matches!(
@@ -58718,9 +58754,12 @@ fn pm_open_project_skips_migration_pending_repo() {
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
 
     runtime.open_project_path_events(project);
+    commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
 
     let tab_id = runtime.active_tab_id.clone().expect("active tab");
     assert!(runtime
