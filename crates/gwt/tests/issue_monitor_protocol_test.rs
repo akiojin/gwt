@@ -324,6 +324,7 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         phase: None,
         has_unknown_phase: false,
         is_spec: false,
+        parent_spec: None,
         monitor_state: Some(MonitorInboxState::HoldExcluded),
         queue_position: Some(3),
         exclusion_reason: Some("matched label: hold".to_string()),
