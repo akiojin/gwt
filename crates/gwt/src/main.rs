@@ -76,8 +76,9 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    OutboundEvent, ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectOpenTarget, ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress,
+    WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -277,12 +278,7 @@ fn board_projection_watch_key(project_root: &Path) -> PathBuf {
 }
 
 fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
-    matches!(
-        event,
-        FrontendEvent::OpenProjectDialog
-            | FrontendEvent::ReopenRecentProject { .. }
-            | FrontendEvent::CloseProjectTab { .. }
-    )
+    matches!(event, FrontendEvent::CloseProjectTab { .. })
 }
 
 /// Phase 0 perf instrumentation (measure-first; see plan
@@ -1455,6 +1451,7 @@ enum UserEvent {
         result: Box<Result<ProcessLaunch, String>>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
+    ProjectNavigationPrepared(Box<ProjectNavigationPrepared>),
     Dispatch(Vec<OutboundEvent>),
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -1634,7 +1631,8 @@ mod tests {
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
         DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        OutboundEvent, ProcessLaunch, ProjectNavigationPrepared, ProjectTabRuntime, UserEvent,
+        WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -2161,16 +2159,22 @@ mod tests {
     #[test]
     fn board_projection_watcher_sync_only_for_project_tab_changes() {
         assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::OpenProjectDialog
-        ));
-        assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::ReopenRecentProject {
-                path: "/tmp/repo".to_string()
-            }
-        ));
-        assert!(super::frontend_event_may_change_project_tabs(
             &gwt::FrontendEvent::CloseProjectTab {
                 tab_id: "tab-1".to_string()
+            }
+        ));
+
+        // SPEC #3170: opening a project no longer mutates the tab set inside
+        // the frontend dispatch — the tab appears when the prepared navigation
+        // commits, and the `ProjectNavigationPrepared` arm syncs the watchers
+        // there instead. Syncing on dispatch would only walk the unchanged tab
+        // set.
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::OpenProjectDialog
+        ));
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::ReopenRecentProject {
+                path: "/tmp/repo".to_string()
             }
         ));
 
@@ -3111,9 +3115,15 @@ mod tests {
         let blocking_tasks = BlockingTaskSpawner::thread();
         let persist_dispatcher =
             crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+        let (project_tab_incarnations, next_project_incarnation) =
+            crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
+            project_tab_incarnations,
+            next_project_incarnation,
+            project_navigation_request: 0,
+            pending_project_navigation: None,
             recent_projects: Vec::new(),
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
@@ -3413,6 +3423,25 @@ mod tests {
         panic!("timed out waiting for {label}: {snapshot:?}");
     }
 
+    fn take_project_navigation_completion(
+        events: &Arc<Mutex<Vec<UserEvent>>>,
+    ) -> ProjectNavigationPrepared {
+        wait_for_recorded_event("project navigation completion", events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+        });
+        let mut events = events.lock().expect("event log");
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+            .expect("project navigation completion");
+        match events.remove(index) {
+            UserEvent::ProjectNavigationPrepared(prepared) => *prepared,
+            _ => unreachable!("matched project navigation completion"),
+        }
+    }
+
     #[test]
     fn frontend_sync_events_replay_status_wizard_and_pending_update() {
         let temp = tempdir().expect("tempdir");
@@ -3563,15 +3592,20 @@ mod tests {
             ),
             sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::NonRepo, &[]),
         ];
-        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-2"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), tabs, Some("tab-2"));
         runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
 
-        let existing = runtime
-            .open_project_path(repo.clone())
-            .expect("open existing project");
+        assert!(runtime.open_project_path_events(repo.clone()).is_empty());
+        let existing_events = runtime.handle_project_navigation_prepared(
+            take_project_navigation_completion(&recorded_events),
+        );
         let new_active = runtime.active_tab_id.clone().expect("active tab");
 
-        assert!(existing);
+        assert!(existing_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::LaunchWizardState { wizard: None }
+        )));
         assert_eq!(new_active, "tab-1");
         assert!(runtime.launch_wizard.is_none());
         assert!(super::same_worktree_path(
@@ -3579,11 +3613,14 @@ mod tests {
             &repo
         ));
 
-        let added = runtime
-            .open_project_path(scratch.clone())
-            .expect("open new project");
+        assert!(runtime.open_project_path_events(scratch.clone()).is_empty());
+        let added_events = runtime.handle_project_navigation_prepared(
+            take_project_navigation_completion(&recorded_events),
+        );
 
-        assert!(!added);
+        assert!(added_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
         assert_eq!(runtime.tabs.len(), 3);
         assert!(super::same_worktree_path(
             &runtime.recent_projects[0].path,
@@ -4729,7 +4766,9 @@ mod tests {
         assert!(!runtime
             .handle_frontend_event("client-1".to_string(), gwt::FrontendEvent::FrontendReady)
             .is_empty());
-        assert!(!runtime
+        // SPEC #3170: the reopen dispatch returns nothing because the open is
+        // prepared off-thread; the tab and its broadcast arrive with the commit.
+        assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::ReopenRecentProject {
@@ -4737,6 +4776,14 @@ mod tests {
                 },
             )
             .is_empty());
+        let prepared = take_project_navigation_completion(&events);
+        assert!(!runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty());
+        assert!(runtime
+            .tabs
+            .iter()
+            .any(|tab| crate::same_worktree_path(&tab.project_root, &scratch)));
         assert!(!runtime
             .handle_frontend_event(
                 "client-1".to_string(),
@@ -9108,6 +9155,20 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
                 let events = app.handle_issue_launch_wizard_prepared(prepared);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ProjectNavigationPrepared(prepared)) => {
+                let may_open_project = matches!(
+                    &prepared.result,
+                    Ok(ProjectNavigationPayload::Open(_))
+                );
+                let events = app.handle_project_navigation_prepared(*prepared);
+                if may_open_project && !events.is_empty() {
+                    board_projection_watchers.sync(&app, proxy.clone());
+                    workspace_projection_watchers.sync(&app, proxy.clone());
+                    #[cfg(unix)]
+                    board_daemon_subscribers.sync(&app, proxy.clone());
+                }
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
