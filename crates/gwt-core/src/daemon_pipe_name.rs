@@ -18,9 +18,7 @@ pub const WINDOWS_PIPE_PREFIX: &str = r"\\.\pipe\";
 ///
 /// [`RuntimeScope`]: crate::daemon::RuntimeScope
 pub fn windows_pipe_name_for(bind: &str) -> String {
-    if bind.len() >= WINDOWS_PIPE_PREFIX.len()
-        && bind[..WINDOWS_PIPE_PREFIX.len()].eq_ignore_ascii_case(WINDOWS_PIPE_PREFIX)
-    {
+    if has_windows_pipe_prefix(bind) {
         return bind.to_string();
     }
     // Split on both separators by hand so the derived name is identical on
@@ -45,9 +43,26 @@ pub fn windows_pipe_name_for(bind: &str) -> String {
     format!("{WINDOWS_PIPE_PREFIX}gwtd-{stem}-{}", &digest[..16])
 }
 
+/// Whether `bind` already names a pipe in the local pipe namespace
+/// (case-insensitive prefix match). `str::get` keeps a bind whose UTF-8
+/// boundary falls inside the prefix width from panicking; it is simply not a
+/// pipe name.
+pub fn has_windows_pipe_prefix(bind: &str) -> bool {
+    bind.get(..WINDOWS_PIPE_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(WINDOWS_PIPE_PREFIX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multibyte_bind_inside_the_prefix_width_is_not_a_pipe_name_and_does_not_panic() {
+        assert!(!has_windows_pipe_prefix("ééééé"));
+        assert!(!has_windows_pipe_prefix("日本語"));
+        assert!(windows_pipe_name_for("ééééé").starts_with(WINDOWS_PIPE_PREFIX));
+        assert!(has_windows_pipe_prefix(r"\\.\PIPE\x"));
+    }
 
     #[test]
     fn pipe_name_is_stable_unique_and_idempotent() {

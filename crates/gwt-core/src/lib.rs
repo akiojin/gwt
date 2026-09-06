@@ -18,6 +18,8 @@ pub mod index;
 pub mod index_coordinator;
 pub mod logging;
 pub mod migration;
+#[cfg(windows)]
+pub mod named_pipe;
 pub mod operation_deadline;
 pub mod paths;
 pub mod process;

@@ -29,7 +29,7 @@ use gwt_core::daemon::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::transport::{IpcReadHalf, IpcStream, IpcWriteHalf};
+use super::transport::{check_server_identity, IpcReadHalf, IpcStream, IpcWriteHalf};
 
 /// Connected, post-handshake daemon client.
 ///
@@ -47,6 +47,7 @@ impl DaemonClient {
         let stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(|err| format!("daemon connect failed ({}): {err}", endpoint.bind))?;
+        check_server_identity(&stream, endpoint.pid)?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 

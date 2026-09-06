@@ -16,7 +16,7 @@ use gwt_core::daemon::{
 };
 use tokio::{io::AsyncReadExt, io::AsyncWriteExt, time::timeout};
 
-use super::transport::{bind_rejection, IpcStream};
+use super::transport::{bind_rejection, check_server_identity, IpcStream};
 
 const SIBLING_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_HANDSHAKE_RESPONSE_BYTES: usize = 16 * 1024;
@@ -497,7 +497,20 @@ fn is_live_pid<F>(pid: u32, is_process_alive: &F) -> bool
 where
     F: Fn(u32) -> bool,
 {
-    pid > 0 && i32::try_from(pid).is_ok() && is_process_alive(pid)
+    pid > 0 && pid_fits_platform(pid) && is_process_alive(pid)
+}
+
+/// Unix `kill(2)` takes a signed `pid_t`; a value above `i32::MAX` would
+/// wrap negative and probe a process *group* instead. Windows pids are
+/// unsigned DWORDs and need no such bound.
+#[cfg(unix)]
+fn pid_fits_platform(pid: u32) -> bool {
+    i32::try_from(pid).is_ok()
+}
+
+#[cfg(windows)]
+fn pid_fits_platform(_pid: u32) -> bool {
+    true
 }
 
 async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
@@ -510,6 +523,7 @@ async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
         let mut stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(ProbeError::Connect)?;
+        check_server_identity(&stream, endpoint.pid).map_err(|_| ProbeError::Handshake)?;
         let request = IpcHandshakeRequest {
             protocol_version: endpoint.protocol_version,
             auth_token: endpoint.auth_token.clone(),

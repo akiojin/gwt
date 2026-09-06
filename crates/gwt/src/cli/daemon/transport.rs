@@ -133,8 +133,7 @@ pub(crate) fn bind_rejection(bind: &str) -> Option<&'static str> {
     }
     #[cfg(windows)]
     {
-        let prefix = gwt_core::daemon::WINDOWS_PIPE_PREFIX;
-        if bind.len() < prefix.len() || !bind[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        if !gwt_core::daemon_pipe_name::has_windows_pipe_prefix(bind) {
             return Some("unsupported_transport");
         }
         if bind_is_served(bind) {
@@ -233,6 +232,54 @@ impl IpcStream {
     /// Split into independently owned read / write halves.
     pub(crate) fn into_split(self) -> (IpcReadHalf, IpcWriteHalf) {
         tokio::io::split(self)
+    }
+
+    /// The process serving this client connection, when the transport can
+    /// tell. Windows reports the named pipe's server pid so a client can
+    /// refuse a squatted pipe before it sends the auth token (the pipe
+    /// namespace is machine-global; see [`check_server_identity`]). Unix
+    /// returns `None`: the socket lives in the owner-only runtime directory,
+    /// which already excludes other accounts.
+    pub(crate) fn server_process_id(&self) -> Option<u32> {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(_) => None,
+            #[cfg(windows)]
+            Self::PipeServer(_) => None,
+            #[cfg(windows)]
+            Self::PipeClient(client) => {
+                use std::os::windows::io::AsRawHandle;
+                gwt_core::named_pipe::named_pipe_server_process_id(client.as_raw_handle())
+            }
+        }
+    }
+}
+
+/// Refuse to hand a handshake (and its auth token) to a transport peer that
+/// is not the process the endpoint file names. A transport that cannot
+/// report its peer (Unix) passes; a Windows pipe whose server pid is unknown
+/// or differs from `expected_pid` fails closed.
+pub(crate) fn check_server_identity(stream: &IpcStream, expected_pid: u32) -> Result<(), String> {
+    match server_identity_verdict(stream.server_process_id(), expected_pid, cfg!(windows)) {
+        Ok(()) => Ok(()),
+        Err(reason) => Err(format!(
+            "daemon transport peer rejected before handshake: {reason} (endpoint pid {expected_pid})"
+        )),
+    }
+}
+
+/// Platform-neutral core of [`check_server_identity`], split out so the
+/// fail-closed rule is testable on every host.
+fn server_identity_verdict(
+    server_pid: Option<u32>,
+    expected_pid: u32,
+    peer_identity_required: bool,
+) -> Result<(), &'static str> {
+    match server_pid {
+        Some(pid) if pid == expected_pid => Ok(()),
+        Some(_) => Err("pipe is served by a different process"),
+        None if peer_identity_required => Err("pipe server identity is unavailable"),
+        None => Ok(()),
     }
 }
 
@@ -400,6 +447,19 @@ mod tests {
         reader.read_line(&mut reply).await.expect("read reply");
         assert_eq!(reply, "pong\n");
         server.await.expect("server task");
+    }
+
+    /// A pipe served by another process (a squatted name) must never
+    /// receive the handshake; a transport that cannot identify its peer
+    /// only passes where the platform does not require identity.
+    #[test]
+    fn server_identity_is_fail_closed_when_the_platform_requires_it() {
+        assert_eq!(server_identity_verdict(Some(42), 42, true), Ok(()));
+        assert!(server_identity_verdict(Some(43), 42, true).is_err());
+        assert!(server_identity_verdict(Some(43), 42, false).is_err());
+        assert!(server_identity_verdict(None, 42, true).is_err());
+        assert_eq!(server_identity_verdict(None, 42, false), Ok(()));
+        assert_eq!(bind_rejection("ééééé"), Some("unsupported_transport"));
     }
 
     /// AC-1: a second daemon for the same scope must fail to bind instead
