@@ -43352,6 +43352,11 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
     };
     let now = "2026-07-28T00:00:00Z";
     let mut stale = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    // Issue #4045 AC-2: the transaction's outcome is the subject, so pin its
+    // budget instead of inheriting the production 250 ms wall-clock bound.
+    let _budget = super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
 
     rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |latest| {
         gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
@@ -43365,7 +43370,8 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             now,
             &std::collections::BTreeSet::new(),
         );
-    });
+    })
+    .expect("latest-state transaction commits the prepared claim proposal");
 
     let prepared = stale
         .pending_effects()
@@ -43446,6 +43452,160 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
     assert_eq!(
         persisted.pending_launch_deliveries[0].delivery_id,
         format!("launch:{attempting_effect_id}")
+    );
+}
+
+/// Issue #4045 AC-3: a persist that outlives the GUI-local prefs budget must
+/// not silently keep an in-memory `Prepared` proposal that disk never saw.
+/// The delay lands between the mutation and the durable rename — the exact
+/// point where a saturated Windows runner's fsync expired the 250 ms budget in
+/// run 34047529539 — so the next attempt rebases from disk, finds nothing, and
+/// `bounded_remote_calls` stays 0 instead of reaching 1.
+#[test]
+fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposal() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed disk authority");
+    let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        issues: vec![gwt::IssueMonitorIssue {
+            number: 42,
+            title: "Issue Monitor slow persist".to_string(),
+            labels: vec!["bug".to_string()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        }],
+        source: gwt::IssueMonitorCandidateSource::Live,
+        live_error: None,
+    };
+    let now = "2026-07-28T00:00:00Z";
+    let mut stale = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    // Longer than the production budget, well inside the pinned one.
+    let persist_delay = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT + Duration::from_millis(150);
+    let _budget = super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+
+    rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |latest| {
+        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+            latest, &loaded, &repo, now,
+        );
+        latest.set_gui_connected(true);
+        prepare_local_issue_monitor_claim_proposals(
+            latest,
+            &loaded,
+            "windows-host/session",
+            now,
+            &std::collections::BTreeSet::new(),
+        );
+        // The proposal exists in memory; the durable rename is what comes next.
+        thread::sleep(persist_delay);
+    })
+    .expect("a persist inside the pinned budget commits the prepared proposal");
+
+    let mut bounded_remote_calls = 0;
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + Duration::from_secs(5),
+    );
+    drive_local_issue_monitor_claim_effects_with(
+        &prefs_path,
+        &mut stale,
+        |effect, _authority_current, _call_now, call_now_text| {
+            bounded_remote_calls += 1;
+            let claim = match &effect.payload {
+                gwt::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    claim_id,
+                    owner,
+                    expires_at,
+                    launched_work_id,
+                    ..
+                } => gwt_github::issue_auto_claim::ClaimComment {
+                    comment_id: Some(gwt_github::CommentId(42)),
+                    claim_id: claim_id.clone(),
+                    owner: owner.clone(),
+                    issue_number: *issue_number,
+                    status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                    heartbeat_at: call_now_text.to_string(),
+                    expires_at: expires_at.clone(),
+                    launched_work_id: launched_work_id.clone(),
+                },
+                other => panic!("unexpected local effect: {other:?}"),
+            };
+            Ok(LocalIssueMonitorEffectOutcome::Claim(Ok(
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(claim),
+            )))
+        },
+    )
+    .expect("local driver completes the claim");
+
+    assert_eq!(
+        bounded_remote_calls, 1,
+        "a slow persist must not silently lose the prepared proposal"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(persisted.pending_launch_deliveries.len(), 1);
+}
+
+/// Issue #4045 AC-1: when the durable write expires the budget after the
+/// mutation already ran, the helper must report the failure and restore the
+/// in-memory state from canonical disk instead of returning the unapplied
+/// mutation as if it had won.
+#[test]
+fn app_runtime_gui_rebase_persist_deadline_expiry_fails_closed_and_restores_disk_state() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let disk = gwt::IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents: 2,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &disk).expect("seed prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let mut monitor =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), disk.clone());
+    let budget = Duration::from_millis(100);
+    let _budget = super::ScopedLocalIssueMonitorPrefsTimeout::set(budget);
+    let persist_delay = budget + Duration::from_millis(150);
+
+    let mutated =
+        super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |latest| {
+            latest.set_max_active_agents(4);
+            thread::sleep(persist_delay);
+            true
+        });
+
+    let error = mutated.expect_err("an expired persist must fail closed");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert_eq!(
+        fs::read(&prefs_path).expect("reload prefs"),
+        before,
+        "an expired persist must be zero-write"
+    );
+    assert_eq!(
+        monitor.prefs().max_active_agents,
+        disk.max_active_agents,
+        "in-memory state must be restored from canonical disk state"
     );
 }
 
@@ -44658,7 +44818,8 @@ fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
         gwt::IssueMonitorPrefs::default(),
     );
 
-    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |_| {});
+    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |_| {})
+        .expect("GUI rebase commits");
 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
     for prefs in [&persisted, &stale.prefs()] {
@@ -44687,7 +44848,8 @@ fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
 
     super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut current, |monitor| {
         monitor.set_max_active_agents(4)
-    });
+    })
+    .expect("GUI rebase recovers malformed prefs and commits");
 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("recovered GUI prefs");
     assert!(persisted.enabled);
@@ -44785,8 +44947,8 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
         "GUI fallback transactions outlived their cumulative short lock budget: {elapsed:?}"
     );
     assert!(
-        !rebase_mutated,
-        "timed-out rebase must not run its mutation"
+        rebase_mutated.is_err(),
+        "timed-out rebase must fail closed without running its mutation"
     );
     assert!(
         control.is_err(),
@@ -44859,7 +45021,8 @@ fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
         },
     );
 
-    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |_| {});
+    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |_| {})
+        .expect("GUI rebase commits");
 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload GUI rebase");
     for prefs in [&persisted, &stale.prefs()] {
