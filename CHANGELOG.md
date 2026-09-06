@@ -1,6 +1,108 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.91.0] - 2026-09-06
+
+### Bug Fixes
+
+- **issue-monitor:** Merged Issue settlement のレビュー指摘を反映する
+- **github-budget:** Secondary rate limit の拒否を指数 backoff 付きで永続化し次プロセスの GraphQL spawn も抑止する
+- **issue-monitor:** Throttle 中もキャッシュ候補で scan を完走させ再同期を burst 上限未満に分割し status に GitHub 予算を出す
+- **issue-monitor:** キュー長が targeted refresh 上限を超えても throttle 中の scan を完走させる
+- **issue-monitor:** Rate limit で拒否された完了 readback は候補を defer して scan を完走させる
+- **gh:** 応答ボディで返る GraphQL の RATE_LIMIT を型付き失敗として分類する
+- **gh:** GraphQL 分類テストの fake transport に execute_with_deadline を実装する
+- **issue-monitor:** 旧リリースの AC 判定文言で隔離された行をフルスキャンで再分類する
+- **hooks:** 独立レビュー窓が verdict を publish できない identity/obligation gate を解消する
+- **hooks:** レビュー窓の deny 範囲に file tool と mutating verify.* を加える
+- **issue-monitor:** 稼働中のエージェント窓を耐久 ledger で追跡し直し二重起動を止める
+- **issue-monitor:** 壊れた prefs の復旧で最後に commit した世代へ落とす
+- **launch:** 優先度設定の失敗で agent 起動を落とさない
+- **launch:** Setpriority helper を impl 外へ出してコンパイルを通す
+- **hooks:** Discussion Stop gate を origin session に限定する
+- **launch:** Codex hook trust の事前登録漏れで Hooks need review が出る問題を修正する
+- **launch:** Codex config path を解決できない場合は起動を止めない
+- **issue-monitor:** Autonomous launch の失敗理由を status の行に残す
+- **skills:** Gwt hook transport の判定を呼び出し位置で絞る
+- **agent:** Codex の共有 ~/.codex SQLite ロック競合を緩和する
+- **launch:** Continue work の owner linkage を回帰固定し owner mismatch を actionable diagnostic 化する
+
+### Documentation
+
+- **skills:** PM guidance に issue.monitor.status の github_budget と backoff 契約を追記する
+- **skills:** Self-improvement Stop hook の trust 説明を削除後の実態に合わせる
+
+### Features
+
+- **gui:** 通知センターのドロワー行をトリアージ案のレイアウトにする
+- **issue-monitor:** Develop マージ後に delivered Issue を自動クローズする
+- **launch-wizard:** Codex の model スナップショットを 2026-09-05 に更新する
+- **knowledge:** Related SPECs から parent_spec を導出し Issue 行に配信する
+- **gwtd:** Actions.rerun で失敗した Actions run / job を再実行できるようにする
+- **issue-monitor:** マージ済み work/issue-* remote ブランチを delivery 後に自動削除する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3979 作業中に生成された Work event shard を追跡に追加
+- **work:** Issue #3979 の検証中に生成された Work event shard を追跡に追加
+- **work:** Issue #3979 の終端 Work update で生成された event shard を追跡に追加
+- **work:** Issue #3928 作業中に生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の verify 実行で生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の PR 作成時に生成された Work event shard を追跡に追加
+- **work:** Issue #3928 のレビュー修正中に生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の検証実行で生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の追加修正で生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の PR 更新で生成された Work event shard を追跡に追加
+- **ci:** ETXTBSY の既知 flake で落ちた Test (Rust) を再走させる
+- **work:** Issue #3928 の追加検証で生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の PR 更新で生成された Work event shard を追跡に追加
+- **work:** Issue #3928 の develop 取り込みで生成された Work event shard を追跡に追加
+- **ci:** タイミング境界の既知 flake で落ちた Test (Rust) を再走させる
+- **work:** Issue #3972 の Work event shard を記録
+- **work:** Issue #3972 の Work event shard を追記する
+- **work:** Issue #3928 の develop 取り込みで生成された Work event shard を追跡に追加
+- **work:** Issue #3959 の Work event shard を追記する
+- **work:** Issue #3959 の develop 取り込みで生成された Work event shard を追跡に追加
+- **work:** Issue #3959 の完了時 Work event shard を追記する
+- **work:** Issue #3984 の Work event shard を追記する
+- **work:** Issue #3962 の Work イベントシャードを記録する
+- **work:** Issue #3883 の Work event shard を追記する
+- **work:** Issue #3883 の Work event shard を追記する
+- **work:** Issue #3883 の Work event shard を追記する
+- **work:** Issue #3883 完了時の Work event shard を追記する
+- **work:** Issue #3942 の終端 Work update で生成された event shard を追跡に追加
+- **work:** Issue #3967 の終端 Work update で生成された event shard を追跡に追加
+- Record runtime work events
+- Record runtime work events
+- **work:** Runtime が書き出した work event を取り込む
+- **work:** Coordination events store を更新する
+- **work:** Develop 取り込み後の work event を取り込む
+
+### Refactor
+
+- Improvement subsystem を撤去し intake を Board → PM 経路へ一本化
+- 撤去し損ねた Improvement Inbox の WebView E2E spec を削除
+- **launch:** Resource policy 適用をヘルパーに閉じ込める
+
+### Styling
+
+- **issue-monitor:** レビュー修正後の cargo fmt を適用する
+- **gwt:** Rustfmt を適用する
+- **launch:** Rustfmt に合わせて Codex hook trust 周辺の整形を修正する
+
+### Testing
+
+- **issue-monitor:** Rate limit テストがプロセス全体の quota gate と共有ログを汚染しないようにする
+- **gwt:** テストから実ホストの package runner を spawn させない guard を入れる
+- **gwt:** App_runtime の共通 runtime fixture でも launch PATH を fixture runner に pin する
+- **gwt:** Fixture package runner をプロセス共有にして runtime fixture の追加コストを下げる
+- **launch-wizard:** フォールバックテストの launch config 検証を Result 前提に直す
+- **launch-wizard:** 既定モデル前提のテストを gpt-6-astra に合わせる
+- **launch-wizard:** 削除モデル通知の headed E2E を追加する
+- **issue-monitor:** 6 pane 対 max_active=3 の復旧を実規模で固定する
+- **gwtd:** Actions family help が actions.rerun を案内することを固定する
+- **launch:** Binding install が PTY 起動前に走ることを順序テストで固定する
+
 ## [9.90.0] - 2026-09-05
 
 ### Bug Fixes
