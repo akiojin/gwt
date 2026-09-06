@@ -2,10 +2,18 @@
 
 use std::{
     ffi::OsStr,
+    io::Read,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use tracing::debug;
+
+/// Upper bound for one `<command> --version` probe (SPEC-3864 T-006). A CLI
+/// that hangs (or waits on a network registry) must not stall wizard
+/// detection; the executable already resolved on PATH, so on timeout the
+/// agent is still reported installed, just without a version string.
+pub const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crate::types::{builtin_agent_descriptor_for_command, builtin_agent_descriptors, AgentId};
 
@@ -44,14 +52,23 @@ pub struct AgentDetector;
 
 impl AgentDetector {
     /// Scan the system for all known builtin agents.
+    ///
+    /// Each probe spawns `<command> --version`, so the probes run on scoped
+    /// threads and the wall-clock cost is bounded by the slowest CLI rather
+    /// than the sum of all nine (SPEC-3864 T-006). Results keep descriptor
+    /// order so callers see a deterministic list.
     pub fn detect_all() -> Vec<DetectedAgent> {
-        let mut found = Vec::new();
-        for probe in builtin_probes() {
-            if let Some(detected) = Self::detect_one(&probe) {
-                found.push(detected);
-            }
-        }
-        found
+        let probes = builtin_probes();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = probes
+                .iter()
+                .map(|probe| scope.spawn(move || Self::detect_one(probe)))
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok().flatten())
+                .collect()
+        })
     }
 
     /// Detect a single agent by its command name.
@@ -133,18 +150,67 @@ impl AgentDetector {
             error.to_string()
         })?;
         let resolved_path = PathBuf::from(cmd.get_program());
-        let output = cmd.output().map_err(|error| error.to_string())?;
-        let version = if output.status.success() {
-            let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if raw.is_empty() {
-                None
-            } else {
-                Some(raw)
-            }
-        } else {
-            None
-        };
+        let version = Self::probe_version_bounded(&mut cmd, VERSION_PROBE_TIMEOUT)?;
         Ok((version, resolved_path))
+    }
+
+    /// Run the version probe with a hard deadline. Returns `Ok(None)` when
+    /// the probe fails, prints nothing, or exceeds the deadline (the child is
+    /// killed); `Err` only when the process could not be spawned at all.
+    fn probe_version_bounded(
+        cmd: &mut std::process::Command,
+        timeout: Duration,
+    ) -> Result<Option<String>, String> {
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        // The reader is detached rather than joined: a descendant that
+        // inherits the pipe (e.g. a shell wrapper's child) would otherwise
+        // hold the read open past the child's exit or kill.
+        let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        if let Some(mut stdout) = child.stdout.take() {
+            std::thread::spawn(move || {
+                let mut raw = Vec::new();
+                let _ = stdout.read_to_end(&mut raw);
+                let _ = stdout_tx.send(raw);
+            });
+        }
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) => {
+                    debug!(?timeout, "Agent version probe timed out; killing probe");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                Err(error) => {
+                    debug!(error = %error, "Agent version probe wait failed");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let Some(status) = status else {
+            return Ok(None);
+        };
+        if !status.success() {
+            return Ok(None);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(stdout) = stdout_rx.recv_timeout(remaining.max(Duration::from_millis(250))) else {
+            return Ok(None);
+        };
+        let raw = String::from_utf8_lossy(&stdout).trim().to_string();
+        Ok((!raw.is_empty()).then_some(raw))
     }
 }
 
@@ -290,6 +356,41 @@ mod tests {
             .expect("git must be detected");
 
         assert_eq!(detected.path, expected);
+    }
+
+    /// SPEC-3864 T-006: a version probe that never returns must not hang
+    /// detection. The executable resolved on PATH, so the agent is still
+    /// reported installed — just without a version string.
+    #[cfg(unix)]
+    #[test]
+    fn detect_by_command_bounds_a_hanging_version_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable = temp.path().join("agy");
+        std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").expect("write hanging fixture");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("chmod fixture");
+
+        // The fixture PATH is injected into the probe only; the process PATH
+        // stays untouched so parallel `sh` / `git` spawns keep resolving
+        // (Issue #3895).
+        let started = std::time::Instant::now();
+        let detected =
+            AgentDetector::detect_by_command_in_env("agy", &[("PATH", temp.path().as_os_str())])
+                .expect("resolvable executable stays detected when its probe hangs");
+        let elapsed = started.elapsed();
+
+        assert_eq!(detected.agent_id, AgentId::Antigravity);
+        assert_eq!(detected.path, executable);
+        assert_eq!(detected.version, None);
+        assert!(
+            elapsed < VERSION_PROBE_TIMEOUT + std::time::Duration::from_secs(3),
+            "probe must be bounded by {VERSION_PROBE_TIMEOUT:?}, took {elapsed:?}"
+        );
     }
 
     #[test]
