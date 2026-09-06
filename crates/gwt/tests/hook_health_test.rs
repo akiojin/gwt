@@ -1067,12 +1067,26 @@ fn committed_codex_hooks_stay_guarded_and_portable() {
                 command.contains("command -v"),
                 "{event} still uses the unguarded legacy template: {command}"
             );
+            // #4044 (AC-3): the committed fallback must be the canonical bare
+            // `gwtd`. Any absolute path — a worktree build output OR an
+            // installed `/Applications/GWT.app/...` (PR #4005) — exists on one
+            // machine only, and the generator rewrites a tracked config to the
+            // canonical form, so a committed absolute path leaves every other
+            // checkout permanently dirty after its first materialization.
+            assert!(
+                command.contains("gwt_bin='gwtd'"),
+                "{event} must commit the canonical `gwtd` fallback, not an absolute path: {command}"
+            );
         }
     }
     assert_eq!(managed, 5, "every managed event must be committed");
     assert!(
         !rendered.contains("/target/debug/") && !rendered.contains("\\\\target\\\\debug\\\\"),
         "a machine-local build output must never be committed: {rendered}"
+    );
+    assert!(
+        !rendered.contains("/Applications/") && !rendered.contains("gwt_bin='/"),
+        "an absolute install path must never be committed: {rendered}"
     );
 }
 
@@ -1162,6 +1176,79 @@ fn contaminated_tracked_codex_hooks_converge_back_to_canonical() {
     assert!(
         git_porcelain(repo.path()).trim().is_empty(),
         "regeneration must restore the canonical tracked bytes, got:\n{}",
+        git_porcelain(repo.path())
+    );
+}
+
+/// #4044 AC-3: `develop` already committed an absolute *install* path
+/// (`/Applications/GWT.app/Contents/MacOS/gwtd`, PR #4005) into the tracked
+/// `.codex/hooks.json`. Repair on any machine must normalize that committed
+/// shape back to the canonical bare `gwtd`, and once the canonical bytes are
+/// committed, materializing on a machine with a different install path must
+/// leave the tracked file clean.
+#[test]
+fn committed_install_path_in_tracked_codex_hooks_is_normalized_on_repair() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = repo_with_committed_canonical_codex_hooks();
+    let hooks_path = repo.path().join(".codex/hooks.json");
+    let canonical = fs::read_to_string(&hooks_path).expect("read canonical hooks");
+    let committed_install_path = canonical.replace(
+        "gwt_bin='gwtd'",
+        "gwt_bin='/Applications/GWT.app/Contents/MacOS/gwtd'",
+    );
+    assert_ne!(
+        canonical, committed_install_path,
+        "fixture must embed an install path"
+    );
+    fs::write(&hooks_path, &committed_install_path).expect("write install-path hooks");
+    run_git(repo.path(), &["add", "-A"]);
+    run_git(
+        repo.path(),
+        &[
+            "commit",
+            "-qm",
+            "commit an absolute install path (#4005 shape)",
+        ],
+    );
+    assert!(git_porcelain(repo.path()).trim().is_empty());
+
+    // Machine A: a different install than the committed one repairs the file.
+    {
+        let installed = stable_hook_bin_guard();
+        gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+        let rendered = fs::read_to_string(&hooks_path).expect("read repaired hooks");
+        let installed_text = normalized_embedded_path_text(&installed.path().display().to_string());
+        assert!(
+            !rendered.contains("/Applications/GWT.app"),
+            "repair must drop the committed install path: {rendered}"
+        );
+        assert!(
+            !normalized_embedded_path_text(&rendered).contains(&installed_text),
+            "repair must not swap in this machine's install path: {rendered}"
+        );
+        assert_eq!(
+            rendered, canonical,
+            "repair must converge on the canonical machine-neutral bytes"
+        );
+    }
+
+    // Commit the normalized bytes, then materialize on "machine B" with yet
+    // another install path: the tracked file must stay clean.
+    run_git(repo.path(), &["add", "-A"]);
+    run_git(
+        repo.path(),
+        &["commit", "-qm", "normalize hooks to canonical gwtd"],
+    );
+    assert!(git_porcelain(repo.path()).trim().is_empty());
+    {
+        let _other_machine = stable_hook_bin_guard();
+        gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+    }
+    assert!(
+        git_porcelain(repo.path()).trim().is_empty(),
+        "a canonical tracked hook config must stay clean on every machine, got:\n{}",
         git_porcelain(repo.path())
     );
 }
