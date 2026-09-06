@@ -732,6 +732,9 @@ JSON
 cargo build -p gwt --bin gwt --bin gwtd
 ```
 
+`browser-check` スキル（この checkout の隔離 GUI 検証）は `hook.doctor` の証跡を
+読むために `jq` が `PATH` 上に必要です。gwt 自体の実行には不要です。
+
 ### 実行
 
 ```bash

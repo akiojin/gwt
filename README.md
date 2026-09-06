@@ -763,6 +763,10 @@ JSON
 cargo build -p gwt --bin gwt --bin gwtd
 ```
 
+The `browser-check` skill (isolated GUI verification of this checkout) also
+needs `jq` on `PATH` to read `hook.doctor` evidence. It is not required to run
+gwt itself.
+
 ### Run
 
 ```bash
