@@ -321,7 +321,7 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
   assert.match(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
   assert.match(testWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
   assert.match(testWorkflow, /1\.\.3 \| ForEach-Object/);
-  assert.match(testWorkflow, /cargo test -p gwt-core -p gwt --all-features/);
+  assert.match(testWorkflow, /cargo test -p gwt-core -p gwt --lib --all-features/);
   // The three runs must share one job so they share one SHA and one runner.
   // Splitting them across jobs would let a green run and a red run coexist.
   const defaultParallelJob = testWorkflow.slice(
@@ -335,6 +335,15 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
     defaultParallelJob.indexOf("--all-features --no-run") <
       defaultParallelJob.indexOf("1..3 | ForEach-Object"),
     "the --no-run build must precede the timed three-run loop"
+  );
+  // `--bin gwt` is excluded because it deadlocks under Windows default
+  // parallelism. Keep the exclusion tied to its reason so it cannot quietly
+  // become permanent once the deadlock is fixed (#3404 AC-3).
+  assert.doesNotMatch(defaultParallelJob, /1\.\.3[\s\S]*?cargo test[^\n]*--bin gwt/);
+  assert.match(
+    defaultParallelJob,
+    /deadlocks[\s\S]*?#3404 AC-3/,
+    "the --bin gwt exclusion must carry its reason and its follow-up owner"
   );
   for (const command of [
     "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
