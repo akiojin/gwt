@@ -1482,6 +1482,50 @@ fn run_scheduled_scan_after_lease_before_commit_test_hook() {
 }
 
 #[cfg(test)]
+type LocalCompletionProbeTestHook = Box<
+    dyn FnMut(u64) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure>
+        + Send,
+>;
+
+#[cfg(test)]
+fn local_completion_probe_test_hook() -> &'static Mutex<Option<LocalCompletionProbeTestHook>> {
+    static HOOK: std::sync::OnceLock<Mutex<Option<LocalCompletionProbeTestHook>>> =
+        std::sync::OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+/// Clears the completion-probe hook when the installing test finishes.
+#[cfg(test)]
+struct LocalCompletionProbeTestHookGuard;
+
+#[cfg(test)]
+impl Drop for LocalCompletionProbeTestHookGuard {
+    fn drop(&mut self) {
+        local_completion_probe_test_hook()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+/// Issue #3528: replace the merged-PR completion probe of the GUI-local scan
+/// drivers for one test. The seam sits exactly where the production probe
+/// spawns `gh`, so the frontier walk, the deadline classification, and the
+/// commit contract around it run unchanged.
+#[cfg(test)]
+fn set_local_completion_probe_test_hook(
+    hook: impl FnMut(u64) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure>
+        + Send
+        + 'static,
+) -> LocalCompletionProbeTestHookGuard {
+    let mut slot = local_completion_probe_test_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(slot.replace(Box::new(hook)).is_none());
+    LocalCompletionProbeTestHookGuard
+}
+
+#[cfg(test)]
 fn reset_local_issue_monitor_fallback_commit_count() {
     LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS.set(0);
 }
@@ -1630,7 +1674,7 @@ fn prepare_local_issue_monitor_claim_proposals(
     loaded: &gwt::issue_monitor_worker::LoadedIssueMonitorCandidates,
     monitor_owner: &str,
     now: &str,
-    completed_issues: &std::collections::BTreeSet<u64>,
+    observations: &std::collections::BTreeMap<u64, bool>,
 ) {
     if !loaded.authorizes_remote_effects()
         || !monitor.config.enabled
@@ -1642,9 +1686,7 @@ fn prepare_local_issue_monitor_claim_proposals(
     if monitor.active_count() >= active_cap {
         return;
     }
-    monitor.prepare_claim_effects_with_probe(monitor_owner, now, active_cap, |issue_number| {
-        completed_issues.contains(&issue_number)
-    });
+    monitor.prepare_claim_effects_with_observations(monitor_owner, now, active_cap, observations);
 }
 
 enum LocalIssueMonitorEffectOutcome {
@@ -2032,24 +2074,129 @@ fn constant_time_issue_monitor_scope_eq(left: &str, right: &str) -> bool {
 /// will walk. Each probe spawns `gh`, so the scan pays for the slots it can
 /// actually fill instead of for every open issue. A completed candidate frees
 /// no slot, so the walk continues past it exactly like the planner does.
-fn completed_claim_candidates(
+///
+/// Every answer is kept by Issue identity (SPEC #3200 FR-058): the commit
+/// phase applies an outcome to the Issue it was observed for and defers any
+/// candidate that has none, instead of reading "not probed" as "not
+/// completed".
+fn claim_candidate_completion_observations<E>(
     available: usize,
     candidates: Vec<u64>,
-    mut completed_probe: impl FnMut(u64) -> bool,
-) -> std::collections::BTreeSet<u64> {
-    let mut completed = std::collections::BTreeSet::new();
+    mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
+) -> Result<std::collections::BTreeMap<u64, bool>, E> {
+    let mut observations = std::collections::BTreeMap::new();
     let mut remaining = available;
     for issue_number in candidates {
         if remaining == 0 {
             break;
         }
-        if completed_probe(issue_number) {
-            completed.insert(issue_number);
-        } else {
+        let completed = completed_probe(issue_number)?;
+        observations.insert(issue_number, completed);
+        if !completed {
             remaining -= 1;
         }
     }
-    completed
+    Ok(observations)
+}
+
+/// The merged-PR completion probe of the GUI-local scan drivers.
+fn local_completion_probe(
+    owner: &str,
+    repo: &str,
+    issue: &gwt::IssueMonitorIssue,
+) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure> {
+    #[cfg(test)]
+    {
+        let mut slot = local_completion_probe_test_hook()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hook) = slot.as_mut() {
+            return hook(issue.number);
+        }
+    }
+    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+}
+
+/// The monitor owner of one GUI-local scan and the completion outcomes it
+/// observed, keyed by Issue number (Issue #3528).
+type LocalClaimObservation = (String, std::collections::BTreeMap<u64, bool>);
+
+/// Issue #3528 (SPEC #3200 FR-057..FR-059): observe merged-PR completion for
+/// the claim frontier of one GUI-local scan. Shared by the scheduled fallback
+/// and the non-Unix compatibility scan so both probe the same candidates and
+/// classify a failure the same way (FR-061).
+///
+/// Returns the monitor owner and the identity-bound outcomes the commit phase
+/// may plan from, `None` when this scan may not propose claims at all, or the
+/// typed stage failure of an expired observation (FR-059) — every partial
+/// outcome is dropped with it, and the caller records the failure inside the
+/// commit so it survives the commit-time rescan.
+fn observe_local_claim_candidates(
+    monitor: &gwt::IssueMonitorState,
+    loaded: &gwt::issue_monitor_worker::LoadedIssueMonitorCandidates,
+    owner: &str,
+    repo: &str,
+) -> Result<Option<LocalClaimObservation>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+    if !loaded.authorizes_remote_effects() {
+        return Ok(None);
+    }
+    // FR-057: no launch profile means no claim, so the frontier is empty and
+    // the scan spends no probe on it — the same gate the daemon scan applies.
+    let claimable_cap = if monitor.has_launch_profile() {
+        monitor.config.max_active.max(1)
+    } else {
+        0
+    };
+    let (available, candidates) = monitor.claim_probe_plan(claimable_cap);
+    let observations =
+        claim_candidate_completion_observations(available, candidates, |issue_number| {
+            let Some(issue) = loaded
+                .issues
+                .iter()
+                .find(|issue| issue.number == issue_number)
+            else {
+                return Ok(false);
+            };
+            observe_claim_candidate_completion(owner, repo, issue)
+        });
+    let observations = observations.inspect_err(|failure| {
+        tracing::warn!(error = %failure, "issue monitor completion probe expired");
+    })?;
+    Ok(Some((
+        format!(
+            "{}:{}",
+            gwt::process::current_username(),
+            std::process::id()
+        ),
+        observations,
+    )))
+}
+
+/// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): the deadline boundary of one
+/// completion probe. An ordinary readback error returned while the observation
+/// deadline is still valid keeps #3165's fail-open compatibility as an explicit
+/// negative outcome for that Issue; an expired deadline escapes as the typed
+/// stage failure so the caller discards the whole claim proposal.
+fn observe_claim_candidate_completion(
+    owner: &str,
+    repo: &str,
+    issue: &gwt::IssueMonitorIssue,
+) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+    use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
+
+    match local_completion_probe(owner, repo, issue) {
+        Ok(completed) => Ok(completed),
+        Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
+        Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
+            gwt::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
+            tracing::debug!(
+                issue = issue.number,
+                error = %failure,
+                "issue monitor completion probe failed within budget (fail-open)"
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn run_scheduled_issue_monitor_scan(
@@ -2176,6 +2323,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
+    let mut completion_probe_error = None;
     let mut local_repo_identity = None;
     let mut local_claim_proposal = None;
 
@@ -2219,29 +2367,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         .map(|error| {
                             format!("issue monitor merge reconciliation failed: {error}")
                         });
-                    if loaded.authorizes_remote_effects() {
-                        let (available, candidates) =
-                            monitor.claim_probe_plan(monitor.config.max_active.max(1));
-                        let completed_issues =
-                            completed_claim_candidates(available, candidates, |issue_number| {
-                                loaded
-                                    .issues
-                                    .iter()
-                                    .find(|issue| issue.number == issue_number)
-                                    .is_some_and(|issue| {
-                                        gwt::issue_monitor_worker::issue_completed_by_merged_pr(
-                                            &owner, &repo, issue,
-                                        )
-                                    })
-                            });
-                        local_claim_proposal = Some((
-                            format!(
-                                "{}:{}",
-                                gwt::process::current_username(),
-                                std::process::id()
-                            ),
-                            completed_issues,
-                        ));
+                    match observe_local_claim_candidates(&monitor, &loaded, &owner, &repo) {
+                        Ok(proposal) => local_claim_proposal = proposal,
+                        Err(failure) => completion_probe_error = Some(failure.to_string()),
                     }
                     loaded_for_commit = Some(loaded);
                 }
@@ -2313,17 +2441,20 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 if latest.config.enabled {
                     latest.set_gui_connected(true);
                 }
-                if let Some((monitor_owner, completed_issues)) = &local_claim_proposal {
+                if let Some((monitor_owner, observations)) = &local_claim_proposal {
                     prepare_local_issue_monitor_claim_proposals(
                         latest,
                         loaded,
                         monitor_owner,
                         now,
-                        completed_issues,
+                        observations,
                     );
                 }
             }
             record_issue_monitor_scan_failures(latest, now, merge_reconciliation_error, Vec::new());
+            if let Some(error) = completion_probe_error {
+                latest.record_scan_error(now, error);
+            }
         },
     );
     if let Err(error) = commit {
@@ -5301,11 +5432,17 @@ impl AppRuntime {
         #[cfg(test)]
         LOCAL_ISSUE_MONITOR_REMOTE_SCANS
             .set(LOCAL_ISSUE_MONITOR_REMOTE_SCANS.get().saturating_add(1));
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        // The read/probe phase owns its budget alone; it is released before
+        // the commit below so a slow scan degrades its findings instead of
+        // discarding them (Issue #3528, SPEC #3200 FR-060 / FR-061) — the same
+        // two-phase contract as the scheduled fallback scan.
+        let scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + ISSUE_MONITOR_SCAN_BUDGET,
         );
         let mut loaded_for_commit = None;
         let mut merge_reconciliation_error = None;
+        #[cfg(not(unix))]
+        let mut completion_probe_error = None;
         #[cfg(not(unix))]
         let mut local_repo_identity = None;
         #[cfg(not(unix))]
@@ -5349,27 +5486,9 @@ impl AppRuntime {
                             monitor.set_gui_connected(true);
                         }
                         #[cfg(not(unix))]
-                        if loaded.authorizes_remote_effects() {
-                            let completed_issues = loaded
-                                .issues
-                                .iter()
-                                .filter_map(|issue| {
-                                    gwt::issue_monitor_worker::issue_completed_by_merged_pr(
-                                        &owner,
-                                        &repo,
-                                        issue,
-                                    )
-                                    .then_some(issue.number)
-                                })
-                                .collect();
-                            local_claim_proposal = Some((
-                                format!(
-                                    "{}:{}",
-                                    gwt::process::current_username(),
-                                    std::process::id()
-                                ),
-                                completed_issues,
-                            ));
+                        match observe_local_claim_candidates(&monitor, &loaded, &owner, &repo) {
+                            Ok(proposal) => local_claim_proposal = proposal,
+                            Err(failure) => completion_probe_error = Some(failure.to_string()),
                         }
                         loaded_for_commit = Some(loaded);
                     }
@@ -5384,9 +5503,14 @@ impl AppRuntime {
             }
         }
 
+        drop(scan_deadline);
+
         // Persist the refreshed read model only. Remote-effect proposals are
         // produced by the daemon scan and executed only after its durable
         // Prepared -> Attempting fence.
+        let _commit_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + ISSUE_MONITOR_COMMIT_BUDGET,
+        );
         rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
             if let Some(loaded) = &loaded_for_commit {
                 gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
@@ -5397,13 +5521,13 @@ impl AppRuntime {
                     &now,
                 );
                 #[cfg(not(unix))]
-                if let Some((monitor_owner, completed_issues)) = &local_claim_proposal {
+                if let Some((monitor_owner, observations)) = &local_claim_proposal {
                     prepare_local_issue_monitor_claim_proposals(
                         monitor,
                         loaded,
                         monitor_owner,
                         &now,
-                        completed_issues,
+                        observations,
                     );
                 }
             }
@@ -5413,6 +5537,10 @@ impl AppRuntime {
                 merge_reconciliation_error,
                 Vec::new(),
             );
+            #[cfg(not(unix))]
+            if let Some(error) = completion_probe_error {
+                monitor.record_scan_error(now.as_str(), error);
+            }
         });
         #[cfg(not(unix))]
         let mut launch_events = local_repo_identity
