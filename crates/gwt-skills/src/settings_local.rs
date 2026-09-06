@@ -686,11 +686,6 @@ fn managed_hook_shell() -> HookShell {
     }
 }
 
-#[cfg(test)]
-fn event_hook_command(event: &str, shell: HookShell) -> String {
-    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
-}
-
 fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_codex_event_hook_command_with_bin(bin, event),

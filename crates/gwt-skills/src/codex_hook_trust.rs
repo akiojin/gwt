@@ -118,6 +118,17 @@ fn scan_codex_hook_trust_from_path(
         return Ok(CodexHookTrustScan::default());
     }
 
+    // #3567: the generator writes the canonical portable fallback into a
+    // git-tracked hooks file and the absolute install path into a machine-local
+    // one, so trust must expect exactly what was written. Comparing a tracked
+    // file against the absolute path finds nothing gwt can vouch for, and Codex
+    // stops the launch on `Hooks need review`.
+    let expected_gwt_bin = if crate::managed_hook_config_is_git_tracked(hooks_path) {
+        Some(crate::CANONICAL_HOOK_BIN)
+    } else {
+        expected_gwt_bin
+    };
+
     let key_source = fs::canonicalize(hooks_path)?;
     let content = fs::read_to_string(hooks_path)?;
     let root: Value = serde_json::from_str(&content).map_err(|err| {
@@ -609,6 +620,79 @@ mod tests {
         assert!(entries.iter().any(|entry| entry
             .key
             .starts_with(&worktree_hooks_path.display().to_string())));
+    }
+
+    /// #3567: a git-tracked `.codex/hooks.json` carries the canonical portable
+    /// fallback, not the running binary's absolute path. Trust registration must
+    /// expect the same thing, or every launch into a repo that commits its hook
+    /// config stops on `Hooks need review`.
+    #[test]
+    fn tracked_hooks_are_trusted_against_the_canonical_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let codex_dir = repo.join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": codex_event_hook_commands_with_bin(
+                                    crate::CANONICAL_HOOK_BIN,
+                                    event,
+                                )
+                                .into_iter()
+                                .next()
+                                .unwrap(),
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]),
+            );
+        }
+        fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "-A"],
+            vec!["commit", "-qm", "hooks"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(repo)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let entries = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            repo,
+            Some("/Applications/GWT.app/Contents/MacOS/gwtd"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries.len(),
+            5,
+            "a tracked hook config must be trusted against the canonical fallback it carries"
+        );
     }
 
     #[test]
