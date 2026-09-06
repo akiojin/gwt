@@ -92,7 +92,14 @@
       import { createBoardLogsSurface } from "/board-logs-surface.js";
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window surface
       // moved to /knowledge-kanban-surface.js.
-      import { createKnowledgeKanbanSurface } from "/knowledge-kanban-surface.js";
+      import {
+        createKnowledgeKanbanSurface,
+        // SPEC #3885 FR-011: the canvas face of a Windowized agent is an Issue
+        // header above the interactive terminal, built from the Issue surface's
+        // own badge/action vocabulary so both faces read identically.
+        issueWindowHeaderModel,
+        renderIssueWindowHeader,
+      } from "/knowledge-kanban-surface.js";
       // SPEC-3064 Phase 3 (E6e): the Profile window surface moved to
       // /profile-window-surface.js.
       import { createProfileWindowSurface } from "/profile-window-surface.js";
@@ -285,6 +292,7 @@
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
       const renderedIssuePreviewBodyKeys = new Map();
+      const renderedIssueWindowHeaderKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
       // window-cleanup call site keeps its text).
@@ -4538,6 +4546,7 @@
       // entries, the drawer chrome wiring, and the window-cleanup call
       // sites, wired through this factory.
       const {
+        issueContextForNumber,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -5046,6 +5055,79 @@
           branchCleanupModal?.classList.contains("open"),
       });
 
+      // SPEC #3885 FR-011 / AC-11: a Windowized agent is an Issue window — Issue
+      // header above an interactive terminal — not a bare terminal. FR-013 keeps a
+      // session with no Issue behind it exactly as it was.
+      function issueWindowHeaderModelFor(windowData) {
+        if (presetSurface(windowData?.preset) !== "terminal") return null;
+        const issueNumber = Number(windowData?.linked_issue_number);
+        if (!Number.isFinite(issueNumber)) return null;
+        const context = issueContextForNumber(issueNumber) || {};
+        return issueWindowHeaderModel({ windowData, ...context });
+      }
+
+      function runIssueWindowHeaderAction(action, windowData) {
+        const issueNumber = Number(windowData?.linked_issue_number);
+        if (action === "return-to-list") {
+          // FR-012: the inverse of Windowize. The window already carries its Issue,
+          // so the frontend only names the window it wants folded back into the row;
+          // the shared terminal runtime is reparented into the row's status row by
+          // the same path the Issue Monitor auto-launch already uses.
+          send({ kind: "dock_agent_window_to_issue", id: windowData.id });
+          return;
+        }
+        if (action === "open-issue" && Number.isFinite(issueNumber)) {
+          const preset = "issue";
+          const windowId = focusOrSpawnPreset(preset);
+          const knowledgeKind = knowledgeKindForPreset(preset);
+          if (windowId) {
+            requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
+            return;
+          }
+          pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number: issueNumber });
+        }
+      }
+
+      function syncIssueWindowHeader(windowData, element) {
+        const body = element.querySelector(".window-body");
+        if (!body) return;
+        const model = issueWindowHeaderModelFor(windowData);
+        const existing = body.querySelector(".issue-window-header");
+        // The terminal fills the body absolutely; the class tells the stylesheet to
+        // leave the header's band free rather than letting the two overlap.
+        element.classList.toggle("has-issue-header", Boolean(model));
+        if (!model) {
+          existing?.remove();
+          return;
+        }
+        const header = renderIssueWindowHeader(document, model, (action) =>
+          runIssueWindowHeaderAction(action, windowData),
+        );
+        if (existing) {
+          existing.replaceWith(header);
+        } else {
+          body.insertBefore(header, body.firstChild);
+        }
+      }
+
+      function issueWindowHeaderRenderKey(windowData) {
+        const model = issueWindowHeaderModelFor(windowData);
+        if (!model) return "";
+        const parts = [];
+        appendRenderKeyPart(parts, "issue");
+        appendRenderKeyPart(parts, model.issueNumber);
+        appendRenderKeyPart(parts, "title");
+        appendRenderKeyPart(parts, model.title);
+        appendRenderKeyPart(parts, "badge");
+        appendRenderKeyPart(parts, model.primary.key);
+        appendRenderKeyPart(parts, model.primary.label);
+        for (const item of model.secondary) {
+          appendRenderKeyPart(parts, "secondary");
+          appendRenderKeyPart(parts, `${item.key}:${item.label}`);
+        }
+        return parts.join("");
+      }
+
       function mountWindowBody(windowData, element) {
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
@@ -5119,6 +5201,9 @@
           if (!isOffCanvasPlacement(windowData)) {
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
+          // SPEC #3885 FR-011: an Issue-bound agent gets its Issue header above the
+          // terminal it already owns; the terminal itself stays interactive.
+          syncIssueWindowHeader(windowData, element);
           return;
         }
 
@@ -5502,6 +5587,16 @@
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
         }
+        // SPEC #3885 FR-011: the Issue header follows the same live state the row's
+        // badge does (agent status, Issue title, Work/PR context), so it is keyed
+        // rather than remounted with the body.
+        if (surface === "terminal") {
+          const nextIssueWindowHeaderKey = issueWindowHeaderRenderKey(windowData);
+          if (renderedIssueWindowHeaderKeys.get(windowData.id) !== nextIssueWindowHeaderKey) {
+            renderedIssueWindowHeaderKeys.set(windowData.id, nextIssueWindowHeaderKey);
+            syncIssueWindowHeader(windowData, element);
+          }
+        }
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
@@ -5668,6 +5763,7 @@
                   renderedRuntimeStatusKeys.delete(windowId);
                   renderedAgentKanbanBodyKeys.delete(windowId);
                   renderedIssuePreviewBodyKeys.delete(windowId);
+                  renderedIssueWindowHeaderKeys.delete(windowId);
                   pendingOutputMap.delete(windowId);
                   pendingSnapshotMap.delete(windowId);
                   terminalOutputBatcher.clear(windowId);

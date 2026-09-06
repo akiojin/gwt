@@ -5950,6 +5950,9 @@ impl AppRuntime {
             FrontendEvent::UndockAgentWindow { id, geometry } => {
                 self.undock_agent_window_events(&id, geometry)
             }
+            FrontendEvent::DockAgentWindowToIssue { id } => {
+                self.dock_agent_window_to_issue_events(&id)
+            }
             FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
                 self.set_agent_kanban_card_collapsed_events(&id, collapsed)
             }
