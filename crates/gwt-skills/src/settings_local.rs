@@ -508,19 +508,29 @@ pub const CANONICAL_HOOK_BIN: &str = "gwtd";
 /// absolute pin resolved for this install (#3810), which is what makes hooks
 /// work for a Codex started outside gwt with no `gwtd` on `PATH`.
 pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
+    sanitize_hook_bin_for_config_path(path, &gwt_hook_bin_path())
+}
+
+/// Reduce `bin` to what may actually be written into a hook config at `path`.
+///
+/// Generation and Codex trust pre-registration both call this, so the value a
+/// launch vouches for is always the value materialization wrote. Divergence
+/// here is not a cosmetic mismatch: Codex refuses to run a hook it was not
+/// given the exact command hash for, and stops the launch on
+/// `Hooks need review`.
+pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
     if managed_hook_config_is_git_tracked(path) {
         return CANONICAL_HOOK_BIN.to_string();
     }
-    let bin = gwt_hook_bin_path();
     // #3567 (PM ruling): a process-global `GWT_HOOK_BIN` is authority only for
     // the worktree it was set for. A developer running `target/debug/gwtd` may
     // pin that build inside their own worktree, but repairing a *different*
     // worktree must never hand it a build output that a `cargo clean` or a
     // worktree removal silently deletes — the hook then fails open and every
     // event goes missing without a word.
-    match build_output_owner_root(Path::new(&bin)) {
+    match build_output_owner_root(Path::new(bin)) {
         Some(owner_root) if !path_is_inside(path, &owner_root) => CANONICAL_HOOK_BIN.to_string(),
-        _ => bin,
+        _ => bin.to_string(),
     }
 }
 
