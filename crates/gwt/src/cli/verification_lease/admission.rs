@@ -1042,26 +1042,46 @@ mod tests {
         std::thread::sleep(Duration::from_secs(60));
     }
 
+    /// The worktree root above this binary's `target/.../deps` directory.
+    fn worktree_root_of(exe: &Path) -> PathBuf {
+        let mut root = exe.to_path_buf();
+        while root.file_name().is_some_and(|name| name != "target") {
+            assert!(
+                root.pop(),
+                "a test binary must live under a worktree's target directory: {}",
+                exe.display()
+            );
+        }
+        root.pop();
+        root
+    }
+
     #[test]
     fn scan_foreign_heavy_finds_a_target_binary_running_in_a_sibling() {
-        let sibling = tempfile::tempdir().unwrap();
         let own = tempfile::tempdir().unwrap();
-        // This test binary lives under `target/debug/deps/`, exactly where a
-        // sibling worktree's test binaries live.
-        let exe = std::env::current_exe().unwrap();
+        // Production attributes a sibling's heavy work through the binary's own
+        // path under `<worktree>/target/.../deps`. Standing the sibling up as a
+        // bare tempdir and only pointing `current_dir` at it makes the working
+        // directory the single attribution signal, and Windows cannot supply
+        // one: sysinfo reads another process's cwd out of its PEB, so the scan
+        // came back empty there while Linux passed on the same SHA (Issue
+        // #3404). This binary already sits under a worktree's target
+        // directory, which is the production shape on every platform.
+        let exe = dunce::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let sibling = worktree_root_of(&exe);
         let mut child = gwt_core::process::hidden_command(&exe)
             .args([
                 "--ignored",
                 "--exact",
                 "cli::verification_lease::admission::tests::fake_heavy_process_parks",
             ])
-            .current_dir(sibling.path())
+            .current_dir(&sibling)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
 
-        let siblings = vec![dunce::canonicalize(sibling.path()).unwrap()];
+        let siblings = vec![sibling];
         let deadline = Instant::now() + FOREIGN_SCAN_OBSERVATION_BUDGET;
         let (found, hit) = loop {
             let found = scan_foreign_heavy(own.path(), &siblings);
