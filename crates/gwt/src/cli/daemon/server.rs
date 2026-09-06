@@ -63,6 +63,42 @@ const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(test)]
+thread_local! {
+    /// Per-test prefs budget (Issue #4033).
+    ///
+    /// Deliberately thread-local rather than an environment variable: a dozen
+    /// sibling tests hold the prefs lock and depend on the *default* budget
+    /// expiring quickly, and none of them take the process-wide env lock. A
+    /// global override would silently make those tests wait out a relaxed
+    /// budget instead. One test per thread makes this override exact.
+    static ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pin the prefs budget for the current test thread until dropped.
+#[cfg(test)]
+struct ScopedIssueMonitorPrefsTimeout {
+    previous: Option<Duration>,
+}
+
+#[cfg(test)]
+impl ScopedIssueMonitorPrefsTimeout {
+    fn set(timeout: Duration) -> Self {
+        Self {
+            previous: ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE
+                .with(|current| current.replace(Some(timeout))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedIssueMonitorPrefsTimeout {
+    fn drop(&mut self) {
+        ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(|current| current.set(self.previous));
+    }
+}
+
 /// The single seam for the prefs read-lock-modify-write budget.
 ///
 /// Issue #4033: every prefs transaction must go through this accessor, not
@@ -71,6 +107,10 @@ const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// filesystem happened to be that minute, and a loaded CI host silently
 /// converts a passing state machine into a failing one.
 fn issue_monitor_prefs_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return timeout;
+    }
     #[cfg(test)]
     if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
@@ -10312,10 +10352,7 @@ exit 0
         // transaction the same hang-guard treatment every other wait in this
         // module gets (Issue #3641): a saturated runner may delay it, never
         // decide it.
-        let _prefs_timeout = ScopedEnvVar::set(
-            "GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS",
-            MARKER_WAIT_HANG_GUARD.as_millis().to_string(),
-        );
+        let _prefs_timeout = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
 
         let workspace_home = temp.path().join("workspace");
         let bare_repo = workspace_home.join("repo.git");
@@ -12326,18 +12363,29 @@ exit 1
         let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
 
+        // Issue #4033: the contended load is the subject here, so pin the
+        // budget it must give up within instead of inheriting whatever the
+        // ambient one happens to be, and bound the assertion by a multiple of
+        // that budget rather than by a wall-clock second.
+        const CONTENDED_BUDGET: Duration = Duration::from_millis(250);
         let started = Instant::now();
-        let blocked = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        let blocked = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(CONTENDED_BUDGET);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < CONTENDED_BUDGET * 8);
         assert!(blocked.recovery_blocked);
         assert!(marker.exists());
         assert_eq!(fs::read(&prefs_path).expect("reload locked prefs"), before);
         FileExt::unlock(&lock).expect("release prefs lock");
 
+        // The retry is not the subject: it must prove recovery, so a saturated
+        // runner may delay it but never decide it (Issue #3641 / #4033).
+        let _retry_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let retried = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
@@ -12455,6 +12503,9 @@ exit 1
         crate::persist_issue_monitor_authority_fence(&prefs_path, &exited_fence)
             .expect("model prior daemon process exit");
 
+        // Issue #4033: the replacement load must prove that authority is taken
+        // over, not that this host writes JSON inside 250 ms.
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let replacement = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
