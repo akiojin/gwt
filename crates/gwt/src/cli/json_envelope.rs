@@ -1,15 +1,14 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::str::FromStr;
 
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
     memory::MemoryAddCommand, workflow::WorkflowBypassMode, ActionsCommand, CliCommand, CliEnv,
-    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, ImprovementCommand,
-    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
-    SkillStateAction, WorkflowCommand, WorkspaceCommand,
+    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
+    IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand, SkillStateAction,
+    WorkflowCommand, WorkspaceCommand,
 };
 use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
@@ -163,9 +162,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         ));
     }
     let params = params_object(&envelope.params)?;
-    if envelope.operation.starts_with("improvement.") {
-        reject_improvement_force(params)?;
-    }
     let command = match envelope.operation.as_str() {
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
@@ -214,20 +210,26 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
-        "improvement.capture" => improvement_capture(params)?,
-        "improvement.list" => improvement_list(params)?,
+        "branch.prune_merged" | "branch.prune-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "branch.prune_merged",
+            )?;
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                // Deleting remote branches is not reversible from here, so an
+                // unqualified call only reports candidates (Issue #3970 AC-3).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
                 number: optional_u64(params, "number")?,
                 reason: optional_string(params, "reason")?,
             })
-        }
-        "improvement.dismiss" => improvement_dismiss(params)?,
-        "improvement.resolve" => improvement_resolve(params)?,
-        "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
-        "improvement.promote_issue" | "improvement.promote-issue" => {
-            improvement_promote_issue(params)?
         }
         "issue.view" => CliCommand::Issue(IssueCommand::View {
             number: required_u64(params, "number")?,
@@ -349,6 +351,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 project_root: optional_path(params, "project_root")?,
             })
         }
+        "issue.monitor.reconcile" => CliCommand::Issue(IssueCommand::MonitorReconcile {
+            project_root: optional_path(params, "project_root")?,
+        }),
         "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
                 project_root: optional_path(params, "project_root")?,
@@ -523,6 +528,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "actions.job_logs" | "actions.job-logs" => CliCommand::Actions(ActionsCommand::JobLogs {
             job_id: required_u64(params, "job_id")?,
+        }),
+        "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
+            target: actions_rerun_target(params)?,
         }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
@@ -913,190 +921,6 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
     ))))
 }
 
-fn improvement_capture(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    for key in [
-        "producer_id",
-        "source_event_id",
-        "session_id",
-        "routing_basis_revision",
-        "budget_profile",
-        "fingerprint",
-        "occurrence_key",
-    ] {
-        reject_key(
-            params,
-            key,
-            "untrusted identity field is not accepted by public improvement.capture",
-        )?;
-    }
-    let typed_evidence = improvement_typed_evidence(params)?;
-    Ok(CliCommand::Improvement(ImprovementCommand::Capture(
-        Box::new(super::improvement::ImprovementCaptureCommand {
-            source: required_string(params, "source")?,
-            target_artifact: required_string(params, "target_artifact")?,
-            classification: required_string(params, "classification")?,
-            confidence: required_string(params, "confidence")?,
-            summary: optional_string(params, "summary")?.unwrap_or_default(),
-            details: optional_string(params, "details")?,
-            evidence_digest: optional_string(params, "evidence_digest")?,
-            dedupe_key: optional_string(params, "dedupe_key")?,
-            local_evidence: optional_json_array(params, "local_evidence")?,
-            typed_evidence,
-        }),
-    )))
-}
-
-fn improvement_typed_evidence(
-    params: &Map<String, Value>,
-) -> Result<Option<super::improvement::ImprovementTypedEvidenceCommand>, CliParseError> {
-    let typed_keys = [
-        "subsystem",
-        "contract_id",
-        "contract_schema_revision",
-        "failure_code",
-        "evidence",
-    ];
-    if !typed_keys.iter().any(|key| params.contains_key(*key)) {
-        return Ok(None);
-    }
-
-    let evidence = params
-        .get("evidence")
-        .and_then(Value::as_object)
-        .ok_or_else(|| CliParseError::InvalidJson("evidence must be an object".to_string()))?;
-    for key in evidence.keys() {
-        if !matches!(key.as_str(), "expected_outcome" | "observed_outcome") {
-            return Err(CliParseError::InvalidJson(format!(
-                "evidence contains unknown field: {key}"
-            )));
-        }
-    }
-
-    Ok(Some(super::improvement::ImprovementTypedEvidenceCommand {
-        subsystem: required_string(params, "subsystem")?,
-        contract_id: required_string(params, "contract_id")?,
-        contract_schema_revision: required_u64(params, "contract_schema_revision")?,
-        failure_code: required_string(params, "failure_code")?,
-        expected_outcome: required_string(evidence, "expected_outcome")?,
-        observed_outcome: required_string(evidence, "observed_outcome")?,
-    }))
-}
-
-fn improvement_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    let state = optional_string(params, "state")?
-        .map(|value| {
-            super::improvement::CandidateState::from_str(&value)
-                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
-        })
-        .transpose()?;
-    let blocked_reason = optional_string(params, "blocked_reason")?
-        .map(|value| {
-            super::improvement::BlockedReason::from_str(&value)
-                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
-        })
-        .transpose()?;
-    let failure_subcode = optional_string(params, "failure_subcode")?
-        .map(|value| {
-            super::improvement::FailureSubcode::from_str(&value)
-                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
-        })
-        .transpose()?;
-    let classification = optional_string(params, "classification")?;
-    if classification.as_deref().is_some_and(|value| {
-        !["gwt-caused", "ambiguous", "target-project", "external"].contains(&value)
-    }) {
-        return Err(CliParseError::InvalidJson(
-            "invalid classification".to_string(),
-        ));
-    }
-    let confidence = optional_string(params, "confidence")?;
-    if confidence
-        .as_deref()
-        .is_some_and(|value| !["low", "medium", "high"].contains(&value))
-    {
-        return Err(CliParseError::InvalidJson("invalid confidence".to_string()));
-    }
-    let owner_number = optional_u64(params, "owner_number")?;
-    if owner_number == Some(0) {
-        return Err(CliParseError::InvalidJson(
-            "owner_number must be greater than zero".to_string(),
-        ));
-    }
-    let limit = optional_usize(params, "limit")?;
-    if limit == Some(0) {
-        return Err(CliParseError::InvalidJson(
-            "limit must be greater than zero".to_string(),
-        ));
-    }
-    Ok(CliCommand::Improvement(ImprovementCommand::List(
-        super::improvement::ImprovementListCommand {
-            state,
-            blocked_reason,
-            failure_subcode,
-            classification,
-            confidence,
-            owner_number,
-            limit,
-        },
-    )))
-}
-
-fn improvement_dismiss(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    Ok(CliCommand::Improvement(ImprovementCommand::Dismiss(
-        super::improvement::ImprovementDismissCommand {
-            id: required_string(params, "id")?,
-            reason: required_string(params, "reason")?,
-        },
-    )))
-}
-
-fn improvement_link_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    if ["number", "url", "repository"]
-        .iter()
-        .any(|key| params.contains_key(*key))
-    {
-        return Err(CliParseError::InvalidJson(
-            "MIGRATION_REQUIRED: improvement.link_issue v2 accepts id, owner_number, and resolver_revision only"
-                .to_string(),
-        ));
-    }
-    Ok(CliCommand::Improvement(ImprovementCommand::LinkIssue(
-        super::improvement::ImprovementLinkIssueCommand {
-            id: required_string(params, "id")?,
-            owner_number: required_u64(params, "owner_number")?,
-            resolver_revision: required_string(params, "resolver_revision")?,
-        },
-    )))
-}
-
-fn improvement_resolve(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    Ok(CliCommand::Improvement(ImprovementCommand::Resolve(
-        super::improvement::ImprovementResolveCommand {
-            id: required_string(params, "id")?,
-            expected_resolver_revision: optional_string(params, "expected_resolver_revision")?,
-        },
-    )))
-}
-
-fn improvement_promote_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    Ok(CliCommand::Improvement(ImprovementCommand::PromoteIssue(
-        super::improvement::ImprovementPromoteIssueCommand {
-            id: required_string(params, "id")?,
-            force: optional_bool(params, "force")?.unwrap_or(false),
-            labels: optional_string_vec(params, "labels")?,
-        },
-    )))
-}
-
-fn reject_improvement_force(params: &Map<String, Value>) -> Result<(), CliParseError> {
-    if optional_bool(params, "force")? == Some(true) {
-        return Err(CliParseError::InvalidJson(
-            "UNSAFE_FORCE_REMOVED".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     let structured = optional_bool(params, "structured")?.unwrap_or(false);
     let replace = optional_bool(params, "replace")?.unwrap_or(false);
@@ -1473,6 +1297,35 @@ fn reject_unknown_params(
         }
     }
     Ok(())
+}
+
+/// Issue #3515: `actions.rerun` takes `run_id` **or** `job_id`, never both.
+/// `failed_only` narrows a run rerun to its failed jobs and is meaningless for
+/// a job target, so passing it there is rejected instead of silently ignored.
+fn actions_rerun_target(
+    params: &Map<String, Value>,
+) -> Result<crate::cli::ActionsRerunTarget, CliParseError> {
+    let job_id = optional_u64(params, "job_id")?;
+    let run_id = optional_u64(params, "run_id")?;
+    match (run_id, job_id) {
+        (Some(_), Some(_)) => Err(CliParseError::InvalidValue {
+            flag: "job_id",
+            reason: "run_id and job_id are mutually exclusive",
+        }),
+        (None, Some(job_id)) => {
+            if optional_bool(params, "failed_only")?.is_some() {
+                return Err(CliParseError::InvalidValue {
+                    flag: "failed_only",
+                    reason: "only applies to a run_id target",
+                });
+            }
+            Ok(crate::cli::ActionsRerunTarget::Job { job_id })
+        }
+        (run_id, None) => Ok(crate::cli::ActionsRerunTarget::Run {
+            run_id: run_id.ok_or(CliParseError::MissingFlag("run_id"))?,
+            failed_only: optional_bool(params, "failed_only")?.unwrap_or(false),
+        }),
+    }
 }
 
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
@@ -1968,6 +1821,52 @@ mod tests {
             CliParseError::UnknownSubcommand(name) => assert_eq!(name, "does.not.exist"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// Issue #3970 AC-3: an unqualified `branch.prune_merged` only reports.
+    #[test]
+    fn branch_prune_merged_defaults_to_a_dry_run() {
+        match ok("branch.prune_merged", json!({})) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_accepts_apply_base_and_branch_filter() {
+        match ok(
+            "branch.prune-merged",
+            json!({
+                "dry_run": false,
+                "base": "develop",
+                "branches": ["work/issue-1", "work/issue-2"],
+            }),
+        ) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("develop"));
+                assert_eq!(branches, vec!["work/issue-1", "work/issue-2"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_rejects_an_unknown_param() {
+        let error = err("branch.prune_merged", json!({ "dryrun": false }));
+        assert!(format!("{error}").contains("dryrun"), "{error}");
     }
 
     #[test]
@@ -2643,6 +2542,26 @@ mod tests {
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
         ));
+    }
+
+    /// Issue #3883 AC-6: the PM's recovery for launches that are still running
+    /// but no longer tracked. It takes no target and no reason because it
+    /// revokes nothing — it only re-adopts what the canvas already shows.
+    #[test]
+    fn issue_monitor_reconcile_parses_with_an_optional_project_scope() {
+        assert_eq!(
+            ok("issue.monitor.reconcile", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorReconcile { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.reconcile",
+                json!({"project_root": "/tmp/gwt-project"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorReconcile {
+                project_root: Some(std::path::PathBuf::from("/tmp/gwt-project")),
+            })
+        );
     }
 
     /// Issue #3923 AC-1: provider quota holds are listed and cleared through
@@ -3435,6 +3354,45 @@ mod tests {
         assert!(matches!(
             ok("actions.job-logs", json!({"job_id": 5})),
             CliCommand::Actions(ActionsCommand::JobLogs { .. })
+        ));
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: false
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5, "failed_only": true})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: true
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"job_id": 7})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Job { job_id: 7 }
+            })
+        );
+        assert!(matches!(
+            err("actions.rerun", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"run_id": 5, "job_id": 7})),
+            CliParseError::InvalidValue { flag: "job_id", .. }
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"job_id": 7, "failed_only": true})),
+            CliParseError::InvalidValue {
+                flag: "failed_only",
+                ..
+            }
         ));
         assert!(matches!(
             ok("index.status", json!({})),

@@ -542,8 +542,15 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         check_status(&resp)?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
-        if let Some(errs) = value.get("errors") {
-            return Err(ApiError::Unexpected(format!("graphql errors: {errs}")));
+        if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
+            // and a `RATE_LIMIT` entry in the response body, so a status-only
+            // check sees a healthy call. Classifying it here — the way the
+            // owner-request path above already does — is what turns it into
+            // `RateLimited` instead of an opaque `Unexpected`, which is what a
+            // caller needs to back off instead of retrying straight into the
+            // same limit.
+            return Err(classify_graphql_errors(errs, "graphql query"));
         }
         Ok(value)
     }
@@ -2446,8 +2453,11 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
-    use super::{check_status, classify_graphql_errors, HttpResponse};
-    use crate::client::ApiError;
+    use super::{
+        check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
+        HttpResponse, HttpTransport, ResolutionDeadline,
+    };
+    use crate::client::{ApiError, IssueClient, SpecListFilter};
 
     /// SPEC-3214 T-016 / FR-011: a non-rate-limit 403 must surface the
     /// GitHub-provided reason (e.g. personal repo restrictions) instead of
@@ -2500,6 +2510,50 @@ mod check_status_tests {
                 retry_after: Some(17)
             }
         ));
+    }
+
+    /// Issue #3928: the plain GraphQL path must classify a rate-limit body the
+    /// same way the owner-request path does. GitHub answers a secondary limit
+    /// with HTTP 200 and a `RATE_LIMIT` entry in the body, so this path used to
+    /// report it as an opaque `Unexpected` and its callers — the Issue cache
+    /// reads a PM surface runs on — retried straight back into the limit
+    /// instead of backing off.
+    #[test]
+    fn a_rate_limited_graphql_body_is_typed_even_on_the_plain_query_path() {
+        struct RateLimitedBody;
+        impl RateLimitedBody {
+            fn response() -> HttpResponse {
+                HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: r#"{"errors":[{"type":"RATE_LIMIT","message":"API rate limit already exceeded for user ID 965624."}]}"#
+                        .to_string(),
+                }
+            }
+        }
+        impl HttpTransport for RateLimitedBody {
+            fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+
+            fn execute_with_deadline(
+                &self,
+                _request: HttpRequest,
+                _deadline: &ResolutionDeadline,
+            ) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+        }
+
+        let client =
+            HttpIssueClient::with_transport(RateLimitedBody, "token".to_string(), "octo", "gwt");
+        let error = client
+            .list_spec_issues(&SpecListFilter::default())
+            .expect_err("a rate-limited body must not read as success");
+        assert!(
+            matches!(error, ApiError::RateLimited { .. }),
+            "expected RateLimited, got {error:?}"
+        );
     }
 
     #[test]

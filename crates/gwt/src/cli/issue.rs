@@ -253,6 +253,9 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorQuotaHoldList { project_root } => {
             run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
         }
+        IssueCommand::MonitorReconcile { project_root } => {
+            run_monitor_reconcile(env, project_root.as_deref(), out)?
+        }
         IssueCommand::MonitorQuotaHoldClear {
             project_root,
             provider,
@@ -360,6 +363,20 @@ fn issue_monitor_project_root<E: CliEnv>(
 /// projection and the offline fallback cannot disagree, and it deliberately
 /// reads a file rather than a pane, so it still answers while `pane.read` is
 /// failing under GUI event-loop saturation (#3629).
+/// Issue #3928 AC-4: the GitHub budget the queue is running on, from the
+/// machine-local ledger every gwt process on this host writes to. Attached at
+/// the surface rather than in the daemon projection so it is current at read
+/// time and answers with or without a live daemon.
+fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
+    let now = chrono::Utc::now();
+    let ledger = gwt_core::github_budget::BudgetLedger::global();
+    status.github_budget = Some(gwt_core::github_budget::status_by_resource(
+        &ledger.snapshot(now),
+        &gwt_core::github_budget::ThrottlePolicy::default(),
+        now,
+    ));
+}
+
 fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
@@ -470,6 +487,7 @@ fn run_monitor_status<E: CliEnv>(
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
         merge_board_escalations_into_needs_human(&project_root, &mut status);
+        attach_github_budget(&mut status);
         out.push_str(
             &serde_json::to_string(&status)
                 .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -501,6 +519,7 @@ fn run_monitor_status<E: CliEnv>(
     // would silently disagree about what a caller can rely on.
     let mut status = monitor.agent_status_at(&now);
     merge_board_escalations_into_needs_human(&project_root, &mut status);
+    attach_github_budget(&mut status);
     out.push_str(
         &serde_json::to_string(&status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -720,6 +739,57 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
         &serde_json::json!({
             "provider_quota_holds": monitor.agent_status_at(&now).provider_quota_holds,
             "source": "durable_prefs",
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3883 AC-6: recover from "running but untracked" without touching a
+/// single running agent.
+///
+/// The recovery the incident needed was six live panes against three slots,
+/// where the fix could not be "close something": all six were working. So this
+/// only ever *adds* tracking back — it re-adopts the launches whose windows the
+/// canvas still shows, and never revokes, prunes, or closes anything. That also
+/// makes it safe without the daemon control lane: additive bindings and
+/// launches are union-merged by every cross-process rebase, so a daemon that
+/// owns the state absorbs this commit instead of racing it.
+///
+/// Judgement comes from the live canvas, exactly as `pane.list` reads it,
+/// because the durable snapshot disagreeing with the running windows is the
+/// condition being repaired.
+fn run_monitor_reconcile<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let live_window_ids = crate::cli::pane::live_window_ids(&project_root)
+        .map_err(|error| SpecOpsError::from(ApiError::Network(error)))?;
+    let (prefs, readopted) = crate::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let readopted = monitor.readopt_live_launch_bindings(&live_window_ids);
+        if !readopted.is_empty() {
+            *prefs = monitor.prefs();
+        }
+        readopted
+    })
+    .map_err(io_as_api_error)?;
+    let monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    out.push_str(
+        &serde_json::json!({
+            "readopted": readopted,
+            "active_launches": monitor.active_issue_numbers(),
+            "max_active": prefs.max_active_agents,
+            "live_windows": live_window_ids.len(),
+            "source": "live_canvas",
         })
         .to_string(),
     );
@@ -3619,6 +3689,7 @@ mod tests {
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
+            github_budget: None,
             generation_reclaim: None,
         };
         merge_board_escalations_into_needs_human(&repo, &mut published);
@@ -3662,6 +3733,7 @@ mod tests {
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
+            github_budget: None,
             generation_reclaim: None,
         };
         merge_board_escalations_into_needs_human(&repo, &mut live_open);
@@ -3756,6 +3828,7 @@ mod tests {
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
+                github_budget: None,
                 generation_reclaim: None,
             };
             merge_board_escalations_into_needs_human(&repo, &mut status);
@@ -3806,6 +3879,7 @@ mod tests {
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
+            github_budget: None,
             generation_reclaim: None,
         };
 
@@ -3915,8 +3989,21 @@ mod tests {
             prefs_before,
             "status must stay read-only"
         );
+        let mut status =
+            serde_json::from_str::<serde_json::Value>(out.trim()).expect("status json");
+        // Issue #3928 AC-4: the GitHub budget block is read from the live
+        // ledger at call time and has its own test; the queue projection is
+        // compared without it.
+        assert!(
+            status
+                .as_object_mut()
+                .expect("status object")
+                .remove("github_budget")
+                .is_some(),
+            "the offline fallback reports the GitHub budget too: {out}"
+        );
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(out.trim()).expect("status json"),
+            status,
             serde_json::json!({
                 "queue": [2, 1],
                 "active_launches": [9],
@@ -3997,6 +4084,85 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
             "a scan that last ran in 2020 must read as stalled: {status}"
+        );
+    }
+
+    /// Issue #3928 AC-4: the PM must be able to see, from the one snapshot it
+    /// already reads, that GitHub is throttling, until when, and which callers
+    /// spent the last minute's budget.
+    #[test]
+    fn issue_monitor_status_reports_the_github_budget_state() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let ledger = gwt_core::github_budget::BudgetLedger::global();
+        let now = chrono::Utc::now();
+        let refusal = |at: chrono::DateTime<chrono::Utc>| gwt_core::github_quota::RateLimitBlock {
+            resource: "graphql".to_string(),
+            limit: 0,
+            remaining: 0,
+            reset_at: at + chrono::Duration::seconds(60),
+        };
+        ledger.record_block(
+            &refusal(now - chrono::Duration::seconds(120)),
+            now - chrono::Duration::seconds(120),
+        );
+        ledger.record_block(&refusal(now), now);
+        ledger.record_spawn_from(
+            gwt_core::github_quota::GitHubQuota::GraphQl,
+            "gwt gh issue view",
+            now - chrono::Duration::seconds(5),
+        );
+        ledger.record_spawn_from(
+            gwt_core::github_quota::GitHubQuota::GraphQl,
+            "gwt gh issue view",
+            now - chrono::Duration::seconds(4),
+        );
+        ledger.record_spawn_from(
+            gwt_core::github_quota::GitHubQuota::GraphQl,
+            "gwtd gh pr list",
+            now - chrono::Duration::seconds(3),
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        let graphql = &status["github_budget"]["graphql"];
+        assert_eq!(graphql["throttled"], true, "{status}");
+        assert!(
+            graphql["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("github_rate_limited")),
+            "{status}"
+        );
+        assert!(graphql["backoff_until"].is_string(), "{status}");
+        assert!(
+            graphql["retry_after_secs"]
+                .as_i64()
+                .is_some_and(|secs| (0..=120).contains(&secs)),
+            "the second refusal in a row waits two minutes: {status}"
+        );
+        assert_eq!(graphql["consecutive_refusals"], 2, "{status}");
+        assert_eq!(graphql["calls_last_minute"], 3, "{status}");
+        assert_eq!(
+            graphql["sources_last_minute"]["gwt gh issue view"], 2,
+            "{status}"
+        );
+        assert_eq!(
+            graphql["sources_last_minute"]["gwtd gh pr list"], 1,
+            "{status}"
+        );
+        assert_eq!(
+            status["github_budget"]["core"]["throttled"], false,
+            "{status}"
         );
     }
 

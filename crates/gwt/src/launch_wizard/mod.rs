@@ -405,6 +405,9 @@ pub struct LaunchWizardView {
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
     pub error: Option<String>,
+    /// Issue #3962 AC-5: non-blocking hint shown when a restored model is no
+    /// longer offered by the agent and the wizard fell back to the default.
+    pub model_fallback_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -688,6 +691,27 @@ impl LaunchWizardLaunchRequest {
             );
         }
     }
+
+    /// Issue #3984 (AC-1): mark an independent-review dispatch launch.
+    ///
+    /// SPEC-3248 P8a already keeps the reviewer out of the implementer's
+    /// Execution Control Record via `suppress_execution_control`; that flag is
+    /// launch-local and invisible to the hooks, so the same decision is also
+    /// published into the review agent's environment. Without it the identity
+    /// and obligation gates treat the reviewer as a producing session whose
+    /// settlement paths it can never reach, and the finished verdict never
+    /// leaves the window.
+    ///
+    /// A no-op for non-agent (shell) launches.
+    pub fn set_review_dispatch_context(&mut self) {
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.suppress_execution_control = true;
+            config.env_vars.insert(
+                crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV.to_string(),
+                "1".to_string(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -734,6 +758,47 @@ mod autonomous_launch_tests {
                         .map(String::as_str),
                     Some("3478")
                 );
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Issue #3984 (AC-1): the review dispatch launch publishes both halves of
+    /// the review contract — the P8a execution suppression and the marker its
+    /// hooks read.
+    #[test]
+    fn review_dispatch_launch_marks_the_review_contract() {
+        let mut request = agent_request(false);
+        request.set_review_dispatch_context();
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert!(
+                    config.suppress_execution_control,
+                    "the reviewer never owns the implementer's execution"
+                );
+                assert_eq!(
+                    config
+                        .env_vars
+                        .get(crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV)
+                        .map(String::as_str),
+                    Some("1")
+                );
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Non-regression: an implementation launch is never marked as a review,
+    /// so it keeps the producing-session gates in full.
+    #[test]
+    fn an_implementation_launch_carries_no_review_marker() {
+        let request = agent_request(false);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert!(!config.suppress_execution_control);
+                assert!(!config
+                    .env_vars
+                    .contains_key(crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV));
             }
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }
@@ -972,6 +1037,10 @@ pub struct LaunchWizardState {
     pub initial_prompt: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
+    /// Issue #3962 AC-5: set when a restored model left the agent's catalog and
+    /// the wizard silently fell back to the current default. A non-blocking
+    /// hint, never an error — the launch still proceeds with the default model.
+    pub model_fallback_notice: Option<String>,
     pub is_hydrating: bool,
     pub runtime_context_resolved: bool,
     pub runtime_resolution_pending: bool,
