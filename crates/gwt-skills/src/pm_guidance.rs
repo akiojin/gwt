@@ -1832,7 +1832,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         for phrase in [
             "`issue.create`",
             "`issue.monitor.requeue`",
-            "never leave undelivered work as a report",
+            "Never leave undelivered work as a report",
             "Cached `linked_prs`",
             "never delivery proof on its own",
         ] {
