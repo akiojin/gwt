@@ -139,6 +139,7 @@ fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
             managed_hook_shell(),
+            &managed_hook_bin_for_config_path(settings_path),
         )),
     );
 
@@ -351,8 +352,9 @@ pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
 fn merge_managed_and_user_hooks(
     user_hooks: Map<String, Value>,
     shell: HookShell,
+    bin: &str,
 ) -> Map<String, Value> {
-    let managed_hooks = managed_hooks(shell);
+    let managed_hooks = managed_hooks(shell, bin);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -455,23 +457,23 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
         .any(|suffix| command.contains(suffix))
 }
 
-fn managed_hooks(shell: HookShell) -> Map<String, Value> {
+fn managed_hooks(shell: HookShell, bin: &str) -> Map<String, Value> {
     let mut hooks = Map::new();
     for event in MANAGED_EVENT_ORDER {
         hooks.insert(
             event.to_string(),
-            Value::Array(vec![event_hook(event, shell)]),
+            Value::Array(vec![event_hook(event, shell, bin)]),
         );
     }
     hooks
 }
 
-fn event_hook(event: &str, shell: HookShell) -> Value {
+fn event_hook(event: &str, shell: HookShell, bin: &str) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": event_hook_command(event, shell),
+                "command": event_hook_command_with_bin(bin, event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -485,6 +487,117 @@ fn event_hook(event: &str, shell: HookShell) -> Value {
 /// the example's own binary path) and any future out-of-process
 /// regenerator.
 const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
+
+/// The portable fallback every generated runtime selector uses when the
+/// hook config it is written into is shared through git.
+///
+/// #3567: a hook config that git tracks is byte-compared against a commit, so
+/// any absolute path baked into it — a worktree-local `target/debug/gwtd`, an
+/// installed `/Applications/GWT.app/Contents/MacOS/gwtd`, a
+/// `C:\Users\<name>\AppData\...` — leaves the file permanently dirty on the
+/// machine that materialized it, and resolves to nothing at all on every other
+/// machine if someone commits it. The bare name defers resolution to run time,
+/// where `GWT_BIN_PATH` (injected by every gwt launch, with its directory
+/// prepended to `PATH`) already answers it.
+pub const CANONICAL_HOOK_BIN: &str = "gwtd";
+
+/// Which binary a generated hook config at `path` should fall back to.
+///
+/// #3567: git-tracked configs get [`CANONICAL_HOOK_BIN`] so materialization
+/// converges on the committed bytes; untracked, machine-local configs keep the
+/// absolute pin resolved for this install (#3810), which is what makes hooks
+/// work for a Codex started outside gwt with no `gwtd` on `PATH`.
+pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
+    if managed_hook_config_is_git_tracked(path) {
+        return CANONICAL_HOOK_BIN.to_string();
+    }
+    let bin = gwt_hook_bin_path();
+    // #3567 (PM ruling): a process-global `GWT_HOOK_BIN` is authority only for
+    // the worktree it was set for. A developer running `target/debug/gwtd` may
+    // pin that build inside their own worktree, but repairing a *different*
+    // worktree must never hand it a build output that a `cargo clean` or a
+    // worktree removal silently deletes — the hook then fails open and every
+    // event goes missing without a word.
+    match build_output_owner_root(Path::new(&bin)) {
+        Some(owner_root) if !path_is_inside(path, &owner_root) => CANONICAL_HOOK_BIN.to_string(),
+        _ => bin,
+    }
+}
+
+/// The checkout root that owns `bin` when `bin` is a gwt build output
+/// (`<root>/target/[<triple>/]{debug,release}/gwt[d][.exe]`), else `None`.
+///
+/// Returned in the normalized forward-slash form both platforms can compare;
+/// see [`path_is_inside`].
+pub fn build_output_owner_root(bin: &Path) -> Option<String> {
+    let normalized = normalize_path_text(bin);
+    let segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let file_name = segments.last()?.to_ascii_lowercase();
+    let binary_name = file_name.strip_suffix(".exe").unwrap_or(file_name.as_str());
+    if binary_name != "gwt" && binary_name != "gwtd" {
+        return None;
+    }
+    let target_index = segments
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, segment)| {
+            (segment.eq_ignore_ascii_case("target")
+                && segments[index + 1..segments.len().saturating_sub(1)]
+                    .iter()
+                    .any(|segment| {
+                        segment.eq_ignore_ascii_case("debug")
+                            || segment.eq_ignore_ascii_case("release")
+                    }))
+            .then_some(index)
+        })?;
+    let mut root = String::new();
+    if normalized.starts_with('/') {
+        root.push('/');
+    }
+    root.push_str(&segments[..target_index].join("/"));
+    Some(root)
+}
+
+fn normalize_path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Whether `path` lives at or below `owner_root` (both in normalized
+/// forward-slash form). Component-boundary aware, so `/repo/work/issue-1` never
+/// swallows `/repo/work/issue-10`, and case-insensitive on Windows.
+fn path_is_inside(path: &Path, owner_root: &str) -> bool {
+    let path = normalize_path_text(path);
+    let owner_root = owner_root.trim_end_matches('/');
+    if owner_root.is_empty() {
+        return true;
+    }
+    let (path, owner_root) = if cfg!(windows) {
+        (path.to_ascii_lowercase(), owner_root.to_ascii_lowercase())
+    } else {
+        (path, owner_root.to_string())
+    };
+    path == owner_root || path.starts_with(&format!("{owner_root}/"))
+}
+
+/// Whether git tracks `path`. A path outside a repository, or one git reports
+/// as untracked, answers `false` — those files are machine-local by definition,
+/// so pinning an absolute binary into them harms nobody.
+pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    gwt_core::process::hidden_command("git")
+        .arg("-C")
+        .arg(parent)
+        .args(["ls-files", "--error-unmatch", "-z", "--"])
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
 
 /// Return the stable fallback used by every generated runtime selector.
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
@@ -573,6 +686,7 @@ fn managed_hook_shell() -> HookShell {
     }
 }
 
+#[cfg(test)]
 fn event_hook_command(event: &str, shell: HookShell) -> String {
     event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
 }
@@ -712,6 +826,39 @@ mod tests {
     };
 
     use super::*;
+
+    /// #3567: the owner-root containment check is what decides whether a build
+    /// output may be pinned, so it has to hold at a component boundary. Sibling
+    /// worktrees whose names share a prefix (`issue-1` / `issue-10`) are the
+    /// shape this repository actually produces.
+    #[test]
+    fn build_output_owner_root_matches_only_whole_path_components() {
+        let owner_root = build_output_owner_root(Path::new(
+            "/repo/work/issue-1/target/x86_64-apple-darwin/release/gwtd",
+        ))
+        .expect("a build output has an owner root");
+        assert_eq!(owner_root, "/repo/work/issue-1");
+
+        assert!(path_is_inside(
+            Path::new("/repo/work/issue-1/.claude/settings.local.json"),
+            &owner_root
+        ));
+        assert!(!path_is_inside(
+            Path::new("/repo/work/issue-10/.claude/settings.local.json"),
+            &owner_root
+        ));
+        assert!(!path_is_inside(
+            Path::new("/repo/work/other/.claude/settings.local.json"),
+            &owner_root
+        ));
+
+        assert_eq!(
+            build_output_owner_root(Path::new(r"C:\repo\target\debug\gwt.exe")).as_deref(),
+            Some("C:/repo")
+        );
+        assert!(build_output_owner_root(Path::new("/usr/local/bin/gwtd")).is_none());
+        assert!(build_output_owner_root(Path::new("/repo/target/debug/other")).is_none());
+    }
 
     #[test]
     fn concurrent_codex_hook_regeneration_uses_distinct_atomic_temp_files() {
@@ -2160,7 +2307,10 @@ mod tests {
         let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("session start command");
-        let expected = event_hook_command("SessionStart", managed_hook_shell());
+        // #3567: the file is git-tracked here, so the migrated command keeps the
+        // canonical portable fallback instead of this machine's absolute path.
+        let expected =
+            event_hook_command_with_bin(CANONICAL_HOOK_BIN, "SessionStart", managed_hook_shell());
         assert_eq!(session_start_command, expected);
     }
 

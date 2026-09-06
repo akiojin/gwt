@@ -379,25 +379,14 @@ fn is_bunx_temp_executable(path: &Path) -> bool {
         .any(|segment| segment.starts_with("bunx-"))
 }
 
+/// Whether `path` is a gwt build output owned by one checkout
+/// (`<root>/target/[<triple>/]{debug,release}/gwt[d]`).
+///
+/// #3567: the hook generator asks the same question when it decides whether a
+/// resolved binary may be written into another worktree's config, so both sides
+/// share one implementation and cannot drift apart.
 pub(crate) fn is_worktree_local_build_binary(path: &Path) -> bool {
-    let segments = normalized_path_segments(path)
-        .into_iter()
-        .map(|segment| segment.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let Some(file_name) = segments.last() else {
-        return false;
-    };
-    let binary_name = strip_windows_exe_suffix(file_name);
-    if binary_name != GUI_FRONT_DOOR_BINARY_NAME && binary_name != INTERNAL_DAEMON_BINARY_NAME {
-        return false;
-    }
-
-    segments.iter().enumerate().any(|(index, segment)| {
-        segment == "target"
-            && segments[index + 1..segments.len().saturating_sub(1)]
-                .iter()
-                .any(|segment| matches!(segment.as_str(), "debug" | "release"))
-    })
+    gwt_skills::build_output_owner_root(path).is_some()
 }
 
 fn is_stable_hook_binary(path: &Path) -> bool {
