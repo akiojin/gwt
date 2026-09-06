@@ -51,6 +51,7 @@ mod workspace;
 
 use std::{io, path::PathBuf};
 
+pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
@@ -291,15 +292,6 @@ pub enum WorkspaceCommand {
         ids: Vec<String>,
         project_root: Option<String>,
     },
-}
-
-/// SPEC-1942 command model for `actions.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionsCommand {
-    /// `actions.logs`.
-    Logs { run_id: u64 },
-    /// `actions.job_logs`.
-    JobLogs { job_id: u64 },
 }
 
 /// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.
