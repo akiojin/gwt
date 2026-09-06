@@ -9,6 +9,7 @@ pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;
+pub(crate) mod branch;
 mod build;
 mod commands;
 pub mod daemon;
@@ -160,6 +161,8 @@ pub enum CliCommand {
     Pr(PrCommand),
     Actions(ActionsCommand),
     Board(BoardCommand),
+    /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
+    Branch(branch::BranchCommand),
     Hook(HookCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
@@ -643,6 +646,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
+        CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
