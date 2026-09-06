@@ -186,6 +186,7 @@ mod tests {
         assert!(is_host_process_alive(std::process::id()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn current_unix_process_group_is_detected() {
         // SAFETY: getpgrp has no preconditions or side effects.
@@ -202,7 +203,6 @@ mod tests {
         assert_eq!(host_process_start_time(i32::MAX as u32), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn current_process_is_alive() {
         assert!(is_process_alive(std::process::id()));

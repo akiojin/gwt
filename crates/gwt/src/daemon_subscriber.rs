@@ -335,12 +335,14 @@ mod tests {
         time::Duration,
     };
 
+    #[cfg(unix)]
+    use gwt_core::daemon::{ClientFrame, IpcHandshakeRequest, IpcHandshakeResponse};
     use gwt_core::daemon::{
-        ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest, IpcHandshakeResponse,
-        RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+        DaemonEndpoint, DaemonFrame, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
     };
     use serde_json::json;
     use tempfile::TempDir;
+    #[cfg(unix)]
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::UnixListener,
@@ -512,6 +514,9 @@ mod tests {
         let _ = server_handle.await;
     }
 
+    /// The fake daemon below speaks the wire protocol over a raw Unix
+    /// listener so it can drop the connection mid-session.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn materializer_subscriber_reasserts_role_after_forced_disconnect() {
         let temp = TempDir::new().expect("tempdir");
