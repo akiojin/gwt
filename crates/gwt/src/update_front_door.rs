@@ -507,7 +507,7 @@ pub fn stage_graceful_update_apply(
     )
 }
 
-/// Issue #4038: the argv this process was started with (without argv[0]),
+/// Issue #4038: the argv this process was started with (without `argv[0]`),
 /// recorded in the resume marker and handed to the helper as restart args.
 pub fn current_restart_args() -> Vec<String> {
     std::env::args().skip(1).collect()

@@ -239,7 +239,7 @@ pub struct UpdateResumeMarker {
     pub to_version: String,
     /// RFC3339 timestamp of when the apply started.
     pub started_at: String,
-    /// Argv (without argv[0]) of the quitting process, for diagnostics.
+    /// Argv (without `argv[0]`) of the quitting process, for diagnostics.
     #[serde(default)]
     pub restart_args: Vec<String>,
     /// Projects open at apply time.
