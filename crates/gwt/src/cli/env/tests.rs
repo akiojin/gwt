@@ -142,6 +142,30 @@ match args.as_slice() {
         print!("job log 91");
         ExitCode::SUCCESS
     }
+    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/runs/90" => {
+        println!("{{\"id\":90,\"repository\":{{\"full_name\":\"akiojin/gwt\"}}}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91" => {
+        println!("{{\"id\":91,\"run_url\":\"https://api.github.com/repos/akiojin/gwt/actions/runs/90\"}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint]
+        if api == "api" && endpoint.starts_with("/repos/akiojin/gwt/actions/") =>
+    {
+        eprintln!("gh: Not Found (HTTP 404)");
+        ExitCode::FAILURE
+    }
+    [api, method_flag, method, endpoint]
+        if api == "api"
+            && method_flag == "--method"
+            && method == "POST"
+            && (endpoint == "/repos/akiojin/gwt/actions/runs/90/rerun-failed-jobs"
+                || endpoint == "/repos/akiojin/gwt/actions/jobs/91/rerun") =>
+    {
+        println!("{{}}");
+        ExitCode::SUCCESS
+    }
     [api, graphql, ..] if api == "api" && graphql == "graphql" => {
         let joined = args.join("\n");
         if joined.contains("timelineItems") {
@@ -978,6 +1002,32 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
         assert_eq!(
             env.fetch_actions_job_log(91).expect("job log"),
             "job log 91"
+        );
+
+        // Issue #3515: `actions.rerun` reaches gh for both target shapes, and
+        // refuses a run id that the current repository does not own.
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 90,
+                failed_only: true,
+            })
+            .expect("rerun failed jobs")
+            .contains("run 90"));
+        assert!(env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Job { job_id: 91 })
+            .expect("rerun job")
+            .contains("job 91"));
+        let refused = env
+            .rerun_actions(crate::cli::ActionsRerunTarget::Run {
+                run_id: 777,
+                failed_only: false,
+            })
+            .expect_err("a run owned by another repository must be refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("run 777 does not belong to akiojin/gwt"),
+            "unexpected error: {refused}"
         );
 
         let note_path = repo_path.join("note.md");

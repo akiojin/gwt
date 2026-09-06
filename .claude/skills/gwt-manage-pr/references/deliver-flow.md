@@ -210,13 +210,16 @@ code-induced hang or a flaky test must not be re-run into a silent merge.
   provisioning failures, or a network `Connection reset` / `timed out` during
   setup/checkout.
 
-  ```bash
-  gh run rerun <run-id> --failed
+  ```text
+  {"schema_version":1,"operation":"actions.rerun",
+   "params":{"run_id":<run-id>,"failed_only":true}}
   ```
 
-  `gh run rerun` and `gh run list` are allowed (only `gh run view` is blocked;
-  read logs through `actions.logs` / `actions.job_logs`, which require the run
-  to be completed). Re-run a given run at most 3 times.
+  Prefer `{"job_id":<job-id>}` — the id `pr.checks` already reports — so a
+  single flaky check does not re-run every job in the run. `actions.rerun`
+  refuses a run/job the current repository does not own. Read logs through
+  `actions.logs` / `actions.job_logs`, which require the run to be
+  completed. Re-run a given run at most 3 times.
 
 - **Not auto-transient in Deliver** -> a `timed out` reported **by a test or
   build step**, a compile error `error[E####]`, test `FAILED` / `panicked`,
