@@ -336,10 +336,10 @@ mod tests {
     };
 
     #[cfg(unix)]
-    use gwt_core::daemon::{ClientFrame, IpcHandshakeRequest, IpcHandshakeResponse};
     use gwt_core::daemon::{
-        DaemonEndpoint, DaemonFrame, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+        ClientFrame, IpcHandshakeRequest, IpcHandshakeResponse, DAEMON_PROTOCOL_VERSION,
     };
+    use gwt_core::daemon::{DaemonEndpoint, DaemonFrame, RuntimeScope, RuntimeTarget};
     use serde_json::json;
     use tempfile::TempDir;
     #[cfg(unix)]

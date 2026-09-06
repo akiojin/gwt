@@ -66,7 +66,7 @@ const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn issue_monitor_prefs_timeout() -> Duration {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
         .filter(|timeout| *timeout <= 60_000)
@@ -426,7 +426,7 @@ fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_worker_with_config(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -444,18 +444,18 @@ fn spawn_issue_monitor_worker_with_config(
 
 #[derive(Clone, Default)]
 struct IssueMonitorWorkerTestHooks {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Default)]
 struct IssueMonitorScanConcurrencyProbe {
     active: AtomicUsize,
     overlap_observed: AtomicBool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl IssueMonitorScanConcurrencyProbe {
     fn enter(self: &Arc<Self>) -> IssueMonitorScanConcurrencyGuard {
         if self.active.fetch_add(1, Ordering::AcqRel) > 0 {
@@ -471,19 +471,19 @@ impl IssueMonitorScanConcurrencyProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct IssueMonitorScanConcurrencyGuard {
     probe: Arc<IssueMonitorScanConcurrencyProbe>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for IssueMonitorScanConcurrencyGuard {
     fn drop(&mut self) {
         self.probe.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_worker_with_config_and_scan_probe(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -1197,7 +1197,7 @@ impl IssueMonitorControlLaneGuard {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn new_with_authority_without_lease(
         hub: BroadcastHub,
         grant_lane_open: Arc<AtomicBool>,
@@ -1323,7 +1323,7 @@ fn issue_monitor_shutdown_revoke_marker_path(prefs_path: &Path) -> PathBuf {
     crate::issue_monitor_authority_fence_path(prefs_path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn persist_issue_monitor_shutdown_revoke_marker(prefs_path: &Path) -> io::Result<()> {
     crate::persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path)
 }
@@ -1664,7 +1664,7 @@ struct PendingIssueMonitorAuthorityControls {
 }
 
 impl PendingIssueMonitorAuthorityControls {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn after_failure(control: IssueMonitorControl) -> Self {
         Self::after_accepted_failure(AcceptedIssueMonitorControl::new(control), None)
     }
@@ -1697,7 +1697,7 @@ impl PendingIssueMonitorAuthorityControls {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn push(&mut self, control: IssueMonitorControl) {
         self.push_accepted_with_completion(AcceptedIssueMonitorControl::new(control), None);
     }
@@ -1718,7 +1718,7 @@ impl PendingIssueMonitorAuthorityControls {
             });
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn front(&self) -> Option<&IssueMonitorControl> {
         self.controls.front().map(|entry| &entry.accepted.control)
     }
@@ -2069,7 +2069,7 @@ fn try_apply_typed_issue_monitor_failure(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn apply_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
@@ -2305,7 +2305,7 @@ fn rebase_issue_monitor_control_candidate(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn apply_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2319,7 +2319,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn try_apply_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2332,7 +2332,7 @@ fn try_apply_issue_monitor_control_with_disk_migration(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn try_apply_issue_monitor_control_with_disk_migration_observed(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2845,7 +2845,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn scan_issue_monitor_once(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2869,7 +2869,7 @@ async fn scan_issue_monitor_once(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_scan(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2911,12 +2911,12 @@ fn spawn_issue_monitor_scan_with_deadline(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let _scan_concurrency_guard = test_hooks
             .scan_concurrency_probe
             .as_ref()
             .map(IssueMonitorScanConcurrencyProbe::enter);
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
@@ -2956,7 +2956,7 @@ fn scan_failure_fallback(
 /// Test-only compatibility seam that scans once and persists the resulting
 /// state. Production worker scans are supervised by the revisioned single-flight
 /// driver, which persists only a result whose captured revision is still current.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn scan_and_persist_issue_monitor(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -3104,7 +3104,7 @@ fn accept_completed_issue_monitor_scan(
 /// to the remote executor. A caller that receives `Some` therefore has a
 /// durable `(effect_id, authority_epoch, attempt)` receipt to reconcile after a
 /// crash or outcome-ambiguous command.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn fence_next_issue_monitor_effect(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -3213,7 +3213,7 @@ struct IssueMonitorEffectPermitToken {
 }
 
 impl IssueMonitorEffectPermitToken {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn always_open() -> Self {
         Self {
             generation_open: Arc::new(AtomicBool::new(true)),
@@ -3312,7 +3312,7 @@ fn spawn_issue_monitor_effect(
 ) -> InFlightIssueMonitorEffect {
     let handle = tokio::task::spawn_blocking(move || {
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if let (Some(started), Some(release)) = (
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_STARTED"),
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_RELEASE"),
@@ -3522,7 +3522,7 @@ fn issue_monitor_http_client(scope: &RuntimeScope) -> Result<HttpIssueClient, St
 fn issue_monitor_http_client_with_repository(
     scope: &RuntimeScope,
 ) -> Result<(HttpIssueClient, gwt_github::client::RepositoryIdentity), String> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(marker) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_HTTP_CLIENT_MARKER") {
         let _ = fs::write(marker, b"attempted");
     }
