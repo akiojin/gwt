@@ -74,9 +74,11 @@ fn bootstrap_rejects_pre_v2_endpoint_files() {
         matches!(action, DaemonBootstrapAction::Spawn { .. }),
         "expected Spawn for v1 endpoint, got: {action:?}"
     );
+    // Issue #2338 AC-A: pid 4242 is alive, so the v1 descriptor is refused for
+    // reuse but left in place. Whoever wrote it is still running.
     assert!(
-        !scope.endpoint_path(gwt_home.path()).exists(),
-        "stale v1 endpoint file should be removed"
+        scope.endpoint_path(gwt_home.path()).exists(),
+        "a live owner's v1 endpoint file must not be deleted by a reader"
     );
 }
 
@@ -131,7 +133,66 @@ fn bootstrap_reuses_live_endpoint_and_rejects_stale_or_mismatched_versions() {
         restart,
         DaemonBootstrapAction::Spawn { ref endpoint_path } if endpoint_path == &scope.endpoint_path(gwt_home.path())
     ));
-    assert!(!scope.endpoint_path(gwt_home.path()).exists());
+    // Issue #2338 AC-A: the owner is still alive, so the descriptor is not
+    // this caller's to delete. Not reusable is not the same as abandoned.
+    assert!(scope.endpoint_path(gwt_home.path()).exists());
+}
+
+/// Issue #2338 AC-A: `daemon.status` and every other read-only resolver goes
+/// through `resolve_bootstrap_action`. Deleting a live daemon's descriptor
+/// because it failed one of `is_usable`'s six conditions is how "running a
+/// status command broke the daemon" happened in production.
+#[test]
+fn resolve_bootstrap_action_keeps_a_live_owners_unusable_endpoint() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let other_scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-other",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let path = scope.endpoint_path(gwt_home.path());
+
+    for unusable in [
+        DaemonEndpoint {
+            protocol_version: DAEMON_PROTOCOL_VERSION + 1,
+            ..DaemonEndpoint::new(
+                scope.clone(),
+                4242,
+                "live-daemon.sock".into(),
+                "live-token".into(),
+                "live-daemon".into(),
+            )
+        },
+        DaemonEndpoint::new(
+            other_scope.clone(),
+            4242,
+            "live-daemon.sock".into(),
+            "live-token".into(),
+            "live-daemon".into(),
+        ),
+    ] {
+        persist_endpoint(&path, &unusable).unwrap();
+        let action =
+            resolve_bootstrap_action(gwt_home.path(), &scope, DAEMON_PROTOCOL_VERSION, |pid| {
+                pid == 4242
+            })
+            .unwrap();
+        assert!(matches!(action, DaemonBootstrapAction::Spawn { .. }));
+        assert!(
+            path.exists(),
+            "a descriptor owned by live pid 4242 must survive resolution: {unusable:?}"
+        );
+    }
 }
 
 #[test]
@@ -494,7 +555,113 @@ fn resolve_bootstrap_action_rejects_pre_materializer_protocol_endpoint() {
         .unwrap();
 
     assert!(matches!(result, DaemonBootstrapAction::Spawn { .. }));
-    assert!(!path.exists(), "old protocol endpoint must not be reused");
+    // Issue #2338 AC-A: "must not be reused" never meant "must be deleted".
+    // Pid 4242 is alive here, so the descriptor stays where its owner put it.
+    assert!(
+        path.exists(),
+        "a live owner's old-protocol endpoint must not be deleted"
+    );
+}
+
+/// Issue #2338 AC-D: past-generation descriptors accumulate forever because
+/// the only removal path is "the caller that tried to resolve this exact one".
+/// A production machine held 746 of them. The sweep must be provably safe:
+/// nothing whose owner might still be serving is touched.
+#[test]
+fn sweep_dead_endpoints_removes_only_provably_abandoned_descriptors() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let daemon_dir = scope.daemon_dir(gwt_home.path());
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+
+    let descriptor = |pid: u32, bind: &str| {
+        DaemonEndpoint::new(
+            scope.clone(),
+            pid,
+            bind.to_string(),
+            "token".into(),
+            "test-daemon".into(),
+        )
+    };
+    let live = daemon_dir.join("live.json");
+    let front_door_sentinel = daemon_dir.join("sentinel.json");
+    let dead_but_served = daemon_dir.join("dead-served.json");
+    let dead_socket_leftover = daemon_dir.join("dead-leftover.json");
+    let pidless = daemon_dir.join("pidless.json");
+    let malformed = daemon_dir.join("malformed.json");
+    let unrelated = daemon_dir.join("notes.txt");
+    persist_endpoint(&live, &descriptor(4242, "/tmp/live.sock")).unwrap();
+    persist_endpoint(
+        &front_door_sentinel,
+        &descriptor(8741, "internal://gwt-front-door"),
+    )
+    .unwrap();
+    persist_endpoint(&dead_but_served, &descriptor(8742, "/tmp/served.sock")).unwrap();
+    persist_endpoint(
+        &dead_socket_leftover,
+        &descriptor(8743, "/tmp/leftover.sock"),
+    )
+    .unwrap();
+    persist_endpoint(&pidless, &descriptor(0, "/tmp/pidless.sock")).unwrap();
+    std::fs::write(&malformed, b"not-json").unwrap();
+    std::fs::write(&unrelated, b"keep me").unwrap();
+
+    let removed = gwt_core::daemon::sweep_dead_endpoints(
+        &daemon_dir,
+        |pid| pid == 4242,
+        |bind| bind == "/tmp/served.sock",
+    )
+    .unwrap();
+
+    assert!(live.exists(), "a live owner's descriptor must survive");
+    assert!(
+        dead_but_served.exists(),
+        "something still answers on this bind; the recorded pid is not proof of abandonment"
+    );
+    assert!(
+        malformed.exists(),
+        "an unreadable descriptor names no owner, so abandonment cannot be proven"
+    );
+    assert!(unrelated.exists(), "non-descriptor files are not ours");
+    assert!(!front_door_sentinel.exists());
+    assert!(!dead_socket_leftover.exists());
+    assert!(!pidless.exists());
+    let mut removed = removed;
+    removed.sort();
+    let mut expected = vec![
+        dead_socket_leftover.clone(),
+        pidless.clone(),
+        front_door_sentinel.clone(),
+    ];
+    expected.sort();
+    assert_eq!(removed, expected);
+}
+
+#[test]
+fn sweep_dead_endpoints_is_a_no_op_when_the_daemon_directory_is_absent() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let removed = gwt_core::daemon::sweep_dead_endpoints(
+        &scope.daemon_dir(gwt_home.path()),
+        |_| false,
+        |_| false,
+    )
+    .unwrap();
+    assert!(removed.is_empty());
 }
 
 #[test]
