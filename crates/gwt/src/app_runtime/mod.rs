@@ -3198,7 +3198,6 @@ impl AppRuntime {
         self.publish_issue_monitor_control(project_root, payload)
     }
 
-    #[cfg(unix)]
     fn publish_issue_monitor_control(
         &self,
         project_root: &Path,
@@ -3210,19 +3209,6 @@ impl AppRuntime {
             std::process::id(),
         );
         gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-    }
-
-    #[cfg(not(unix))]
-    fn publish_issue_monitor_control(
-        &self,
-        _project_root: &Path,
-        _payload: serde_json::Value,
-    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        Err(
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-                "Issue Monitor daemon control is unavailable on this platform".to_string(),
-            ),
-        )
     }
 
     fn claim_issue_monitor_launch_delivery(
@@ -4613,10 +4599,8 @@ impl AppRuntime {
         target: &gwt::IssueMonitorStopTarget,
         commit_timeout: std::time::Duration,
     ) -> WindowCloseMonitorResult {
-        #[cfg_attr(not(unix), allow(unused_variables))]
         let window_id = target.window_id.as_deref().unwrap_or_default();
 
-        #[cfg(unix)]
         let publication = {
             let payload = gwt::runtime_daemon_events::issue_monitor_payload(
                 "control",
@@ -4632,12 +4616,6 @@ impl AppRuntime {
             );
             gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
         };
-        #[cfg(not(unix))]
-        let publication = Err(
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-                "Issue Monitor daemon control is unavailable on this platform".to_string(),
-            ),
-        );
 
         match publication {
             Ok(()) => WindowCloseMonitorResult::Published,
