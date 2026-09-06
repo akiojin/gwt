@@ -39,10 +39,18 @@ impl AgentId {
             })
     }
 
-    /// npm package name (if distributed via npm).
-    pub fn package_name(&self) -> Option<&str> {
+    /// Distribution route declared by the built-in descriptor. Custom agents
+    /// have no route: the user already pointed gwt at an executable.
+    pub fn distribution(&self) -> DistributionRoute {
         self.builtin_descriptor()
-            .and_then(|descriptor| descriptor.package_name)
+            .map_or(DistributionRoute::None, |descriptor| {
+                descriptor.distribution
+            })
+    }
+
+    /// npm package name when the distribution route is the npm registry.
+    pub fn npm_package(&self) -> Option<&'static str> {
+        self.distribution().npm_package()
     }
 
     /// Default UI color for this agent.
@@ -134,6 +142,54 @@ impl std::fmt::Display for AgentId {
     }
 }
 
+/// How gwt obtains an agent executable that is not already on PATH.
+///
+/// SPEC-3864 FR-001: replaces the former `package_name: Option<&str>`, which
+/// could only express "npm or nothing". Only [`DistributionRoute::Npm`]
+/// supports a runtime `latest` launch through bunx/npx; every other route is
+/// a pre-install type whose install command feeds the wizard's setup
+/// affordance instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistributionRoute {
+    /// Published on the npm registry: enables `latest` / pinned launches
+    /// through bunx/npx and npm version history.
+    Npm { package: &'static str },
+    /// Installed with Homebrew (`brew install <formula>`).
+    Homebrew { formula: &'static str },
+    /// Installed as a GitHub CLI extension (`gh extension install <repo>`).
+    GhExtension { repository: &'static str },
+    /// Vendor-provided installer run through the user's shell.
+    Installer { shell_command: &'static str },
+    /// No known route; the user installs the executable by hand.
+    None,
+}
+
+impl DistributionRoute {
+    /// npm package name when the route is the npm registry.
+    pub fn npm_package(self) -> Option<&'static str> {
+        match self {
+            Self::Npm { package } => Some(package),
+            _ => None,
+        }
+    }
+
+    /// Whether gwt can fetch and run the newest release at launch time.
+    pub fn supports_runtime_latest(self) -> bool {
+        self.npm_package().is_some()
+    }
+
+    /// Shell command that installs the agent ahead of time. `None` for npm
+    /// (runtime `latest` covers it) and for agents without a route.
+    pub fn install_shell_command(self) -> Option<String> {
+        match self {
+            Self::Npm { .. } | Self::None => None,
+            Self::Homebrew { formula } => Some(format!("brew install {formula}")),
+            Self::GhExtension { repository } => Some(format!("gh extension install {repository}")),
+            Self::Installer { shell_command } => Some(shell_command.to_string()),
+        }
+    }
+}
+
 /// Metadata for a built-in coding agent.
 ///
 /// Keep agent identity, presentation, detection, and cache keys in this
@@ -144,7 +200,12 @@ pub struct BuiltinAgentDescriptor {
     pub id: AgentId,
     pub command: &'static str,
     pub display_name: &'static str,
-    pub package_name: Option<&'static str>,
+    /// SPEC-3864 FR-001: how the executable is obtained when not on PATH.
+    pub distribution: DistributionRoute,
+    /// SPEC-3864 FR-006 / FR-007: subcommand the wizard's setup affordance
+    /// appends to the agent command for first-time configuration (e.g.
+    /// `auth login`). Empty when the agent has no interactive setup.
+    pub setup_args: &'static [&'static str],
     pub color: AgentColor,
     pub aliases: &'static [&'static str],
     pub cache_key: &'static str,
@@ -157,7 +218,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::ClaudeCode,
         command: "claude",
         display_name: "Claude Code",
-        package_name: Some("@anthropic-ai/claude-code"),
+        distribution: DistributionRoute::Npm {
+            package: "@anthropic-ai/claude-code",
+        },
+        setup_args: &[],
         color: AgentColor::Yellow,
         aliases: &["claude", "claudecode", "claude-code", "claude code"],
         cache_key: "claude-code",
@@ -168,7 +232,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::Codex,
         command: "codex",
         display_name: "Codex",
-        package_name: Some("@openai/codex"),
+        distribution: DistributionRoute::Npm {
+            package: "@openai/codex",
+        },
+        setup_args: &[],
         color: AgentColor::Cyan,
         aliases: &["codex"],
         cache_key: "codex",
@@ -179,7 +246,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::GrokBuild,
         command: "grok",
         display_name: "Grok Build",
-        package_name: Some("@xai-official/grok"),
+        distribution: DistributionRoute::Npm {
+            package: "@xai-official/grok",
+        },
+        setup_args: &[],
         color: AgentColor::Gray,
         aliases: &["grok", "grok build", "grok-build"],
         cache_key: "grok-build",
@@ -190,7 +260,14 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::Antigravity,
         command: "agy",
         display_name: "Antigravity CLI",
-        package_name: None,
+        // SPEC-3864 FR-010: Antigravity ships only through Google's installer
+        // (README "Install"). The npm packages carrying the Antigravity name
+        // are name squats with no real binary — never wire an
+        // `DistributionRoute::Npm` here, even if one of them looks populated.
+        distribution: DistributionRoute::Installer {
+            shell_command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+        },
+        setup_args: &[],
         color: AgentColor::Green,
         aliases: &["agy", "antigravity", "antigravity cli", "antigravity-cli"],
         cache_key: "antigravity",
@@ -201,7 +278,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::Gemini,
         command: "gemini",
         display_name: "Gemini CLI (legacy)",
-        package_name: Some("@google/gemini-cli"),
+        distribution: DistributionRoute::Npm {
+            package: "@google/gemini-cli",
+        },
+        setup_args: &[],
         color: AgentColor::Magenta,
         aliases: &["gemini", "gemini cli", "gemini-cli", "gemini cli legacy"],
         cache_key: "gemini",
@@ -215,7 +295,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         // SPEC-3151: OpenCode ships on npm as `opencode-ai` (bin `opencode`),
         // so versioned launches route through the bunx/npx package runner like
         // Codex/Claude Code instead of requiring a native binary in PATH.
-        package_name: Some("opencode-ai"),
+        distribution: DistributionRoute::Npm {
+            package: "opencode-ai",
+        },
+        setup_args: &["auth", "login"],
         color: AgentColor::Green,
         aliases: &["opencode", "open-code"],
         cache_key: "opencode",
@@ -226,7 +309,12 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::OpenClaw,
         command: "openclaw",
         display_name: "OpenClaw",
-        package_name: None,
+        // SPEC-3864 FR-009: `openclaw` is the vendor's own npm package (also
+        // shipped via Homebrew); npm is the route that enables runtime latest.
+        distribution: DistributionRoute::Npm {
+            package: "openclaw",
+        },
+        setup_args: &[],
         color: AgentColor::Blue,
         aliases: &["openclaw", "open-claw"],
         cache_key: "openclaw",
@@ -237,7 +325,12 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::Hermes,
         command: "hermes",
         display_name: "Hermes Agent",
-        package_name: None,
+        // SPEC-3864 FR-011: the npm bridges for Hermes are third-party and
+        // unofficial, so only the vendor installer is a default route.
+        distribution: DistributionRoute::Installer {
+            shell_command: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+        },
+        setup_args: &["setup"],
         color: AgentColor::Magenta,
         aliases: &["hermes", "hermes agent", "hermes-agent"],
         cache_key: "hermes",
@@ -248,7 +341,11 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::Copilot,
         command: "gh",
         display_name: "GitHub Copilot",
-        package_name: None,
+        // SPEC-3864 FR-012: `gh copilot` is a GitHub CLI extension.
+        distribution: DistributionRoute::GhExtension {
+            repository: "github/gh-copilot",
+        },
+        setup_args: &[],
         color: AgentColor::Blue,
         aliases: &["gh", "copilot", "github copilot", "github-copilot"],
         cache_key: "copilot",
@@ -311,7 +408,7 @@ impl AgentInfo {
         Self {
             display_name: id.display_name().to_string(),
             command: id.command().to_string(),
-            package_name: id.package_name().map(std::string::ToString::to_string),
+            package_name: id.npm_package().map(std::string::ToString::to_string),
             color: id.default_color(),
             id,
         }
@@ -435,21 +532,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_id_package_name() {
+    fn agent_id_npm_package() {
         assert_eq!(
-            AgentId::ClaudeCode.package_name(),
+            AgentId::ClaudeCode.npm_package(),
             Some("@anthropic-ai/claude-code")
         );
-        assert_eq!(AgentId::Antigravity.package_name(), None);
-        assert_eq!(
-            AgentId::GrokBuild.package_name(),
-            Some("@xai-official/grok")
-        );
-        assert_eq!(AgentId::Gemini.package_name(), Some("@google/gemini-cli"));
-        assert_eq!(AgentId::OpenCode.package_name(), Some("opencode-ai"));
-        assert_eq!(AgentId::OpenClaw.package_name(), None);
-        assert_eq!(AgentId::Hermes.package_name(), None);
-        assert_eq!(AgentId::Custom("x".into()).package_name(), None);
+        assert_eq!(AgentId::Antigravity.npm_package(), None);
+        assert_eq!(AgentId::GrokBuild.npm_package(), Some("@xai-official/grok"));
+        assert_eq!(AgentId::Gemini.npm_package(), Some("@google/gemini-cli"));
+        assert_eq!(AgentId::OpenCode.npm_package(), Some("opencode-ai"));
+        assert_eq!(AgentId::OpenClaw.npm_package(), Some("openclaw"));
+        assert_eq!(AgentId::Hermes.npm_package(), None);
+        assert_eq!(AgentId::Custom("x".into()).npm_package(), None);
     }
 
     #[test]
@@ -490,7 +584,10 @@ mod tests {
                 "{:?}",
                 descriptor.id
             );
-            assert_eq!(info.package_name.as_deref(), descriptor.package_name);
+            assert_eq!(
+                info.package_name.as_deref(),
+                descriptor.distribution.npm_package()
+            );
             assert_eq!(info.color, descriptor.color);
             assert_eq!(
                 resolve_agent_id(descriptor.command),
@@ -508,7 +605,10 @@ mod tests {
 
         assert_eq!(descriptor.id, AgentId::GrokBuild);
         assert_eq!(descriptor.display_name, "Grok Build");
-        assert_eq!(descriptor.package_name, Some("@xai-official/grok"));
+        assert_eq!(
+            descriptor.distribution.npm_package(),
+            Some("@xai-official/grok")
+        );
         assert_eq!(descriptor.cache_key, "grok-build");
         assert_eq!(descriptor.version_flag, "--version");
         assert!(descriptor.version_prefix_args.is_empty());
@@ -523,11 +623,177 @@ mod tests {
 
         assert_eq!(descriptor.command, "agy");
         assert_eq!(descriptor.display_name, "Antigravity CLI");
-        assert_eq!(descriptor.package_name, None);
+        assert_eq!(descriptor.distribution.npm_package(), None);
         assert_eq!(descriptor.cache_key, "antigravity");
         assert_eq!(descriptor.version_flag, "--version");
         assert!(descriptor.aliases.contains(&"antigravity"));
         assert!(descriptor.aliases.contains(&"antigravity-cli"));
+    }
+
+    /// SPEC-3864 FR-001 (AC-1): the descriptor distinguishes every
+    /// distribution route kind, and each kind answers the two questions the
+    /// wizard asks: "can gwt run `latest` at launch?" and "what installs it
+    /// ahead of time?".
+    #[test]
+    fn distribution_route_kinds_are_distinguishable() {
+        let cases: [(DistributionRoute, Option<&str>, bool, Option<&str>); 5] = [
+            (
+                DistributionRoute::Npm {
+                    package: "@example/cli",
+                },
+                Some("@example/cli"),
+                true,
+                None,
+            ),
+            (
+                DistributionRoute::Homebrew {
+                    formula: "example/tap/cli",
+                },
+                None,
+                false,
+                Some("brew install example/tap/cli"),
+            ),
+            (
+                DistributionRoute::GhExtension {
+                    repository: "example/gh-cli",
+                },
+                None,
+                false,
+                Some("gh extension install example/gh-cli"),
+            ),
+            (
+                DistributionRoute::Installer {
+                    shell_command: "curl -fsSL https://example.test/install.sh | bash",
+                },
+                None,
+                false,
+                Some("curl -fsSL https://example.test/install.sh | bash"),
+            ),
+            (DistributionRoute::None, None, false, None),
+        ];
+        for (route, npm_package, supports_latest, install_command) in cases {
+            assert_eq!(route.npm_package(), npm_package, "{route:?}");
+            assert_eq!(
+                route.supports_runtime_latest(),
+                supports_latest,
+                "{route:?}"
+            );
+            assert_eq!(
+                route.install_shell_command().as_deref(),
+                install_command,
+                "{route:?}"
+            );
+        }
+    }
+
+    /// SPEC-3864 FR-009..FR-012 (AC-8..AC-11): each built-in declares the
+    /// route gwt actually uses, table-driven so adding an agent means adding
+    /// one row here and one descriptor entry.
+    #[test]
+    fn builtin_descriptors_declare_expected_distribution_routes() {
+        let cases = [
+            (
+                AgentId::ClaudeCode,
+                DistributionRoute::Npm {
+                    package: "@anthropic-ai/claude-code",
+                },
+            ),
+            (
+                AgentId::Codex,
+                DistributionRoute::Npm {
+                    package: "@openai/codex",
+                },
+            ),
+            (
+                AgentId::GrokBuild,
+                DistributionRoute::Npm {
+                    package: "@xai-official/grok",
+                },
+            ),
+            (
+                AgentId::Antigravity,
+                DistributionRoute::Installer {
+                    shell_command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+                },
+            ),
+            (
+                AgentId::Gemini,
+                DistributionRoute::Npm {
+                    package: "@google/gemini-cli",
+                },
+            ),
+            (
+                AgentId::OpenCode,
+                DistributionRoute::Npm {
+                    package: "opencode-ai",
+                },
+            ),
+            (
+                AgentId::OpenClaw,
+                DistributionRoute::Npm {
+                    package: "openclaw",
+                },
+            ),
+            (
+                AgentId::Hermes,
+                DistributionRoute::Installer {
+                    shell_command: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+                },
+            ),
+            (
+                AgentId::Copilot,
+                DistributionRoute::GhExtension {
+                    repository: "github/gh-copilot",
+                },
+            ),
+        ];
+        assert_eq!(cases.len(), builtin_agent_descriptors().len());
+        for (id, expected) in cases {
+            let descriptor = id.builtin_descriptor().expect("built-in descriptor");
+            assert_eq!(descriptor.distribution, expected, "{id:?}");
+            assert_eq!(id.distribution(), expected, "{id:?}");
+            assert_eq!(id.npm_package(), expected.npm_package(), "{id:?}");
+        }
+        assert_eq!(
+            AgentId::Custom("x".into()).distribution(),
+            DistributionRoute::None
+        );
+        assert_eq!(AgentId::Custom("x".into()).npm_package(), None);
+    }
+
+    /// SPEC-3864 FR-010 (AC-9): Antigravity never routes through npm. The
+    /// same-named npm packages are name squats, and the ban is written next
+    /// to the descriptor so nobody "fixes" the missing package later.
+    #[test]
+    fn antigravity_rejects_npm_route_and_documents_squat_ban() {
+        let descriptor =
+            builtin_agent_descriptor_for_command("agy").expect("Antigravity must be built in");
+        assert_eq!(descriptor.distribution.npm_package(), None);
+        assert!(!descriptor.distribution.supports_runtime_latest());
+        let source = include_str!("types.rs");
+        let table_start = source
+            .find("const BUILTIN_AGENT_DESCRIPTORS")
+            .expect("descriptor table");
+        let antigravity_entry = source[table_start..]
+            .find("id: AgentId::Antigravity")
+            .expect("Antigravity entry");
+        let entry_start = table_start + antigravity_entry;
+        let window = &source[entry_start..(entry_start + 1200).min(source.len())];
+        assert!(
+            window.contains("squat"),
+            "the Antigravity descriptor must carry the npm squat ban"
+        );
+    }
+
+    /// SPEC-3864 FR-011 (AC-10): Hermes does not default to a third-party
+    /// npm bridge; only the vendor installer is a distribution route.
+    #[test]
+    fn hermes_default_route_excludes_third_party_npm() {
+        assert_eq!(AgentId::Hermes.npm_package(), None);
+        assert!(matches!(
+            AgentId::Hermes.distribution(),
+            DistributionRoute::Installer { .. }
+        ));
     }
 
     #[test]

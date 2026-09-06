@@ -216,6 +216,19 @@ use super::{
 use crate::usable_worktree_path_for_branch;
 
 impl AppRuntime {
+    /// SPEC-3864 FR-006: feed the host-global "is this agent configured?"
+    /// probes into the wizard. The probes are per-agent (they read that
+    /// agent's own config home); everything downstream — the setup
+    /// affordance and its in-pane launcher — is descriptor-driven.
+    fn apply_agent_configuration_state(wizard: &mut gwt::LaunchWizardState) {
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
+        wizard.set_agent_needs_configuration("hermes", !gwt_skills::hermes_is_configured_global());
+        wizard.set_agent_needs_configuration(
+            "opencode",
+            !gwt_skills::opencode_is_configured_global(),
+        );
+    }
+
     fn launch_wizard_view_for_session(&self, session: &LaunchWizardSession) -> LaunchWizardView {
         let mut view = session.wizard.view();
         if session.issue_monitor_profile_save.is_some() {
@@ -367,9 +380,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         let origin = if workspace_resume_context.is_some() {
             super::LaunchWizardOrigin::WorkspaceResume
@@ -500,9 +511,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -723,9 +732,7 @@ impl AppRuntime {
         if tab_changed {
             let _ = self.persist();
             events.push(self.workspace_state_broadcast());
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         events.push(self.launch_wizard_state_outbound());
         events
@@ -1539,9 +1546,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -1945,9 +1950,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -3987,9 +3990,7 @@ impl AppRuntime {
                 let _ = self.persist();
                 let mut events = vec![self.workspace_state_broadcast()];
                 if tab_changed {
-                    if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                        events.push(event);
-                    }
+                    events.extend(self.active_project_snapshot_broadcasts());
                 }
                 events.push(self.launch_wizard_state_broadcast(None));
                 events

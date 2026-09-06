@@ -238,6 +238,18 @@ fn prepare_project_switch(
 }
 
 impl AppRuntime {
+    /// Broadcast the consumers whose state is scoped to the active project.
+    /// Every route that changes `active_tab_id` uses this bundle so a consumer
+    /// cannot keep values from the previous project.
+    pub(crate) fn active_project_snapshot_broadcasts(&mut self) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+            events.push(event);
+        }
+        events.extend(self.pm_status_broadcast_events());
+        events
+    }
+
     pub(crate) fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
         let selected = rfd::FileDialog::new().pick_folder();
         self.open_project_dialog_selection_events(selected)
@@ -563,9 +575,12 @@ impl AppRuntime {
                 true,
             );
         }
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
-        }
+        // Window restore and PM ensure may report intermediate PM state.
+        // Replace those snapshots at this aggregation boundary with one final
+        // active-project bundle after every restore and ensure mutation has
+        // settled.
+        events.retain(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. }));
+        events.extend(self.active_project_snapshot_broadcasts());
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -753,9 +768,7 @@ impl AppRuntime {
             self.pending_project_navigation = None;
         }
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
-        }
+        events.extend(self.active_project_snapshot_broadcasts());
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -766,6 +779,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
@@ -810,11 +824,13 @@ impl AppRuntime {
         if wizard_closed {
             self.launch_wizard = None;
         }
+        let active_project_changed =
+            self.active_project_root().map(Path::to_path_buf) != previous_project_root;
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
+        if active_project_changed {
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));

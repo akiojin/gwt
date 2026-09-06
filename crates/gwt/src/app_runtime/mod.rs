@@ -4641,7 +4641,11 @@ impl AppRuntime {
                 .get(project_root)
                 .is_none_or(|current| Some(current.as_str()) == closing_session_id)
         });
-        if !window_id_reused && pm_completion_is_current {
+        let pm_completion_is_for_active_project = project_root.is_none_or(|project_root| {
+            self.active_project_root()
+                .is_some_and(|active_root| same_worktree_path(active_root, project_root))
+        });
+        if !window_id_reused && pm_completion_is_current && pm_completion_is_for_active_project {
             if let Some(pm_status) = pm_status {
                 // The worker materialized this from the committed prefs so Tao
                 // does not reopen the PM file or resolve agent binaries.
@@ -6008,9 +6012,12 @@ impl AppRuntime {
                     pm::PmEnsureTrigger::Explicit,
                 )
             }
-            // SPEC-3431 FR-026: PM settings. The two writes never touch the
+            // SPEC-3431 FR-026/FR-132: PM settings. The three writes never touch the
             // running pane; only the explicit restart does.
             FrontendEvent::SetPmAutoStart { enabled } => self.set_pm_auto_start_events(enabled),
+            FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
+                self.set_pm_loop_interval_events(loop_interval_secs)
+            }
             FrontendEvent::SetPmLaunchProfile {
                 agent_id,
                 model,
@@ -7450,9 +7457,10 @@ impl AppRuntime {
         // SPEC-3431 FR-026: hydrate the PM settings panel on connect. Without
         // this a freshly loaded page shows the panel's built-in defaults until
         // some unrelated PM transition happens to broadcast.
-        if let Some(event) = self.pm_status_event() {
-            events.push(OutboundEvent::reply(client_id.to_string(), event));
-        }
+        events.push(OutboundEvent::reply(
+            client_id.to_string(),
+            self.pm_status_event(),
+        ));
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
