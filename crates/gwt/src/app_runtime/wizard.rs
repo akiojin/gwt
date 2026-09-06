@@ -2666,6 +2666,9 @@ impl AppRuntime {
             issue_monitor_session_mode,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            // Issue #4041: the review window observes the Issue; it never
+            // owns the launch binding the implementation window holds.
+            issue_monitor_review_dispatch: review_prompt.is_some(),
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -3038,6 +3041,7 @@ impl AppRuntime {
             issue_monitor_session_mode: Some(config.session_mode),
             issue_monitor_autonomous_handoff: autonomous_delivery_attempt.clone(),
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         };
         let launch = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
@@ -4128,6 +4132,7 @@ impl AppRuntime {
                             issue_monitor_session_mode: Some(config.session_mode),
                             issue_monitor_autonomous_handoff: None,
                             issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
                         });
                     if let Some(target) = session.agent_kanban_target.clone() {
                         runtime.spawn_agent_window_in_agent_kanban(
