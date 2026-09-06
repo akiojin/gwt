@@ -279,7 +279,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Fetch GitHub Actions run/job logs via JSON envelope.",
+        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -289,9 +289,15 @@ fn format_actions_help() -> String {
         "Operations:",
         "  actions.logs                            Print raw run logs",
         "  actions.job_logs                        Print raw job logs",
+        "  actions.rerun                           Re-run a failed run or a single failed job",
         "",
         "Key params:",
         "  run_id, job_id",
+        "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "",
+        "Notes:",
+        "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
     .join("\n")

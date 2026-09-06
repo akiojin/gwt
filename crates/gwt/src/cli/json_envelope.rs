@@ -512,6 +512,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "actions.job_logs" | "actions.job-logs" => CliCommand::Actions(ActionsCommand::JobLogs {
             job_id: required_u64(params, "job_id")?,
         }),
+        "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
+            target: actions_rerun_target(params)?,
+        }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
             scope: optional_string(params, "scope")?
@@ -1277,6 +1280,35 @@ fn reject_unknown_params(
         }
     }
     Ok(())
+}
+
+/// Issue #3515: `actions.rerun` takes `run_id` **or** `job_id`, never both.
+/// `failed_only` narrows a run rerun to its failed jobs and is meaningless for
+/// a job target, so passing it there is rejected instead of silently ignored.
+fn actions_rerun_target(
+    params: &Map<String, Value>,
+) -> Result<crate::cli::ActionsRerunTarget, CliParseError> {
+    let job_id = optional_u64(params, "job_id")?;
+    let run_id = optional_u64(params, "run_id")?;
+    match (run_id, job_id) {
+        (Some(_), Some(_)) => Err(CliParseError::InvalidValue {
+            flag: "job_id",
+            reason: "run_id and job_id are mutually exclusive",
+        }),
+        (None, Some(job_id)) => {
+            if optional_bool(params, "failed_only")?.is_some() {
+                return Err(CliParseError::InvalidValue {
+                    flag: "failed_only",
+                    reason: "only applies to a run_id target",
+                });
+            }
+            Ok(crate::cli::ActionsRerunTarget::Job { job_id })
+        }
+        (run_id, None) => Ok(crate::cli::ActionsRerunTarget::Run {
+            run_id: run_id.ok_or(CliParseError::MissingFlag("run_id"))?,
+            failed_only: optional_bool(params, "failed_only")?.unwrap_or(false),
+        }),
+    }
 }
 
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
@@ -3239,6 +3271,45 @@ mod tests {
         assert!(matches!(
             ok("actions.job-logs", json!({"job_id": 5})),
             CliCommand::Actions(ActionsCommand::JobLogs { .. })
+        ));
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: false
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5, "failed_only": true})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: true
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"job_id": 7})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Job { job_id: 7 }
+            })
+        );
+        assert!(matches!(
+            err("actions.rerun", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"run_id": 5, "job_id": 7})),
+            CliParseError::InvalidValue { flag: "job_id", .. }
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"job_id": 7, "failed_only": true})),
+            CliParseError::InvalidValue {
+                flag: "failed_only",
+                ..
+            }
         ));
         assert!(matches!(
             ok("index.status", json!({})),
