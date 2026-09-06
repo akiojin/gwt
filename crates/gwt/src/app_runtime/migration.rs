@@ -129,7 +129,9 @@ impl AppRuntime {
     /// SPEC-1934 US-6.8: user chose Quit. Leave the repository untouched and
     /// ask the GUI event loop to exit through the normal shutdown path.
     pub(crate) fn quit_migration_events(&mut self, _tab_id: &str) -> Vec<OutboundEvent> {
-        self.proxy.send(UserEvent::QuitApp);
+        self.proxy.send(UserEvent::QuitApp {
+            reason: crate::GuiShutdownReason::QuitApp,
+        });
         Vec::new()
     }
 }

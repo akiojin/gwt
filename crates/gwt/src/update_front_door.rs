@@ -192,11 +192,6 @@ fn pending_manifest_covers(latest: &str) -> bool {
 }
 
 trait UpdateApplyOps {
-    fn prepare_update(
-        &mut self,
-        latest: &str,
-        asset_url: &str,
-    ) -> Result<gwt_core::update::PreparedPayload, String>;
     fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String>;
     fn make_helper_copy(&mut self, current_exe: &Path, latest: &str) -> Result<PathBuf, String>;
     fn spawn_internal_apply_update(
@@ -231,14 +226,6 @@ impl Default for RealUpdateApplyOps {
 }
 
 impl UpdateApplyOps for RealUpdateApplyOps {
-    fn prepare_update(
-        &mut self,
-        latest: &str,
-        asset_url: &str,
-    ) -> Result<gwt_core::update::PreparedPayload, String> {
-        self.mgr.prepare_update(latest, asset_url)
-    }
-
     fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String> {
         self.mgr.write_restart_args_file(path, args)
     }
@@ -282,9 +269,9 @@ impl UpdateApplyOps for RealUpdateApplyOps {
 /// SPEC-2041 Phase 19 (T-130): a download that has been completed but not yet
 /// committed via the helper subprocess. Constructed by
 /// [`prepare_update_payload`] from a verified `UpdateState::Available`, then
-/// reused by `apply_update_state_and_exit` (which performs the helper spawn +
-/// `exit(0)`). The struct intentionally owns the on-disk path so the apply
-/// path does not have to re-derive it from the asset URL.
+/// persisted as a pending manifest for the graceful commit (Issue #4038). The
+/// struct intentionally owns the on-disk path so the apply path does not have
+/// to re-derive it from the asset URL.
 #[derive(Debug, Clone)]
 pub struct PreparedUpdate {
     pub latest: String,
@@ -311,15 +298,13 @@ impl PreparedUpdate {
 /// `UserEvent::ApplyUpdateStart` worker thread in `main.rs`) broadcasts
 /// [`crate::BackendEvent::UpdateReady`] when this returns `Ok`.
 ///
-/// This is the explicit no-side-effects half of the legacy
-/// [`apply_update_state_and_exit`]: it never calls `exit(0)`, never spawns the
-/// helper, and never mutates the running binary. T-130 will eventually replace
-/// `apply_update_state_and_exit` entirely with this + a separate
-/// `commit_update_restart_now` once Phase 19 stabilizes.
+/// This is the explicit no-side-effects half of the apply: it never calls
+/// `exit(0)`, never spawns the helper, and never mutates the running binary.
+/// The commit half is [`stage_graceful_update_apply`] (Issue #4038).
+///
 /// Convenience wrapper that drops download-progress events. Kept on the
 /// public API for future non-streaming callers (CLI, automated tests) so the
 /// progress-aware variant does not have to be re-discovered.
-#[allow(dead_code)]
 pub fn prepare_update_payload(
     state: gwt_core::update::UpdateState,
 ) -> Result<PreparedUpdate, String> {
@@ -361,63 +346,23 @@ pub fn prepare_update_payload_with_progress(
     })
 }
 
-/// Apply an already-detected update state from the GUI notification path.
-///
-/// The startup poll has already selected the platform-specific asset. Reusing
-/// that state avoids a second network/cache check that can make a clicked toast
-/// appear to do nothing when the re-check does not return `Available`.
-pub fn apply_update_state_and_exit(state: gwt_core::update::UpdateState) -> Result<(), String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
-    let restart_args: Vec<String> = std::env::args().skip(1).collect();
-    let mut ops = RealUpdateApplyOps::default();
-    start_update_apply_with_ops(
-        &mut ops,
-        state,
-        &current_exe,
-        restart_args,
-        std::process::id(),
-        cfg!(windows),
-    )?;
-    std::process::exit(0);
-}
-
-fn start_update_apply_with_ops(
-    ops: &mut impl UpdateApplyOps,
+/// Issue #4038 (AC-1 / AC-2): download the payload for an already-detected
+/// update state and persist the pending manifest without spawning the helper
+/// or exiting. Used by the pre-manifest fallbacks (legacy toast click, or
+/// `Restart now` before the download persisted) so every apply reaches the
+/// graceful `ApplyUpdateGraceful` commit instead of a worker-thread `exit`.
+pub fn prepare_and_persist_pending_update(
     state: gwt_core::update::UpdateState,
-    current_exe: &Path,
-    restart_args: Vec<String>,
-    old_pid: u32,
-    use_helper_copy: bool,
-) -> Result<(), String> {
-    let (latest, asset_url) = match state {
-        gwt_core::update::UpdateState::Available {
-            latest,
-            asset_url: Some(asset_url),
-            ..
-        } => (latest, asset_url),
-        gwt_core::update::UpdateState::Available { .. } => {
-            return Err("No applicable update asset is available for this platform.".to_string());
-        }
-        gwt_core::update::UpdateState::UpToDate { .. } => {
-            return Err("No pending update is available.".to_string());
-        }
-        gwt_core::update::UpdateState::Failed { message, .. } => {
-            return Err(format!("Update check failed: {message}"));
-        }
+) -> Result<gwt_core::update::PendingUpdateManifest, String> {
+    let prepared = prepare_update_payload(state)?;
+    let manifest = gwt_core::update::PendingUpdateManifest {
+        version: prepared.latest.clone(),
+        asset_url: prepared.asset_url.clone(),
+        payload: prepared.payload.clone(),
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
     };
-    let payload = ops
-        .prepare_update(&latest, &asset_url)
-        .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
-    apply_prepared_payload_with_ops(
-        ops,
-        &latest,
-        payload,
-        current_exe,
-        restart_args,
-        old_pid,
-        use_helper_copy,
-    )
+    gwt_core::update::persist_pending_update_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 /// SPEC-2041 Phase 19 (T-130): commit an already-prepared update by writing
@@ -478,37 +423,113 @@ pub fn commit_update_later_pending() -> Result<(), String> {
     }
 }
 
-/// SPEC-2041 Phase 19 (FR-058/062): consume an already-persisted manifest.
-/// Used both by `Restart now` (when the user clicked through the modal) and
-/// by the bootstrap path (when a previous run wrote the manifest via
-/// `Later`). After the helper subprocess is spawned the manifest is removed
-/// so a future launch does not re-apply the same payload.
-///
-/// This is the function FR-064 names `commit_update_restart_now`. Kept under
-/// the implementation-evolved name `apply_pending_manifest_and_exit` because
-/// renaming would force a much larger diff across tests; the SPEC contract is
-/// satisfied by the function's behavior, not its identifier.
-pub fn apply_pending_manifest_and_exit(
+/// SPEC-2041 Phase 19 (FR-058/062) + Issue #4038 (AC-1): commit an
+/// already-persisted manifest by spawning the helper subprocess and clearing
+/// the manifest so a future launch does not re-apply the same payload. Never
+/// exits: the graceful GUI route quits through `UserEvent::QuitApp` afterwards,
+/// and only the bootstrap route ([`apply_pending_manifest_and_exit`]) exits.
+fn commit_pending_manifest_with_ops(
+    ops: &mut impl UpdateApplyOps,
     manifest: gwt_core::update::PendingUpdateManifest,
-) -> Result<(), String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
-    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    current_exe: &Path,
+    restart_args: Vec<String>,
+    old_pid: u32,
+    use_helper_copy: bool,
+) -> Result<String, String> {
     let latest = manifest.version.clone();
-    let payload = manifest.payload.clone();
-    let mut ops = RealUpdateApplyOps::default();
     apply_prepared_payload_with_ops(
-        &mut ops,
+        ops,
         &latest,
-        payload,
-        &current_exe,
+        manifest.payload,
+        current_exe,
         restart_args,
-        std::process::id(),
-        cfg!(windows),
+        old_pid,
+        use_helper_copy,
     )?;
     // Best-effort cleanup so the next launch starts from a clean state. The
     // helper has already been spawned so failures here are not fatal.
     let _ = gwt_core::update::clear_pending_update_manifest();
+    Ok(latest)
+}
+
+/// Issue #4038 (AC-1): the graceful apply commit. Order matters and is what
+/// AC-7 asserts: (a) the resume marker is on disk before anything
+/// irreversible happens, (b) the helper spawns exactly once, (c) the pending
+/// manifest is cleared. A failed helper spawn rolls the marker back so the
+/// next launch is not mistaken for the tail of an apply. The caller then
+/// sends `UserEvent::QuitApp { reason: ApplyUpdate }`.
+fn stage_graceful_update_apply_with_ops(
+    ops: &mut impl UpdateApplyOps,
+    manifest: gwt_core::update::PendingUpdateManifest,
+    marker: &gwt_core::update::UpdateResumeMarker,
+    current_exe: &Path,
+    restart_args: Vec<String>,
+    old_pid: u32,
+    use_helper_copy: bool,
+) -> Result<String, String> {
+    gwt_core::update::persist_update_resume_marker(marker)
+        .map_err(|err| format!("Failed to write update resume marker: {err}"))?;
+    match commit_pending_manifest_with_ops(
+        ops,
+        manifest,
+        current_exe,
+        restart_args,
+        old_pid,
+        use_helper_copy,
+    ) {
+        Ok(version) => Ok(version),
+        Err(err) => {
+            let _ = gwt_core::update::clear_update_resume_marker();
+            Err(err)
+        }
+    }
+}
+
+/// Issue #4038 (AC-1 / AC-2): production entry for the graceful apply commit.
+/// Called on the event-loop thread by the `UserEvent::ApplyUpdateGraceful`
+/// handler; returns the committed version so the handler can quit with
+/// `GuiShutdownReason::ApplyUpdate { version }`.
+pub fn stage_graceful_update_apply(
+    manifest: gwt_core::update::PendingUpdateManifest,
+    marker: &gwt_core::update::UpdateResumeMarker,
+) -> Result<String, String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
+    let mut ops = RealUpdateApplyOps::default();
+    stage_graceful_update_apply_with_ops(
+        &mut ops,
+        manifest,
+        marker,
+        &current_exe,
+        marker.restart_args.clone(),
+        std::process::id(),
+        cfg!(windows),
+    )
+}
+
+/// Issue #4038: the argv this process was started with (without argv[0]),
+/// recorded in the resume marker and handed to the helper as restart args.
+pub fn current_restart_args() -> Vec<String> {
+    std::env::args().skip(1).collect()
+}
+
+/// SPEC-2041 Phase 19 (FR-058/062): bootstrap-only commit of a persisted
+/// manifest followed by `exit(0)`. This is the single exit-bearing route left
+/// after Issue #4038; the running GUI never calls it.
+fn apply_pending_manifest_and_exit(
+    manifest: gwt_core::update::PendingUpdateManifest,
+) -> Result<(), String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
+    let mut ops = RealUpdateApplyOps::default();
+    commit_pending_manifest_with_ops(
+        &mut ops,
+        manifest,
+        &current_exe,
+        current_restart_args(),
+        std::process::id(),
+        cfg!(windows),
+    )?;
     std::process::exit(0);
 }
 
@@ -562,8 +583,8 @@ fn should_apply_pending_at_bootstrap(pending_version: &str, current_version: &st
 
 #[cfg(test)]
 mod poll_state_tests {
-    use super::{start_update_apply_with_ops, PollState, UpdateApplyOps};
-    use gwt_core::update::{InstallerKind, PreparedPayload, UpdateState};
+    use super::{commit_pending_manifest_with_ops, PollState, UpdateApplyOps};
+    use gwt_core::update::{InstallerKind, PendingUpdateManifest, PreparedPayload};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -641,7 +662,7 @@ mod poll_state_tests {
 
     #[derive(Debug)]
     struct FakeUpdateApplyOps {
-        prepare_result: Result<PreparedPayload, String>,
+        payload: PathBuf,
         restart_args_result: Result<(), String>,
         helper_copy_result: Result<PathBuf, String>,
         portable_spawn_result: Result<(), String>,
@@ -649,12 +670,13 @@ mod poll_state_tests {
         wrote_restart_args: bool,
         spawned_portable: bool,
         spawned_installer: bool,
+        portable_spawn_count: usize,
     }
 
     impl FakeUpdateApplyOps {
         fn portable(payload: PathBuf) -> Self {
             Self {
-                prepare_result: Ok(PreparedPayload::PortableBinary { path: payload }),
+                payload,
                 restart_args_result: Ok(()),
                 helper_copy_result: Ok(PathBuf::from("/tmp/gwt-helper")),
                 portable_spawn_result: Ok(()),
@@ -662,19 +684,26 @@ mod poll_state_tests {
                 wrote_restart_args: false,
                 spawned_portable: false,
                 spawned_installer: false,
+                portable_spawn_count: 0,
+            }
+        }
+    }
+
+    impl FakeUpdateApplyOps {
+        /// A persisted-manifest shape pointing at this fake's payload path.
+        fn manifest(&self) -> PendingUpdateManifest {
+            PendingUpdateManifest {
+                version: "9.20.4".to_string(),
+                asset_url: "https://example.invalid/gwt-macos-arm64.dmg".to_string(),
+                payload: PreparedPayload::PortableBinary {
+                    path: self.payload.clone(),
+                },
+                downloaded_at: "2026-05-10T12:00:00Z".to_string(),
             }
         }
     }
 
     impl UpdateApplyOps for FakeUpdateApplyOps {
-        fn prepare_update(
-            &mut self,
-            _latest: &str,
-            _asset_url: &str,
-        ) -> Result<PreparedPayload, String> {
-            self.prepare_result.clone()
-        }
-
         fn write_restart_args_file(
             &mut self,
             _path: &Path,
@@ -701,6 +730,7 @@ mod poll_state_tests {
             _args_file: &Path,
         ) -> Result<(), String> {
             self.spawned_portable = true;
+            self.portable_spawn_count += 1;
             self.portable_spawn_result.clone()
         }
 
@@ -718,45 +748,15 @@ mod poll_state_tests {
         }
     }
 
-    fn available_update_state() -> UpdateState {
-        UpdateState::Available {
-            current: "9.20.3".to_string(),
-            latest: "9.20.4".to_string(),
-            release_url: "https://example.invalid/releases/v9.20.4".to_string(),
-            asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
-            checked_at: chrono::Utc::now(),
-        }
-    }
-
     #[test]
-    fn update_apply_start_reports_prepare_update_failure() {
-        let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
-        ops.prepare_result = Err("download failed".to_string());
-
-        let err = start_update_apply_with_ops(
-            &mut ops,
-            available_update_state(),
-            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
-            Vec::new(),
-            42,
-            false,
-        )
-        .expect_err("prepare failure should be returned to the caller");
-
-        assert!(err.contains("download failed"));
-        assert!(!ops.wrote_restart_args);
-        assert!(!ops.spawned_portable);
-        assert!(!ops.spawned_installer);
-    }
-
-    #[test]
-    fn update_apply_start_reports_restart_args_failure() {
+    fn commit_pending_manifest_reports_restart_args_failure() {
         let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
         ops.restart_args_result = Err("restart args write failed".to_string());
 
-        let err = start_update_apply_with_ops(
+        let manifest = ops.manifest();
+        let err = commit_pending_manifest_with_ops(
             &mut ops,
-            available_update_state(),
+            manifest,
             Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
             vec!["--project".to_string(), "/repo".to_string()],
             42,
@@ -771,13 +771,14 @@ mod poll_state_tests {
     }
 
     #[test]
-    fn update_apply_start_reports_spawn_failure() {
+    fn commit_pending_manifest_reports_spawn_failure() {
         let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
         ops.portable_spawn_result = Err("helper spawn failed".to_string());
 
-        let err = start_update_apply_with_ops(
+        let manifest = ops.manifest();
+        let err = commit_pending_manifest_with_ops(
             &mut ops,
-            available_update_state(),
+            manifest,
             Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
             Vec::new(),
             42,
@@ -789,6 +790,23 @@ mod poll_state_tests {
         assert!(ops.wrote_restart_args);
         assert!(ops.spawned_portable);
         assert!(!ops.spawned_installer);
+    }
+
+    #[test]
+    fn commit_pending_manifest_returns_the_committed_version() {
+        let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
+        let manifest = ops.manifest();
+        let version = commit_pending_manifest_with_ops(
+            &mut ops,
+            manifest,
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+        )
+        .expect("commit succeeds");
+        assert_eq!(version, "9.20.4");
+        assert_eq!(ops.portable_spawn_count, 1);
     }
 
     // SPEC-2041 Phase 19 (T-127): bootstrap pending-update decision tests.
@@ -838,6 +856,125 @@ mod poll_state_tests {
         assert!(
             gwt_core::update::load_pending_update_manifest_in(tempdir.path()).is_none(),
             "manifest must be gone after cleanup",
+        );
+    }
+
+    // Issue #4038 (AC-1 / AC-7): the graceful apply commit writes the resume
+    // marker first, spawns the helper exactly once, then clears the pending
+    // manifest. It never calls `exit(0)`; the caller sends `QuitApp`.
+    fn staged_manifest_in(home: &Path) -> gwt_core::update::PendingUpdateManifest {
+        let payload = home.join("v9.31.0").join("gwt");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"#!/bin/sh\nexit 0\n").unwrap();
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "9.31.0".to_string(),
+            asset_url: "https://example.invalid/v9.31.0.tar.gz".to_string(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+            downloaded_at: "2026-09-07T00:00:00Z".to_string(),
+        };
+        gwt_core::update::persist_pending_update_manifest(&manifest).expect("persist manifest");
+        manifest
+    }
+
+    fn sample_resume_marker() -> gwt_core::update::UpdateResumeMarker {
+        gwt_core::update::UpdateResumeMarker {
+            from_version: "9.30.0".to_string(),
+            to_version: "9.31.0".to_string(),
+            started_at: "2026-09-07T00:00:00Z".to_string(),
+            restart_args: vec!["--no-tray".to_string()],
+            projects: vec![gwt_core::update::UpdateResumeProject {
+                hash: "99a8660247f5bc49".to_string(),
+                update_drain: false,
+            }],
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn graceful_apply_writes_marker_spawns_helper_once_and_clears_manifest() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tempdir.path());
+        let manifest = staged_manifest_in(tempdir.path());
+        let payload = manifest.payload.clone();
+        let mut ops = FakeUpdateApplyOps::portable(match payload {
+            PreparedPayload::PortableBinary { path } | PreparedPayload::Installer { path, .. } => {
+                path
+            }
+        });
+        let marker = sample_resume_marker();
+
+        let version = super::stage_graceful_update_apply_with_ops(
+            &mut ops,
+            manifest,
+            &marker,
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+        )
+        .expect("graceful apply commits");
+
+        assert_eq!(version, "9.31.0");
+        assert_eq!(
+            gwt_core::update::load_update_resume_marker(),
+            Some(marker),
+            "the resume marker must be on disk before the process quits"
+        );
+        assert_eq!(ops.portable_spawn_count, 1, "helper spawns exactly once");
+        assert!(ops.wrote_restart_args);
+        assert!(
+            gwt_core::update::load_pending_update_manifest().is_none(),
+            "the pending manifest is consumed after the helper is spawned"
+        );
+    }
+
+    #[test]
+    fn graceful_apply_rolls_back_marker_when_helper_spawn_fails() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tempdir.path());
+        let manifest = staged_manifest_in(tempdir.path());
+        let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
+        ops.portable_spawn_result = Err("helper spawn failed".to_string());
+
+        let err = super::stage_graceful_update_apply_with_ops(
+            &mut ops,
+            manifest,
+            &sample_resume_marker(),
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+        )
+        .expect_err("spawn failure surfaces");
+
+        assert!(err.contains("helper spawn failed"));
+        assert!(
+            gwt_core::update::load_update_resume_marker().is_none(),
+            "a failed commit must not leave a marker that resumes nothing"
+        );
+        assert!(
+            gwt_core::update::load_pending_update_manifest().is_some(),
+            "the manifest stays so the user can retry"
+        );
+    }
+
+    // Issue #4038 (AC-1): the worker-thread `exit(0)` path is gone. Only the
+    // bootstrap route keeps the exit-bearing variant.
+    #[test]
+    fn worker_thread_exit_paths_are_removed_from_update_front_door() {
+        let source = include_str!("update_front_door.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod poll_state_tests")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            !production.contains("pub fn apply_update_state_and_exit("),
+            "apply_update_state_and_exit must not survive as a production entry point"
+        );
+        assert_eq!(
+            production.matches("std::process::exit(0)").count(),
+            1,
+            "exactly one exit(0) remains, owned by the bootstrap swap route"
         );
     }
 }

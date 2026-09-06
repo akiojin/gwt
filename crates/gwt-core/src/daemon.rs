@@ -522,7 +522,15 @@ pub struct DaemonStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonBootstrapAction {
     Reuse(DaemonEndpoint),
-    Spawn { endpoint_path: PathBuf },
+    Spawn {
+        endpoint_path: PathBuf,
+    },
+    /// Issue #4038 (AC-6): a live daemon serves this scope but was built from
+    /// another gwt version. It must not be adopted; the caller retires it and
+    /// spawns a fresh one once its descriptor is gone.
+    RetireStaleVersion {
+        endpoint: DaemonEndpoint,
+    },
 }
 
 pub fn validate_handshake(
@@ -588,10 +596,62 @@ pub fn resolve_bootstrap_action<F>(
 where
     F: Fn(u32) -> bool,
 {
+    resolve_bootstrap_action_with_version(
+        gwt_home,
+        scope,
+        expected_protocol_version,
+        None,
+        is_process_alive,
+    )
+}
+
+/// Issue #4038 (AC-6): like [`resolve_bootstrap_action`], but a usable, live
+/// endpoint whose `daemon_version` differs from `expected_daemon_version` is
+/// returned as [`DaemonBootstrapAction::RetireStaleVersion`] instead of
+/// `Reuse`. The endpoint contract otherwise never compares versions, which is
+/// how a pre-update daemon survived into the post-update GUI (Issue #3633).
+pub fn resolve_bootstrap_action_for_version<F>(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    expected_protocol_version: u32,
+    expected_daemon_version: &str,
+    is_process_alive: F,
+) -> Result<DaemonBootstrapAction>
+where
+    F: Fn(u32) -> bool,
+{
+    resolve_bootstrap_action_with_version(
+        gwt_home,
+        scope,
+        expected_protocol_version,
+        Some(expected_daemon_version),
+        is_process_alive,
+    )
+}
+
+fn daemon_versions_match(left: &str, right: &str) -> bool {
+    left.trim().trim_start_matches('v') == right.trim().trim_start_matches('v')
+}
+
+fn resolve_bootstrap_action_with_version<F>(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    expected_protocol_version: u32,
+    expected_daemon_version: Option<&str>,
+    is_process_alive: F,
+) -> Result<DaemonBootstrapAction>
+where
+    F: Fn(u32) -> bool,
+{
     let endpoint_path = scope.endpoint_path(gwt_home);
     match load_endpoint(&endpoint_path) {
         Ok(endpoint) if endpoint.is_usable(scope, expected_protocol_version, &is_process_alive) => {
-            Ok(DaemonBootstrapAction::Reuse(endpoint))
+            match expected_daemon_version {
+                Some(expected) if !daemon_versions_match(&endpoint.daemon_version, expected) => {
+                    Ok(DaemonBootstrapAction::RetireStaleVersion { endpoint })
+                }
+                _ => Ok(DaemonBootstrapAction::Reuse(endpoint)),
+            }
         }
         // Issue #2338 AC-A: "not reusable" and "abandoned" are different
         // questions, and `is_usable` only answers the first. Four of this

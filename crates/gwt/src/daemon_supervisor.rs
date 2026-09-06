@@ -44,6 +44,10 @@ pub enum DaemonEnsureOutcome {
     Starting { pid: u32 },
     /// This platform has no daemon transport yet (Issue #3526).
     Unsupported,
+    /// Issue #4038 (AC-6): a live daemon of another gwt version serves this
+    /// scope. It was asked to terminate; nothing is spawned until its
+    /// descriptor is gone, so the next ensure tick starts the replacement.
+    RetiringStale { pid: u32 },
 }
 
 /// Everything one `gwtd` daemon child needs.
@@ -109,6 +113,11 @@ pub fn daemon_stderr_log_path(endpoint_path: &Path) -> PathBuf {
 pub struct DaemonEnsureInputs<'a> {
     pub gwt_home: PathBuf,
     pub is_process_alive: &'a dyn Fn(u32) -> bool,
+    /// Issue #4038 (AC-6): the version a reusable daemon must report.
+    pub expected_daemon_version: &'a str,
+    /// Issue #4038 (AC-6): asked to terminate a live daemon of another
+    /// version (SIGTERM in production so it unlinks its own descriptor).
+    pub retire_stale_daemon: &'a dyn Fn(u32),
 }
 
 /// Owns the daemon children this process started.
@@ -184,6 +193,8 @@ impl DaemonSupervisor {
             DaemonEnsureInputs {
                 gwt_home: gwt_core::paths::gwt_home(),
                 is_process_alive: &crate::process::is_process_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &terminate_pid_gracefully,
             },
         );
         if let Err(ref error) = result {
@@ -214,14 +225,16 @@ impl DaemonSupervisor {
         inputs: DaemonEnsureInputs<'_>,
     ) -> Result<DaemonEnsureOutcome, String> {
         use gwt_core::daemon::{
-            resolve_bootstrap_action, DaemonBootstrapAction, RuntimeScope, RuntimeTarget,
-            DAEMON_PROTOCOL_VERSION,
+            resolve_bootstrap_action_for_version, DaemonBootstrapAction, RuntimeScope,
+            RuntimeTarget, DAEMON_PROTOCOL_VERSION,
         };
 
         self.ensure_attempts.fetch_add(1, Ordering::SeqCst);
         let DaemonEnsureInputs {
             gwt_home,
             is_process_alive,
+            expected_daemon_version,
+            retire_stale_daemon,
         } = inputs;
 
         let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
@@ -231,13 +244,35 @@ impl DaemonSupervisor {
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
         let started_child_pid = reap_finished_child(&mut children, &endpoint_path);
 
-        let action =
-            resolve_bootstrap_action(&gwt_home, &scope, DAEMON_PROTOCOL_VERSION, is_process_alive)
-                .map_err(|error| format!("daemon bootstrap resolution failed: {error}"))?;
+        let action = resolve_bootstrap_action_for_version(
+            &gwt_home,
+            &scope,
+            DAEMON_PROTOCOL_VERSION,
+            expected_daemon_version,
+            is_process_alive,
+        )
+        .map_err(|error| format!("daemon bootstrap resolution failed: {error}"))?;
 
         match action {
             DaemonBootstrapAction::Reuse(endpoint) => {
                 Ok(DaemonEnsureOutcome::AlreadyRunning { pid: endpoint.pid })
+            }
+            DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
+                // Issue #4038 (AC-6): a daemon from a previous build survived
+                // the update (or was started by a hook while the old binary
+                // was still installed). Adopting it would serve stale logic
+                // for this project; retire it and let the next ensure tick
+                // spawn a version-matched replacement once its descriptor is
+                // unlinked.
+                tracing::warn!(
+                    pid = endpoint.pid,
+                    daemon_version = %endpoint.daemon_version,
+                    expected_daemon_version,
+                    project_root = %project_root.display(),
+                    "retiring a runtime daemon of another gwt version instead of reusing it"
+                );
+                retire_stale_daemon(endpoint.pid);
+                Ok(DaemonEnsureOutcome::RetiringStale { pid: endpoint.pid })
             }
             DaemonBootstrapAction::Spawn { .. } => {
                 if let Some(pid) = started_child_pid {
@@ -373,13 +408,21 @@ fn last_daemon_stderr_line(endpoint_path: &Path) -> Option<String> {
 
 #[cfg(unix)]
 fn terminate_gracefully(child: &Child) {
-    let pid = child.id();
+    // The child has not been reaped yet (we still hold its handle), so the pid
+    // cannot have been recycled by another process.
+    terminate_pid_gracefully(child.id());
+}
+
+/// Issue #4038 (AC-6): SIGTERM a daemon named by a live endpoint descriptor so
+/// its serve loop unlinks the socket and descriptor. Liveness was just
+/// checked by the caller through the same descriptor, which is the strongest
+/// identity the endpoint contract offers for a process this GUI did not spawn.
+#[cfg(unix)]
+fn terminate_pid_gracefully(pid: u32) {
     if pid == 0 || pid > i32::MAX as u32 {
         return;
     }
-    // SAFETY: SIGTERM to a pid this process owns as a child. The child has not
-    // been reaped yet (we still hold its handle), so the pid cannot have been
-    // recycled by another process.
+    // SAFETY: plain signal send; `kill` has no memory-safety preconditions.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
@@ -538,6 +581,53 @@ mod tests {
         assert_eq!(
             last_daemon_stderr_line(&endpoint_path).as_deref(),
             Some("the reason it died")
+        );
+    }
+
+    /// Issue #4038 (AC-6): a live daemon whose `daemon_version` differs from
+    /// this build is retired instead of adopted, and nothing is spawned until
+    /// it has gone (the next ensure tick finds no endpoint and spawns).
+    #[cfg(unix)]
+    #[test]
+    fn ensure_running_retires_a_live_daemon_of_another_version() {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+        let gwt_home = tempfile::TempDir::new().expect("gwt home");
+        let project = tempfile::TempDir::new().expect("project");
+        let scope =
+            RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            4242,
+            "unix:///tmp/gwt-test.sock".into(),
+            "secret-token".into(),
+            "0.0.1-stale".into(),
+        );
+        persist_endpoint(&scope.endpoint_path(gwt_home.path()), &endpoint).expect("persist");
+
+        let supervisor = DaemonSupervisor::with_spawner(move |_context| {
+            Err(std::io::Error::other(
+                "spawn must not run while a stale daemon is alive",
+            ))
+        });
+        let retired = std::sync::Mutex::new(Vec::new());
+        let outcome = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: gwt_home.path().to_path_buf(),
+                    is_process_alive: &|pid| pid == 4242,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &|pid| retired.lock().unwrap().push(pid),
+                },
+            )
+            .expect("ensure succeeds");
+
+        assert_eq!(outcome, DaemonEnsureOutcome::RetiringStale { pid: 4242 });
+        assert_eq!(retired.lock().unwrap().as_slice(), &[4242]);
+        assert!(
+            scope.endpoint_path(gwt_home.path()).exists(),
+            "the live daemon unlinks its own descriptor on SIGTERM; the supervisor does not"
         );
     }
 

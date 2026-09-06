@@ -229,6 +229,11 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     .map_err(|error| OutcomeUnknown(format!("bootstrap resolve failed: {error}")))?;
     match action {
         DaemonBootstrapAction::Reuse(endpoint) => Ok(Some(endpoint)),
+        // Issue #4038: version-agnostic resolution never yields this arm; a
+        // stale-version daemon is only ever named by the GUI supervisor.
+        DaemonBootstrapAction::RetireStaleVersion { .. } => Err(OutcomeUnknown(
+            "daemon endpoint belongs to another gwt version".to_string(),
+        )),
         DaemonBootstrapAction::Spawn { .. } => match absence_evidence {
             EndpointAbsenceEvidence::Missing | EndpointAbsenceEvidence::DefinitelyDead => {
                 match fence_evidence {
@@ -471,7 +476,9 @@ pub fn publish_event_with_timeout(
         .map_err(|err| format!("bootstrap resolve failed: {err}"))?;
     let endpoint = match action {
         DaemonBootstrapAction::Reuse(ep) => ep,
-        DaemonBootstrapAction::Spawn { .. } => return Err("daemon not running".to_string()),
+        DaemonBootstrapAction::Spawn { .. } | DaemonBootstrapAction::RetireStaleVersion { .. } => {
+            return Err("daemon not running".to_string())
+        }
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
