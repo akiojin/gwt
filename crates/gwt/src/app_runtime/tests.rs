@@ -134,6 +134,107 @@ fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     );
 }
 
+/// Issue #3942: `setpriority` returns EPERM on hosts where the launcher may
+/// not renice the target's process group. Priority tuning is an optimization,
+/// so neither spawn route may turn it into `PTY creation failed`.
+#[test]
+fn agent_resource_policy_failure_never_fails_the_spawn_routes() {
+    let source = include_str!("launch.rs");
+    let direct = source
+        .split("pub(crate) fn spawn_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn spawn_bound_process_window_with_console_kind")
+                .next()
+        })
+        .expect("direct spawn route body");
+    let bound = source
+        .split("fn spawn_bound_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| tail.split("fn install_process_window").next())
+        .expect("bound spawn route body");
+
+    for (route, body) in [("direct", direct), ("bound", bound)] {
+        let apply = body
+            .find("best_effort_apply_policy(")
+            .expect("best-effort policy application");
+        let statement_end = body[apply..].find(';').expect("apply_policy statement end");
+        let statement = &body[apply..apply + statement_end];
+        for propagation in ["?", ".unwrap(", ".expect(", "map_err"] {
+            assert!(
+                !statement.contains(propagation),
+                "{route} route must not turn a resource policy failure into a launch failure: \
+                 {statement}"
+            );
+        }
+    }
+
+    // The routes cannot re-introduce the failure path even by editing the
+    // statement: the helper owns the call and hands no outcome back.
+    let helper = source
+        .split("pub(crate) fn best_effort_apply_policy(")
+        .nth(1)
+        .expect("best-effort helper");
+    let signature = &helper[..helper.find('{').expect("helper body")];
+    assert!(
+        !signature.contains("->"),
+        "the best-effort helper must not return an outcome the routes could propagate: {signature}"
+    );
+}
+
+/// Issue #3942 AC-2 / AC-3: a rejected policy is a single warning, never an
+/// error that the launch routes can turn into a user-facing "Agent error".
+#[test]
+fn agent_resource_policy_failure_warns_once_and_keeps_the_launch() {
+    let events = capture_tracing_events(|| {
+        super::launch::note_unapplied_agent_resource_policy(
+            "window-3942",
+            Err(gwt_terminal::TerminalError::PtyCreationFailed {
+                reason: "apply process policy: setpriority(pgrp 4242, nice 10): \
+                     Operation not permitted (os error 1)"
+                    .to_string(),
+            }),
+        );
+    });
+    let policy_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(event.fields.get("message"), Some(message) if message.contains("resource policy"))
+        })
+        .collect();
+    assert_eq!(
+        policy_events.len(),
+        1,
+        "a rejected resource policy must be recorded exactly once: {events:?}"
+    );
+    let warning = policy_events[0];
+    assert_eq!(
+        warning.level,
+        Level::WARN,
+        "a rejected resource policy must stay at warn level: {warning:?}"
+    );
+    assert_eq!(
+        warning.fields.get("window_id").map(String::as_str),
+        Some("window-3942"),
+        "the warning must name the window: {warning:?}"
+    );
+    assert!(
+        matches!(warning.fields.get("error"), Some(error) if error.contains("setpriority")),
+        "the warning must keep the platform reason: {warning:?}"
+    );
+
+    let applied = capture_tracing_events(|| {
+        super::launch::note_unapplied_agent_resource_policy("window-3942", Ok(()));
+    });
+    assert!(
+        applied.iter().all(|event| !matches!(
+            event.fields.get("message"),
+            Some(message) if message.contains("resource policy")
+        )),
+        "an applied resource policy must stay silent: {applied:?}"
+    );
+}
+
 #[test]
 fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
     for (source_name, source) in [
@@ -11278,7 +11379,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     let mut session = gwt_agent::Session::new(&repo, "feature/demo", gwt_agent::AgentId::Codex);
-    session.model = Some("gpt-5.4".to_string());
+    session.model = Some("gpt-5.5".to_string());
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
     session.session_mode = gwt_agent::SessionMode::Continue;
@@ -11307,7 +11408,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
         .view();
     assert!(!view.is_hydrating);
     assert_eq!(view.selected_agent_id, "codex");
-    assert_eq!(view.selected_model, "gpt-5.4");
+    assert_eq!(view.selected_model, "gpt-5.5");
     assert_eq!(view.selected_reasoning, "high");
     assert_eq!(view.selected_version, "latest");
     assert_eq!(view.selected_execution_mode, "continue");
@@ -37971,7 +38072,7 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
         gwt_agent::Session::new(&repo, "work/board-origin", gwt_agent::AgentId::Codex);
     session.id = "session-origin".to_string();
     session.agent_session_id = Some("codex-resume-123".to_string());
-    session.model = Some("gpt-5.4".to_string());
+    session.model = Some("gpt-5.5".to_string());
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
     session.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
@@ -37997,7 +38098,7 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
         Some("codex-resume-123")
     );
     assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
-    assert_eq!(config.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(config.reasoning_level.as_deref(), Some("high"));
     assert_eq!(
         config.tool_runtime_provenance, session.tool_runtime_provenance,
@@ -45138,7 +45239,7 @@ fn monitor_relaunch_fixture(
     source.agent_session_id = Some(native_conversation_id.clone());
     source.project_state_root = Some(repo.clone());
     source.linked_issue_number = Some(3165);
-    source.model = Some("gpt-5.4".to_string());
+    source.model = Some("gpt-5.5".to_string());
     source.reasoning_level = Some("low".to_string());
     source.tool_version = Some("latest".to_string());
     source.skip_permissions = true;
@@ -45609,7 +45710,7 @@ fn assert_monitor_exact_resume(result: AgentLaunchResult, fixture: &MonitorRelau
         Some(fixture.native_conversation_id.as_str()),
         "exact Resume must retain the provider conversation identity",
     );
-    assert_eq!(resumed.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(resumed.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(resumed.reasoning_level.as_deref(), Some("low"));
     let monitor_prefs = gwt::load_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
