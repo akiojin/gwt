@@ -14,10 +14,31 @@ fn run_gwtd_json(
     home: &std::path::Path,
     payload: serde_json::Value,
 ) -> std::process::Output {
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    run_gwtd_json_as_session(root, home, None, payload)
+}
+
+/// Same as [`run_gwtd_json`] but with an explicit `GWT_SESSION_ID`, so
+/// Issue #3465's `Origin Session` stamping can be exercised end to end.
+fn run_gwtd_json_as_session(
+    root: &std::path::Path,
+    home: &std::path::Path,
+    session_id: Option<&str>,
+    payload: serde_json::Value,
+) -> std::process::Output {
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+    command
         .current_dir(root)
         .env("HOME", home)
-        .env("USERPROFILE", home)
+        .env("USERPROFILE", home);
+    match session_id {
+        Some(id) => {
+            command.env("GWT_SESSION_ID", id);
+        }
+        None => {
+            command.env_remove("GWT_SESSION_ID");
+        }
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -235,5 +256,62 @@ fn discussion_update_imports_repo_local_work_file_and_keeps_source() {
         fs::read_to_string(work.join("discussions.md")).expect("read repo-local"),
         repo_local,
         "repo-local discussions.md must be left intact (copy, not move)"
+    );
+}
+
+/// Issue #3465: `discussion.update` records the owning session so the Stop
+/// gate can scope itself to the session that opened the entry. Without a
+/// session id the field is omitted and the entry stays unattributed.
+#[test]
+fn discussion_update_records_origin_session_when_launched_by_gwt() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+
+    let payload = |title: &str| {
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "discussion.update",
+            "params": {
+                "date": "2026-08-04",
+                "title": title,
+                "status": "active",
+                "summary": "Investigating readiness derivation.",
+                "next": "Ask the owner about the not-ready wording."
+            }
+        })
+    };
+
+    let output = run_gwtd_json_as_session(
+        repo.path(),
+        home.path(),
+        Some("sess-owner"),
+        payload("Owned discussion"),
+    );
+    assert!(
+        output.status.success(),
+        "discussion update should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = fs::read_to_string(home_discussions_path(home.path())).expect("read discussions");
+    assert!(
+        content.contains("Origin Session: sess-owner"),
+        "entry must record the owning session, got: {content}"
+    );
+
+    let output = run_gwtd_json(repo.path(), home.path(), payload("Unattributed discussion"));
+    assert!(
+        output.status.success(),
+        "discussion update should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = fs::read_to_string(home_discussions_path(home.path())).expect("read discussions");
+    let unattributed = content
+        .split("## 2026-08-04 — Unattributed discussion")
+        .nth(1)
+        .expect("unattributed entry");
+    assert!(
+        !unattributed.contains("Origin Session:"),
+        "a session-less caller must not stamp an owner, got: {unattributed}"
     );
 }
