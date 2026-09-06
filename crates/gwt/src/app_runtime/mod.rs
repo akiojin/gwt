@@ -4392,6 +4392,53 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #3883: put every still-running agent window back under slot
+    /// accounting, and drop the bindings of the windows this tab has lost.
+    ///
+    /// Committed in one prefs transaction so the load, the reconciliation, and
+    /// the save all see the same generation — the point of AC-2, since the
+    /// restart restore and this scan are exactly the two writers that used to
+    /// disagree about which launches existed. The caller must run this on a
+    /// blocking worker; it performs prefs I/O.
+    fn readopt_issue_monitor_live_windows_in_background(
+        prefs_path: &Path,
+        live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
+    ) -> Vec<String> {
+        if live_windows_per_tab.is_empty() {
+            return Vec::new();
+        }
+        let outcome = gwt::mutate_issue_monitor_prefs(prefs_path, |prefs| {
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let mut reconciliation = gwt::IssueMonitorLaunchBindingReconciliation::default();
+            for (tab_id, live_window_ids) in live_windows_per_tab {
+                let pass = monitor.reconcile_launch_bindings(tab_id, live_window_ids);
+                reconciliation.readopted.extend(pass.readopted);
+                reconciliation.pruned.extend(pass.pruned);
+            }
+            if !reconciliation.is_empty() {
+                *prefs = monitor.prefs();
+            }
+            reconciliation
+        });
+        match outcome {
+            Ok((_, reconciliation)) => {
+                if !reconciliation.readopted.is_empty() {
+                    tracing::warn!(
+                        issues = ?reconciliation.readopted,
+                        "issue monitor recovered launches whose agent windows were still running"
+                    );
+                }
+                Vec::new()
+            }
+            Err(error) => vec![format!(
+                "Issue Monitor launch-binding reconciliation could not commit: {error}"
+            )],
+        }
+    }
+
     /// Reconcile monitor-owned windows against a memory-only canvas snapshot.
     /// The caller must run this on a blocking worker: prefs reads, daemon
     /// publication, and the exact-CAS local fallback all perform I/O.
@@ -5511,12 +5558,24 @@ impl AppRuntime {
         let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Issue #3883: restore tracking for windows that are still
+                // running before anything decides there is free capacity. This
+                // has to precede both the vanished-window release and the scan
+                // itself — a launch whose record was lost looks exactly like an
+                // open slot, and the scan would spend it on a second window for
+                // an Issue that is already being worked.
+                let mut reconcile_failures = Self::readopt_issue_monitor_live_windows_in_background(
+                    &worker_prefs_path,
+                    &live_windows_per_tab,
+                );
                 let vanished_window_failures =
                     Self::finalize_issue_monitor_vanished_windows_in_background(
                         &worker_project_root,
                         &live_windows_per_tab,
                         fallback_commit_timeout,
                     );
+                reconcile_failures.extend(vanished_window_failures);
+                let vanished_window_failures = reconcile_failures;
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
