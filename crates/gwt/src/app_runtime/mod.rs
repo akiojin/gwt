@@ -726,6 +726,25 @@ pub struct LaunchFeedbackContext {
     /// false are definitely pre-submit and keep the bounded retry ladder;
     /// failures while true have an ambiguous provider outcome.
     pub(crate) issue_monitor_autonomous_submit_started: bool,
+    /// SPEC #3200 Option A / Issue #4041: the independent review agent is
+    /// subordinate to the implementing launch. Its window must never be
+    /// ACKed as the Issue's launch: that rebinds `launched_issues` to the
+    /// review window, drops the implementation claim, and takes an active
+    /// slot while the implementation window is still running.
+    pub(crate) issue_monitor_review_dispatch: bool,
+}
+
+impl LaunchFeedbackContext {
+    /// The Issue whose Monitor launch this window materializes. `None` for a
+    /// review dispatch, whose window observes the Issue without owning its
+    /// launch binding (Issue #4041).
+    pub(crate) fn issue_monitor_launch_binding_issue_number(&self) -> Option<u64> {
+        if self.issue_monitor_review_dispatch {
+            None
+        } else {
+            self.issue_monitor_issue_number
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4672,7 +4691,7 @@ impl AppRuntime {
                     let mut status = monitor.status_view();
                     self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorStatus {
-                        status,
+                        status: Box::new(status),
                     }));
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                         items: monitor.inbox,
@@ -5870,7 +5889,9 @@ impl AppRuntime {
         }
         let mut status = monitor.status_view();
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
-        let status_event = BackendEvent::IssueMonitorStatus { status };
+        let status_event = BackendEvent::IssueMonitorStatus {
+            status: Box::new(status),
+        };
         let inbox_event = BackendEvent::IssueMonitorInbox {
             items: monitor.inbox,
         };
@@ -6527,7 +6548,9 @@ impl AppRuntime {
                             );
                             events.push(OutboundEvent::reply(
                                 client_id.clone(),
-                                BackendEvent::IssueMonitorStatus { status },
+                                BackendEvent::IssueMonitorStatus {
+                                    status: Box::new(status),
+                                },
                             ));
                         }
                         return events;

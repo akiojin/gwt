@@ -6290,7 +6290,7 @@ impl AppRuntime {
         // so it must ACK the durable delivery — otherwise the delivery tuple
         // stays pending forever and the daemon keeps redelivering it.
         if let Some(context) = pending.launch_feedback_context.as_ref() {
-            if let Some(issue_number) = context.issue_monitor_issue_number {
+            if let Some(issue_number) = context.issue_monitor_launch_binding_issue_number() {
                 let project_root = context
                     .issue_monitor_project_root
                     .as_deref()

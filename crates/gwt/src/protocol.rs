@@ -1802,7 +1802,9 @@ pub enum BackendEvent {
         agent_options: Vec<PmAgentOption>,
     },
     IssueMonitorStatus {
-        status: IssueMonitorStatusView,
+        /// Boxed: the view is by far the largest payload in this enum
+        /// (clippy `large_enum_variant`), and every broadcast clones it.
+        status: Box<IssueMonitorStatusView>,
     },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
