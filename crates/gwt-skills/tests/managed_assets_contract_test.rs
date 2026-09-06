@@ -365,10 +365,21 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
+        // Issue #4001 AC-A1: `n/a (autonomous)` is the recorded value for an
+        // Issue Monitor launch, distinct from the agent judging a skip.
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
-            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a",
+            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous)",
             "{} evidence-bundle enum must include every supported result",
+            skill_path.display()
+        );
+
+        // Issue #4001 AC-2: the agent's own headed browser-check is its own
+        // evidence line and is never read as the user's result.
+        assert_eq!(
+            line_starting_with(&skill, "Agent Visual Check:"),
+            "Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)",
+            "{} evidence bundle must record the agent's own visual check separately",
             skill_path.display()
         );
 
