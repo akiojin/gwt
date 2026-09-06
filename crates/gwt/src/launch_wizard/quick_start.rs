@@ -79,7 +79,7 @@ pub(super) fn collect_quick_start_entries_from_sessions(
             version: session.tool_version.clone().or_else(|| {
                 session
                     .agent_id
-                    .package_name()
+                    .npm_package()
                     .map(|_| "installed".to_string())
             }),
             resume_session_id: agent_session_resume_id(&session),
