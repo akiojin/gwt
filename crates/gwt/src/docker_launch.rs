@@ -423,7 +423,7 @@ fn resolve_docker_exec_program(
 }
 
 pub fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
-    let package = config.agent_id.package_name()?;
+    let package = config.agent_id.npm_package()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
         return None;
@@ -845,6 +845,7 @@ mod docker_exec_env_tests {
     #[test]
     fn managed_override_uses_runtime_specific_host_bridge_contract() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bundle = docker_bundle_mounts_for_home(temp.path());
         let docker =
             docker_bundle_override_content("app", &bundle, "docker").expect("Docker override");
@@ -863,6 +864,7 @@ mod docker_exec_env_tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bundle = docker_bundle_mounts_for_home(temp.path());
         let wrapper = temp.path().join("stateful-container-wrapper");
         std::fs::write(
@@ -910,6 +912,7 @@ fi
     #[test]
     fn managed_override_reports_content_change_for_container_recreate() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join(DOCKER_GWT_OVERRIDE_FILE_NAME);
         let bundle = docker_bundle_mounts_for_home(temp.path());
 

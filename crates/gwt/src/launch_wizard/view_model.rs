@@ -35,6 +35,7 @@ impl LaunchWizardState {
                 _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
+            holder_decision: self.holder_decision.clone(),
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
             open_branch_candidates: self.open_branch_candidates.clone(),
@@ -106,14 +107,20 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && self.agent_is_codex(),
             show_hermes_options,
-            hermes_needs_setup: show_hermes_options && self.hermes_needs_setup,
+            hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
-            opencode_needs_setup: show_opencode_options && self.opencode_needs_setup,
+            opencode_needs_setup: show_opencode_options
+                && self.agent_needs_configuration("opencode"),
+            agent_setup: self.agent_setup_view(show_manual_setup),
             hermes_provider: self.hermes_provider.clone(),
-            hermes_provider_options: self.hermes_provider_choices.clone(),
+            hermes_provider_options: self.hermes_choices.providers.clone(),
+            hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
             hermes_profile: self.hermes_profile.clone(),
+            hermes_profile_options: self.hermes_choices.profiles.clone(),
             hermes_toolsets: self.hermes_toolsets.clone(),
+            hermes_toolset_options: self.hermes_choices.toolsets.clone(),
             hermes_skills: self.hermes_skills.clone(),
+            hermes_skill_options: self.hermes_choices.skills.clone(),
             hermes_max_turns: self.hermes_max_turns.clone(),
             hermes_safe_mode: self.hermes_safe_mode,
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
@@ -138,6 +145,9 @@ impl LaunchWizardState {
             launch_summary: self.launch_summary_view(),
             phase: self.current_phase(),
             error: self.error.clone(),
+            // Issue #3962 AC-5: rendered next to the Model field, which the
+            // surface already gates on `show_agent_settings`.
+            model_fallback_notice: self.model_fallback_notice.clone(),
         }
     }
 
@@ -366,6 +376,24 @@ impl LaunchWizardState {
             .collect()
     }
 
+    /// SPEC-3864 FR-013: before launch the wizard states whether `Installed`,
+    /// `latest`, or setup applies to the selected agent; this is the setup
+    /// branch of that decision.
+    fn agent_setup_view(&self, show_manual_setup: bool) -> Option<LaunchWizardAgentSetupView> {
+        if !show_manual_setup || !self.launch_target_is_agent() {
+            return None;
+        }
+        let agent = self.selected_agent()?;
+        let affordance = self.agent_setup_affordance_for(agent)?;
+        Some(LaunchWizardAgentSetupView {
+            agent_id: agent.id.clone(),
+            kind: affordance.kind.wire_value().to_string(),
+            title: affordance.title,
+            detail: affordance.detail,
+            action_label: affordance.action_label,
+        })
+    }
+
     fn agent_options_view(&self) -> Vec<LaunchWizardOptionView> {
         self.detected_agents
             .iter()
@@ -391,7 +419,8 @@ impl LaunchWizardState {
     }
 
     fn reasoning_options_view(&self) -> Vec<LaunchWizardOptionView> {
-        self.current_reasoning_options()
+        let mut options: Vec<_> = self
+            .current_reasoning_options()
             .iter()
             .map(|option| LaunchWizardOptionView {
                 value: option.stored_value.to_string(),
@@ -399,7 +428,16 @@ impl LaunchWizardState {
                 description: Some(option.description.to_string()),
                 color: None,
             })
-            .collect()
+            .collect();
+        if let Some(reasoning) = self.unlisted_grok_reasoning() {
+            options.push(LaunchWizardOptionView {
+                value: reasoning.to_string(),
+                label: reasoning.to_string(),
+                description: Some("Saved custom effort; passed through unchanged".to_string()),
+                color: None,
+            });
+        }
+        options
     }
 
     fn docker_service_options_view(&self) -> Vec<LaunchWizardOptionView> {
@@ -471,10 +509,10 @@ impl LaunchWizardState {
                     .map(|agent| agent.name.clone())
                     .unwrap_or_else(|| "Unavailable".to_string()),
             });
-            if is_explicit_model_selection(&self.model) {
+            if let Some(model) = self.explicit_model_for_launch() {
                 summary.push(LaunchWizardSummaryView {
                     label: "Model".to_string(),
-                    value: self.model.clone(),
+                    value: model.to_string(),
                 });
             }
             if let Some(reasoning) = self.reasoning_level_for_launch() {
@@ -631,6 +669,7 @@ impl LaunchWizardState {
             || self.runtime_resolution_pending
             || self.launch_materialization_pending
             || self.show_start_methods()
+            || self.holder_decision.is_some()
         {
             return false;
         }
@@ -822,16 +861,7 @@ impl LaunchWizardState {
                     color: None,
                 })
                 .collect(),
-            LaunchWizardStep::ReasoningLevel => self
-                .current_reasoning_options()
-                .iter()
-                .map(|option| LaunchWizardOptionView {
-                    value: option.stored_value.to_string(),
-                    label: option.label.to_string(),
-                    description: Some(option.description.to_string()),
-                    color: None,
-                })
-                .collect(),
+            LaunchWizardStep::ReasoningLevel => self.reasoning_options_view(),
             LaunchWizardStep::RuntimeTarget => RUNTIME_TARGET_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
@@ -906,6 +936,138 @@ mod tests {
     use super::super::profiles::load_launch_sessions;
     use super::super::test_support::*;
     use super::*;
+
+    fn grok_manual_state() -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_agent_id("grok");
+        state
+    }
+
+    #[test]
+    fn grok_build_view_exposes_freetext_model_and_common_effort_surface() {
+        // SPEC-1921 T483: the Rust view model must expose the Grok launch
+        // values without substituting a fixed model catalog.
+        let mut state = grok_manual_state();
+        state.set_model("grok-4.20-beta");
+        state.set_reasoning("high");
+
+        let view = state.view();
+        let effort_values: Vec<&str> = view
+            .reasoning_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+
+        assert!(view.show_agent_settings);
+        assert!(view.show_reasoning);
+        assert!(view.model_options.is_empty());
+        assert_eq!(view.selected_model, "grok-4.20-beta");
+        assert_eq!(view.selected_reasoning, "high");
+        assert_eq!(
+            effort_values,
+            ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Model" && item.value == "grok-4.20-beta"));
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Effort" && item.value == "high"));
+    }
+
+    #[test]
+    fn normal_wizard_view_has_no_holder_decision() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let view = state.view();
+
+        assert!(view.holder_decision.is_none());
+        assert_eq!(
+            serde_json::to_value(&view).expect("serialize normal wizard view")["holder_decision"],
+            serde_json::Value::Null,
+        );
+    }
+
+    #[test]
+    fn holder_decision_state_is_projected_into_the_view() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1:agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: false,
+            move_unavailable_reason: Some("The holder is in another runtime".to_string()),
+        });
+
+        let view = state.view();
+        let decision = view.holder_decision.expect("holder decision view");
+
+        assert_eq!(decision.fingerprint, "repo:/tmp/gwt:work/issue-3547");
+        assert_eq!(decision.holder_session_id, "session-holder");
+        assert_eq!(
+            decision.holder_window_id.as_deref(),
+            Some("tab-1:agent-holder")
+        );
+        assert_eq!(decision.holder_summary, "Codex · work/issue-3547");
+        assert!(decision.stop_available);
+        assert!(decision.stop_unavailable_reason.is_none());
+        assert!(!decision.move_available);
+        assert_eq!(
+            decision.move_unavailable_reason.as_deref(),
+            Some("The holder is in another runtime")
+        );
+    }
+
+    #[test]
+    fn holder_decision_disables_legacy_primary_launch_action() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "exact-holder".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1::agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: true,
+            move_unavailable_reason: None,
+        });
+
+        assert!(!state.view().primary_action_enabled);
+    }
 
     #[test]
     fn start_methods_view_exposes_direct_methods() {
@@ -1429,13 +1591,13 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
 
         let configured = state.view();
         assert!(!configured.show_start_methods);
         assert!(configured.show_manual_setup);
-        assert_eq!(configured.selected_model, "gpt-5.4");
+        assert_eq!(configured.selected_model, "gpt-5.5");
 
         state.apply(LaunchWizardAction::Back);
 
@@ -1443,7 +1605,7 @@ mod tests {
         assert!(state.completion.is_none());
         assert!(backed.show_start_methods);
         assert!(!backed.show_manual_setup);
-        assert_eq!(backed.selected_model, "gpt-5.4");
+        assert_eq!(backed.selected_model, "gpt-5.5");
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -1451,7 +1613,7 @@ mod tests {
         let configured_again = state.view();
         assert!(!configured_again.show_start_methods);
         assert!(configured_again.show_manual_setup);
-        assert_eq!(configured_again.selected_model, "gpt-5.4");
+        assert_eq!(configured_again.selected_model, "gpt-5.5");
     }
 
     #[test]
@@ -1501,6 +1663,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             windows_shell: None,
+            hermes: Default::default(),
         };
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260523-1406"),
@@ -1567,6 +1730,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1606,6 +1770,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.2-codex".to_string()),
@@ -1626,11 +1791,20 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
+        // Issue #3962 AC-5: the swap is reported, not silent.
+        let notice = state
+            .model_fallback_notice
+            .as_deref()
+            .expect("a removed Quick Start model must be reported");
+        assert!(
+            notice.contains("gpt-5.2-codex") && notice.contains("gpt-6-astra"),
+            "the notice must name both models: {notice}"
+        );
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+                    assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -1657,6 +1831,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1731,6 +1906,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1772,6 +1948,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2017,7 +2194,7 @@ mod tests {
         state.step = LaunchWizardStep::ModelSelect;
         state.selected = 0;
         state.apply_selection();
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
 
         state.step = LaunchWizardStep::ReasoningLevel;
         state.selected = 1;
@@ -2167,6 +2344,7 @@ mod tests {
             ),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "proxy-agent".to_string(),
                 tool_label: "Claude Proxy".to_string(),
                 model: None,

@@ -41,6 +41,17 @@ fn cli_command_family_split_round_trip_parses() {
     let cmd = parse_pr_args(&[s("current")]).expect("parse pr current");
     assert_eq!(cmd, CliCommand::Pr(PrCommand::Current));
 
+    let cmd = parse_pr_args(&[s("list")]).expect("parse pr list");
+    assert_eq!(
+        cmd,
+        CliCommand::Pr(PrCommand::List {
+            stale_after_hours: None,
+            escalate_after_cycles: None,
+            refresh: false,
+            include: None,
+        })
+    );
+
     // legacy parser fixture: pr checks 12
     let cmd = parse_pr_args(&[s("checks"), s("12")]).expect("parse pr checks");
     assert_eq!(cmd, CliCommand::Pr(PrCommand::Checks { number: 12 }));

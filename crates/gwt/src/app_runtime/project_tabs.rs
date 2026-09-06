@@ -159,6 +159,18 @@ fn detect_locked_worktrees(project_root: &Path) -> bool {
 }
 
 impl AppRuntime {
+    /// Broadcast the consumers whose state is scoped to the active project.
+    /// Every route that changes `active_tab_id` uses this bundle so a consumer
+    /// cannot keep values from the previous project.
+    pub(crate) fn active_project_snapshot_broadcasts(&mut self) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+            events.push(event);
+        }
+        events.extend(self.pm_status_broadcast_events());
+        events
+    }
+
     pub(crate) fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
         let selected = rfd::FileDialog::new().pick_folder();
         let Some(path) = selected else {
@@ -287,9 +299,12 @@ impl AppRuntime {
                 {
                     self.spawn_work_events_ingest(project_root, true);
                 }
-                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                    events.push(event);
-                }
+                // Window restore and PM ensure may report intermediate PM
+                // state. Replace those snapshots at this aggregation boundary
+                // with one final active-project bundle after every restore and
+                // ensure mutation has settled.
+                events.retain(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. }));
+                events.extend(self.active_project_snapshot_broadcasts());
                 if wizard_closed {
                     events.push(self.launch_wizard_state_broadcast(None));
                 }
@@ -320,9 +335,7 @@ impl AppRuntime {
                         workspace_home: workspace_home.display().to_string(),
                     }),
                 ];
-                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                    events.push(event);
-                }
+                events.extend(self.active_project_snapshot_broadcasts());
                 if wizard_closed {
                     events.push(self.launch_wizard_state_broadcast(None));
                 }
@@ -504,9 +517,7 @@ impl AppRuntime {
             self.spawn_work_events_ingest(project_root, false);
         }
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
-        }
+        events.extend(self.active_project_snapshot_broadcasts());
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -533,18 +544,14 @@ impl AppRuntime {
             })
             .unwrap_or_default();
         for window_id in &window_ids {
-            self.clear_agent_window_startup_restore(window_id);
-            self.stop_window_runtime(window_id);
-            self.remove_window_state_tracking(window_id);
+            self.queue_accepted_window_close_finalizer(
+                window_id,
+                Some(closing_project_root.clone()),
+                true,
+                None,
+            );
             self.window_lookup.remove(window_id);
-            self.profile_selections.remove(window_id);
         }
-
-        // Return any Issue Monitor launched windows to pending before the tab is
-        // removed. The closing tab owns this lifecycle even when another tab is
-        // active. Closing a project pauses (does not complete) its in-flight work.
-        let issue_monitor_events =
-            self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {
@@ -561,19 +568,17 @@ impl AppRuntime {
         if wizard_closed {
             self.launch_wizard = None;
         }
-        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
-            self.schedule_active_improvement_candidates_refresh();
-        }
+        let active_project_changed =
+            self.active_project_root().map(Path::to_path_buf) != previous_project_root;
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-            events.push(event);
+        if active_project_changed {
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
-        events.extend(issue_monitor_events);
         events
     }
 }

@@ -12,6 +12,17 @@ impl LaunchWizardState {
             .selected_agent()
             .cloned()
             .ok_or_else(|| "Agent option is unavailable".to_string())?;
+        // SPEC-3864 FR-013 / Scenario 1: refuse inside the wizard when neither
+        // `Installed` nor a runtime `latest` route can launch this built-in,
+        // instead of failing later in preflight.
+        if selected_agent.custom_agent.is_none()
+            && self.current_version_options_for(&selected_agent).is_empty()
+        {
+            return Err(format!(
+                "{} is not installed and has no runtime package route; use the setup action in the Agent section first",
+                selected_agent.name
+            ));
+        }
 
         // SPEC-1921 FR-090 (2026-05-18 amendment) / T295: when a saved
         // Quick Start entry recorded `AgentId::Custom("<old-id>")` for a
@@ -81,8 +92,8 @@ impl LaunchWizardState {
             }
         }
 
-        if is_explicit_model_selection(&self.model) {
-            builder = builder.model(self.model.clone());
+        if let Some(model) = self.explicit_model_for_launch() {
+            builder = builder.model(model.to_string());
         }
 
         if !self.version.is_empty() {
@@ -141,6 +152,27 @@ impl LaunchWizardState {
             builder = builder.docker_service(docker_service.to_string());
         }
         builder = builder.docker_lifecycle_intent(self.docker_lifecycle_intent);
+        let quick_start_predecessor = matches!(self.mode.as_str(), "resume" | "continue")
+            .then(|| {
+                self.selected_quick_start_index
+                    .and_then(|index| self.quick_start_entries.get(index))
+            })
+            .flatten()
+            .filter(|_| self.launch_path == LaunchWizardLaunchPath::QuickStart);
+        let linked_issue_number = if let Some(predecessor) = quick_start_predecessor {
+            match (self.linked_issue_number, predecessor.linked_issue_number) {
+                (Some(context_owner), Some(predecessor_owner))
+                    if context_owner != predecessor_owner =>
+                {
+                    return Err(format!(
+                        "Quick Start Session owner mismatch: context Issue #{context_owner}, predecessor Issue #{predecessor_owner}"
+                    ));
+                }
+                (_, owner) => owner,
+            }
+        } else {
+            self.linked_issue_number
+        };
         // SPEC-2014 2026-05-18 amendment FR-A:
         // Execution Mode `"resume"` always maps to `SessionMode::Resume`.
         // - Quick Start Resume (with id)       → SessionMode::Resume + id
@@ -160,7 +192,11 @@ impl LaunchWizardState {
             _ => builder.session_mode(gwt_agent::SessionMode::Normal),
         };
 
-        if let Some(n) = self.linked_issue_number {
+        if let Some(predecessor) = quick_start_predecessor {
+            builder = builder.predecessor_session_id(predecessor.session_id.clone());
+        }
+
+        if let Some(n) = linked_issue_number {
             builder = builder.linked_issue_number(n);
         }
 
@@ -268,6 +304,103 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    fn grok_launch_state(mode: &str, resume_session_id: Option<&str>) -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.set_agent_id("grok");
+        state.version = "installed".to_string();
+        state.mode = mode.to_string();
+        state.resume_session_id = resume_session_id.map(str::to_string);
+        state
+    }
+
+    #[test]
+    fn build_launch_config_maps_grok_model_and_effort_for_every_launch_mode() {
+        // SPEC-1921 T483: wizard values must survive into LaunchConfig and the
+        // exact Grok CLI option/value pairs for all supported session modes.
+        let cases = [
+            ("normal", gwt_agent::SessionMode::Normal, None),
+            ("continue", gwt_agent::SessionMode::Continue, None),
+            (
+                "resume",
+                gwt_agent::SessionMode::Resume,
+                Some("grok-session-42"),
+            ),
+        ];
+
+        for (mode, expected_mode, resume_session_id) in cases {
+            let mut state = grok_launch_state(mode, resume_session_id);
+            state.model = "grok-4.20-beta".to_string();
+            state.reasoning = "xhigh".to_string();
+
+            let config = state.build_launch_config().expect("Grok launch config");
+
+            assert_eq!(config.session_mode, expected_mode);
+            assert_eq!(config.model.as_deref(), Some("grok-4.20-beta"));
+            assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+            assert_eq!(
+                config
+                    .args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--model" && pair[1] == "grok-4.20-beta")
+                    .count(),
+                1,
+                "missing exact Grok model argv in {:?}",
+                config.args
+            );
+            assert_eq!(
+                config
+                    .args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--effort" && pair[1] == "xhigh")
+                    .count(),
+                1,
+                "missing exact Grok effort argv in {:?}",
+                config.args
+            );
+        }
+    }
+
+    #[test]
+    fn build_launch_config_omits_grok_whitespace_model_and_auto_effort_flags() {
+        let mut state = grok_launch_state("normal", None);
+        state.model = " \t ".to_string();
+        state.reasoning = "auto".to_string();
+
+        let config = state.build_launch_config().expect("Grok launch config");
+
+        assert!(config.model.is_none());
+        assert_eq!(config.reasoning_level, None);
+        assert!(!config.args.iter().any(|arg| arg == "--model"));
+        assert!(!config.args.iter().any(|arg| arg == "--effort"));
+    }
+
+    #[test]
+    fn build_launch_config_preserves_default_prefixed_grok_model_as_free_text() {
+        let mut state = grok_launch_state("normal", None);
+        state.set_model("DefaultXL");
+
+        let config = state.build_launch_config().expect("Grok launch config");
+
+        assert_eq!(config.model.as_deref(), Some("DefaultXL"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "DefaultXL"));
+    }
+
     #[test]
     fn build_launch_config_for_intake_is_ephemeral_and_branchless() {
         // SPEC-3214 Phase 3: an intake session wizard produces an ephemeral,
@@ -354,6 +487,167 @@ mod tests {
             "a Resume launch must carry Codex's skip-permissions flag"
         );
         assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_resume_and_continue_launches_carry_durable_lineage() {
+        for (mode, provider_session_id) in [
+            ("resume", Some("provider-conversation")),
+            ("continue", None),
+        ] {
+            let mut entry = quick_start_entry(
+                "durable-session-3457",
+                "codex",
+                provider_session_id,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            );
+            entry.linked_issue_number = Some(3457);
+            let mut state = LaunchWizardState::open_with(
+                context(branch("work/issue-3457"), "work/issue-3457"),
+                sample_agent_options(),
+                vec![entry],
+            );
+            state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+            state.apply(LaunchWizardAction::SetAgent {
+                agent_id: "codex".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetModel {
+                model: "gpt-5.5".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetReasoning {
+                reasoning: "high".to_string(),
+            });
+            state.mode = mode.to_string();
+            state.resume_session_id = provider_session_id.map(str::to_string);
+
+            let config = state
+                .build_launch_config()
+                .expect("Quick Start launch config");
+
+            assert_eq!(
+                config.predecessor_session_id.as_deref(),
+                Some("durable-session-3457"),
+                "{mode} must carry the exact durable predecessor"
+            );
+            assert_eq!(
+                config.linked_issue_number,
+                Some(3457),
+                "{mode} must carry the predecessor owner"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_start_lineage_uses_the_durable_selection_after_step_cursor_changes() {
+        let mut first = quick_start_entry(
+            "durable-session-old",
+            "codex",
+            Some("provider-old"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        first.linked_issue_number = Some(1111);
+        let mut selected = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        selected.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![first, selected],
+        );
+
+        // Reuse actions occupy indexes 0 and 2 because each reusable entry is
+        // followed by a Start New action. Advancing the real UI flow then
+        // repurposes `selected` as the next step's cursor.
+        state.apply(LaunchWizardAction::Select { index: 2 });
+        assert_eq!(state.selected_quick_start_index, Some(1));
+        state.step = LaunchWizardStep::ModelSelect;
+        state.apply(LaunchWizardAction::Select { index: 0 });
+        state.step = LaunchWizardStep::ReasoningLevel;
+        state.apply(LaunchWizardAction::Select { index: 0 });
+        state.completion = None;
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+
+        let config = state
+            .build_launch_config()
+            .expect("Quick Start launch config after UI step cursor changes");
+
+        assert_eq!(
+            config.predecessor_session_id.as_deref(),
+            Some("durable-session-3457")
+        );
+        assert_eq!(config.linked_issue_number, Some(3457));
+    }
+
+    #[test]
+    fn quick_start_unlinked_predecessor_stays_observation_only_in_linked_context() {
+        let entry = quick_start_entry(
+            "legacy-unlinked-session",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+        state.linked_issue_number = Some(3457);
+
+        let config = state
+            .build_launch_config()
+            .expect("legacy unlinked Quick Start remains observation-only");
+
+        assert_eq!(
+            config.predecessor_session_id.as_deref(),
+            Some("legacy-unlinked-session")
+        );
+        assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn quick_start_relaunch_rejects_a_conflicting_context_owner() {
+        let mut entry = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+        state.linked_issue_number = Some(9999);
+
+        let error = state
+            .build_launch_config()
+            .expect_err("conflicting Quick Start owner must fail closed");
+
+        assert!(error.contains("owner mismatch"), "{error}");
+        assert!(error.contains("#9999"), "{error}");
+        assert!(error.contains("#3457"), "{error}");
     }
 
     // Issue #3462: Resume / Continue launches must inherit the Skip
@@ -747,7 +1041,10 @@ mod tests {
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "hermes".to_string(),
         });
-        state.set_hermes_provider_choices(vec!["zai".to_string(), "ollama-launch".to_string()]);
+        state.set_hermes_launch_choices(gwt_skills::HermesLaunchChoices {
+            providers: vec!["zai".to_string(), "ollama-launch".to_string()],
+            ..Default::default()
+        });
         state.apply(LaunchWizardAction::SetHermesOption {
             field: "provider".to_string(),
             value: "openrouter".to_string(),
@@ -771,6 +1068,68 @@ mod tests {
         );
     }
 
+    // Issue #3863 AC-1/AC-2/AC-3: candidates enumerated from the user's
+    // config are exposed per field, and model candidates follow the selected
+    // provider (blank provider = config default provider).
+    #[test]
+    fn hermes_choice_options_follow_selected_provider() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        state.set_hermes_launch_choices(gwt_skills::HermesLaunchChoices {
+            providers: vec!["zai".to_string(), "ollama-launch".to_string()],
+            default_provider: Some("zai".to_string()),
+            models_by_provider: [
+                ("zai".to_string(), vec!["glm-5.2".to_string()]),
+                ("ollama-launch".to_string(), vec!["qwen3.5".to_string()]),
+            ]
+            .into_iter()
+            .collect(),
+            profiles: vec!["concise".to_string(), "pirate".to_string()],
+            toolsets: vec!["terminal".to_string(), "web".to_string()],
+            skills: vec!["github".to_string()],
+        });
+
+        let view = state.view();
+        assert_eq!(view.hermes_provider, "");
+        assert_eq!(view.hermes_model_options, vec!["glm-5.2"]);
+        assert_eq!(view.hermes_profile_options, vec!["concise", "pirate"]);
+        assert_eq!(view.hermes_toolset_options, vec!["terminal", "web"]);
+        assert_eq!(view.hermes_skill_options, vec!["github"]);
+
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "ollama-launch".to_string(),
+        });
+        assert_eq!(state.view().hermes_model_options, vec!["qwen3.5"]);
+
+        // A free-text ("Other…") provider has no known models; the model
+        // field degrades to config default + Other.
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+        assert!(state.view().hermes_model_options.is_empty());
+    }
+
     #[test]
     fn hermes_needs_setup_flag_is_exposed_only_for_hermes() {
         let mut options = sample_agent_options();
@@ -791,12 +1150,18 @@ mod tests {
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
         });
-        state.set_hermes_needs_setup(true);
+        state.set_agent_needs_configuration("hermes", true);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "hermes".to_string(),
         });
-        assert!(state.view().hermes_needs_setup);
+        let view = state.view();
+        assert!(view.hermes_needs_setup);
+        // SPEC-3864 FR-006: the generic affordance carries the configure hint.
+        let setup = view.agent_setup.expect("configure affordance");
+        assert_eq!(setup.agent_id, "hermes");
+        assert_eq!(setup.kind, "configure");
+        assert!(setup.detail.contains("hermes setup"), "{}", setup.detail);
 
         // Non-Hermes agents never surface the needs-setup hint.
         state.apply(LaunchWizardAction::SetAgent {
@@ -906,12 +1271,17 @@ mod tests {
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
         });
-        state.set_opencode_needs_setup(true);
+        state.set_agent_needs_configuration("opencode", true);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "opencode".to_string(),
         });
-        assert!(state.view().opencode_needs_setup);
+        let view = state.view();
+        assert!(view.opencode_needs_setup);
+        let setup = view.agent_setup.expect("configure affordance");
+        assert_eq!(setup.agent_id, "opencode");
+        assert_eq!(setup.kind, "configure");
+        assert!(setup.detail.contains("auth login"), "{}", setup.detail);
 
         // Non-OpenCode agents never surface the needs-setup hint.
         state.apply(LaunchWizardAction::SetAgent {
@@ -920,10 +1290,199 @@ mod tests {
         assert!(!state.view().opencode_needs_setup);
     }
 
+    fn uninstalled_antigravity_state() -> LaunchWizardState {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "agy".to_string(),
+            name: "Antigravity CLI".to_string(),
+            available: false,
+            installed_version: None,
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "agy".to_string(),
+        });
+        state
+    }
+
+    /// SPEC-3864 FR-003 / FR-005 / FR-013 (AC-3 / AC-5): an uninstalled
+    /// pre-install agent offers no `Installed` entry, no version picker, and
+    /// an install affordance instead.
+    #[test]
+    fn uninstalled_preinstall_agent_exposes_install_affordance_instead_of_installed() {
+        let state = uninstalled_antigravity_state();
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "agy");
+        assert!(
+            view.version_options.is_empty(),
+            "no Installed / latest entry may be offered: {:?}",
+            view.version_options
+        );
+        assert!(!view.show_version);
+        assert_eq!(view.selected_version, "");
+        let setup = view.agent_setup.expect("install affordance");
+        assert_eq!(setup.agent_id, "agy");
+        assert_eq!(setup.kind, "install");
+        assert!(setup.title.contains("not installed"), "{}", setup.title);
+        assert!(
+            setup
+                .detail
+                .contains("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+            "{}",
+            setup.detail
+        );
+        assert_eq!(
+            setup.action_label.as_deref(),
+            Some("Install Antigravity CLI")
+        );
+        let agy = view
+            .agent_options
+            .iter()
+            .find(|option| option.value == "agy")
+            .expect("agy option");
+        assert_eq!(agy.description.as_deref(), Some("Not installed"));
+    }
+
+    fn uninstalled_openclaw_state() -> LaunchWizardState {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "openclaw".to_string(),
+            name: "OpenClaw".to_string(),
+            available: false,
+            installed_version: None,
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "openclaw".to_string(),
+        });
+        state
+    }
+
+    /// SPEC-3864 FR-009 (AC-8) / Scenario 2: OpenClaw is not on PATH, but its
+    /// npm route still offers `latest`. The wizard must present `latest`
+    /// (never `Installed`), skip the install affordance, and build a launch
+    /// config pinned to the `latest` route instead of refusing.
+    #[test]
+    fn uninstalled_npm_routed_agent_launches_through_latest() {
+        let state = uninstalled_openclaw_state();
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "openclaw");
+        assert!(view.show_version);
+        let version_values: Vec<&str> = view
+            .version_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+        assert!(
+            version_values.contains(&"latest"),
+            "latest must stay reachable without an installed executable: {version_values:?}"
+        );
+        assert!(
+            !version_values.contains(&"installed"),
+            "an unresolvable executable must not be offered as Installed: {version_values:?}"
+        );
+        assert_eq!(view.selected_version, "latest");
+        assert_eq!(
+            view.agent_setup, None,
+            "a runtime latest route means no install affordance is needed"
+        );
+
+        let config = state
+            .build_launch_config()
+            .expect("the latest route must launch without a local install");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::OpenClaw);
+        assert_eq!(config.tool_version.as_deref(), Some("latest"));
+    }
+
+    /// SPEC-3864 Scenario 1: launching an agent with neither `Installed` nor
+    /// `latest` is refused inside the wizard, so it never reaches
+    /// `Launch failed before PTY started`.
+    #[test]
+    fn submit_refuses_agent_without_installed_or_latest_route() {
+        let mut state = uninstalled_antigravity_state();
+        let error = state
+            .build_launch_config()
+            .expect_err("no launchable route must refuse");
+        assert!(error.contains("Antigravity CLI"), "{error}");
+        assert!(error.contains("not installed"), "{error}");
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            state.completion.is_none(),
+            "submit must not produce a launch: {:?}",
+            state.completion
+        );
+        assert!(state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not installed")));
+    }
+
+    /// SPEC-3864 FR-007: the install affordance runs the descriptor's install
+    /// command in an in-pane host shell.
+    #[test]
+    fn run_agent_setup_for_install_route_launches_installer_shell() {
+        let mut state = uninstalled_antigravity_state();
+        state.apply(LaunchWizardAction::RunAgentSetup);
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Shell(config) => {
+                    assert_eq!(config.display_name, "Antigravity CLI Setup");
+                    assert_eq!(config.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+                    assert_eq!(config.working_dir, state.context.worktree_path);
+                    let args = config
+                        .command_args_override
+                        .as_ref()
+                        .expect("command args override");
+                    assert!(
+                        args.iter().any(|arg| arg.contains(
+                            "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+                        )),
+                        "{args:?}"
+                    );
+                    assert!(config.command_override.is_some());
+                }
+                other => panic!("expected shell launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    /// SPEC-3864 FR-006: a synthetic setup request for an agent that needs
+    /// nothing is an error, not a silent no-op launch.
+    #[test]
+    fn run_agent_setup_without_affordance_reports_error() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.set_agent_id("claude");
+        state.apply(LaunchWizardAction::RunAgentSetup);
+        assert!(state.completion.is_none());
+        assert!(state.error.is_some(), "expected an error");
+    }
+
     #[test]
     fn run_opencode_setup_yields_shell_completion_with_auth_login_command() {
-        // SPEC-3151 FR-010: the in-pane setup launcher produces a Host shell
-        // launch running `<opencode runner> auth login`.
+        // SPEC-3151 FR-010 / SPEC-3864 FR-006: the generic in-pane setup
+        // launcher produces a Host shell launch running
+        // `<opencode runner> auth login` from the descriptor's setup args.
         let mut options = sample_agent_options();
         options.push(AgentOption {
             id: "opencode".to_string(),
@@ -937,9 +1496,10 @@ mod tests {
         ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
         let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
         state.set_agent_id("opencode");
+        state.set_agent_needs_configuration("opencode", true);
         state.version = "latest".to_string();
 
-        state.apply(LaunchWizardAction::RunOpenCodeSetup);
+        state.apply(LaunchWizardAction::RunAgentSetup);
 
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
@@ -975,13 +1535,17 @@ mod tests {
     }
 
     #[test]
-    fn run_opencode_setup_action_deserializes_from_frontend_wire_tag() {
-        // SPEC-3151 FR-010: the frontend dispatches `{"kind":"run_opencode_setup"}`.
+    fn run_agent_setup_action_deserializes_from_frontend_wire_tags() {
+        // SPEC-3864 FR-006: the frontend dispatches `{"kind":"run_agent_setup"}`;
+        // the SPEC-3151 `run_opencode_setup` tag stays accepted as an alias.
+        let action: LaunchWizardAction =
+            serde_json::from_str(r#"{"kind":"run_agent_setup"}"#).expect("deserialize action");
+        assert_eq!(action, LaunchWizardAction::RunAgentSetup);
         // Default snake_case would produce `run_open_code_setup`, so the variant
         // carries an explicit serde rename; this locks the wire contract.
         let action: LaunchWizardAction =
             serde_json::from_str(r#"{"kind":"run_opencode_setup"}"#).expect("deserialize action");
-        assert_eq!(action, LaunchWizardAction::RunOpenCodeSetup);
+        assert_eq!(action, LaunchWizardAction::RunAgentSetup);
     }
 
     #[test]

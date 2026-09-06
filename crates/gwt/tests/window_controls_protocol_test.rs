@@ -1,4 +1,4 @@
-use gwt::{AgentKanbanLane, FrontendEvent, WindowPreset, WindowSurface};
+use gwt::{AgentKanbanLane, FrontendEvent, WindowPlacement, WindowPreset, WindowSurface};
 use serde_json::json;
 
 // SPEC-2008 FR-096/FR-097: the canvas window model dropped manual
@@ -242,6 +242,73 @@ fn frontend_event_deserializes_agent_kanban_commands() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+}
+
+// SPEC-3671 FR-001 / FR-004: the wire kind the frontend `isOffCanvasPlacement()` seam
+// matches on. The JS predicate and this string must move in lockstep.
+#[test]
+fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
+    let placement = WindowPlacement::IssuePreview {
+        issue_window_id: "project-1::issue-1".to_string(),
+        issue_number: 3671,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&placement).expect("serialize placement"),
+        json!({
+            "kind": "issue_preview",
+            "issue_window_id": "project-1::issue-1",
+            "issue_number": 3671
+        })
+    );
+    assert!(placement.is_off_canvas());
+    assert!(!placement.is_canvas());
+    assert!(WindowPlacement::AgentKanban {
+        board_id: "project-1::agent-kanban-1".to_string(),
+        lane_id: AgentKanbanLane::Active,
+        order: 0,
+        collapsed: false,
+    }
+    .is_off_canvas());
+    assert!(!WindowPlacement::Canvas.is_off_canvas());
+}
+
+// SPEC-3671 FR-014 / FR-015 / 受け入れシナリオ 9: the window title is the only
+// thing a user sees on an open window, so each face must be tellable apart. The
+// three Knowledge-surface Issue presets shared one "Issue" title, and the Work
+// surface titled itself "Workspace" while it lists Works.
+#[test]
+fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
+    assert_eq!(WindowPreset::Issue.title(), "Issue");
+    assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
+    assert_eq!(WindowPreset::Spec.title(), "SPEC");
+    assert_eq!(WindowPreset::Work.title(), "Work");
+
+    let titles = [
+        WindowPreset::Issue.title(),
+        WindowPreset::IssueMonitor.title(),
+        WindowPreset::Spec.title(),
+        WindowPreset::Work.title(),
+    ];
+    let unique = titles.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        titles.len(),
+        "every Issue-family and Work face must be identifiable from its window title"
+    );
+
+    // The faces still share their surfaces — only the naming changed.
+    assert_eq!(WindowPreset::Issue.surface(), WindowSurface::Knowledge);
+    assert_eq!(
+        WindowPreset::IssueMonitor.surface(),
+        WindowSurface::Knowledge
+    );
+    assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
+    assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
+
+    // SPEC-3671 FR-016 / 受け入れシナリオ 10: the Work surface stays offerable
+    // while any Work information has not moved to the Issue row.
+    assert!(WindowPreset::ALL.contains(&WindowPreset::Work));
 }
 
 #[test]

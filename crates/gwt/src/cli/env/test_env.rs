@@ -8,13 +8,11 @@ use std::{
     collections::HashMap,
     io::{self},
     path::PathBuf,
-    sync::Mutex,
-    time::Duration,
 };
 
 use gwt_git::PrStatus;
 use gwt_github::{
-    client::{fake::FakeIssueClient, ApiError, IssueClient, ResolutionDeadline},
+    client::{fake::FakeIssueClient, IssueClient},
     IssueNumber, IssueSnapshot,
 };
 
@@ -36,19 +34,19 @@ pub struct TargetIssueCreateCall {
 
 pub struct TestEnv {
     pub client: FakeIssueClient,
-    pub owner_client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
-    pub improvement_source_scope_nonce: String,
     pub stdin: String,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
+    pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
     pub prs: HashMap<u64, PrStatus>,
+    pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
     pub pr_comments: Vec<(u64, String)>,
     pub pr_create_call_log: Vec<PrCreateCall>,
@@ -57,6 +55,12 @@ pub struct TestEnv {
     pub pr_review_threads: HashMap<u64, Vec<PrReviewThread>>,
     pub pr_checks: HashMap<u64, PrChecksSummary>,
     pub pr_current_call_count: usize,
+    pub pr_list: Vec<gwt_git::PrInventoryItem>,
+    pub pr_list_call_count: usize,
+    pub pr_list_options: Option<gwt_git::PrInventoryOptions>,
+    /// Issue #3891: the `gh api rate_limit` payload `github.budget` reads.
+    pub github_rate_limit_payload: Option<String>,
+    pub github_rate_limit_probe_count: usize,
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
@@ -68,16 +72,11 @@ pub struct TestEnv {
     pub run_log_call_log: Vec<u64>,
     pub job_logs: HashMap<u64, String>,
     pub job_log_call_log: Vec<u64>,
+    /// Issue #3515: every `actions.rerun` target the command layer requested.
+    pub rerun_call_log: Vec<crate::cli::ActionsRerunTarget>,
+    /// Issue #3515: when set, `rerun_actions` refuses with this message.
+    pub rerun_rejection: Option<String>,
     pub internal_command_call_log: Vec<InternalCommandCall>,
-    owner_client_access_log: Mutex<Vec<OwnerClientAccessObservation>>,
-}
-
-#[derive(Debug, Clone)]
-struct OwnerClientAccessObservation {
-    connect_timeout: Duration,
-    total_remaining: Duration,
-    candidate_store_persisted: bool,
-    candidate_id: Option<String>,
 }
 
 impl TestEnv {
@@ -85,19 +84,19 @@ impl TestEnv {
         let repo_path = cache_root.clone();
         TestEnv {
             client: FakeIssueClient::new(),
-            owner_client: FakeIssueClient::new(),
             cache_root,
             repo_path,
-            improvement_source_scope_nonce: "0".repeat(64),
             stdin: String::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
             linked_prs: HashMap::new(),
+            linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
             prs: HashMap::new(),
+            pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
             pr_comments: Vec::new(),
             pr_create_call_log: Vec::new(),
@@ -106,6 +105,11 @@ impl TestEnv {
             pr_review_threads: HashMap::new(),
             pr_checks: HashMap::new(),
             pr_current_call_count: 0,
+            pr_list: Vec::new(),
+            pr_list_call_count: 0,
+            pr_list_options: None,
+            github_rate_limit_payload: None,
+            github_rate_limit_probe_count: 0,
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
@@ -117,51 +121,18 @@ impl TestEnv {
             run_log_call_log: Vec::new(),
             job_logs: HashMap::new(),
             job_log_call_log: Vec::new(),
+            rerun_call_log: Vec::new(),
+            rerun_rejection: None,
             internal_command_call_log: Vec::new(),
-            owner_client_access_log: Mutex::new(Vec::new()),
         }
-    }
-
-    pub fn owner_client_access_count(&self) -> usize {
-        self.owner_client_access_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
-
-    pub fn last_owner_client_budget(&self) -> Option<(Duration, Duration)> {
-        self.owner_client_access_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last()
-            .map(|access| (access.connect_timeout, access.total_remaining))
-    }
-
-    pub fn last_owner_client_access_saw_persisted_candidate(&self) -> Option<bool> {
-        self.owner_client_access_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last()
-            .map(|access| access.candidate_store_persisted)
-    }
-
-    pub fn last_owner_client_candidate_id(&self) -> Option<String> {
-        self.owner_client_access_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last()
-            .and_then(|access| access.candidate_id.clone())
-    }
-
-    pub fn clear_owner_client_access_log(&self) {
-        self.owner_client_access_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
     }
 
     pub fn seed_linked_prs(&mut self, number: u64, linked_prs: Vec<LinkedPrSummary>) {
         self.linked_prs.insert(number, linked_prs);
+    }
+
+    pub fn seed_linked_pr_error(&mut self, number: u64, message: impl Into<String>) {
+        self.linked_pr_errors.insert(number, message.into());
     }
 
     pub fn linked_pr_calls(&self) -> Vec<u64> {
@@ -178,6 +149,10 @@ impl TestEnv {
 
     pub fn seed_pr(&mut self, number: u64, pr: PrStatus) {
         self.prs.insert(number, pr);
+    }
+
+    pub fn seed_pr_inventory(&mut self, items: Vec<gwt_git::PrInventoryItem>) {
+        self.pr_list = items;
     }
 
     pub fn seed_created_pr(&mut self, pr: PrStatus) {
@@ -200,6 +175,11 @@ impl TestEnv {
         self.run_logs.insert(run_id, log.into());
     }
 
+    /// Issue #3515: make the next `actions.rerun` fail the repository guard.
+    pub fn seed_rerun_rejection(&mut self, message: impl Into<String>) {
+        self.rerun_rejection = Some(message.into());
+    }
+
     pub fn seed_job_log(&mut self, job_id: u64, log: impl Into<String>) {
         self.job_logs.insert(job_id, log.into());
     }
@@ -207,55 +187,8 @@ impl TestEnv {
 
 impl CliEnv for TestEnv {
     type Client = FakeIssueClient;
-    type OwnerClient = FakeIssueClient;
     fn client(&self) -> &Self::Client {
         &self.client
-    }
-    fn improvement_owner_client(
-        &self,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&Self::OwnerClient, ApiError> {
-        let total_remaining = deadline.remaining("test owner client access")?;
-        let connect_timeout = deadline.connect_timeout("test owner client connect")?;
-        let candidate_store_path = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path)
-            .join("improvements")
-            .join("candidates.json");
-        let candidate_id = std::fs::read(&candidate_store_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|store| {
-                store
-                    .get("candidates")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|candidates| {
-                        candidates.iter().find_map(|candidate| {
-                            if candidate.get("state").and_then(serde_json::Value::as_str)
-                                == Some("owner-resolving")
-                            {
-                                candidate
-                                    .get("id")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string)
-                            } else {
-                                None
-                            }
-                        })
-                    })
-            });
-        let candidate_store_persisted = candidate_id.is_some();
-        self.owner_client_access_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(OwnerClientAccessObservation {
-                connect_timeout,
-                total_remaining,
-                candidate_store_persisted,
-                candidate_id,
-            });
-        Ok(&self.owner_client)
-    }
-    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
-        Ok(self.improvement_source_scope_nonce.clone())
     }
     fn cache_root(&self) -> PathBuf {
         self.cache_root.clone()
@@ -300,6 +233,9 @@ impl CliEnv for TestEnv {
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
         self.linked_pr_call_log.push(number.0);
+        if let Some(message) = self.linked_pr_errors.get(&number.0) {
+            return Err(io::Error::other(message.clone()));
+        }
         Ok(self.linked_prs.get(&number.0).cloned().unwrap_or_default())
     }
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
@@ -351,6 +287,41 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.pr_quarantine_contexts
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no PR quarantine context: {number}"),
+                )
+            })
+    }
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        self.pr_list_call_count += 1;
+        self.pr_list_options = Some(*options);
+        Ok(gwt_git::PrInventoryRead {
+            items: self.pr_list.clone(),
+            source: "github",
+            fetched_at: None,
+            cache_age_secs: Some(0),
+            throttled: None,
+            github_calls: 1,
+        })
+    }
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        self.github_rate_limit_probe_count += 1;
+        self.github_rate_limit_payload.clone().ok_or_else(|| {
+            io::Error::other("gh api rate_limit: no payload seeded in TestEnv".to_string())
+        })
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);
@@ -415,6 +386,13 @@ impl CliEnv for TestEnv {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no job log: {job_id}")))
+    }
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        self.rerun_call_log.push(target.clone());
+        if let Some(message) = self.rerun_rejection.clone() {
+            return Err(io::Error::other(message));
+        }
+        Ok(format!("rerun requested for {target:?}"))
     }
     fn run_internal_command(
         &mut self,

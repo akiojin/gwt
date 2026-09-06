@@ -99,24 +99,25 @@ pub(super) struct CodexModelCapability {
     pub(super) max_effort: &'static str,
 }
 
-// SPEC-1921 US-20 / FR-121..FR-123: fixed 2026-07-10 Codex picker snapshot.
-// Model rows and reasoning rows both derive from this single capability table
-// so stop counts and defaults cannot drift from the model list. A later
-// snapshot update edits this table together with the focused tests; the
-// wizard never reads a runtime model cache for these rows.
+// SPEC-1921 US-20 / FR-121..FR-123 + Issue #3962: fixed 2026-09-05 Codex
+// picker snapshot, in the CLI's own picker order — the first row is the Codex
+// default model. Model rows and reasoning rows both derive from this single
+// capability table so stop counts and defaults cannot drift from the model
+// list. A later snapshot update edits this table together with the focused
+// tests; the wizard never reads a runtime model cache for these rows.
 const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
-            label: "gpt-5.5",
-            description: "Frontier model for complex coding, research, and real-world work",
+            label: "gpt-6-astra",
+            description: "Our most capable model for complex, demanding work",
         },
         default_effort: "medium",
-        max_effort: "xhigh",
+        max_effort: "ultra",
     },
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.6-sol",
-            description: "Latest frontier agentic coding model",
+            description: "Reliable agentic workhorse for everyday tasks",
         },
         default_effort: "low",
         max_effort: "ultra",
@@ -139,8 +140,8 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     },
     CodexModelCapability {
         model: ModelDisplayOption {
-            label: "gpt-5.4",
-            description: "Strong model for everyday coding",
+            label: "gpt-5.5",
+            description: "Proven previous-generation model for coding and general work",
         },
         default_effort: "medium",
         max_effort: "xhigh",
@@ -277,6 +278,57 @@ pub(super) const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = 
         label: "High",
         stored_value: "high",
         description: "Deeper reasoning for complex work (Sonnet's default under Auto)",
+        is_default: false,
+    },
+];
+
+pub(super) const GROK_REASONING_OPTIONS: [ReasoningDisplayOption; 8] = [
+    ReasoningDisplayOption {
+        label: "Auto",
+        stored_value: "auto",
+        description: "Use Grok Build's configured default effort",
+        is_default: true,
+    },
+    ReasoningDisplayOption {
+        label: "None",
+        stored_value: "none",
+        description: "Disable additional reasoning",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Minimal",
+        stored_value: "minimal",
+        description: "Use minimal reasoning for the fastest response",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Use light reasoning for simple work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balance speed and reasoning depth",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Use deeper reasoning for complex work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "xHigh",
+        stored_value: "xhigh",
+        description: "Use extra-high reasoning depth",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Max",
+        stored_value: "max",
+        description: "Use maximum reasoning depth",
         is_default: false,
     },
 ];
@@ -533,6 +585,8 @@ impl<'a> LaunchWizardFlow<'a> {
             LaunchWizardStep::AgentSelect => {
                 if self.state.agent_has_models() {
                     Some(LaunchWizardStep::ModelSelect)
+                } else if self.state.agent_uses_reasoning_step() {
+                    Some(LaunchWizardStep::ReasoningLevel)
                 } else {
                     self.next_after_agent_configuration()
                 }
@@ -586,7 +640,13 @@ impl<'a> LaunchWizardFlow<'a> {
             }
             LaunchWizardStep::AgentSelect => Some(LaunchWizardStep::LaunchTarget),
             LaunchWizardStep::ModelSelect => Some(LaunchWizardStep::AgentSelect),
-            LaunchWizardStep::ReasoningLevel => Some(LaunchWizardStep::ModelSelect),
+            LaunchWizardStep::ReasoningLevel => {
+                if self.state.agent_has_models() {
+                    Some(LaunchWizardStep::ModelSelect)
+                } else {
+                    Some(LaunchWizardStep::AgentSelect)
+                }
+            }
             LaunchWizardStep::RuntimeTarget => {
                 if self.state.launch_target_is_shell() {
                     Some(LaunchWizardStep::LaunchTarget)
@@ -746,17 +806,19 @@ pub(super) fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizar
             .iter()
             .position(|model| model == &state.model)
             .unwrap_or(0),
-        LaunchWizardStep::ReasoningLevel => state
-            .current_reasoning_options()
-            .iter()
-            .position(|option| option.stored_value == state.reasoning)
-            .unwrap_or_else(|| {
-                state
-                    .current_reasoning_options()
-                    .iter()
-                    .position(|option| option.is_default)
-                    .unwrap_or(0)
-            }),
+        LaunchWizardStep::ReasoningLevel => {
+            let options = state.current_reasoning_options();
+            options
+                .iter()
+                .position(|option| option.stored_value == state.reasoning)
+                .or_else(|| state.unlisted_grok_reasoning().map(|_| options.len()))
+                .unwrap_or_else(|| {
+                    options
+                        .iter()
+                        .position(|option| option.is_default)
+                        .unwrap_or(0)
+                })
+        }
         LaunchWizardStep::RuntimeTarget => {
             usize::from(state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
         }
@@ -1023,8 +1085,89 @@ pub(super) fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
 }
 
+/// SPEC-3864 FR-005..FR-007: what the wizard offers when an agent cannot
+/// launch as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSetupKind {
+    /// The executable is missing and no runtime `latest` route exists.
+    Install,
+    /// The executable is launchable but first-time configuration is missing.
+    Configure,
+}
+
+impl AgentSetupKind {
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Configure => "configure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSetupAffordance {
+    pub kind: AgentSetupKind,
+    pub title: String,
+    pub detail: String,
+    /// Button label when gwt can run the setup in a shell pane; `None` when
+    /// the user has to act outside gwt.
+    pub action_label: Option<String>,
+}
+
+/// Derive the setup affordance for one built-in purely from its descriptor
+/// plus the detection / configuration state (SPEC-3864 FR-006): adding an
+/// agent means filling in `distribution` / `setup_args`, never a new branch.
+pub fn agent_setup_affordance(
+    descriptor: &gwt_agent::BuiltinAgentDescriptor,
+    available: bool,
+    needs_configuration: bool,
+) -> Option<AgentSetupAffordance> {
+    let name = descriptor.display_name;
+    if !available && !descriptor.distribution.supports_runtime_latest() {
+        let title = format!("{name} is not installed");
+        return Some(match descriptor.distribution.install_shell_command() {
+            Some(command) => AgentSetupAffordance {
+                kind: AgentSetupKind::Install,
+                title,
+                detail: format!(
+                    "Install it with: {command} — gwt can run this in a shell pane. \
+                     Restart gwt after installing so `{}` is detected on PATH.",
+                    descriptor.command
+                ),
+                action_label: Some(format!("Install {name}")),
+            },
+            None => AgentSetupAffordance {
+                kind: AgentSetupKind::Install,
+                title,
+                detail: format!(
+                    "No distribution route is known. Install `{}` manually, put it on PATH, \
+                     and restart gwt.",
+                    descriptor.command
+                ),
+                action_label: None,
+            },
+        });
+    }
+    if needs_configuration && !descriptor.setup_args.is_empty() {
+        let setup_command = std::iter::once(descriptor.command)
+            .chain(descriptor.setup_args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(AgentSetupAffordance {
+            kind: AgentSetupKind::Configure,
+            title: format!("{name} is not set up yet"),
+            detail: format!(
+                "Run `{setup_command}` to finish first-time setup. You can still launch — \
+                 {name} will prompt for setup."
+            ),
+            action_label: Some(format!("Run {name} setup")),
+        });
+    }
+    None
+}
+
 pub(super) fn agent_has_npm_package(agent_id: &str) -> bool {
-    agent_id_from_key(agent_id).package_name().is_some()
+    agent_id_from_key(agent_id).npm_package().is_some()
 }
 
 pub(super) fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
@@ -1037,7 +1180,10 @@ pub(super) fn agent_description(agent: &AgentOption) -> String {
     match agent.installed_version.as_deref() {
         Some(version) => format!("Detected · {version}"),
         None if agent.custom_agent.is_some() => "Configured".to_string(),
-        None => "Built-in".to_string(),
+        None if agent.available => "Detected".to_string(),
+        // SPEC-3864 FR-004: `available` is the real detection result, so an
+        // undetected built-in says so instead of the neutral "Built-in".
+        None => "Not installed".to_string(),
     }
 }
 
@@ -1077,8 +1223,15 @@ pub fn build_agent_options(
     options
 }
 
+/// Production wizard entry point: runs install detection for every built-in
+/// (SPEC-3864 FR-002) so `available` / `installed_version` reflect the host
+/// instead of an empty detection list.
 pub fn load_agent_options(cache: &gwt_agent::VersionCache) -> Vec<AgentOption> {
-    build_agent_options(Vec::new(), cache, load_global_custom_agents())
+    build_agent_options(
+        gwt_agent::AgentDetector::detect_all(),
+        cache,
+        load_global_custom_agents(),
+    )
 }
 
 pub fn build_builtin_agent_options(
@@ -1095,7 +1248,8 @@ pub fn build_builtin_agent_options(
             AgentOption {
                 id: agent_id.command().to_string(),
                 name: agent_id.display_name().to_string(),
-                available: true,
+                // SPEC-3864 FR-004: derived from detection, never hardcoded.
+                available: detected.is_some(),
                 installed_version: detected.and_then(|detected| detected.version.clone()),
                 versions: cache
                     .get(&agent_id)
@@ -1114,6 +1268,25 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    fn grok_manual_state() -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.set_agent_id("grok");
+        state
+    }
+
     #[test]
     fn agent_option_color_maps_known_ids_and_falls_back_to_gray() {
         assert_eq!(
@@ -1123,6 +1296,10 @@ mod tests {
         assert_eq!(
             agent_option_color("codex"),
             Some(gwt_agent::AgentColor::Cyan)
+        );
+        assert_eq!(
+            agent_option_color("grok"),
+            Some(gwt_agent::AgentColor::Gray)
         );
         assert_eq!(
             agent_option_color("gemini"),
@@ -1197,6 +1374,194 @@ mod tests {
         );
     }
 
+    /// SPEC-3864 FR-002 / FR-004 (AC-2 / AC-4): the production wizard entry
+    /// point must run real install detection and derive `available` from it.
+    /// A fake `agy` on PATH is the only detectable built-in, so Antigravity
+    /// must come back available with its probed version while every other
+    /// built-in is reported as not installed instead of hardcoded `true`.
+    #[cfg(unix)]
+    #[test]
+    fn load_agent_options_runs_detection_and_derives_availability() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempdir().expect("tempdir");
+        let executable = dir.path().join("agy");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write agy stub");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("stub metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("chmod stub");
+        // PATH is replaced wholesale so no real agent leaks in, but tests that
+        // spawn `git` without the env lock still run concurrently; keep git
+        // reachable through the scoped PATH.
+        let git = which::which("git").expect("git on the test runner");
+        std::os::unix::fs::symlink(&git, dir.path().join("git")).expect("link git");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", dir.path());
+        let _no_custom = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
+            "1",
+        );
+
+        let options = load_agent_options(&gwt_agent::VersionCache::new());
+
+        let agy = options
+            .iter()
+            .find(|option| option.id == "agy")
+            .expect("Antigravity option");
+        assert!(agy.available, "detected agent must be available");
+        assert_eq!(agy.installed_version.as_deref(), Some("1.2.3"));
+        for option in options.iter().filter(|option| option.id != "agy") {
+            assert!(
+                !option.available,
+                "{} is not on PATH and must not be reported available",
+                option.id
+            );
+            assert_eq!(option.installed_version, None, "{}", option.id);
+        }
+    }
+
+    #[test]
+    fn build_builtin_agent_options_marks_undetected_builtins_unavailable() {
+        // SPEC-3864 FR-004: `available` is a detection result, not a label.
+        let options = build_builtin_agent_options(
+            vec![gwt_agent::DetectedAgent {
+                agent_id: gwt_agent::AgentId::OpenClaw,
+                version: Some("2026.1.0".to_string()),
+                path: PathBuf::from("/opt/homebrew/bin/openclaw"),
+            }],
+            &gwt_agent::VersionCache::new(),
+        );
+        let openclaw = options
+            .iter()
+            .find(|option| option.id == "openclaw")
+            .expect("OpenClaw option");
+        assert!(openclaw.available);
+        assert_eq!(openclaw.installed_version.as_deref(), Some("2026.1.0"));
+        assert_eq!(agent_description(openclaw), "Detected · 2026.1.0");
+
+        let agy = options
+            .iter()
+            .find(|option| option.id == "agy")
+            .expect("Antigravity option");
+        assert!(!agy.available);
+        assert_eq!(agent_description(agy), "Not installed");
+    }
+
+    /// SPEC-3864 FR-005 (AC-5): every pre-install built-in (no runtime
+    /// `latest` route) surfaces an install affordance when it is missing, and
+    /// npm-routed or detected agents surface none.
+    #[test]
+    fn agent_setup_affordance_covers_preinstall_builtins_when_missing() {
+        for command in ["agy", "hermes", "gh"] {
+            let descriptor = gwt_agent::builtin_agent_descriptor_for_command(command)
+                .expect("built-in descriptor");
+            let affordance = agent_setup_affordance(descriptor, false, false)
+                .unwrap_or_else(|| panic!("{command} must offer an install affordance"));
+            assert_eq!(affordance.kind, AgentSetupKind::Install, "{command}");
+            assert!(
+                affordance.title.contains(descriptor.display_name),
+                "{command}: {}",
+                affordance.title
+            );
+            let install_command = descriptor
+                .distribution
+                .install_shell_command()
+                .expect("install command");
+            assert!(
+                affordance.detail.contains(&install_command),
+                "{command}: {}",
+                affordance.detail
+            );
+            assert!(affordance.action_label.is_some(), "{command}");
+        }
+        for command in ["openclaw", "opencode", "claude"] {
+            let descriptor = gwt_agent::builtin_agent_descriptor_for_command(command)
+                .expect("built-in descriptor");
+            assert_eq!(
+                agent_setup_affordance(descriptor, false, false),
+                None,
+                "{command} can run latest at launch and needs no install affordance"
+            );
+            assert_eq!(
+                agent_setup_affordance(descriptor, true, false),
+                None,
+                "{command}"
+            );
+        }
+    }
+
+    /// SPEC-3864 FR-006 / FR-007 (AC-6): the affordance is derived from the
+    /// descriptor alone. A synthetic agent that exists nowhere else in gwt
+    /// gets both the install and the configure affordance without any
+    /// agent-specific branch.
+    #[test]
+    fn agent_setup_affordance_is_descriptor_driven_for_synthetic_agent() {
+        let descriptor = gwt_agent::BuiltinAgentDescriptor {
+            id: gwt_agent::AgentId::Custom("zeta-cli".to_string()),
+            command: "zeta",
+            display_name: "Zeta CLI",
+            distribution: gwt_agent::DistributionRoute::Homebrew {
+                formula: "zeta/tap/zeta",
+            },
+            setup_args: &["login"],
+            color: gwt_agent::AgentColor::Gray,
+            aliases: &["zeta"],
+            cache_key: "zeta",
+            version_flag: "--version",
+            version_prefix_args: &[],
+        };
+
+        let install = agent_setup_affordance(&descriptor, false, false).expect("install");
+        assert_eq!(install.kind, AgentSetupKind::Install);
+        assert!(install.title.contains("Zeta CLI"), "{}", install.title);
+        assert!(
+            install.detail.contains("brew install zeta/tap/zeta"),
+            "{}",
+            install.detail
+        );
+        assert_eq!(install.action_label.as_deref(), Some("Install Zeta CLI"));
+
+        let configure = agent_setup_affordance(&descriptor, true, true).expect("configure");
+        assert_eq!(configure.kind, AgentSetupKind::Configure);
+        assert!(
+            configure.detail.contains("zeta login"),
+            "{}",
+            configure.detail
+        );
+        assert_eq!(
+            configure.action_label.as_deref(),
+            Some("Run Zeta CLI setup")
+        );
+
+        assert_eq!(agent_setup_affordance(&descriptor, true, false), None);
+    }
+
+    /// SPEC-3864 FR-005: an agent with no known route still tells the user it
+    /// is missing, but offers no runnable action.
+    #[test]
+    fn agent_setup_affordance_without_route_has_no_action() {
+        let descriptor = gwt_agent::BuiltinAgentDescriptor {
+            id: gwt_agent::AgentId::Custom("omega".to_string()),
+            command: "omega",
+            display_name: "Omega",
+            distribution: gwt_agent::DistributionRoute::None,
+            setup_args: &[],
+            color: gwt_agent::AgentColor::Gray,
+            aliases: &[],
+            cache_key: "omega",
+            version_flag: "--version",
+            version_prefix_args: &[],
+        };
+        let affordance = agent_setup_affordance(&descriptor, false, false).expect("install");
+        assert_eq!(affordance.kind, AgentSetupKind::Install);
+        assert_eq!(affordance.action_label, None);
+        assert!(affordance.detail.contains("omega"), "{}", affordance.detail);
+    }
+
     #[test]
     fn build_builtin_agent_options_includes_hook_parity_agents() {
         let options = build_builtin_agent_options(Vec::new(), &gwt_agent::VersionCache::new());
@@ -1204,8 +1569,11 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec!["claude", "codex", "agy", "gemini", "opencode", "openclaw", "hermes", "gh"]
+            vec![
+                "claude", "codex", "grok", "agy", "gemini", "opencode", "openclaw", "hermes", "gh"
+            ]
         );
+        assert!(options.iter().any(|option| option.name == "Grok Build"));
         assert!(options
             .iter()
             .any(|option| option.name == "Antigravity CLI"));
@@ -1215,6 +1583,32 @@ mod tests {
         assert!(options.iter().any(|option| option.name == "OpenCode"));
         assert!(options.iter().any(|option| option.name == "OpenClaw"));
         assert!(options.iter().any(|option| option.name == "Hermes Agent"));
+    }
+
+    #[test]
+    fn build_builtin_agent_options_projects_detected_grok_version_and_cache() {
+        let mut cache = gwt_agent::VersionCache::new();
+        cache.record_versions(
+            &gwt_agent::AgentId::GrokBuild,
+            vec!["1.0.3".to_string(), "1.0.2".to_string()],
+        );
+        let options = build_builtin_agent_options(
+            vec![gwt_agent::DetectedAgent {
+                agent_id: gwt_agent::AgentId::GrokBuild,
+                version: Some("1.0.3".to_string()),
+                path: PathBuf::from("/usr/local/bin/grok"),
+            }],
+            &cache,
+        );
+        let grok = options
+            .iter()
+            .find(|option| option.id == "grok")
+            .expect("Grok Build option");
+
+        assert_eq!(grok.name, "Grok Build");
+        assert!(grok.available);
+        assert_eq!(grok.installed_version.as_deref(), Some("1.0.3"));
+        assert_eq!(grok.versions, ["1.0.3", "1.0.2"]);
     }
 
     // SPEC-2014 2026-05-18 amendment FR-D / SC-C:
@@ -1368,7 +1762,7 @@ mod tests {
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
         assert!(agent_has_npm_package("opencode"));
-        assert!(!agent_has_npm_package("openclaw"));
+        assert!(agent_has_npm_package("openclaw"));
         assert!(!agent_has_npm_package("hermes"));
         assert!(!agent_has_npm_package("custom"));
         assert_eq!(agent_id_from_key("gh"), gwt_agent::AgentId::Copilot);
@@ -1431,11 +1825,11 @@ mod tests {
         assert_eq!(
             current_model_options("codex"),
             vec![
-                "gpt-5.5",
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.4",
+                "gpt-5.5",
                 "gpt-5.4-mini",
                 "gpt-5.3-codex-spark",
             ]
@@ -1459,10 +1853,12 @@ mod tests {
         assert!(!model_display_options("codex").is_empty());
     }
 
-    // SPEC-1921 US-20 / FR-121: the Codex picker is the fixed, tested
-    // 2026-07-10 seven-model snapshot with the current descriptions.
+    // SPEC-1921 US-20 / FR-121 + Issue #3962 AC-1: the Codex picker is the
+    // fixed, tested 2026-09-05 seven-model snapshot in picker order, with the
+    // descriptions the CLI shows. `gpt-6-astra` leads as the new default and
+    // the retired `gpt-5.4` is gone.
     #[test]
-    fn codex_model_catalog_matches_2026_07_10_snapshot() {
+    fn codex_model_catalog_matches_2026_09_05_snapshot() {
         let rows: Vec<(&str, &str)> = model_display_options("codex")
             .iter()
             .map(|option| (option.label, option.description))
@@ -1471,22 +1867,32 @@ mod tests {
             rows,
             vec![
                 (
-                    "gpt-5.5",
-                    "Frontier model for complex coding, research, and real-world work",
+                    "gpt-6-astra",
+                    "Our most capable model for complex, demanding work",
                 ),
-                ("gpt-5.6-sol", "Latest frontier agentic coding model"),
+                (
+                    "gpt-5.6-sol",
+                    "Reliable agentic workhorse for everyday tasks",
+                ),
                 (
                     "gpt-5.6-terra",
                     "Balanced agentic coding model for everyday work",
                 ),
                 ("gpt-5.6-luna", "Fast and affordable agentic coding model"),
-                ("gpt-5.4", "Strong model for everyday coding"),
+                (
+                    "gpt-5.5",
+                    "Proven previous-generation model for coding and general work",
+                ),
                 (
                     "gpt-5.4-mini",
                     "Small, fast, and cost-efficient model for simpler coding tasks",
                 ),
                 ("gpt-5.3-codex-spark", "Ultra-fast coding model"),
             ]
+        );
+        assert!(
+            !rows.iter().any(|(label, _)| *label == "gpt-5.4"),
+            "gpt-5.4 left the Codex picker and must not be selectable"
         );
     }
 
@@ -1501,16 +1907,23 @@ mod tests {
         (values, default)
     }
 
-    // SPEC-1921 US-20 / FR-122 + FR-123: reasoning rows and the initial stop
-    // derive from the selected model's capability row, so Sol/Terra expose six
-    // stops through Ultra, Luna five through Max, and the rest four through
-    // Extra high, with Sol=Low / Spark=High / others=Medium defaults.
+    // SPEC-1921 US-20 / FR-122 + FR-123 + Issue #3962 AC-3: reasoning rows and
+    // the initial stop derive from the selected model's capability row. The
+    // expectations below mirror the CLI's own effort picker
+    // (`supported_reasoning_levels` / `default_reasoning_level`), so Astra /
+    // Sol / Terra expose six stops through Ultra, Luna five through Max, and
+    // the rest four through Extra high, with Sol=Low / Spark=High /
+    // others=Medium defaults.
     #[test]
     fn codex_reasoning_capability_rows_follow_model() {
         const SIX: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
         const FIVE: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
         const FOUR: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+        assert_eq!(
+            codex_capability_row("gpt-6-astra"),
+            (SIX.to_vec(), "medium")
+        );
         assert_eq!(codex_capability_row("gpt-5.6-sol"), (SIX.to_vec(), "low"));
         assert_eq!(
             codex_capability_row("gpt-5.6-terra"),
@@ -1521,7 +1934,6 @@ mod tests {
             (FIVE.to_vec(), "medium")
         );
         assert_eq!(codex_capability_row("gpt-5.5"), (FOUR.to_vec(), "medium"));
-        assert_eq!(codex_capability_row("gpt-5.4"), (FOUR.to_vec(), "medium"));
         assert_eq!(
             codex_capability_row("gpt-5.4-mini"),
             (FOUR.to_vec(), "medium")
@@ -1530,13 +1942,70 @@ mod tests {
             codex_capability_row("gpt-5.3-codex-spark"),
             (FOUR.to_vec(), "high")
         );
+
+        // Every catalog row must be covered by the expectations above, so a
+        // future snapshot cannot add a model whose effort ladder goes untested.
+        let covered = [
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+        ];
+        assert_eq!(current_model_options("codex"), covered.to_vec());
+    }
+
+    #[test]
+    fn grok_build_reasoning_options_cover_common_effort_values_with_auto_default() {
+        // SPEC-1921 T483: these stored values are the launch contract. `auto`
+        // delegates to the Grok CLI/config and every other row maps verbatim
+        // to `--effort <LEVEL>`.
+        let options = grok_manual_state().current_reasoning_options();
+        let values: Vec<&str> = options.iter().map(|option| option.stored_value).collect();
+
+        assert_eq!(
+            values,
+            ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            options
+                .iter()
+                .filter(|option| option.is_default)
+                .map(|option| option.stored_value)
+                .collect::<Vec<_>>(),
+            ["auto"]
+        );
+        assert!(
+            current_model_options("grok").is_empty(),
+            "Grok model entry is free text, not a fixed catalog"
+        );
+
+        let state = grok_manual_state();
+        let flow = LaunchWizardFlow::new(&state);
+        assert_eq!(
+            flow.next_step(LaunchWizardStep::AgentSelect),
+            Some(LaunchWizardStep::ReasoningLevel),
+            "free-text model is edited in the form, but legacy flow must still visit effort"
+        );
+        assert_eq!(
+            flow.prev_step(LaunchWizardStep::ReasoningLevel),
+            Some(LaunchWizardStep::AgentSelect),
+            "Grok has no fixed ModelSelect step to return to"
+        );
     }
 
     // Unknown or legacy persisted Codex models keep the conservative pre-5.6
     // surface so a stale saved model can never unlock unsupported stops.
+    // Issue #3962: `gpt-5.4` joined that legacy set when it left the picker.
     #[test]
     fn codex_reasoning_capability_falls_back_conservatively_for_unknown_model() {
         let (values, default) = codex_capability_row("gpt-5.2-codex");
+        assert_eq!(values, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(default, "medium");
+
+        let (values, default) = codex_capability_row("gpt-5.4");
         assert_eq!(values, vec!["low", "medium", "high", "xhigh"]);
         assert_eq!(default, "medium");
     }
@@ -1545,6 +2014,7 @@ mod tests {
     fn quick_start_summary_includes_runtime_metadata() {
         let summary = quick_start_summary(&QuickStartEntry {
             session_id: "gwt-session-1".to_string(),
+            linked_issue_number: None,
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
             model: Some("gpt-5.5".to_string()),

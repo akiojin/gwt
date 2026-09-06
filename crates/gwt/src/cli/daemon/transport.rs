@@ -4,21 +4,26 @@
 //! transport-agnostic. This module hides the one place where the platform
 //! differs:
 //!
-//! - Unix: a Unix domain socket bound at the endpoint's `.sock` path.
+//! - Unix: a Unix domain socket at the path chosen by
+//!   `gwt_core::daemon::resolve_daemon_socket_path`.
 //! - Windows: a named pipe `\\.\pipe\gwtd-<stem>-<hash>` derived from the
-//!   endpoint file path, so distinct `GWT_HOME` / scope pairs never share a
-//!   pipe name. Remote clients are rejected at the pipe level; the existing
-//!   `auth_token` handshake (token persisted under the user-private
-//!   `~/.gwt`) remains the authorization boundary.
+//!   endpoint file path (`gwt_core::daemon::windows_pipe_name_for`), so
+//!   distinct `GWT_HOME` / scope pairs never share a pipe. Remote clients
+//!   are rejected at the pipe level; the existing `auth_token` handshake
+//!   (token persisted under the user-private `~/.gwt`) remains the
+//!   authorization boundary.
 //!
 //! Both sides expose the same surface: [`IpcListener::bind`] +
 //! [`IpcListener::accept`] for the server and [`IpcStream::connect`] for the
 //! client. [`IpcStream`] implements `AsyncRead + AsyncWrite`, so callers
-//! split it with `tokio::io::split` and never see the platform type.
+//! split it with `tokio::io::split` and never see the platform type. The
+//! synchronous probes ([`bind_is_served`], [`bind_is_present`],
+//! [`bind_rejection`]) back the stale-endpoint hygiene that used to open a
+//! raw `std` Unix stream.
 
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::Path,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -29,21 +34,6 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub(crate) type IpcReadHalf = tokio::io::ReadHalf<IpcStream>;
 /// Write half type produced by [`IpcStream::into_split`].
 pub(crate) type IpcWriteHalf = tokio::io::WriteHalf<IpcStream>;
-
-/// Derive the daemon bind address from the persisted endpoint file path.
-///
-/// Unix keeps the historical `<endpoint>.sock` sibling. Windows maps the
-/// path onto a named pipe name (see [`pipe_name_for`]).
-pub(crate) fn bind_address_for_endpoint_path(endpoint_path: &Path) -> PathBuf {
-    #[cfg(unix)]
-    {
-        endpoint_path.with_extension("sock")
-    }
-    #[cfg(windows)]
-    {
-        PathBuf::from(pipe_name_for(&endpoint_path.to_string_lossy()))
-    }
-}
 
 /// Prepare the filesystem for a bind: create the socket's parent directory
 /// on Unix. Named pipes live in the pipe namespace, so Windows has nothing
@@ -78,41 +68,74 @@ pub(crate) fn cleanup_stale_bind(bind: &Path) {
     }
 }
 
-/// Windows named-pipe name for an arbitrary bind string.
+/// Whether a daemon currently accepts connections at `bind`.
 ///
-/// A value that already lives in the pipe namespace (`\\.\pipe\...`) is
-/// returned unchanged, so persisted endpoint binds round-trip. Any other
-/// value (a test's temp path, a legacy `.sock` path) is hashed into a
-/// unique, length-bounded pipe name. Pipe names cannot contain path
-/// separators, hence the hash rather than the raw path.
-#[cfg(any(windows, test))]
-pub(crate) fn pipe_name_for(bind: &str) -> String {
-    const PIPE_PREFIX: &str = r"\\.\pipe\";
-    if bind.len() >= PIPE_PREFIX.len()
-        && bind[..PIPE_PREFIX.len()].eq_ignore_ascii_case(PIPE_PREFIX)
+/// Synchronous so the bootstrap / hygiene callers (which run outside a
+/// tokio runtime) can use it. On Windows a successful open is closed at
+/// once; a pipe whose instances are all busy (`ERROR_PIPE_BUSY`) is served
+/// too.
+pub(crate) fn bind_is_served(bind: &str) -> bool {
+    #[cfg(unix)]
     {
-        return bind.to_string();
+        std::os::unix::net::UnixStream::connect(bind).is_ok()
     }
-    // Split on both separators by hand so the derived name is identical on
-    // every host (a `\` is not a separator for `std::path` on Unix).
-    let stem = bind
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("daemon")
-        .rsplit_once('.')
-        .map_or("daemon", |(stem, _)| stem);
-    let stem = stem
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-        .take(32)
-        .collect::<String>();
-    let digest = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(bind.as_bytes());
-        hex::encode(hasher.finalize())
-    };
-    format!("{PIPE_PREFIX}gwtd-{stem}-{}", &digest[..16])
+    #[cfg(windows)]
+    {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(gwt_core::daemon::windows_pipe_name_for(bind))
+        {
+            Ok(_) => true,
+            Err(error) => error.raw_os_error() == Some(windows_impl::ERROR_PIPE_BUSY),
+        }
+    }
+}
+
+/// Whether the transport artifact behind `bind` exists at all: the socket
+/// file on Unix, a served pipe on Windows (a pipe has no on-disk presence
+/// apart from being served).
+pub(crate) fn bind_is_present(bind: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        bind.exists()
+    }
+    #[cfg(windows)]
+    {
+        bind_is_served(&bind.to_string_lossy())
+    }
+}
+
+/// Why a persisted endpoint `bind` cannot be used as a transport address, if
+/// it cannot. Shared by the subscribe resolver's evidence checks.
+pub(crate) fn bind_rejection(bind: &str) -> Option<&'static str> {
+    let bind = bind.trim();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+
+        if bind.is_empty() || !Path::new(bind).is_absolute() {
+            return Some("unsupported_transport");
+        }
+        match std::fs::metadata(bind) {
+            Ok(metadata) if metadata.file_type().is_socket() => None,
+            Ok(_) => Some("not_socket"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Some("socket_missing"),
+            Err(_) => Some("socket_unreadable"),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let prefix = gwt_core::daemon::WINDOWS_PIPE_PREFIX;
+        if bind.len() < prefix.len() || !bind[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return Some("unsupported_transport");
+        }
+        if bind_is_served(bind) {
+            None
+        } else {
+            Some("socket_missing")
+        }
+    }
 }
 
 /// Listening side of the daemon transport.
@@ -136,7 +159,7 @@ impl IpcListener {
         }
         #[cfg(windows)]
         {
-            let pipe_name = pipe_name_for(&bind.to_string_lossy());
+            let pipe_name = gwt_core::daemon::windows_pipe_name_for(&bind.to_string_lossy());
             let first = windows_impl::create_server_instance(&pipe_name, true)?;
             Ok(Self {
                 pipe_name,
@@ -196,7 +219,7 @@ impl IpcStream {
         }
         #[cfg(windows)]
         {
-            windows_impl::connect_client(&pipe_name_for(bind)).await
+            windows_impl::connect_client(&gwt_core::daemon::windows_pipe_name_for(bind)).await
         }
     }
 
@@ -271,7 +294,7 @@ mod windows_impl {
     use super::IpcStream;
 
     /// `ERROR_PIPE_BUSY`: every server instance is mid-connect; retry.
-    const ERROR_PIPE_BUSY: i32 = 231;
+    pub(super) const ERROR_PIPE_BUSY: i32 = 231;
     const BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
     const BUSY_RETRY_LIMIT: usize = 50;
 
@@ -310,11 +333,7 @@ mod windows_impl {
 #[cfg(test)]
 pub(crate) async fn wait_until_bound(bind: &Path) {
     for _ in 0..100 {
-        #[cfg(unix)]
-        let ready = bind.exists();
-        #[cfg(windows)]
-        let ready = IpcStream::connect(&bind.to_string_lossy()).await.is_ok();
-        if ready {
+        if bind_is_present(bind) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -328,15 +347,25 @@ mod tests {
 
     use super::*;
 
+    fn bind_for(temp: &tempfile::TempDir, stem: &str) -> std::path::PathBuf {
+        gwt_core::daemon::resolve_daemon_socket_path(&temp.path().join(format!("{stem}.json")))
+            .expect("resolve bind")
+            .path
+    }
+
     /// AC-1 / AC-2: the same listener + client surface must round-trip a
     /// newline-delimited frame on every supported host. On Windows this is
     /// the named-pipe path; on Unix it is the historical socket path.
     #[tokio::test]
     async fn listener_and_client_round_trip_a_line_on_this_platform() {
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let bind = bind_address_for_endpoint_path(&temp.path().join("feedfacecafebeef.json"));
+        let bind = bind_for(&temp, "feedfacecafebeef");
         prepare_bind_parent(&bind).expect("prepare parent");
         cleanup_stale_bind(&bind);
+        assert!(
+            !bind_is_served(&bind.to_string_lossy()),
+            "nothing may be served before bind"
+        );
 
         let mut listener = IpcListener::bind(&bind).expect("bind");
         let server = tokio::spawn(async move {
@@ -371,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn second_bind_on_the_same_address_is_rejected() {
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let bind = bind_address_for_endpoint_path(&temp.path().join("feedfacecafebeef.json"));
+        let bind = bind_for(&temp, "feedfacecafebeef");
         prepare_bind_parent(&bind).expect("prepare parent");
         let _first = IpcListener::bind(&bind).expect("first bind");
         assert!(
@@ -385,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn connect_to_an_unbound_address_fails() {
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let bind = bind_address_for_endpoint_path(&temp.path().join("does-not-exist.json"));
+        let bind = bind_for(&temp, "does-not-exist");
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             IpcStream::connect(&bind.to_string_lossy()),
@@ -393,38 +422,11 @@ mod tests {
         .await
         .expect("connect must not hang");
         assert!(result.is_err(), "connect to an unbound address must fail");
-    }
-
-    #[test]
-    fn bind_address_is_derived_from_the_endpoint_path() {
-        let endpoint = Path::new("/home/user/.gwt/projects/repo/runtime/daemon/abcd.json");
-        let bind = bind_address_for_endpoint_path(endpoint);
-        #[cfg(unix)]
+        assert!(!bind_is_present(&bind));
         assert_eq!(
-            bind,
-            Path::new("/home/user/.gwt/projects/repo/runtime/daemon/abcd.sock")
+            bind_rejection(&bind.to_string_lossy()),
+            Some("socket_missing")
         );
-        #[cfg(windows)]
-        assert!(
-            bind.to_string_lossy().starts_with(r"\\.\pipe\gwtd-abcd-"),
-            "unexpected pipe name {}",
-            bind.display()
-        );
-    }
-
-    #[test]
-    fn pipe_name_is_stable_unique_and_idempotent() {
-        let a = pipe_name_for(r"C:\Users\me\.gwt\projects\r\runtime\daemon\abcd.json");
-        let b = pipe_name_for(r"C:\Users\me\.gwt\projects\r\runtime\daemon\abcd.json");
-        let c = pipe_name_for(r"C:\Users\other\.gwt\projects\r\runtime\daemon\abcd.json");
-        assert_eq!(a, b, "same path must map to the same pipe name");
-        assert_ne!(a, c, "different homes must not share a pipe name");
-        assert!(a.starts_with(r"\\.\pipe\gwtd-abcd-"), "{a}");
-        assert!(a.len() < 256, "pipe names are limited to 256 characters");
-        assert_eq!(pipe_name_for(&a), a, "pipe names must round-trip unchanged");
-        assert_eq!(
-            pipe_name_for(r"\\.\PIPE\already-a-pipe"),
-            r"\\.\PIPE\already-a-pipe"
-        );
+        assert_eq!(bind_rejection(""), Some("unsupported_transport"));
     }
 }

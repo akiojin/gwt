@@ -6,6 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gwt_core::index::broker::RefreshBroker;
+
 use crate::{app_runtime::AppEventProxy, UserEvent};
 
 pub use gwt::IndexRebuildScope;
@@ -134,6 +136,9 @@ impl ProjectIndexBootstrapService {
         project_root: PathBuf,
     ) -> ProjectIndexBootstrapRequest {
         let disabled = gwt::index_worker::automatic_background_index_disabled();
+        if !disabled {
+            ensure_refresh_broker_drain(proxy.clone());
+        }
         self.spawn_automatic_with(
             proxy,
             project_root,
@@ -219,7 +224,7 @@ impl ProjectIndexBootstrapService {
         if let Some(status) = self.fresh_full_status(&project_key, &project_root_label) {
             proxy.send(UserEvent::ProjectIndexStatus {
                 project_root: project_root_label,
-                status,
+                status: Box::new(status),
             });
             return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
@@ -425,7 +430,7 @@ impl ProjectIndexBootstrapService {
         }
         proxy.send(UserEvent::ProjectIndexStatus {
             project_root: project_root_label.to_string(),
-            status,
+            status: Box::new(status),
         });
         true
     }
@@ -547,7 +552,7 @@ impl ProjectIndexBootstrapService {
         if let Some(status) = self.bootstrap_completed_recently(&project_key, &project_root_label) {
             proxy.send(UserEvent::ProjectIndexStatus {
                 project_root: project_root_label,
-                status,
+                status: Box::new(status),
             });
             return ProjectIndexBootstrapRequest::SkippedFresh;
         }
@@ -598,7 +603,7 @@ impl ProjectIndexBootstrapService {
                         service_for_thread.record_bootstrap_status(&project_key, &status);
                         proxy.send(UserEvent::ProjectIndexStatus {
                             project_root: project_root_label.clone(),
-                            status: status.clone(),
+                            status: Box::new(status.clone()),
                         });
                         if kick_orchestrator {
                             trigger_auto_repair_for_project(
@@ -620,12 +625,12 @@ impl ProjectIndexBootstrapService {
                         );
                         proxy.send(UserEvent::ProjectIndexStatus {
                             project_root: project_root_label,
-                            status: gwt::ProjectIndexStatusView::new(
+                            status: Box::new(gwt::ProjectIndexStatusView::new(
                                 gwt::ProjectIndexStatusState::Error,
                                 format!(
                                     "Project index bootstrap failed after {elapsed_ms} ms: {error}"
                                 ),
-                            ),
+                            )),
                         });
                     }
                 }
@@ -805,7 +810,13 @@ impl ServiceBackedRebuildSpawner {
     }
 
     pub(crate) fn with_default_runner(service: ProjectIndexBootstrapService) -> Self {
-        Self::new(service, Arc::new(gwt::default_rebuild_runner))
+        Self::new(
+            service,
+            Arc::new(|project_root: &Path, scope, worktree_hash: Option<&str>| {
+                ensure_project_index_runtime_for_rebuild()?;
+                gwt::default_rebuild_runner(project_root, scope, worktree_hash)
+            }),
+        )
     }
 }
 
@@ -842,7 +853,10 @@ pub(crate) fn spawn_per_cell_rebuild(
         worktree_hash,
         // Per-cell rebuilds are user-initiated: manual priority so they
         // preempt background repair for the heavy lease (FR-383).
-        Arc::new(gwt::manual_rebuild_runner),
+        Arc::new(|project_root: &Path, scope, worktree_hash: Option<&str>| {
+            ensure_project_index_runtime_for_rebuild()?;
+            gwt::manual_rebuild_runner(project_root, scope, worktree_hash)
+        }),
         Arc::new(|path: &Path| -> gwt::ProjectIndexStatusView {
             gwt::global_aggregated_status_cache().invalidate(path);
             gwt::aggregate_project_index_status_for_path(path)
@@ -884,7 +898,7 @@ pub(crate) fn spawn_per_cell_rebuild_with(
         // rebuild actually completes.
         proxy_for_closure.send(UserEvent::ProjectIndexStatus {
             project_root: project_root_label.clone(),
-            status: gwt::ProjectIndexStatusView {
+            status: Box::new(gwt::ProjectIndexStatusView {
                 state: gwt::ProjectIndexStatusState::Repairing,
                 detail: format!(
                     "Rebuilding {} (worktree={:?})",
@@ -899,7 +913,7 @@ pub(crate) fn spawn_per_cell_rebuild_with(
                 scopes: gwt::ProjectIndexScopes::default(),
                 worktrees: std::collections::BTreeMap::new(),
                 coverage: None,
-            },
+            }),
         });
 
         let result = rebuild_runner_for_closure(
@@ -917,7 +931,7 @@ pub(crate) fn spawn_per_cell_rebuild_with(
         };
         proxy_for_closure.send(UserEvent::ProjectIndexStatus {
             project_root: project_root_label.clone(),
-            status: final_view,
+            status: Box::new(final_view),
         });
     })
 }
@@ -941,7 +955,7 @@ pub(crate) fn trigger_auto_repair_for_project(
     let event_sink = move |view: gwt::ProjectIndexStatusView| {
         proxy.send(UserEvent::ProjectIndexStatus {
             project_root: project_root_for_sink.display().to_string(),
-            status: view,
+            status: Box::new(view),
         });
     };
     let final_status_provider = |path: &Path| -> gwt::ProjectIndexStatusView {
@@ -993,6 +1007,94 @@ fn normalize_project_root(project_root: &Path) -> PathBuf {
     dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
 }
 
+/// SPEC #1939 Phase 71 AS-32: status is read-only, so runtime provisioning
+/// moved to the owners that actually spawn a runner. Every GUI-driven rebuild
+/// ensures the versioned runtime right before its coordinated build.
+fn ensure_project_index_runtime_for_rebuild() -> Result<(), String> {
+    gwt_core::runtime::ensure_project_index_runtime()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Poll interval for the host-wide Refresh Broker drain (SPEC #1939 FR-415).
+/// Background targets become claimable 30 s after their last dirty event, so
+/// a few-second poll keeps admission latency small without busy-waiting.
+const REFRESH_BROKER_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Start the single process-wide drain that executes claimed Refresh Broker
+/// targets for the repositories this process registered. Idempotent.
+fn ensure_refresh_broker_drain(proxy: AppEventProxy) {
+    static DRAIN: OnceLock<()> = OnceLock::new();
+    DRAIN.get_or_init(|| {
+        let spawned = thread::Builder::new()
+            .name("gwt-index-refresh-drain".to_string())
+            .spawn(move || refresh_broker_drain_loop(proxy));
+        if let Err(error) = spawned {
+            tracing::warn!(
+                target: "gwt::index",
+                error = %error,
+                "failed to spawn project index refresh broker drain"
+            );
+        }
+    });
+}
+
+fn refresh_broker_drain_loop(proxy: AppEventProxy) {
+    let broker = match RefreshBroker::open_default() {
+        Ok(broker) => broker,
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                error = %error,
+                "refresh broker unavailable; project index refresh drain stopped"
+            );
+            return;
+        }
+    };
+    loop {
+        thread::sleep(REFRESH_BROKER_POLL_INTERVAL);
+        let claim = match gwt::index_worker::claim_registered_project_index_refresh(&broker) {
+            Ok(Some(claim)) => claim,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt::index",
+                    error = %error,
+                    "project index refresh claim failed"
+                );
+                continue;
+            }
+        };
+        if let Err(error) = ensure_project_index_runtime_for_rebuild() {
+            tracing::warn!(
+                target: "gwt::index",
+                error = %error,
+                "project index runtime unavailable for claimed refresh"
+            );
+            let _ = claim.fail(error);
+            continue;
+        }
+        match gwt::index_worker::execute_claimed_project_index_refresh(claim) {
+            Ok(project_root) => {
+                gwt::global_aggregated_status_cache().invalidate(&project_root);
+                ProjectIndexBootstrapService::global().invalidate_full_status(&project_root);
+                let status = current_worktree_status_probe(&project_root);
+                proxy.send(UserEvent::ProjectIndexStatus {
+                    project_root: normalize_project_root(&project_root).display().to_string(),
+                    status: Box::new(status),
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt::index",
+                    error = %error,
+                    "project index refresh claim execution failed"
+                );
+            }
+        }
+    }
+}
+
 fn cached_aggregate_status_probe(project_root: &Path) -> gwt::ProjectIndexStatusView {
     gwt::global_aggregated_status_cache()
         .get_or_compute(project_root, gwt::aggregate_project_index_status_for_path)
@@ -1023,6 +1125,7 @@ mod tests {
     fn disabled_automatic_bootstrap_starts_no_background_work() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let (proxy, events) = AppEventProxy::stub();
         let bootstrap_calls = Arc::new(AtomicUsize::new(0));
         let status_calls = Arc::new(AtomicUsize::new(0));
@@ -1064,7 +1167,7 @@ mod tests {
                     project_root,
                     status,
                 } if project_root == expected_project_root && status.state == expected_state => {
-                    Some(status.clone())
+                    Some((**status).clone())
                 }
                 _ => None,
             }) {
@@ -1088,7 +1191,7 @@ mod tests {
                     project_root,
                     status,
                 } if project_root == expected_project_root && status.detail == expected_detail => {
-                    Some(status.clone())
+                    Some((**status).clone())
                 }
                 _ => None,
             }) {
@@ -1104,6 +1207,7 @@ mod tests {
     fn duplicate_background_bootstrap_requests_for_same_project_are_coalesced() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1163,6 +1267,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1231,6 +1336,7 @@ mod tests {
     fn full_status_refresh_retries_after_startup_bootstrap_coalesces() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1304,6 +1410,7 @@ mod tests {
     fn duplicate_full_status_refresh_requests_collapse_without_queued_second_probe() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1376,6 +1483,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1442,6 +1550,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1488,6 +1597,7 @@ mod tests {
     fn failed_background_bootstrap_reports_error_and_releases_in_flight_slot() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1545,6 +1655,7 @@ mod tests {
         // frontend `setIndexStatus` consumes from WebSocket.
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project_root = temp.path().to_path_buf();
         // spawn_per_cell_rebuild_with canonicalises the project root so
         // proxy events share a key with the bootstrap path.
@@ -1627,6 +1738,7 @@ mod tests {
         // shows on auto-rebuild failure.
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project_root = temp.path().to_path_buf();
         // spawn_per_cell_rebuild_with canonicalises the project root so
         // proxy events share a key with the bootstrap path.
@@ -1682,6 +1794,7 @@ mod tests {
 
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project_root = temp.path().to_path_buf();
         let (block_files_tx, block_files_rx) = mpsc::channel();
         let (block_specs_tx, block_specs_rx) = mpsc::channel();

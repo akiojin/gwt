@@ -41,6 +41,12 @@ const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// restart.
 pub type EndpointResolver = dyn Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static;
 
+#[derive(Clone, Copy)]
+enum SubscriptionKind {
+    Observer,
+    Materializer,
+}
+
 /// Owns the subscriber thread. Drop or call [`Self::stop`] to wind it
 /// down cleanly.
 pub struct DaemonSubscriber {
@@ -80,6 +86,39 @@ impl DaemonSubscriber {
         R: Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static,
         F: Fn(String, serde_json::Value) + Send + Sync + 'static,
     {
+        Self::spawn_with_resolver_and_kind(resolver, channels, on_event, SubscriptionKind::Observer)
+    }
+
+    /// Spawn the GUI's daemon subscriber. This is deliberately separate from
+    /// the general observer API: only this path acquires the daemon's
+    /// connection-bound Issue Monitor materializer lease.
+    pub fn spawn_materializer_with_resolver<R, F>(
+        resolver: R,
+        channels: Vec<String>,
+        on_event: F,
+    ) -> Self
+    where
+        R: Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static,
+        F: Fn(String, serde_json::Value) + Send + Sync + 'static,
+    {
+        Self::spawn_with_resolver_and_kind(
+            resolver,
+            channels,
+            on_event,
+            SubscriptionKind::Materializer,
+        )
+    }
+
+    fn spawn_with_resolver_and_kind<R, F>(
+        resolver: R,
+        channels: Vec<String>,
+        on_event: F,
+        kind: SubscriptionKind,
+    ) -> Self
+    where
+        R: Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static,
+        F: Fn(String, serde_json::Value) + Send + Sync + 'static,
+    {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(Notify::new());
         let stop_flag_inner = Arc::clone(&stop_flag);
@@ -95,6 +134,7 @@ impl DaemonSubscriber {
                     callback,
                     stop_flag_inner,
                     shutdown_inner,
+                    kind,
                 );
             })
             .expect("daemon subscriber thread spawn");
@@ -134,6 +174,7 @@ fn run_loop(
     on_event: Arc<dyn Fn(String, serde_json::Value) + Send + Sync>,
     stop_flag: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
+    kind: SubscriptionKind,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -168,6 +209,7 @@ fn run_loop(
                 callback_for_session,
                 shutdown_for_session,
                 stop_flag_for_session,
+                kind,
             )
             .await
         });
@@ -191,12 +233,17 @@ async fn run_session(
     on_event: Arc<dyn Fn(String, serde_json::Value) + Send + Sync>,
     shutdown: Arc<Notify>,
     stop_flag: Arc<AtomicBool>,
+    kind: SubscriptionKind,
 ) -> Result<(), String> {
     let mut client = DaemonClient::connect(&endpoint)
         .await
         .map_err(|err| format!("connect failed: {err}"))?;
+    let subscribe = match kind {
+        SubscriptionKind::Observer => ClientFrame::Subscribe { channels },
+        SubscriptionKind::Materializer => ClientFrame::SubscribeMaterializer { channels },
+    };
     client
-        .send_frame(&ClientFrame::Subscribe { channels })
+        .send_frame(&subscribe)
         .await
         .map_err(|err| format!("subscribe send failed: {err}"))?;
     // Drain the daemon's Subscribe ack. There is a race where another
@@ -288,9 +335,16 @@ mod tests {
         time::Duration,
     };
 
-    use gwt_core::daemon::{DaemonEndpoint, DaemonFrame, RuntimeScope, RuntimeTarget};
+    use gwt_core::daemon::{
+        ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest, IpcHandshakeResponse,
+        RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    };
     use serde_json::json;
     use tempfile::TempDir;
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
 
     use super::DaemonSubscriber;
     use crate::cli::daemon::{broadcast::BroadcastHub, server};
@@ -413,6 +467,125 @@ mod tests {
 
         server_handle.abort();
         let _ = server_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn materializer_subscriber_holds_presence_only_for_its_live_connection() {
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+        let endpoint = sample_endpoint(scope, &socket_path, "materializer-secret");
+        let server_endpoint = endpoint.clone();
+        let server_socket = socket_path.clone();
+        let hub = BroadcastHub::new();
+        let observed_hub = hub.clone();
+        let server_handle = tokio::spawn(async move {
+            server::run_server(server_endpoint, server_socket, endpoint_path, hub).await
+        });
+        wait_for_socket(&socket_path).await;
+
+        let resolver_endpoint = endpoint.clone();
+        let subscriber = DaemonSubscriber::spawn_materializer_with_resolver(
+            move || Ok(resolver_endpoint.clone()),
+            vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+            |_channel, _payload| {},
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed_hub.issue_monitor_materializer_connected() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("materializer subscriber acquires presence lease");
+
+        subscriber.stop();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while observed_hub.issue_monitor_materializer_connected() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stopped subscriber releases presence lease");
+
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn materializer_subscriber_reasserts_role_after_forced_disconnect() {
+        let temp = TempDir::new().expect("tempdir");
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint = sample_endpoint(
+            sample_scope(&temp),
+            &socket_path,
+            "materializer-reconnect-secret",
+        );
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+        let accepted_sessions = Arc::new(AtomicUsize::new(0));
+        let accepted_sessions_for_server = Arc::clone(&accepted_sessions);
+        let server_endpoint = endpoint.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept subscriber");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read handshake");
+                let request: IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end()).expect("decode handshake");
+                assert_eq!(request.protocol_version, DAEMON_PROTOCOL_VERSION);
+                assert_eq!(request.auth_token, server_endpoint.auth_token);
+                assert_eq!(request.scope, server_endpoint.scope);
+                let mut response = serde_json::to_vec(&IpcHandshakeResponse {
+                    protocol_version: DAEMON_PROTOCOL_VERSION,
+                    daemon_version: server_endpoint.daemon_version.clone(),
+                    accepted: true,
+                    rejection_reason: None,
+                })
+                .expect("encode handshake response");
+                response.push(b'\n');
+                write_half
+                    .write_all(&response)
+                    .await
+                    .expect("write handshake response");
+
+                line.clear();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read subscribe frame");
+                assert!(matches!(
+                    serde_json::from_str::<ClientFrame>(line.trim_end())
+                        .expect("decode subscribe frame"),
+                    ClientFrame::SubscribeMaterializer { channels }
+                        if channels == [crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL]
+                ));
+                let mut ack = serde_json::to_vec(&DaemonFrame::Ack).expect("encode ack");
+                ack.push(b'\n');
+                write_half.write_all(&ack).await.expect("write ack");
+                accepted_sessions_for_server.fetch_add(1, Ordering::SeqCst);
+                // Dropping both halves forces the subscriber through its
+                // reconnect path before the next accept.
+            }
+        });
+
+        let resolver_endpoint = endpoint.clone();
+        let subscriber = DaemonSubscriber::spawn_materializer_with_resolver(
+            move || Ok(resolver_endpoint.clone()),
+            vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+            |_channel, _payload| {},
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while accepted_sessions.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("materializer reconnects and reasserts its typed role");
+
+        subscriber.stop();
+        server.await.expect("fake daemon sessions");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

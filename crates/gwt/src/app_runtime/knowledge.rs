@@ -237,7 +237,7 @@ mod related_snapshot_cache_tests {
             id: id.to_string(),
             title: id.to_string(),
             status_category: "active".to_string(),
-            branch: None,
+            branch: Some(format!("work/{id}")),
             worktree_path: None,
             updated_at: "2026-08-03T00:00:00Z".to_string(),
             agents: Vec::new(),
@@ -260,9 +260,11 @@ mod related_snapshot_cache_tests {
                 phase: None,
                 has_unknown_phase: false,
                 is_spec: false,
+                parent_spec: None,
                 monitor_state: None,
                 queue_position: None,
                 exclusion_reason: None,
+                related_work_refs: Vec::new(),
             }],
             selected_number: Some(number),
             empty_message: None,
@@ -283,6 +285,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn normalized_key_and_generation_reject_a_late_completion() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         std::fs::create_dir_all(&root).expect("create repo");
         let equivalent_root = root.join(".");
@@ -314,6 +317,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn snapshot_cache_is_capacity_eight_lru_and_kind_isolated() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let mut cache = KnowledgeRelatedSnapshotCache::default();
         let mut roots = Vec::new();
         for index in 0..8_u64 {
@@ -349,6 +353,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn pr_reservation_and_snapshot_miss_do_not_mutate_issue_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         let other = directory.path().join("other");
         std::fs::create_dir_all(&root).expect("create repo");
@@ -371,6 +376,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn pr_full_augmentation_preserves_baseline_view_without_publishing_a_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         let sessions_dir = directory.path().join("sessions");
         let issue_link_cache_dir = directory.path().join("cache");
@@ -428,6 +434,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn partial_search_consumes_but_never_replaces_the_full_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         std::fs::create_dir_all(&root).expect("create repo");
         let snapshots = KnowledgeRelatedSnapshot::default();
@@ -447,6 +454,17 @@ mod related_snapshot_cache_tests {
         apply_latest_knowledge_bridge_related_works(&root, &mut partial_view, &snapshots);
 
         assert_eq!(partial_view.entries[0].related_work_count, 1);
+        // SPEC-3671 FR-012: the row carries the Issue -> Work correlation so the
+        // Issue surface can join the active Work projection it already receives.
+        assert_eq!(
+            partial_view.entries[0].related_work_refs,
+            vec![gwt::KnowledgeWorkRefView {
+                id: "work-42".to_string(),
+                branch: Some("work/work-42".to_string()),
+                worktree_path: None,
+                updated_at: "2026-08-03T00:00:00Z".to_string(),
+            }]
+        );
         assert_eq!(partial_view.detail.related_works[0].id, "work-42");
         let retained = snapshots
             .lock()
@@ -476,6 +494,7 @@ mod monitor_snapshot_cache_tests {
                 body: None,
                 url: None,
                 readiness: gwt::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             state,
             claim_id: None,
@@ -502,15 +521,18 @@ mod monitor_snapshot_cache_tests {
             phase: None,
             has_unknown_phase: false,
             is_spec: false,
+            parent_spec: None,
             monitor_state: Some(gwt::MonitorInboxState::Launched),
             queue_position: Some(99),
             exclusion_reason: Some("stale".to_string()),
+            related_work_refs: Vec::new(),
         }
     }
 
     #[test]
     fn projection_preserves_global_queue_positions_for_filtered_rows_and_clears_stale_values() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let project_root = directory.path().join("repo");
         let mut cache = KnowledgeMonitorSnapshotCache::default();
         cache.replace(
@@ -578,6 +600,7 @@ mod monitor_snapshot_cache_tests {
     #[test]
     fn projection_keeps_all_current_wire_states_isolated_by_project_root() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let first_root = directory.path().join("first");
         let second_root = directory.path().join("second");
         let states = [
@@ -632,9 +655,10 @@ mod monitor_snapshot_cache_tests {
 }
 
 use super::{
-    knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
-    workspace_resume_owner_issue_number, workspace_work_item_view_from_item, AppRuntime,
-    BackendEvent, IssueBranchLinkStore, OutboundEvent, UserEvent, WindowPreset,
+    knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name,
+    resume_branch_refs_snapshot, work_session_index, workspace_resume_owner_issue_number,
+    workspace_work_item_view_from_item, AppRuntime, BackendEvent, IssueBranchLinkStore,
+    OutboundEvent, ResumeBranchIndex, UserEvent, WindowPreset,
 };
 
 pub struct KnowledgeSearchRequest<'a> {
@@ -902,6 +926,11 @@ fn augment_knowledge_bridge_related_works(
     }
 
     let session_index = work_session_index(sessions);
+    // Issue #3611: the Knowledge augmentation runs on a blocking task, so one
+    // bulk ref snapshot is affordable — a per-Session Git probe inside the
+    // Work loop is not, at any repository size.
+    let known_branch_refs = resume_branch_refs_snapshot(project_root);
+    let resume_branches = ResumeBranchIndex::scanned(Some(&known_branch_refs));
     let mut related_by_number: HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> = HashMap::new();
     let mut represented_sessions_by_number: HashMap<u64, HashSet<String>> = HashMap::new();
 
@@ -913,7 +942,7 @@ fn augment_knowledge_bridge_related_works(
         if !relevant_numbers.contains(&issue_number) {
             continue;
         }
-        let work_view = workspace_work_item_view_from_item(item, &session_index, project_root);
+        let work_view = workspace_work_item_view_from_item(item, &session_index, resume_branches);
         represented_sessions_by_number
             .entry(issue_number)
             .or_default()
@@ -969,6 +998,18 @@ fn apply_knowledge_bridge_related_works(
         if let Some(works) = related_by_number.get(&entry.number) {
             entry.related_work_count = works.len();
             entry.related_session_count = related_session_count(works);
+            // SPEC-3671 FR-012: carry the correlation itself, not a copy of the
+            // Work's display state. The Issue surface joins these ids/branches
+            // against the active Work projection it already receives.
+            entry.related_work_refs = works
+                .iter()
+                .map(|work| gwt::KnowledgeWorkRefView {
+                    id: work.id.clone(),
+                    branch: work.branch.clone(),
+                    worktree_path: work.worktree_path.clone(),
+                    updated_at: work.updated_at.clone(),
+                })
+                .collect();
         }
     }
     if let Some(number) = view.detail.number {
@@ -2036,7 +2077,9 @@ impl AppRuntime {
                         id: id_owned,
                         request_id,
                         issue_number,
-                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok { fresh_entry },
+                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok {
+                            fresh_entry: Box::new(fresh_entry),
+                        },
                     }
                 }
                 Err(error) => BackendEvent::KnowledgeBridgePhaseUpdated {
