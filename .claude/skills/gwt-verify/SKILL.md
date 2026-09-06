@@ -73,6 +73,54 @@ Additional flag:
   verification unless this flag is set. The reason is recorded in the
   evidence bundle as `User Verification: skipped(--skip-user-check)`.
 
+## Launch mode (autonomous vs interactive)
+
+Verification behavior depends on **who launched the work**, not on how hard
+the check looks. Read it from the launcher's own environment — never from the
+agent's judgement:
+
+| Launch mode | Detection | User Verification Handoff |
+|---|---|---|
+| `autonomous` | `GWT_AUTONOMOUS_EXECUTION` is set to a truthy value (paired with `GWT_AUTONOMOUS_ISSUE`) — an unattended gwt Issue Monitor launch | **Waived.** Nobody is watching the session. |
+| `interactive` | the variable is absent — a human started this work | Unchanged: the handoff below runs as written. |
+
+Record the detected mode on the evidence bundle's `Launch mode:` line.
+
+In `autonomous` mode:
+
+- **Skip the User Verification Handoff phase entirely.** Do not prepare an
+  instance, do not share a URL, and do not call the platform's question tool —
+  in an autonomous session a question is converted into a NeedsHuman handoff
+  that parks the owner Issue, so asking ends the execution instead of pausing
+  it.
+- Record `User Verification Result: n/a (autonomous)`. This is a launch-mode
+  fact, not a judgement call. It is **not** interchangeable with
+  `skipped(<reason>)`, which still means *an agent decided to defer a check a
+  human could have done*.
+- A UI surface in scope is covered instead by the agent's own automated headed
+  run — see **Agent Visual Check** below. `n/a (autonomous)` never excuses a
+  missing or failing Agent Visual Check.
+
+## Agent Visual Check (the agent's own browser-check)
+
+The agent's own headed run is evidence the **agent** produced. It is recorded
+on its own line and is **never a User Verification Result** — a self-reported
+"looks right" must not be readable as a human having confirmed anything.
+
+Run it whenever a UI surface is in scope (by diff or by acceptance-aware
+escalation) and the project ships a headed runner, in every launch mode:
+
+- a real browser / WebView instance, not headless-only, not a DOM shim
+- both `dark` and `light` themes
+- zero console errors and zero page errors
+- the concrete changed behavior actually exercised, not just page load
+
+Record the result as `Agent Visual Check: pass | fail(<reason>) | n/a (no UI
+surface)`, and list the executed headed command under `Executed` so the claim
+is backed by a `PASS` entry. In `autonomous` mode this is the GUI quality bar
+that replaces the human's eyes, so `Agent Visual Check: fail(<reason>)` — or a
+UI surface in scope with no Agent Visual Check at all — makes `Overall: FAIL`.
+
 ## Invocation Sequence
 
 ```text
@@ -141,6 +189,7 @@ Output to stdout in the following shape (Markdown):
 ## Verification Report
 
 Mode: <quick|full|pre-pr>
+Launch mode: autonomous | interactive
 Baseline: merge-base HEAD..origin/develop (<N> commits, <M> files)
 Changed surfaces: <abstract surface list>
 Acceptance Surface: <user-facing surface the change is escalated to, or `non-user-facing(<justification>)`>
@@ -163,7 +212,7 @@ Skipped (no matching surface or not applicable):
 (inventory unavailable: <reason>)  # when extraction failed for a runner
 
 ### User Verification
-Status: required | recommended | skipped(<reason>)
+Status: required | recommended | skipped(<reason>) | waived(autonomous launch)
 Surfaces requiring user check: <list>
 
 #### Verification Target Card
@@ -193,7 +242,8 @@ URL or launch target: <verified URL, GUI/editor target, or exact CLI/TUI invocat
 
 Expected: <one-line summary of the intended behavior>
 Observed: <user response slot>
-User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a
+User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous)
+Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)
 
 Headed verification: <yes|no>
 Tooling installed during run: <list, or "none">
@@ -204,8 +254,13 @@ Overall: PASS|FAIL
 Rules:
 
 - `Overall: PASS` requires **both** every entry in `Executed` reporting `PASS`
-  **and** `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
-  `pending` must never resolve to `PASS`.
+  **and** `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
+  skipped(<reason>)}`. `pending` must never resolve to `PASS`.
+- When a UI surface is in scope, `Overall: PASS` additionally requires
+  `Agent Visual Check: pass`. In `autonomous` mode that line carries the GUI
+  quality bar on its own, so a missing or failing Agent Visual Check is
+  `Overall: FAIL` even though `User Verification Result` is
+  `n/a (autonomous)`.
 - Every acceptance boundary in scope must map to either a reachable manual
   checkbox or an Automated-only Evidence item that names the exact command and
   test. An Automated-only Evidence item must match a `PASS` entry under
@@ -231,11 +286,21 @@ project-specific specialization, see `references/surface-taxonomy.md`.
 | Skill asset / agent config | **Recommended** | Describe the trigger phrase or scenario that should activate the modified skill / agent, plus the expected effect. |
 | Docs / config-only (markdownlint clean) | **Skipped(docs-only)** | Automated checks are sufficient. |
 
+The `User Check` column applies to `interactive` launches. In `autonomous`
+mode every row collapses to `waived(autonomous launch)`; a **Required** row
+means the Agent Visual Check is mandatory instead, not that a human is
+summoned.
+
 ## User Verification Handoff (post-Executed)
 
+This phase runs in `interactive` launch mode only. In `autonomous` mode, skip
+straight to recording `User Verification Result: n/a (autonomous)` plus the
+`Agent Visual Check:` line and finalize `Overall` — do not execute any step
+below, and in particular do not call the question tool in step 5.
+
 When `Overall` would otherwise be `PASS` (every `Executed` entry passed) and
-`--mode full` or `--mode pre-pr` is active and `--skip-user-check` was not
-supplied:
+the launch mode is `interactive` and `--mode full` or `--mode pre-pr` is
+active and `--skip-user-check` was not supplied:
 
 1. Compute the `User Verification` block:
    - `Status: required` if any changed surface is marked Required above.
@@ -312,7 +377,52 @@ supplied:
      skipped(<reason>)`.
 
 If no selection UI exists in the current runtime, fall back to plain-text
-prompting but keep the same three-option discipline.
+prompting but keep the same three-option discipline. An autonomous session is
+not a runtime without a selection UI — it is a runtime where asking parks the
+Issue, so it never reaches this step at all.
+
+## Heavy verification serialization (Issue #3868 AC-30 / Issue #3913)
+
+Heavy commands — `cargo test` (focused or full), `cargo clippy`,
+`cargo build`, coverage, headed Playwright, and `verify.run` — contend for
+host CPU with every other agent worktree. Serialize every one of them
+through JSON operation `verify.lease.acquire` (SPEC #3576); a raw `cargo`
+started without the lease is exactly the parallel run that saturates the
+host (Issue #3913). A contended acquire answers immediately with the
+current holder instead of queueing, so the wait loop is yours:
+
+1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
+   success run the matrix, then `verify.lease.release` with the lease id.
+2. On refusal, declare the wait once with JSON operation
+   `issue.monitor.wait` (`params.reason`: `waiting for verification lease`,
+   `params.resume_condition`: `verify.lease.acquire is granted`) so stuck
+   detection skips your Issue instead of charging an attempt (Issue #3844),
+   then wait 3 minutes and retry. Record the holder for humans with JSON
+   operation `workspace.update`, `current_focus` set to
+   `waiting for verification lease (attempt N/15, holder: <holder>)`, when
+   the wait starts and whenever the holder changes — that is state, not a
+   liveness signal, so do not run it just to look alive. Clear the
+   declaration (`issue.monitor.wait` with `params.clear:true`) the moment
+   the lease is granted.
+3. Stop after 15 attempts (about 45 minutes). Post `kind:"blocked"` to the
+   Board mentioning the PM with the holder from `verify.lease.status` and
+   the host-wide heavy process list, and wait for the PM's arbitration.
+   Never run the heavy matrix without the lease, and never go idle at the
+   prompt without the Board post — an idle agent with a stale
+   `last_activity_at` is terminated as stuck.
+
+`verify.run` admits itself (Issue #3913): a lease this worktree already
+holds is honored without waiting; otherwise it claims the lease
+in-process, then waits for `cargo` / `rustc` / `clippy-driver` / test
+binaries of other worktrees of the same repository to drain, bounded by
+`params.max_wait_secs` (default 300, hard cap 1500 — below the Issue
+Monitor's stuck timeout). While it waits, `verify.lease.status` lists it
+under `pending` and it posts one Board `status` entry. Its own wait is
+shorter than the Issue Monitor's stuck timeout, so it needs no
+declaration. A `deferred` answer means the budget ran out without a
+record: treat it as one refused attempt of the loop above and rerun
+`verify.run` — the rerun is a fresh tool call, and if the host stays busy
+the same `issue.monitor.wait` declaration covers the retries.
 
 ## Stop Conditions
 
@@ -375,7 +485,8 @@ exists, stop with `gwtd not found`.
 On `Overall: PASS`, the caller proceeds:
 
 - `gwt-build-spec` Phase 3 → Phase 4 (PR Flow via `gwt-manage-pr`), provided
-  `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
+  `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
+  skipped(<reason>)}`.
 - `gwt-manage-pr` → PR create / update, provided the same User Verification
   Result gate is satisfied.
 - Manual invocation → return the evidence bundle to the user.

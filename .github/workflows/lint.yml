@@ -62,6 +62,22 @@ jobs:
       - name: Validate SKILL.md frontmatter
         run: bash scripts/validate-skill-frontmatter.sh
 
+  lint-windows:
+    name: Clippy (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-windows
+        continue-on-error: true
+      - name: Run Windows Clippy
+        run: cargo clippy -p gwt -p gwt-core --all-targets --all-features -- -D warnings
+        timeout-minutes: 30
+
   commitlint:
     name: Commit Message Lint
     runs-on: ubuntu-latest

@@ -40,8 +40,9 @@ pub use hooks::{
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
-    hermes_is_configured_global, hermes_provider_choices, hermes_provider_choices_global,
-    hermes_source_home, opencode_is_configured, opencode_is_configured_global,
+    hermes_is_configured_global, hermes_launch_choices, hermes_launch_choices_global,
+    hermes_provider_choices, hermes_source_home, opencode_is_configured,
+    opencode_is_configured_global, HermesLaunchChoices,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
@@ -740,6 +741,21 @@ mod tests {
                 issue_skill.contains("- [ ] AC-1:"),
                 "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
             );
+            // Issue #3930 AC-1: the readiness format is spelled out where
+            // Issues are authored — every heading the classifier scans, the
+            // one it does not, and the un-prefixed checkbox fallback.
+            for phrase in [
+                "`## Acceptance Criteria`, `## 受け入れ基準`,\n    `## 受け入れ条件`",
+                "`## 成功基準` is not scanned",
+                "numbered by position",
+                "Do not mix the two styles",
+                "body or comment",
+            ] {
+                assert!(
+                    issue_skill.contains(phrase),
+                    "expected the readiness format note {phrase:?} in: {relative}"
+                );
+            }
             assert!(
                 issue_skill.contains("\"labels\":[\"auto-merge\"]"),
                 "expected the auto-merge label applied by default at issue.create: {relative}"
@@ -902,6 +918,14 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
+                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
+                // the host-wide lease, and verify.run's own admission is
+                // documented where the loop is defined.
+                "verify.lease.acquire",
+                "verify.lease.release",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -912,6 +936,30 @@ mod tests {
                 !execute_skill.contains("adopt is also the repair path"),
                 "{relative} must not direct integrity-failed records to adopt"
             );
+        }
+
+        // Issue #3913 AC-2: the verification skill's serialization section
+        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let verify_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "## Heavy verification serialization",
+                "`cargo test`",
+                "`cargo clippy`",
+                "verify.lease.acquire",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
+            ] {
+                assert!(
+                    verify_skill.contains(required),
+                    "expected gwt-verify serialization guidance in {relative}: {required}"
+                );
+            }
         }
 
         let execute_command =
@@ -1608,6 +1656,7 @@ mod tests {
                     && content.contains("\"operation\":\"issue.monitor.config.set\"")
                     && content.contains("enabled=true")
                     && content.contains("autonomous_mode=true")
+                    && content.contains("including the registered PM")
                     && content.contains("next scan")
                     && content.contains("params.targets")
                     && content.contains("handoff")
@@ -1623,6 +1672,11 @@ mod tests {
                     && !content.contains("<pane-id> <message>")
                     && !content.contains("broadcast <message>"),
                 "unexpected bare pane or direct communication contract in {relative}"
+            );
+            assert!(
+                !content.contains("one exception is the project's resident PM")
+                    && !content.contains("caller_is_registered_pm"),
+                "obsolete PM ON exception remains in {relative}"
             );
         }
 
@@ -2273,6 +2327,90 @@ mod tests {
                     && content.contains("rejected")
                     && content.contains("pending"),
                 "{relative} must enumerate User Verification Result states (pending/confirmed/rejected)"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issue Monitor)
+    /// launch must never wait for a human to look at a screen, and the agent's
+    /// own headed browser-check must be recorded as its own evidence line
+    /// instead of being laundered into the user's verification result. Manual
+    /// launches keep the existing handoff.
+    #[test]
+    fn gwt_verify_waives_user_verification_for_autonomous_launches() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                // Launch mode is detected from the launcher's own environment,
+                // not from the agent's judgement.
+                "GWT_AUTONOMOUS_EXECUTION",
+                "Launch mode",
+                // The recorded value for an autonomous run.
+                "n/a (autonomous)",
+                // The automated substitute that carries the GUI quality bar.
+                "Agent Visual Check",
+                "dark",
+                "light",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document the autonomous verification waiver: {required}"
+                );
+            }
+            assert!(
+                content.contains("agent's own")
+                    || content.contains("never a User Verification Result"),
+                "{relative} must separate the agent's own browser-check from the user's result"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A1: the callers that gate delivery must accept the
+    /// autonomous value, otherwise the waiver stops at gwt-verify.
+    #[test]
+    fn delivery_gates_accept_the_autonomous_user_verification_value() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+            ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-build-spec/references/completion-gate.md",
+            ".codex/skills/gwt-build-spec/references/completion-gate.md",
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("n/a (autonomous)"),
+                "{relative} must accept `User Verification Result: n/a (autonomous)` (Issue #4001 AC-A1)"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A5: the repository's own Ready PR rules must agree with
+    /// the distributed skills, or agents get contradictory instructions.
+    #[test]
+    fn agents_md_waives_user_verification_for_autonomous_launches() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in ["n/a (autonomous)", "Agent Visual Check", "自動実行"] {
+            assert!(
+                agents.contains(required),
+                "AGENTS.md must document the autonomous verification waiver: {required}"
             );
         }
     }

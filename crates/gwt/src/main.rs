@@ -77,7 +77,7 @@ pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
     OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress,
+    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -253,10 +253,10 @@ fn dispatch_project_index_status_check_with(
     let Some(project_root) = project_root else {
         proxy.send(UserEvent::ProjectIndexStatus {
             project_root: String::new(),
-            status: gwt::ProjectIndexStatusView::new(
+            status: Box::new(gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 "No current directory",
-            ),
+            )),
         });
         return None;
     };
@@ -778,6 +778,43 @@ impl WorkspaceProjectionWatcherRegistry {
     }
 }
 
+fn load_workspace_projection_user_event(project_root: &Path) -> Option<UserEvent> {
+    match gwt_core::workspace_projection::load_workspace_projection(project_root) {
+        Ok(Some(mut projection)) => {
+            // This helper runs on the watcher thread or a blocking runtime
+            // worker. Materialize the linked-Issue fallback here so the Tao
+            // handler never reopens issue-cache files while applying the
+            // already-loaded Workspace snapshot.
+            if let Some(issue) = projection.linked_issues.first_mut() {
+                let has_title = issue
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|title| !title.is_empty());
+                if !has_title {
+                    let cache_root =
+                        gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+                    issue.title =
+                        gwt::issue_cache::load_issue_title_from_cache(&cache_root, issue.number);
+                }
+            }
+            Some(UserEvent::WorkspaceProjectionLoaded {
+                project_root: project_root.to_path_buf(),
+                projection: Box::new(projection),
+            })
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                error = %error,
+                "workspace projection snapshot load failed"
+            );
+            None
+        }
+    }
+}
+
 fn spawn_workspace_projection_watcher(
     project_root: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
@@ -862,9 +899,9 @@ fn spawn_workspace_projection_watcher(
                             project_root = %project_root.display(),
                             "workspace projection watcher detected current.json change"
                         );
-                        let _ = proxy.send_event(UserEvent::WorkspaceProjectionChanged {
-                            project_root: project_root.clone(),
-                        });
+                        if let Some(event) = load_workspace_projection_user_event(&project_root) {
+                            let _ = proxy.send_event(event);
+                        }
                     }
                 }
                 WorkspaceProjectionWatcherMessage::Stop => break,
@@ -974,7 +1011,7 @@ fn spawn_board_daemon_subscriber(
     let proxy_for_callback = proxy;
     let project_root_for_callback = project_root;
     Some(
-        gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+        gwt::daemon_subscriber::DaemonSubscriber::spawn_materializer_with_resolver(
             resolver,
             daemon_subscriber_channels(),
             move |channel, payload| {
@@ -1017,9 +1054,7 @@ fn daemon_broadcast_user_event(
         });
     }
     if channel == "workspace" {
-        return Some(UserEvent::WorkspaceProjectionChanged {
-            project_root: project_root.to_path_buf(),
-        });
+        return load_workspace_projection_user_event(project_root);
     }
 
     match gwt::runtime_daemon_events::decode_runtime_daemon_event(channel, payload, current_pid)? {
@@ -1144,12 +1179,6 @@ pub(crate) struct DockerBundleMounts {
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
-#[derive(Debug, Clone)]
-enum ImprovementActionOutcome {
-    Success(String),
-    Error(String),
-}
-
 #[cfg_attr(
     windows,
     allow(
@@ -1229,6 +1258,11 @@ enum UserEvent {
     RuntimeApprovalResolutionCancelled {
         id: String,
     },
+    /// Issue #3702: the fast-path just submitted or cleared a composer that
+    /// had unsent keystrokes. Deliver one coalesced PM wake if one was held.
+    FlushPendingPmWake {
+        id: String,
+    },
     RuntimeApprovalSettle {
         id: String,
         token: u64,
@@ -1301,6 +1335,19 @@ enum UserEvent {
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
+    WorkspaceProjectionLoaded {
+        project_root: PathBuf,
+        projection: Box<gwt_core::workspace_projection::WorkspaceProjection>,
+    },
+    WindowCloseFinalized {
+        window_id: String,
+        project_root: Option<PathBuf>,
+        closing_session_id: Option<String>,
+        pm_close: bool,
+        pm_deregistered: bool,
+        pm_status: Option<BackendEvent>,
+        monitor_result: WindowCloseMonitorResult,
+    },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
@@ -1330,12 +1377,30 @@ enum UserEvent {
     /// default); daemon supervision is a liveness check that must not inherit
     /// it, or a crashed daemon would leave the control lane dead for minutes.
     RuntimeDaemonEnsureTick,
+    /// Issue #3927 (SPEC #3340 FR-045): observer tick for runtime-owned
+    /// terminal convergence of Issue-linked Agent windows. Its own short
+    /// cadence: the scan poll interval (minutes) is far coarser than the
+    /// 60-second close grace it has to honour.
+    TerminalConvergenceTick,
+    /// Typed observations from the terminal convergence worker. Grace is
+    /// read from Agent settings off-thread and carried with them.
+    TerminalConvergenceObserved {
+        grace: std::time::Duration,
+        observations: Vec<app_runtime::terminal_convergence::TerminalWindowObservation>,
+    },
     IssueMonitorScheduledScanComplete {
         project_root: PathBuf,
         prefs_path: PathBuf,
         now: String,
         outcome: Result<ScheduledIssueMonitorScanOutcome, String>,
+        /// Materialized worker failures from vanished-window exact release.
+        /// Tao turns these strings into toasts without entering prefs or
+        /// daemon I/O.
+        vanished_window_failures: Vec<String>,
     },
+    /// Completion of an off-event-loop physical answer submit to an exact
+    /// live pane. Durable delivery acknowledgment begins only on this event.
+    IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -1379,7 +1444,7 @@ enum UserEvent {
     },
     ProjectIndexStatus {
         project_root: String,
-        status: gwt::ProjectIndexStatusView,
+        status: Box<gwt::ProjectIndexStatusView>,
     },
     LaunchComplete {
         window_id: String,
@@ -1396,18 +1461,6 @@ enum UserEvent {
         agent: gwt_agent::BuiltinAgentId,
         generation: u64,
         event: BackendEvent,
-    },
-    ImprovementActionComplete {
-        project_root: PathBuf,
-        client_id: ClientId,
-        action: String,
-        id: String,
-        outcome: ImprovementActionOutcome,
-    },
-    ImprovementCandidatesLoaded {
-        project_root: PathBuf,
-        epoch: u64,
-        result: Result<Vec<serde_json::Value>, String>,
     },
     /// #2995: a disk-fresh session set loaded off-thread by the branch load.
     /// Applied to the Launch Wizard cache on the main thread so branch Resume
@@ -1702,6 +1755,9 @@ mod tests {
         assert!(channels.iter().any(|channel| channel == "workspace"));
         assert!(channels
             .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL));
+        assert!(channels
+            .iter()
             .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL));
         assert!(channels
             .iter()
@@ -1712,6 +1768,49 @@ mod tests {
         assert!(channels.iter().any(|channel| {
             channel == gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL
         }));
+    }
+
+    #[test]
+    fn workspace_projection_event_carries_the_snapshot_loaded_off_the_event_loop() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+        projection.title = "snapshot from watcher thread".to_string();
+        projection
+            .linked_issues
+            .push(gwt_core::workspace_projection::WorkspaceIssueLink {
+                number: 3783,
+                title: None,
+                url: None,
+            });
+        let issue_cache_root =
+            gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
+        fs::create_dir_all(issue_cache_root.join("3783")).expect("create issue cache entry");
+        fs::write(
+            issue_cache_root.join("3783/meta.json"),
+            serde_json::json!({ "title": "Materialized outside Tao" }).to_string(),
+        )
+        .expect("write issue cache title");
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save projection");
+
+        match super::load_workspace_projection_user_event(&project_root) {
+            Some(UserEvent::WorkspaceProjectionLoaded {
+                project_root: actual_root,
+                projection: actual_projection,
+            }) => {
+                assert_eq!(actual_root, project_root);
+                assert_eq!(actual_projection.title, "snapshot from watcher thread");
+                assert_eq!(
+                    actual_projection.linked_issues[0].title.as_deref(),
+                    Some("Materialized outside Tao")
+                );
+            }
+            other => panic!("unexpected workspace projection event: {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -1843,6 +1942,10 @@ mod tests {
             launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            quota_hold: None,
+            launch_profile_candidates: Vec::new(),
+            provider_quota_holds: Vec::new(),
+            usage_threshold_percent: 80,
         };
         let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "status",
@@ -2533,10 +2636,10 @@ mod tests {
                     Some(project_root.clone());
                 proxy.send(UserEvent::ProjectIndexStatus {
                     project_root: project_root.display().to_string(),
-                    status: gwt::ProjectIndexStatusView::new(
+                    status: Box::new(gwt::ProjectIndexStatusView::new(
                         gwt::ProjectIndexStatusState::Ready,
                         "bootstrap status",
-                    ),
+                    )),
                 });
                 crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
             },
@@ -3018,6 +3121,7 @@ mod tests {
             window_details: HashMap::new(),
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
+            window_lifecycle_generations: Arc::new(Mutex::new(HashMap::new())),
             board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
@@ -3030,6 +3134,8 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_fallback_commit_timeout:
+                crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
             issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
@@ -3043,12 +3149,17 @@ mod tests {
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
+            pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            terminal_close_candidates: HashMap::new(),
+            terminal_convergence_scan_in_flight: false,
+            terminal_close_grace: std::time::Duration::from_secs(60),
             work_merged_branches: HashMap::new(),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
@@ -3093,8 +3204,6 @@ mod tests {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
-            improvement_refresh_epoch: 0,
-            improvement_latest_refresh_epochs: HashMap::new(),
             agent_backend_probe_generation: 0,
             agent_backend_latest_probe_generations: HashMap::new(),
         };
@@ -3315,35 +3424,9 @@ mod tests {
             "Repo",
             repo.clone(),
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree, WindowPreset::Improvement],
+            &[WindowPreset::FileTree],
         );
-        fs::create_dir_all(repo.join(".gwt/improvements")).expect("create improvement dir");
-        fs::write(
-            repo.join(".gwt/improvements/candidates.json"),
-            serde_json::json!({
-                "candidates": [{
-                    "id": "impr-sync",
-                    "created_at": "2026-06-23T00:00:00Z",
-                    "updated_at": "2026-06-23T00:00:00Z",
-                    "source": "agent-failure",
-                    "target_artifact": "skill",
-                    "classification": "gwt-caused",
-                    "confidence": "high",
-                    "state": "pending",
-                    "dedupe_key": "skill:sync",
-                    "occurrences": 1,
-                    "sanitized_summary": "Sync candidate",
-                    "sanitized_details": null,
-                    "evidence_digest": null,
-                    "local_evidence": [],
-                    "linked_issue": null,
-                    "dismissed_reason": null
-                }]
-            })
-            .to_string(),
-        )
-        .expect("write improvement candidates");
-        let (mut runtime, recorded_events) =
+        let (mut runtime, _recorded_events) =
             sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
         let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         runtime
@@ -3376,39 +3459,6 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
-        )));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event.event, BackendEvent::ImprovementCandidates { .. })));
-        wait_for_recorded_event(
-            "asynchronous improvement candidates",
-            &recorded_events,
-            |events| {
-                events
-                    .iter()
-                    .any(|event| matches!(event, UserEvent::ImprovementCandidatesLoaded { .. }))
-            },
-        );
-        let (project_root, epoch, result) = recorded_events
-            .lock()
-            .expect("event log")
-            .iter()
-            .find_map(|event| match event {
-                UserEvent::ImprovementCandidatesLoaded {
-                    project_root,
-                    epoch,
-                    result,
-                } => Some((project_root.clone(), *epoch, result.clone())),
-                _ => None,
-            })
-            .expect("asynchronous improvement snapshot");
-        let snapshot_events =
-            runtime.handle_improvement_candidates_loaded(project_root, epoch, result);
-        assert!(snapshot_events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ImprovementCandidates { candidates, .. }
-                if candidates.first().and_then(|candidate| candidate.get("id")).and_then(serde_json::Value::as_str)
-                    == Some("impr-sync")
         )));
     }
 
@@ -3791,7 +3841,6 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -4410,6 +4459,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    resource_policy: None,
                 },
                 "session-3".to_string(),
                 "feature/demo".to_string(),
@@ -4444,6 +4494,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             }),
         );
         assert!(matches!(
@@ -5528,6 +5579,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    resource_policy: None,
                 },
                 "session-1".to_string(),
                 "feature/demo".to_string(),
@@ -5571,6 +5623,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    resource_policy: None,
                 },
                 "session-2".to_string(),
                 "feature/demo".to_string(),
@@ -5605,6 +5658,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             }),
         );
         assert!(matches!(
@@ -5627,6 +5681,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             }),
         );
         assert!(matches!(
@@ -5977,7 +6032,13 @@ mod tests {
         let ok = crate::probe_host_package_runner_with_timeout(
             command,
             args,
-            &HashMap::new(),
+            // The "runner" here is a shell fixture, not the host package
+            // runner, so the Issue #3972 guard must let it through — otherwise
+            // this asserts the refusal instead of the timeout it is about.
+            &HashMap::from([(
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            )]),
             &[],
             None,
             Duration::from_millis(100),
@@ -8364,6 +8425,26 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start the runtime daemon supervision thread");
         }
     }
+    // Issue #3927 (SPEC #3340 FR-045): runtime-owned terminal convergence.
+    // The observer needs a cadence finer than the scan poll so a settled
+    // window closes within one tick after its 60-second grace.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        if let Err(error) = std::thread::Builder::new()
+            .name("terminal-convergence-tick".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(app_runtime::terminal_convergence::TERMINAL_CONVERGENCE_TICK);
+                if tick_proxy
+                    .send_event(UserEvent::TerminalConvergenceTick)
+                    .is_err()
+                {
+                    break;
+                }
+            })
+        {
+            tracing::error!(%error, "failed to start the terminal convergence tick thread");
+        }
+    }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
@@ -8738,6 +8819,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
                 app.cancel_runtime_approval_resolution(&id);
             }
+            Event::UserEvent(UserEvent::FlushPendingPmWake { id }) => {
+                app.flush_pending_pm_wake(&id);
+            }
             Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
                 clients.dispatch(app.handle_runtime_approval_settle(&id, token));
             }
@@ -8819,8 +8903,39 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
-                let events = app.handle_workspace_projection_changed_events(&project_root);
+                let apply_proxy = proxy.clone();
+                drop(runtime.handle().spawn_blocking(move || {
+                    if let Some(event) = load_workspace_projection_user_event(&project_root) {
+                        let _ = apply_proxy.send_event(event);
+                    }
+                }));
+            }
+            Event::UserEvent(UserEvent::WorkspaceProjectionLoaded {
+                project_root,
+                projection,
+            }) => {
+                let events =
+                    app.handle_workspace_projection_changed_events(&project_root, &projection);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WindowCloseFinalized {
+                window_id,
+                project_root,
+                closing_session_id,
+                pm_close,
+                pm_deregistered,
+                pm_status,
+                monitor_result,
+            }) => {
+                clients.dispatch(app.handle_window_close_finalized(
+                    &window_id,
+                    project_root.as_deref(),
+                    closing_session_id.as_deref(),
+                    pm_close,
+                    pm_deregistered,
+                    pm_status,
+                    monitor_result,
+                ));
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let events = app.handle_runtime_hook_event(event);
@@ -8853,18 +8968,40 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
+            Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
+                let events = app.terminal_convergence_tick_events();
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::TerminalConvergenceObserved {
+                grace,
+                observations,
+            }) => {
+                let events = app.terminal_convergence_observed_events(grace, observations);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,
                 prefs_path,
                 now,
                 outcome,
+                vanished_window_failures,
             }) => {
-                let events = app.issue_monitor_scheduled_scan_complete_events(
+                let mut events = vanished_window_failures
+                    .into_iter()
+                    .map(|message| {
+                        OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                            level: "error".to_string(),
+                            message,
+                            issue_number: None,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                events.extend(app.issue_monitor_scheduled_scan_complete_events(
                     &project_root,
                     &prefs_path,
                     &now,
                     outcome,
-                );
+                ));
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
@@ -8962,6 +9099,9 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {
+                clients.dispatch(app.handle_issue_monitor_answer_delivery_complete(delivery));
+            }
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
                 let events = app.handle_shell_launch_complete(window_id, *result);
                 clients.dispatch(events);
@@ -8981,32 +9121,6 @@ fn main() -> std::io::Result<()> {
             }) => {
                 clients.dispatch(app.handle_agent_backend_connection_probe_complete(
                     client_id, agent, generation, event,
-                ));
-            }
-            Event::UserEvent(UserEvent::ImprovementActionComplete {
-                project_root,
-                client_id,
-                action,
-                id,
-                outcome,
-            }) => {
-                clients.dispatch(app.handle_improvement_action_complete(
-                    &project_root,
-                    &client_id,
-                    &action,
-                    &id,
-                    outcome,
-                ));
-            }
-            Event::UserEvent(UserEvent::ImprovementCandidatesLoaded {
-                project_root,
-                epoch,
-                result,
-            }) => {
-                clients.dispatch(app.handle_improvement_candidates_loaded(
-                    project_root,
-                    epoch,
-                    result,
                 ));
             }
             Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {

@@ -158,6 +158,11 @@ impl PendingPane {
     pub fn abort(self) -> Result<(), TerminalError> {
         self.pty.abort()
     }
+
+    /// Apply a resource policy to the gated tree before [`Self::release`].
+    pub fn apply_policy(&self, policy: crate::pty::ProcessPolicy) -> Result<(), TerminalError> {
+        self.pty.apply_policy(policy)
+    }
 }
 
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
@@ -412,6 +417,11 @@ impl Pane {
     /// Write input to the PTY.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
         self.pty.write_input(data)
+    }
+
+    /// Issue #3702: the TUI composer still holds unsent keystrokes.
+    pub fn has_unsent_user_input(&self) -> bool {
+        self.pty.has_unsent_user_input()
     }
 
     /// Resize the pane (PTY + vt100 parser).

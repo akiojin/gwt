@@ -14,7 +14,10 @@ pub mod settings;
 pub mod usage_config;
 pub mod voice_config;
 
-pub use agent_config::AgentConfig;
+pub use agent_config::{
+    AgentConfig, AgentProcessPriority, AgentResourceConfig, AgentResourceConfigError,
+    AgentResourcePreset,
+};
 pub use ai_settings::AISettings;
 pub use board_config::{
     BoardConfig, BoardProviderKind, ProjectBoardConfig, SlackConfig, TeamsConfig,
@@ -25,6 +28,6 @@ pub use locale::{
     detect_user_locale, detect_user_locale_from, detect_user_locale_from_env_and_system,
 };
 pub use profile::{Profile, ProfilesConfig};
-pub use settings::{ServerConfig, Settings};
+pub use settings::{PerfBudgetOverrides, PerfConfig, ServerConfig, Settings};
 pub use usage_config::UsageConfig;
 pub use voice_config::VoiceConfig;

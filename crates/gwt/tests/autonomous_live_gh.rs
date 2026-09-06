@@ -132,14 +132,19 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     let issues = [auto_issue()];
 
     // Full pass → the real merge_pr_auto executes against the (mock) gh
-    // subprocess → layer-4 (reviewed == headRefOid) holds → completion.
+    // subprocess → layer-4 (reviewed == headRefOid) holds → delivery completion.
     let _ = fs::remove_file(&merge_log);
     let mut monitor = reviewed_monitor();
 
     // Tick 1: Reviewing → real fetchers (mock gh) → real gate → durable arm
     // proposal. The scan itself has no authority to invoke the remote mutation.
-    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
-        .expect("gate scan succeeds");
+    let degradations =
+        try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+            .expect("gate scan succeeds");
+    assert!(
+        degradations.is_empty(),
+        "every readback must actually succeed here: {degradations:?}"
+    );
     assert_eq!(
         monitor.autonomous_record(42).map(|r| r.phase),
         Some(AutonomousPhase::Reviewing),
@@ -195,16 +200,28 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
         "the real arm adapter invoked `gh pr merge --auto` (log={log:?})",
     );
 
-    // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed ⇒ done.
-    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
-        .expect("delivery scan succeeds");
+    // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed
+    // completes the delivery. The ordinary Issue is still Open, so it returns
+    // to the queue in a fresh session instead of becoming terminal.
+    let degradations =
+        try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+            .expect("delivery scan succeeds");
+    assert!(
+        degradations.is_empty(),
+        "every readback must actually succeed here: {degradations:?}"
+    );
     assert!(
         monitor.autonomous_record(42).is_none(),
-        "merged head (headRefOid) == reviewed_sha ⇒ record cleared (completion)",
+        "merged head (headRefOid) == reviewed_sha ⇒ delivery record cleared",
     );
     assert_eq!(
         monitor.inbox_item(42).map(|i| i.state),
-        Some(MonitorInboxState::Merged),
+        Some(MonitorInboxState::Queued),
+    );
+    assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    assert_eq!(
+        monitor.prefs().queued_launch_session_strategies.get(&42),
+        Some(&gwt::IssueMonitorLaunchSessionStrategy::FreshRequired),
     );
 
     cleanup(&tmp, &orig_path);

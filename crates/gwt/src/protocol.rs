@@ -208,6 +208,70 @@ pub enum ContinueWorkOutcomeKind {
     Failed,
 }
 
+/// SPEC #1921 Phase 86 (#3813): wire shape of the agent process-tree
+/// resource policy shared by `update_system_settings` and the
+/// `system_settings` / `system_settings_updated` replies. Numeric `null`
+/// means automatic mode; zero is rejected at the settings boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResourceSettings {
+    pub enabled: bool,
+    /// `automatic` / `gui-responsiveness` / `build-speed` / `custom`.
+    /// Older senders omit it, which keeps the automatic preset.
+    #[serde(default = "default_agent_resource_preset")]
+    pub preset: String,
+    /// `normal` / `below-normal` / `idle` (Custom preset).
+    pub priority: String,
+    #[serde(default)]
+    pub cpu_limit_percent: Option<u8>,
+    /// Build parallelism per agent (Custom preset).
+    #[serde(default)]
+    pub build_jobs: Option<u32>,
+}
+
+fn default_agent_resource_preset() -> String {
+    gwt_config::AgentResourcePreset::Automatic
+        .as_str()
+        .to_string()
+}
+
+impl AgentResourceSettings {
+    pub fn from_config(config: &gwt_config::AgentResourceConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            preset: config.preset.as_str().to_string(),
+            priority: config.priority.as_str().to_string(),
+            cpu_limit_percent: config.cpu_limit_percent,
+            build_jobs: config.build_jobs,
+        }
+    }
+
+    /// Convert to the persisted config, rejecting unknown preset / priority
+    /// names. Range validation of the numeric fields happens in
+    /// [`gwt_config::AgentResourceConfig::validate`].
+    pub fn to_config(&self) -> Result<gwt_config::AgentResourceConfig, String> {
+        let preset = gwt_config::AgentResourcePreset::parse(&self.preset).ok_or_else(|| {
+            format!(
+                "invalid agent resource preset `{}`: expected `automatic`, `gui-responsiveness`, `build-speed`, or `custom`",
+                self.preset
+            )
+        })?;
+        let priority =
+            gwt_config::AgentProcessPriority::parse(&self.priority).ok_or_else(|| {
+                format!(
+                "invalid agent process priority `{}`: expected `normal`, `below-normal`, or `idle`",
+                self.priority
+            )
+            })?;
+        Ok(gwt_config::AgentResourceConfig {
+            enabled: self.enabled,
+            preset,
+            priority,
+            cpu_limit_percent: self.cpu_limit_percent,
+            build_jobs: self.build_jobs,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -918,6 +982,10 @@ pub enum FrontendEvent {
         /// `None` leaves the persisted value unchanged.
         #[serde(default)]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): complete agent process-tree resource
+        /// policy. `None` leaves the persisted policy unchanged.
+        #[serde(default)]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -976,24 +1044,6 @@ pub enum FrontendEvent {
     CloseWork {
         work_id: String,
         close_kind: String,
-    },
-    ImprovementPromoteIssue {
-        id: String,
-    },
-    ImprovementResolve {
-        id: String,
-        #[serde(default)]
-        expected_resolver_revision: Option<String>,
-    },
-    ImprovementSelectOwner {
-        id: String,
-        owner_number: u64,
-        resolver_revision: String,
-    },
-    ImprovementDismiss {
-        id: String,
-        #[serde(default)]
-        reason: Option<String>,
     },
 }
 
@@ -1609,24 +1659,14 @@ pub enum BackendEvent {
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
     },
+    /// Issue #3783: bounded lifecycle/watcher update. The browser replaces
+    /// live membership and scalar fields while preserving its existing Work,
+    /// journal, and per-agent Session history for the same projection id.
+    ActiveWorkProjectionPatch {
+        projection: Box<ActiveWorkProjectionView>,
+    },
     WindowList {
         windows: Vec<PersistedWindowState>,
-    },
-    ImprovementCandidates {
-        project_root: String,
-        candidates: Vec<serde_json::Value>,
-    },
-    ImprovementActionResult {
-        project_root: String,
-        id: String,
-        action: String,
-        message: Option<String>,
-    },
-    ImprovementActionError {
-        project_root: Option<String>,
-        id: Option<String>,
-        action: String,
-        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -1646,6 +1686,15 @@ pub enum BackendEvent {
     TerminalSnapshot {
         id: String,
         data_base64: String,
+    },
+    /// Origin-client completion receipt for one authenticated pane snapshot
+    /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
+    /// sets explain every authorized pane that produced no frame.
+    PaneSyncComplete {
+        empty_window_ids: Vec<String>,
+        busy_window_ids: Vec<String>,
+        unavailable_window_ids: Vec<String>,
+        failed_window_ids: Vec<String>,
     },
     TerminalStatus {
         id: String,
@@ -2060,7 +2109,7 @@ pub enum BackendEvent {
     },
     ProjectIndexStatus {
         project_root: String,
-        status: crate::ProjectIndexStatusView,
+        status: Box<crate::ProjectIndexStatusView>,
     },
     RuntimeHookEvent {
         event: RuntimeHookEvent,
@@ -2201,6 +2250,9 @@ pub enum BackendEvent {
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): authoritative agent resource policy.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC-2963: remote Board provider sign-in state, the editable provider
     /// configuration (non-secret), and an optional status message. The settings
@@ -2264,6 +2316,10 @@ pub enum BackendEvent {
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): persisted agent resource policy echoed
+        /// back so every open Settings window reconciles to the same values.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
@@ -2392,24 +2448,14 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
-        "window_list",
+        "active_work_projection_patch",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
-        "improvement_candidates",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::PreserveOrder,
-    ),
-    BackendEventPolicy::new(
-        "improvement_action_result",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "improvement_action_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
+        "window_list",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
         "provider_usage",
@@ -2433,6 +2479,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "terminal_snapshot",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "pane_sync_complete",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -2894,14 +2945,13 @@ impl BackendEvent {
         match self {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
+            BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
-            BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
-            BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
-            BackendEvent::ImprovementActionError { .. } => "improvement_action_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
@@ -3037,7 +3087,7 @@ pub enum KnowledgePhaseUpdateResult {
     /// Phase write-back succeeded. `fresh_entry` is the rebuilt cache
     /// entry (with the new labels / state / phase) so the optimistic
     /// Kanban card can be overwritten with authoritative data.
-    Ok { fresh_entry: KnowledgeListItem },
+    Ok { fresh_entry: Box<KnowledgeListItem> },
     /// Phase write-back failed. `message` is human-readable so the
     /// toast / log can show it directly; the frontend rolls back the
     /// optimistic UI from `state.dndSnapshot`.
@@ -3124,6 +3174,20 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #3755 AC-2: the final availability receipt is origin-client
+    /// state and must survive outbound pressure like the pane snapshot itself.
+    #[test]
+    fn pane_sync_completion_has_client_scoped_snapshot_policy() {
+        let policy =
+            backend_event_policy("pane_sync_complete").expect("pane_sync_complete delivery policy");
+
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,
@@ -3862,6 +3926,16 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false),
             "Work cleanup must default to local-only deletion"
+        );
+        let BackendEvent::ActiveWorkProjection { projection } = event else {
+            unreachable!("constructed full projection")
+        };
+        let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
+            .expect("serialize bounded active work projection patch");
+        assert_eq!(
+            patch.get("kind"),
+            Some(&Value::String("active_work_projection_patch".to_string())),
+            "bounded lifecycle updates need merge semantics on the frontend"
         );
     }
 

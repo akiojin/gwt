@@ -12,18 +12,25 @@
 //! never touches sqlite directly.
 
 use std::{
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{GwtError, Result},
+    index::view::{FileIndexGcPinDescriptor, WorktreeViewDescriptor, WorktreeViewHead},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
+
+pub use crate::index::view::FileIndexGcPinKind;
 
 // =====================================================================
 // reconcile_repo
@@ -124,6 +131,561 @@ pub fn remove_worktree_index(
         std::fs::remove_dir_all(&target)?;
     }
     Ok(())
+}
+
+// =====================================================================
+// Phase 71 reachability GC
+// =====================================================================
+
+const FILE_INDEX_V2_DIR: &str = "file-index-v2";
+const GC_LEASES_DIR: &str = "leases";
+const GC_LOCK_FILE: &str = ".lock";
+const GC_PIN_FILE: &str = "pin.json";
+const GC_ORPHAN_MARKER: &str = ".gc-orphaned.json";
+
+/// Deterministic inputs for one repository-scoped file-index v2 sweep.
+#[derive(Debug, Clone)]
+pub struct FileIndexGcOptions {
+    pub index_root: PathBuf,
+    pub repo_hash: RepoHash,
+    pub active_worktree_hashes: Vec<String>,
+    pub now_unix_nanos: u64,
+    pub artifact_ttl: Duration,
+    pub worktree_grace: Duration,
+}
+
+/// Observable outcome of a best-effort sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileIndexGcReport {
+    pub deleted: Vec<PathBuf>,
+    pub retry_pending: Vec<PathBuf>,
+}
+
+/// A cross-process liveness pin held while a reader, migration, or
+/// continuation needs immutable v2 artifacts.
+///
+/// `pin.json` is diagnostic/mark metadata. The sibling kernel-locked `.lock`
+/// file is the liveness source of truth, so process exit releases the pin even
+/// when its directory remains behind.
+pub struct FileIndexGcPin {
+    lock_file: Option<File>,
+    pin_dir: PathBuf,
+    setup_lock_path: PathBuf,
+}
+
+impl FileIndexGcPin {
+    pub fn acquire(
+        v2_root: &Path,
+        kind: FileIndexGcPinKind,
+        repo_hash: &str,
+        worktree_hash: Option<&str>,
+        protected_paths: Vec<PathBuf>,
+    ) -> Result<Self> {
+        let leases_root = v2_root.join(GC_LEASES_DIR);
+        fs::create_dir_all(&leases_root)?;
+        let setup_lock_path = leases_root.join(GC_LOCK_FILE);
+        let setup_lock = open_gc_lock(&setup_lock_path)?;
+        FileExt::lock_exclusive(&setup_lock).map_err(|error| {
+            GwtError::Other(format!(
+                "lock file-index GC lease registry {}: {error}",
+                setup_lock_path.display()
+            ))
+        })?;
+
+        let mut created_pin_dir = None;
+        let result = (|| {
+            let pin_id = uuid::Uuid::new_v4().to_string();
+            let pin_dir = leases_root.join(&pin_id);
+            fs::create_dir(&pin_dir)?;
+            created_pin_dir = Some(pin_dir.clone());
+            let lock_path = pin_dir.join(GC_LOCK_FILE);
+            let lock_file = open_gc_lock(&lock_path)?;
+            FileExt::lock_shared(&lock_file).map_err(|error| {
+                GwtError::Other(format!(
+                    "lock file-index GC pin {}: {error}",
+                    lock_path.display()
+                ))
+            })?;
+
+            let protected_paths = protected_paths
+                .iter()
+                .map(|path| relative_gc_path_to_wire(path))
+                .collect::<Result<Vec<_>>>()?;
+            let marker = FileIndexGcPinDescriptor::new(
+                pin_id,
+                kind,
+                repo_hash.to_string(),
+                worktree_hash.map(str::to_string),
+                protected_paths,
+                std::process::id(),
+                Utc::now().to_rfc3339(),
+            )
+            .map_err(|error| GwtError::Other(format!("create file-index GC pin: {error}")))?;
+            write_json_atomic(&pin_dir.join(GC_PIN_FILE), &marker)?;
+            Ok(Self {
+                lock_file: Some(lock_file),
+                pin_dir,
+                setup_lock_path: setup_lock_path.clone(),
+            })
+        })();
+
+        if result.is_err() {
+            if let Some(pin_dir) = created_pin_dir {
+                let _ = fs::remove_dir_all(pin_dir);
+            }
+        }
+        let _ = FileExt::unlock(&setup_lock);
+        result
+    }
+}
+
+impl Drop for FileIndexGcPin {
+    fn drop(&mut self) {
+        let setup_lock = open_gc_lock(&self.setup_lock_path).ok();
+        let setup_locked = setup_lock
+            .as_ref()
+            .is_some_and(|file| FileExt::lock_exclusive(file).is_ok());
+        if let Some(lock_file) = self.lock_file.take() {
+            let _ = FileExt::unlock(&lock_file);
+            drop(lock_file);
+        }
+        if setup_locked {
+            let _ = fs::remove_dir_all(&self.pin_dir);
+        }
+        if let Some(setup_lock) = setup_lock {
+            let _ = FileExt::unlock(&setup_lock);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorktreeGcGraceMarker {
+    schema_version: u32,
+    first_absent_unix_nanos: u64,
+}
+
+pub fn sweep_file_index_v2(options: &FileIndexGcOptions) -> Result<FileIndexGcReport> {
+    sweep_file_index_v2_with_remover(options, fs::remove_dir_all)
+}
+
+pub fn sweep_file_index_v2_with_remover<F>(
+    options: &FileIndexGcOptions,
+    remover: F,
+) -> Result<FileIndexGcReport>
+where
+    F: FnMut(PathBuf) -> io::Result<()>,
+{
+    sweep_file_index_v2_inner(options, remover)
+}
+
+fn sweep_file_index_v2_inner<F>(
+    options: &FileIndexGcOptions,
+    mut remover: F,
+) -> Result<FileIndexGcReport>
+where
+    F: FnMut(PathBuf) -> io::Result<()>,
+{
+    let v2_root = options
+        .index_root
+        .join(options.repo_hash.as_str())
+        .join(FILE_INDEX_V2_DIR);
+    if !v2_root.is_dir() {
+        return Ok(FileIndexGcReport::default());
+    }
+
+    let leases_root = v2_root.join(GC_LEASES_DIR);
+    fs::create_dir_all(&leases_root)?;
+    let setup_lock_path = leases_root.join(GC_LOCK_FILE);
+    let setup_lock = open_gc_lock(&setup_lock_path)?;
+    FileExt::lock_exclusive(&setup_lock).map_err(|error| {
+        GwtError::Other(format!(
+            "lock file-index GC lease registry {}: {error}",
+            setup_lock_path.display()
+        ))
+    })?;
+
+    let sweep_result = (|| {
+        let mut protected = HashSet::new();
+        let mut candidates = Vec::new();
+        collect_gc_pin_roots(
+            &v2_root,
+            options.repo_hash.as_str(),
+            &mut protected,
+            &mut candidates,
+        )?;
+        collect_worktree_roots(options, &v2_root, &mut protected, &mut candidates)?;
+        collect_expired_gc_artifacts(
+            &v2_root,
+            options.now_unix_nanos,
+            options.artifact_ttl,
+            &mut candidates,
+        )?;
+
+        candidates.sort_by(|left, right| {
+            left.components()
+                .count()
+                .cmp(&right.components().count())
+                .then_with(|| left.cmp(right))
+        });
+        candidates.dedup();
+
+        let mut report = FileIndexGcReport::default();
+        for candidate in candidates {
+            if !candidate.exists() || gc_paths_intersect(&candidate, &protected) {
+                continue;
+            }
+            match remover(candidate.clone()) {
+                Ok(()) => report.deleted.push(candidate),
+                Err(_) => report.retry_pending.push(candidate),
+            }
+        }
+        Ok(report)
+    })();
+
+    let _ = FileExt::unlock(&setup_lock);
+    sweep_result
+}
+
+fn open_gc_lock(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+}
+
+fn relative_gc_path_to_wire(path: &Path) -> Result<String> {
+    if path.is_absolute() {
+        return Err(GwtError::Other(format!(
+            "file-index GC pin path must be relative: {}",
+            path.display()
+        )));
+    }
+    let components = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| GwtError::Other("file-index GC pin path must be UTF-8".to_string())),
+            _ => Err(GwtError::Other(format!(
+                "file-index GC pin path is unsafe: {}",
+                path.display()
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if components.is_empty() {
+        return Err(GwtError::Other(
+            "file-index GC pin path must not be empty".to_string(),
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        GwtError::Other(format!(
+            "file-index GC path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("gc-json"),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|error| GwtError::Other(format!("serialize file-index GC JSON: {error}")))?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        sync_gc_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn sync_gc_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_gc_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn is_gc_lock_contended(error: &io::Error) -> bool {
+    crate::operation_deadline::is_lock_contended(error)
+}
+
+fn collect_gc_pin_roots(
+    v2_root: &Path,
+    expected_repo_hash: &str,
+    protected: &mut HashSet<PathBuf>,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let leases_root = v2_root.join(GC_LEASES_DIR);
+    let mut entries = fs::read_dir(&leases_root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if entry.file_name() == GC_LOCK_FILE || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let pin_dir = entry.path();
+        let lock_path = pin_dir.join(GC_LOCK_FILE);
+        let lock_file = open_gc_lock(&lock_path)?;
+        match FileExt::try_lock_exclusive(&lock_file) {
+            Ok(()) => {
+                let _ = FileExt::unlock(&lock_file);
+                drop(lock_file);
+                candidates.push(pin_dir);
+            }
+            Err(error) if is_gc_lock_contended(&error) => {
+                let marker_path = pin_dir.join(GC_PIN_FILE);
+                let marker_bytes = fs::read(&marker_path).map_err(|error| {
+                    GwtError::Other(format!(
+                        "read live file-index GC pin {}: {error}",
+                        marker_path.display()
+                    ))
+                })?;
+                let marker: FileIndexGcPinDescriptor = serde_json::from_slice(&marker_bytes)
+                    .map_err(|error| {
+                        GwtError::Other(format!(
+                            "invalid live file-index GC pin {}: {error}",
+                            marker_path.display()
+                        ))
+                    })?;
+                let directory_pin_id = entry.file_name().to_string_lossy().into_owned();
+                if marker.pin_id != directory_pin_id || marker.repo_hash != expected_repo_hash {
+                    return Err(GwtError::Other(format!(
+                        "file-index GC pin authority mismatch at {}",
+                        marker_path.display()
+                    )));
+                }
+                for relative in &marker.protected_paths {
+                    protected.insert(v2_root.join(relative));
+                }
+            }
+            Err(error) => {
+                return Err(GwtError::Other(format!(
+                    "probe file-index GC pin {}: {error}",
+                    lock_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_worktree_roots(
+    options: &FileIndexGcOptions,
+    v2_root: &Path,
+    protected: &mut HashSet<PathBuf>,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let worktrees_root = v2_root.join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Ok(());
+    }
+    let active = options
+        .active_worktree_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut entries = fs::read_dir(&worktrees_root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let worktree_root = entry.path();
+        let worktree_hash = entry.file_name().to_string_lossy().to_string();
+        let grace_marker_path = worktree_root.join(GC_ORPHAN_MARKER);
+        let retain_head_closure = if active.contains(worktree_hash.as_str()) {
+            if grace_marker_path.exists() {
+                fs::remove_file(&grace_marker_path)?;
+            }
+            true
+        } else {
+            let marker = if grace_marker_path.exists() {
+                let bytes = fs::read(&grace_marker_path)?;
+                let marker: WorktreeGcGraceMarker =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        GwtError::Other(format!(
+                            "invalid file-index worktree grace marker {}: {error}",
+                            grace_marker_path.display()
+                        ))
+                    })?;
+                if marker.schema_version != 1 {
+                    return Err(GwtError::Other(format!(
+                        "unsupported file-index worktree grace marker {}",
+                        grace_marker_path.display()
+                    )));
+                }
+                marker
+            } else {
+                let marker = WorktreeGcGraceMarker {
+                    schema_version: 1,
+                    first_absent_unix_nanos: options.now_unix_nanos,
+                };
+                write_json_atomic(&grace_marker_path, &marker)?;
+                marker
+            };
+            let elapsed = options
+                .now_unix_nanos
+                .saturating_sub(marker.first_absent_unix_nanos) as u128;
+            if elapsed > options.worktree_grace.as_nanos() {
+                candidates.push(worktree_root.clone());
+                false
+            } else {
+                true
+            }
+        };
+
+        if retain_head_closure {
+            collect_head_file_closure(
+                v2_root,
+                options.repo_hash.as_str(),
+                &worktree_hash,
+                &worktree_root.join("head.json"),
+                protected,
+            )?;
+            collect_head_file_closure(
+                v2_root,
+                options.repo_hash.as_str(),
+                &worktree_hash,
+                &worktree_root.join("head.previous.json"),
+                protected,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_head_file_closure(
+    v2_root: &Path,
+    expected_repo_hash: &str,
+    expected_worktree_hash: &str,
+    head_path: &Path,
+    protected: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    if !head_path.is_file() {
+        return Ok(());
+    }
+    let head_bytes = fs::read(head_path)?;
+    let head: WorktreeViewHead = serde_json::from_slice(&head_bytes).map_err(|error| {
+        GwtError::Other(format!(
+            "invalid file-index WorktreeView head {}: {error}",
+            head_path.display()
+        ))
+    })?;
+    let mut view_ids = vec![head.active_view_id];
+    if let Some(previous) = head.previous_view_id {
+        view_ids.push(previous);
+    }
+    for view_id in view_ids {
+        let view_dir = v2_root
+            .join("worktrees")
+            .join(expected_worktree_hash)
+            .join("views")
+            .join(&view_id);
+        let descriptor_path = view_dir.join("descriptor.json");
+        let descriptor_bytes = fs::read(&descriptor_path).map_err(|error| {
+            GwtError::Other(format!(
+                "read file-index WorktreeView descriptor {}: {error}",
+                descriptor_path.display()
+            ))
+        })?;
+        let descriptor: WorktreeViewDescriptor = serde_json::from_slice(&descriptor_bytes)
+            .map_err(|error| {
+                GwtError::Other(format!(
+                    "invalid file-index WorktreeView descriptor {}: {error}",
+                    descriptor_path.display()
+                ))
+            })?;
+        if descriptor.view_id != view_id
+            || descriptor.repo_hash != expected_repo_hash
+            || descriptor.worktree_hash != expected_worktree_hash
+        {
+            return Err(GwtError::Other(format!(
+                "file-index WorktreeView authority mismatch at {}",
+                descriptor_path.display()
+            )));
+        }
+        protected.insert(view_dir);
+        protected.insert(v2_root.join("bases").join(descriptor.base_generation_id));
+        protected.insert(
+            v2_root
+                .join("worktrees")
+                .join(expected_worktree_hash)
+                .join("overlays")
+                .join(descriptor.overlay_generation_id),
+        );
+    }
+    Ok(())
+}
+
+fn collect_expired_gc_artifacts(
+    root: &Path,
+    now_unix_nanos: u64,
+    ttl: Duration,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(created_at) = gc_artifact_created_at(&name) {
+            let elapsed = now_unix_nanos.saturating_sub(created_at) as u128;
+            if elapsed > ttl.as_nanos() {
+                candidates.push(path);
+                continue;
+            }
+        }
+        collect_expired_gc_artifacts(&path, now_unix_nanos, ttl, candidates)?;
+    }
+    Ok(())
+}
+
+fn gc_artifact_created_at(name: &str) -> Option<u64> {
+    if !name.starts_with('.') {
+        return None;
+    }
+    let (prefix_and_time, pid) = name.rsplit_once('-')?;
+    pid.parse::<u32>().ok()?;
+    let (prefix, created_at) = prefix_and_time.rsplit_once('-')?;
+    if !prefix.ends_with(".staging") && !prefix.ends_with(".quarantine") {
+        return None;
+    }
+    created_at.parse().ok()
+}
+
+fn gc_paths_intersect(candidate: &Path, protected: &HashSet<PathBuf>) -> bool {
+    protected
+        .iter()
+        .any(|root| candidate.starts_with(root) || root.starts_with(candidate))
 }
 
 // =====================================================================
@@ -490,6 +1052,11 @@ mod tests {
 
     use super::*;
     use crate::repo_hash::compute_repo_hash;
+
+    #[test]
+    fn gc_recognizes_the_platform_lock_contention_error() {
+        assert!(is_gc_lock_contended(&fs2::lock_contended_error()));
+    }
 
     #[derive(Default, Clone)]
     struct RecordingSpawner {
