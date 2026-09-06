@@ -871,6 +871,20 @@ mod tests {
         assert_eq!(did_you_mean("baord"), Some("board"));
     }
 
+    /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
+    /// and both of its target params, so an agent blocked on `gh run rerun`
+    /// can discover the sanctioned replacement from the help alone.
+    #[test]
+    fn actions_family_help_documents_rerun() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
     #[test]
     fn did_you_mean_rejects_unrelated_input() {
         assert_eq!(did_you_mean("frobnicate"), None);
