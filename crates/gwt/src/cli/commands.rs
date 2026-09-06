@@ -204,6 +204,12 @@ pub enum IssueCommand {
     MonitorQuotaHoldList {
         project_root: Option<std::path::PathBuf>,
     },
+    /// Issue #3883 AC-6: put the still-running agent windows back under slot
+    /// accounting. Additive only — no pane is closed and no slot is taken
+    /// away — so it is safe to run against a project mid-flight.
+    MonitorReconcile {
+        project_root: Option<std::path::PathBuf>,
+    },
     /// Issue #3923 AC-1: release one provider's quota hold on the operator's
     /// authority. The release is a durable fence, so a process that still
     /// holds the hold in memory cannot re-stamp it.

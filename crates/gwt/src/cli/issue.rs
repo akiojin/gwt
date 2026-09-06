@@ -253,6 +253,9 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorQuotaHoldList { project_root } => {
             run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
         }
+        IssueCommand::MonitorReconcile { project_root } => {
+            run_monitor_reconcile(env, project_root.as_deref(), out)?
+        }
         IssueCommand::MonitorQuotaHoldClear {
             project_root,
             provider,
@@ -736,6 +739,57 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
         &serde_json::json!({
             "provider_quota_holds": monitor.agent_status_at(&now).provider_quota_holds,
             "source": "durable_prefs",
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3883 AC-6: recover from "running but untracked" without touching a
+/// single running agent.
+///
+/// The recovery the incident needed was six live panes against three slots,
+/// where the fix could not be "close something": all six were working. So this
+/// only ever *adds* tracking back — it re-adopts the launches whose windows the
+/// canvas still shows, and never revokes, prunes, or closes anything. That also
+/// makes it safe without the daemon control lane: additive bindings and
+/// launches are union-merged by every cross-process rebase, so a daemon that
+/// owns the state absorbs this commit instead of racing it.
+///
+/// Judgement comes from the live canvas, exactly as `pane.list` reads it,
+/// because the durable snapshot disagreeing with the running windows is the
+/// condition being repaired.
+fn run_monitor_reconcile<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let live_window_ids = crate::cli::pane::live_window_ids(&project_root)
+        .map_err(|error| SpecOpsError::from(ApiError::Network(error)))?;
+    let (prefs, readopted) = crate::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let readopted = monitor.readopt_live_launch_bindings(&live_window_ids);
+        if !readopted.is_empty() {
+            *prefs = monitor.prefs();
+        }
+        readopted
+    })
+    .map_err(io_as_api_error)?;
+    let monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    out.push_str(
+        &serde_json::json!({
+            "readopted": readopted,
+            "active_launches": monitor.active_issue_numbers(),
+            "max_active": prefs.max_active_agents,
+            "live_windows": live_window_ids.len(),
+            "source": "live_canvas",
         })
         .to_string(),
     );
