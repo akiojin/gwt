@@ -128,8 +128,11 @@ pub const UNIX_SOCKET_PATH_CAPACITY: usize =
 #[cfg(unix)]
 pub const MAX_UNIX_SOCKET_PATH_LEN: usize = UNIX_SOCKET_PATH_CAPACITY - 1;
 
-/// Where the daemon's Unix socket ended up relative to its endpoint file.
-#[cfg(unix)]
+pub use crate::daemon_pipe_name::{windows_pipe_name_for, WINDOWS_PIPE_PREFIX};
+
+/// Where the daemon's socket ended up relative to its endpoint file. A
+/// Windows named pipe is always [`Self::Colocated`]: pipe names live in the
+/// pipe namespace and have no `sun_path` limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonSocketPlacement {
     /// Beside the endpoint metadata inside the project runtime root. This
@@ -141,12 +144,27 @@ pub enum DaemonSocketPlacement {
     Shortened,
 }
 
-/// A daemon socket location plus how it was chosen.
-#[cfg(unix)]
+/// A daemon socket location plus how it was chosen. On Windows `path` holds
+/// the named-pipe name (`\\.\pipe\gwtd-...`), which callers pass to the
+/// transport verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSocketPath {
     pub path: PathBuf,
     pub placement: DaemonSocketPlacement,
+}
+
+/// Resolve the named-pipe name for a daemon endpoint (Issue #3526).
+///
+/// The name is derived from the full endpoint path, so the same gwt home
+/// plus [`RuntimeScope`] always resolves to the same pipe while distinct
+/// scopes never share one — the Windows counterpart of the Unix socket
+/// contract below.
+#[cfg(windows)]
+pub fn resolve_daemon_socket_path(endpoint_path: &Path) -> Result<DaemonSocketPath> {
+    Ok(DaemonSocketPath {
+        path: PathBuf::from(windows_pipe_name_for(&endpoint_path.to_string_lossy())),
+        placement: DaemonSocketPlacement::Colocated,
+    })
 }
 
 #[cfg(unix)]
