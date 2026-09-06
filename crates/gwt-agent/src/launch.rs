@@ -2916,6 +2916,21 @@ mod tests {
         );
     }
 
+    /// SPEC-3864 FR-009 (AC-8): OpenClaw's distribution route is the vendor's
+    /// own npm package, so a `latest` launch resolves through the bunx/npx
+    /// package runner instead of falling back to a `openclaw` executable that
+    /// is not on PATH.
+    #[test]
+    fn resolve_runner_latest_uses_official_openclaw_package() {
+        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
+        assert_ne!(
+            runner.executable, "openclaw",
+            "a latest launch must not fall back to the direct command"
+        );
+        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
+        assert_eq!(spec_arg.map(String::as_str), Some("openclaw@latest"));
+    }
+
     #[test]
     fn build_grok_build_maps_launch_modes_and_permission_flag() {
         let normal = AgentLaunchBuilder::new(AgentId::GrokBuild).build();

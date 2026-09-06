@@ -1351,6 +1351,65 @@ mod tests {
         assert_eq!(agy.description.as_deref(), Some("Not installed"));
     }
 
+    fn uninstalled_openclaw_state() -> LaunchWizardState {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "openclaw".to_string(),
+            name: "OpenClaw".to_string(),
+            available: false,
+            installed_version: None,
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "openclaw".to_string(),
+        });
+        state
+    }
+
+    /// SPEC-3864 FR-009 (AC-8) / Scenario 2: OpenClaw is not on PATH, but its
+    /// npm route still offers `latest`. The wizard must present `latest`
+    /// (never `Installed`), skip the install affordance, and build a launch
+    /// config pinned to the `latest` route instead of refusing.
+    #[test]
+    fn uninstalled_npm_routed_agent_launches_through_latest() {
+        let state = uninstalled_openclaw_state();
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "openclaw");
+        assert!(view.show_version);
+        let version_values: Vec<&str> = view
+            .version_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+        assert!(
+            version_values.contains(&"latest"),
+            "latest must stay reachable without an installed executable: {version_values:?}"
+        );
+        assert!(
+            !version_values.contains(&"installed"),
+            "an unresolvable executable must not be offered as Installed: {version_values:?}"
+        );
+        assert_eq!(view.selected_version, "latest");
+        assert_eq!(
+            view.agent_setup, None,
+            "a runtime latest route means no install affordance is needed"
+        );
+
+        let config = state
+            .build_launch_config()
+            .expect("the latest route must launch without a local install");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::OpenClaw);
+        assert_eq!(config.tool_version.as_deref(), Some("latest"));
+    }
+
     /// SPEC-3864 Scenario 1: launching an agent with neither `Installed` nor
     /// `latest` is refused inside the wizard, so it never reaches
     /// `Launch failed before PTY started`.
