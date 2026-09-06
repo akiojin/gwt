@@ -5303,6 +5303,37 @@ exit 0
     /// decide its outcome (Issue #3641).
     const MARKER_WAIT_HANG_GUARD: Duration = Duration::from_secs(60);
 
+    /// Run `attempt` until the kernel stops refusing to execute the program.
+    ///
+    /// A fixture writes its fake `gh` moments before it runs it. Any sibling
+    /// test thread that forks inside that write window hands its child a
+    /// descriptor on the file, and the kernel refuses to execute a file that
+    /// any process still holds open for writing (`ETXTBSY`). The refusal
+    /// belongs to that fork window rather than to the invocation that raced it,
+    /// and it clears as soon as the forked child execs - so it is waited out
+    /// here instead of failing whichever test happened to be spawning
+    /// (Issue #4012).
+    fn execute_once_the_program_is_not_busy<T>(
+        what: &str,
+        mut attempt: impl FnMut() -> std::io::Result<T>,
+    ) -> T {
+        let started = Instant::now();
+        loop {
+            match attempt() {
+                Ok(value) => return value,
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    assert!(
+                        started.elapsed() < MARKER_WAIT_HANG_GUARD,
+                        "{what}: still refused as busy after {MARKER_WAIT_HANG_GUARD:?}; \
+                         a writer that outlives a fork window is a leak, not a race"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{what}: {error}"),
+            }
+        }
+    }
+
     async fn wait_for_path(path: &Path) -> bool {
         tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
             while !path.exists() {
@@ -5466,10 +5497,11 @@ exit 0
         /// Start an invocation that blocks until [`Self::release`] is called.
         fn spawn(&self, name: &str) -> BlockingFakeGhChild {
             let markers = self.markers(name);
-            let child = self
-                .command(&markers)
-                .spawn()
-                .unwrap_or_else(|error| panic!("spawn {name} fake gh: {error}"));
+            let mut command = self.command(&markers);
+            let child =
+                execute_once_the_program_is_not_busy(&format!("spawn {name} fake gh"), || {
+                    command.spawn()
+                });
             BlockingFakeGhChild::new(child, markers)
         }
 
@@ -5477,9 +5509,10 @@ exit 0
         /// because `block` mode waits for it before exiting.
         fn run(&self, name: &str) -> std::process::ExitStatus {
             let markers = self.markers(name);
-            self.command(&markers)
-                .status()
-                .unwrap_or_else(|error| panic!("run {name} fake gh: {error}"))
+            let mut command = self.command(&markers);
+            execute_once_the_program_is_not_busy(&format!("run {name} fake gh"), || {
+                command.status()
+            })
         }
 
         fn release(&self) {
@@ -5719,6 +5752,28 @@ exit 0
         assert!(
             !fixture.overlap_reported(),
             "a single invocation is never an overlap, however slowly it starts"
+        );
+    }
+
+    #[test]
+    fn a_program_refused_as_busy_is_waited_out_rather_than_failed() {
+        // Issue #4012: a saturated runner made `spawn` of a freshly written
+        // fake gh fail with `ETXTBSY` and turned unrelated PRs red. That
+        // refusal is another test thread's fork window, not a fault of this
+        // invocation, and it clears without any action here.
+        let mut attempts = 0usize;
+        let value = execute_once_the_program_is_not_busy("busy fake gh", || {
+            attempts += 1;
+            if attempts <= 2 {
+                return Err(std::io::Error::from_raw_os_error(libc::ETXTBSY));
+            }
+            Ok("started")
+        });
+
+        assert_eq!(value, "started");
+        assert_eq!(
+            attempts, 3,
+            "every refusal must be waited out, not surfaced as a failure"
         );
     }
 
