@@ -330,17 +330,27 @@ export function issueRowStateModel({
 // to the Issue comes from the Work projection's agent rows (window id or session
 // id) or from the ids this surface itself Windowized; only windows that are on
 // the canvas count, so a preview that returned to the row is never doubled.
-export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds) {
+export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, issueNumber) {
   const list = Array.isArray(windows) ? windows : [];
   const agents = Array.isArray(work?.agents) ? work.agents : [];
   const windowIds = new Set(agents.map((agent) => agent?.window_id).filter(Boolean));
   const sessionIds = new Set(agents.map((agent) => agent?.session_id).filter(Boolean));
   const remembered =
     rememberedIds instanceof Set ? rememberedIds : new Set(rememberedIds || []);
+  const wanted = Number(issueNumber);
   return list.filter((windowData) => {
     if (!windowData?.id) return false;
     const kind = windowData.placement?.kind || "canvas";
     if (kind !== "canvas") return false;
+    // SPEC #3885 FR-011: a Windowized agent carries its Issue durably, so a
+    // window that names a different Issue is never this row's canvas face. The
+    // Work-projection and remembered-id paths below only prove "this agent is on
+    // the canvas", not which Issue owns it, and without this fence one Windowize
+    // gives every Issue without an agent the same canvas face.
+    const linked = Number(windowData.linked_issue_number);
+    if (Number.isFinite(linked) && Number.isFinite(wanted) && linked !== wanted) {
+      return false;
+    }
     if (remembered.has(windowData.id) || windowIds.has(windowData.id)) return true;
     return Boolean(windowData.session_id) && sessionIds.has(windowData.session_id);
   });
@@ -3101,7 +3111,12 @@ export function createKnowledgeKanbanSurface({
         const inlineWindow = issuePreviewWindowsForIssue(windows, windowId, entry.number)[0] || null;
         const canvasWindow = inlineWindow
           ? null
-          : issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds)[0] || null;
+          : issueCanvasAgentWindowsForIssue(
+              windows,
+              work,
+              windowizedAgentWindowIds,
+              entry.number,
+            )[0] || null;
         return { inlineWindow, canvasWindow };
       }
 

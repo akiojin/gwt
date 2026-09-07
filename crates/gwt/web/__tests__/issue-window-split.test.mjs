@@ -323,6 +323,20 @@ test("US-4 / FR-003a: a Windowized agent's pair shows the canvas face, not a sec
   click(onCanvas.querySelector('[data-action="focus-canvas-window"]'));
   assert.deepEqual(fx.focused, ["agent-1"]);
 
+  // FR-011: the Windowized window names its own Issue, so an Issue with no agent
+  // never adopts it as its canvas face.
+  const { issueCanvasAgentWindowsForIssue } = fx.mod;
+  const windowized = previewWindow("agent-1", 3671, { placement: { kind: "canvas" } });
+  assert.deepEqual(
+    issueCanvasAgentWindowsForIssue([windowized], null, ["agent-1"], 3671).map((w) => w.id),
+    ["agent-1"],
+  );
+  assert.deepEqual(
+    issueCanvasAgentWindowsForIssue([windowized], null, ["agent-1"], 3999).map((w) => w.id),
+    [],
+    "a remembered Windowize belongs to the Issue the window is linked to",
+  );
+
   // The inline pair keeps Windowize as its hand-off to the canvas.
   click(list[1].querySelector('[data-action="windowize-issue-preview"]'));
   assert.deepEqual(fx.windowized, ["agent-2"]);

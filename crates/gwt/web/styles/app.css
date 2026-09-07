@@ -3259,6 +3259,11 @@ body {
 }
 
 .issue-split-terminal {
+  /* Pinned to the last row explicitly: the activity line above it collapses to
+   * display:none when the agent has printed nothing yet, and an auto-placed
+   * terminal would then land in that empty auto row and fit against a zero-height
+   * box. */
+  grid-row: 3;
   position: relative;
   min-height: 0;
   overflow: hidden;
@@ -3270,6 +3275,7 @@ body {
 }
 
 .issue-split-placeholder {
+  grid-row: 3;
   display: flex;
   align-items: center;
   padding: var(--space-3);

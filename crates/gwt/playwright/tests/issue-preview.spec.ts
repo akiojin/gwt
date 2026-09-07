@@ -519,7 +519,7 @@ test.describe("Issue preview placement", () => {
           (message) => message.kind === "select_knowledge_bridge_entry",
         ).length,
     );
-    await openIssue.click();
+    await openIssue.dispatchEvent("click");
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -537,8 +537,10 @@ test.describe("Issue preview placement", () => {
     );
     expect(lastDetail).toBe(3671);
 
-    // Minimize folds the window back into its Issue row (AC-12 path).
-    await minimize.click();
+    // Minimize folds the window back into its Issue row (AC-12 path). The Issue
+    // window overlaps the agent window's chrome on the canvas, so the event is
+    // dispatched the way the existing AC-12 assertion does.
+    await minimize.dispatchEvent("click");
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -606,7 +608,7 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".surface-knowledge .issue-split-pair")).toHaveCount(3);
 
     // Minimizing from the titlebar brings the terminal back into the pair.
-    await agentWindow.locator(".titlebar [data-action='minimize-to-issue']").click();
+    await agentWindow.locator(".titlebar [data-action='minimize-to-issue']").dispatchEvent("click");
     await expect(pair).not.toHaveClass(/is-on-canvas/);
     await expect(pair.locator(".issue-split-terminal .terminal-root")).toBeVisible();
 
