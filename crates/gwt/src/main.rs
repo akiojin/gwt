@@ -1557,6 +1557,13 @@ enum UserEvent {
         version: String,
         asset_path: std::path::PathBuf,
     },
+    /// Issue #3906 AC-2 / #4076 AC-2: the update drain tick found the host
+    /// quiescent for two ticks and the cancel grace elapsed. The persisted
+    /// manifest for `version` is committed through `ApplyUpdateGraceful`;
+    /// the automatic path never touches `ApplyUpdateRestartNow`.
+    ApplyUpdateDrained {
+        version: String,
+    },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
     /// [`gwt::BackendEvent::MigrationProgress`].
@@ -1988,6 +1995,7 @@ mod tests {
     fn daemon_broadcast_issue_monitor_payloads_map_to_frontend_dispatch_and_launch_request() {
         let project_root = Path::new("/tmp/gwt-project");
         let status = gwt::IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,
@@ -3264,6 +3272,7 @@ mod tests {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             update_resume_tab_ids: std::collections::HashSet::new(),
+            update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
@@ -9124,7 +9133,10 @@ fn main() -> std::io::Result<()> {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
-                let events = app.terminal_convergence_tick_events();
+                let mut events = app.terminal_convergence_tick_events();
+                // Issue #3906 AC-8: the 15 s convergence tick is also the
+                // update drain's clock (two clear ticks = quiescent).
+                events.extend(app.update_drain_tick_events());
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::TerminalConvergenceObserved {
@@ -9448,10 +9460,40 @@ fn main() -> std::io::Result<()> {
                 version,
                 asset_path,
             }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
-                    version,
+                // Issue #3906 AC-3: the manifest is persisted, so the update
+                // is staged; an unattended monitor now drains new launches.
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                    version: version.clone(),
                     asset_path: asset_path.to_string_lossy().to_string(),
-                })]);
+                })];
+                events.extend(app.update_staged_events(&version));
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateDrained { version }) => {
+                // Issue #3906 AC-2 / AC-10: the drained apply commits the
+                // manifest the staging persisted, through the same graceful
+                // route as Restart now. A manifest that vanished (cleared by
+                // hand, payload deleted) releases the drain instead of
+                // re-downloading unattended.
+                gwt_core::update::log_update_event(
+                    "auto_apply_drained",
+                    &[("version", &version)],
+                );
+                match gwt_core::update::load_pending_update_manifest() {
+                    Some(manifest) if manifest.version == version => {
+                        let _ = proxy.send_event(UserEvent::ApplyUpdateGraceful {
+                            manifest,
+                            client_id: app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.to_string(),
+                        });
+                    }
+                    _ => {
+                        let events = app.release_update_auto_apply_events(
+                            &version,
+                            app_runtime::UpdateAutoApplyRelease::PayloadMissing,
+                        );
+                        clients.dispatch(events);
+                    }
+                }
             }
             Event::UserEvent(UserEvent::ApplyUpdateRestartNow { state, client_id }) => {
                 gwt_core::update::log_update_event("restart_now_requested", &[]);
@@ -9498,15 +9540,28 @@ fn main() -> std::io::Result<()> {
                             "fail",
                             &[("stage", "graceful_apply"), ("reason", &message)],
                         );
-                        clients.dispatch(vec![OutboundEvent::reply(
-                            client_id,
-                            BackendEvent::UpdateApplyError {
-                                message: Some(message.clone()),
-                                stage: Some("Restart now".to_string()),
-                                reason: Some(message),
-                                log_path: Some(log_path),
-                            },
-                        )]);
+                        // Issue #3906 AC-12: the failure is recorded in the
+                        // notification center for every client, not only the
+                        // one that clicked (the automatic path has none).
+                        clients.dispatch(vec![
+                            OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                                level: "error".to_string(),
+                                message: format!(
+                                    "Update v{} could not be applied: {message}",
+                                    marker.to_version
+                                ),
+                                issue_number: None,
+                            }),
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError {
+                                    message: Some(message.clone()),
+                                    stage: Some("Restart now".to_string()),
+                                    reason: Some(message),
+                                    log_path: Some(log_path),
+                                },
+                            ),
+                        ]);
                     }
                 }
             }
