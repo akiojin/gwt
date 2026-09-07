@@ -123,7 +123,8 @@ pub use index_worker::{
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
     bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
-    decide_merged_issue_settlement, delegation_recorded, establish_issue_monitor_authority_fence,
+    clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
+    delegation_recorded, establish_issue_monitor_authority_fence,
     is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
     issue_monitor_authority_fence_path, issue_monitor_launch_plan,
     issue_monitor_launch_profile_pool_summary, issue_monitor_launch_profile_summary,
