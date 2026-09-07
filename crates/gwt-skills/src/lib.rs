@@ -46,8 +46,9 @@ pub use provider_hooks::{
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
-    codex_hooks_paths_for_codex_discovery, generate_codex_hooks, generate_codex_hooks_for_mode,
-    generate_settings_local, managed_hook_config_has_user_content, CodexHookDiscoveryMode,
+    build_output_owner_root, codex_hooks_paths_for_codex_discovery, generate_codex_hooks,
+    generate_codex_hooks_for_mode, generate_settings_local, managed_hook_config_has_user_content,
+    managed_hook_config_is_git_tracked, CodexHookDiscoveryMode, CANONICAL_HOOK_BIN,
 };
 
 #[cfg(test)]
@@ -2327,6 +2328,90 @@ mod tests {
                     && content.contains("rejected")
                     && content.contains("pending"),
                 "{relative} must enumerate User Verification Result states (pending/confirmed/rejected)"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issue Monitor)
+    /// launch must never wait for a human to look at a screen, and the agent's
+    /// own headed browser-check must be recorded as its own evidence line
+    /// instead of being laundered into the user's verification result. Manual
+    /// launches keep the existing handoff.
+    #[test]
+    fn gwt_verify_waives_user_verification_for_autonomous_launches() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                // Launch mode is detected from the launcher's own environment,
+                // not from the agent's judgement.
+                "GWT_AUTONOMOUS_EXECUTION",
+                "Launch mode",
+                // The recorded value for an autonomous run.
+                "n/a (autonomous)",
+                // The automated substitute that carries the GUI quality bar.
+                "Agent Visual Check",
+                "dark",
+                "light",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document the autonomous verification waiver: {required}"
+                );
+            }
+            assert!(
+                content.contains("agent's own")
+                    || content.contains("never a User Verification Result"),
+                "{relative} must separate the agent's own browser-check from the user's result"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A1: the callers that gate delivery must accept the
+    /// autonomous value, otherwise the waiver stops at gwt-verify.
+    #[test]
+    fn delivery_gates_accept_the_autonomous_user_verification_value() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+            ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-build-spec/references/completion-gate.md",
+            ".codex/skills/gwt-build-spec/references/completion-gate.md",
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("n/a (autonomous)"),
+                "{relative} must accept `User Verification Result: n/a (autonomous)` (Issue #4001 AC-A1)"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A5: the repository's own Ready PR rules must agree with
+    /// the distributed skills, or agents get contradictory instructions.
+    #[test]
+    fn agents_md_waives_user_verification_for_autonomous_launches() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in ["n/a (autonomous)", "Agent Visual Check", "自動実行"] {
+            assert!(
+                agents.contains(required),
+                "AGENTS.md must document the autonomous verification waiver: {required}"
             );
         }
     }

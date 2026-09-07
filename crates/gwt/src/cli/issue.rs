@@ -290,7 +290,9 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
+            update_drain,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
@@ -298,7 +300,9 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent.as_deref(),
+            update_drain,
             out,
         )?,
         IssueCommand::MonitorProfiles { project_root } => {
@@ -480,7 +484,6 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    #[cfg(unix)]
     if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(&project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
@@ -1322,25 +1325,15 @@ fn monitor_projection_reports_blocked_by_claim(
     project_root: &std::path::Path,
     number: u64,
 ) -> bool {
-    #[cfg(unix)]
-    {
-        let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root)
-        else {
-            return false;
-        };
-        let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status) else {
-            return false;
-        };
-        agent_status_reports_blocked_by_claim(&status, number)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (project_root, number);
-        false
-    }
+    let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root) else {
+        return false;
+    };
+    let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status) else {
+        return false;
+    };
+    agent_status_reports_blocked_by_claim(&status, number)
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 fn agent_status_reports_blocked_by_claim(
     status: &crate::IssueMonitorAgentStatus,
     number: u64,
@@ -1453,6 +1446,24 @@ fn issue_monitor_scan_delivery(result: Result<(), String>) -> IssueMonitorScanDe
 
 #[cfg(unix)]
 fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    request_immediate_daemon_monitor_scan(project_root)
+}
+
+/// Windows prefers the daemon control lane like Unix (Issue #3526) but keeps
+/// the SPEC-3431 FR-124 GUI WebSocket request as the fallback for the
+/// GUI-only topology, i.e. before the supervisor has started a daemon for
+/// this project.
+#[cfg(not(unix))]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    match request_immediate_daemon_monitor_scan(project_root) {
+        Err(code) if code == "daemon_control_unavailable" => {
+            super::pane::request_issue_monitor_scan_now(project_root)
+        }
+        other => other,
+    }
+}
+
+fn request_immediate_daemon_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({ "scan_now": {} }),
@@ -1477,11 +1488,6 @@ fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), 
     })
 }
 
-#[cfg(not(unix))]
-fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
-    super::pane::request_issue_monitor_scan_now(project_root)
-}
-
 /// SPEC-3431 FR-031: a stable, greppable name for each refusal.
 fn issue_monitor_stop_mismatch_label(mismatch: crate::IssueMonitorStopMismatch) -> &'static str {
     match mismatch {
@@ -1493,20 +1499,25 @@ fn issue_monitor_stop_mismatch_label(mismatch: crate::IssueMonitorStopMismatch) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_monitor_config_set(
     prefs: &mut crate::IssueMonitorPrefs,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
+        update_drain.as_ref(),
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -1528,13 +1539,40 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
+    if let Some(auto_apply_updates) = auto_apply_updates {
+        candidate.set_auto_apply_updates(Some(auto_apply_updates));
+    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     }
+    apply_update_drain(&mut candidate, update_drain);
     *prefs = candidate.prefs();
     Ok(())
+}
+
+/// Issue #4037 AC-5: a CLI-raised drain is a manual one, stamped with the
+/// running gwt version. Whether a staged update manifest exists is not this
+/// surface's question (#3906 wires that); the drain only pauses admission.
+pub(crate) fn apply_update_drain(
+    monitor: &mut crate::IssueMonitorState,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
+) {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match update_drain {
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)) => monitor.set_update_drain(
+            crate::IssueMonitorUpdateDrainReason::Manual,
+            env!("CARGO_PKG_VERSION"),
+            &now,
+        ),
+        // Issue #3906 AC-3: the update mechanism names the staged version.
+        Some(crate::IssueMonitorUpdateDrainControl::Raise { reason, version }) => {
+            monitor.set_update_drain(reason, &version, &now)
+        }
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)) => monitor.clear_update_drain(),
+        None => {}
+    }
 }
 
 fn validate_monitor_config_set(
@@ -1542,7 +1580,9 @@ fn validate_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
+    update_drain: Option<&crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
         return Err(io::Error::new(
@@ -1554,7 +1594,9 @@ fn validate_monitor_config_set(
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
+        && auto_apply_updates.is_none()
         && launch_agent.is_none()
+        && update_drain.is_none()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1589,7 +1631,9 @@ fn run_monitor_config_set<E: CliEnv>(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -1598,7 +1642,9 @@ fn run_monitor_config_set<E: CliEnv>(
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
+        update_drain.as_ref(),
     )
     .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
@@ -1625,7 +1671,9 @@ fn run_monitor_config_set<E: CliEnv>(
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
                 "auto_close_merged_issues": auto_close_merged_issues,
+                "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
+                "update_drain": update_drain,
             }
         }),
         std::process::id(),
@@ -1643,7 +1691,9 @@ fn run_monitor_config_set<E: CliEnv>(
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                auto_apply_updates,
                 launch_agent,
+                update_drain.clone(),
             )
         })
         .map_err(io_as_api_error)?;
@@ -1661,9 +1711,14 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
                 .unwrap_or(prefs.autonomous_mode),
+            "auto_apply_updates": prefs.auto_apply_updates,
+            "auto_apply_updates_effective": prefs
+                .auto_apply_updates
+                .unwrap_or(prefs.autonomous_mode),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
             }),
+            "update_drain": prefs.update_drain,
         })
         .to_string(),
     );
@@ -1843,24 +1898,11 @@ fn run_monitor_profiles_set<E: CliEnv>(
     Ok(0)
 }
 
-#[cfg(unix)]
 fn publish_monitor_config_set(
     project_root: &std::path::Path,
     payload: serde_json::Value,
 ) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
     crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-}
-
-#[cfg(not(unix))]
-fn publish_monitor_config_set(
-    _project_root: &std::path::Path,
-    _payload: serde_json::Value,
-) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
-    Err(
-        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-            "Issue Monitor daemon control is unavailable on this platform".to_string(),
-        ),
-    )
 }
 
 /// Issue #3844: the Issue an agent's wait declaration is about. The launch
@@ -1880,7 +1922,6 @@ fn monitor_launch_is_live(
     project_root: &std::path::Path,
     number: u64,
 ) -> Result<bool, SpecOpsError> {
-    #[cfg(unix)]
     if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
@@ -1894,7 +1935,6 @@ fn monitor_launch_is_live(
     Ok(monitor.launched_window_id(number).is_some())
 }
 
-#[cfg(unix)]
 fn publish_monitor_wait_control(
     project_root: &std::path::Path,
     wait: serde_json::Value,
@@ -1909,14 +1949,6 @@ fn publish_monitor_wait_control(
         crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
         payload,
     )
-}
-
-#[cfg(not(unix))]
-fn publish_monitor_wait_control(
-    _project_root: &std::path::Path,
-    _wait: serde_json::Value,
-) -> Result<(), String> {
-    Err("wait declaration publish unavailable on this platform".to_string())
 }
 
 /// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
@@ -2013,7 +2045,6 @@ fn run_monitor_wait<E: CliEnv>(
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
 /// Monitor daemon's control channel. The daemon re-judges the raw verdict
 /// (SHA-bound) — this only transports it.
-#[cfg(unix)]
 fn run_monitor_review_verdict<E: CliEnv>(
     env: &mut E,
     issue_number: u64,
@@ -2050,20 +2081,6 @@ fn run_monitor_review_verdict<E: CliEnv>(
             1
         }
     }
-}
-
-#[cfg(not(unix))]
-fn run_monitor_review_verdict<E: CliEnv>(
-    _env: &mut E,
-    issue_number: u64,
-    _reviewed_sha: &str,
-    _verdict_raw: &str,
-    out: &mut String,
-) -> i32 {
-    out.push_str(&format!(
-        "review verdict publish unavailable on this platform (#{issue_number})\n"
-    ));
-    1
 }
 
 fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<IssueCommand, CliParseError> {
@@ -3680,6 +3697,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             usage_threshold_percent: 80,
@@ -3706,6 +3724,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             usage_threshold_percent: 80,
@@ -3801,6 +3820,7 @@ mod tests {
                 autonomous_mode: true,
                 has_launch_profile: true,
                 quota_hold: None,
+                update_drain: None,
                 launch_profile_summary: String::new(),
                 launch_profile_candidates: Vec::new(),
                 usage_threshold_percent: 80,
@@ -3870,6 +3890,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
             usage_threshold_percent: 80,
@@ -4500,6 +4521,99 @@ mod tests {
         .is_err());
     }
 
+    /// Issue #4037 AC-3 / AC-5: `update_drain:true` records a manual drain in
+    /// the durable prefs and `update_drain:false` clears it, neither touching
+    /// the launch ledgers the way `enabled:false` does.
+    #[test]
+    fn issue_monitor_config_set_update_drain_is_non_destructive_without_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let seeded = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            launch_bindings: std::collections::BTreeMap::from([("tab-1::agent-1".to_string(), 42)]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &seeded).expect("save prefs");
+        let before = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let ledgers = |prefs: &crate::IssueMonitorPrefs| {
+            (
+                prefs.enabled,
+                prefs.autonomous_mode,
+                prefs.max_active_agents,
+                prefs.launched_issues.clone(),
+                prefs.launch_bindings.clone(),
+                prefs.launched_claims.clone(),
+                prefs.launching_issues.clone(),
+                prefs.pending_effects.clone(),
+                prefs.pending_launch_deliveries.clone(),
+                prefs.effect_authority_epoch,
+            )
+        };
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
+            },
+            &mut out,
+        )
+        .expect("config set");
+        assert_eq!(code, 0);
+        let drained = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let drain = drained.update_drain.clone().expect("drain recorded");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Manual);
+        assert_eq!(drain.version, env!("CARGO_PKG_VERSION"));
+        assert!(!drain.since.is_empty());
+        assert_eq!(
+            ledgers(&drained),
+            ledgers(&before),
+            "the drain must not touch the launch ledgers"
+        );
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
+        assert_eq!(reply["update_drain"]["reason"], "manual");
+        assert_eq!(reply["enabled"], true);
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                auto_apply_updates: None,
+            },
+            &mut out,
+        )
+        .expect("config clear");
+        assert_eq!(code, 0);
+        let cleared = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(cleared.update_drain.is_none());
+        assert_eq!(ledgers(&cleared), ledgers(&before));
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
+        assert!(reply["update_drain"].is_null());
+    }
+
     #[test]
     fn issue_monitor_config_set_falls_back_safely_when_daemon_is_absent() {
         let tmp = TempDir::new().expect("tempdir");
@@ -4527,7 +4641,9 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
+                update_drain: None,
             },
             &mut out,
         )
@@ -4550,7 +4666,9 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
+                update_drain: None,
             },
             &mut out,
         )
@@ -4791,7 +4909,9 @@ mod tests {
                     autonomous_mode,
                     max_active: None,
                     auto_close_merged_issues: None,
+                    auto_apply_updates: None,
                     launch_agent: None,
+                    update_drain: None,
                 },
                 &mut out,
             );
@@ -5848,7 +5968,9 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
+                update_drain: None,
             },
             &mut out,
         )
@@ -5887,7 +6009,9 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),
+                update_drain: None,
             },
             &mut out,
         )

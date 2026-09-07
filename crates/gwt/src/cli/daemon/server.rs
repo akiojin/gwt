@@ -1,10 +1,13 @@
-//! Tokio-based Unix-socket IPC server for the runtime daemon (SPEC-2077
-//! Phase 1 runtime layer).
+//! Tokio-based IPC server for the runtime daemon (SPEC-2077 Phase 1
+//! runtime layer). The transport is a Unix domain socket on Unix and a
+//! named pipe on Windows (Issue #3526, see `super::transport`).
 //!
 //! Foreground entry: caller blocks inside [`serve_blocking`] until the
-//! daemon receives `SIGINT` / `SIGTERM`, at which point the listener is
-//! dropped, the socket file is removed, and the persisted endpoint file
-//! is unlinked. Per-connection workers handle:
+//! daemon receives `SIGINT` / `SIGTERM` (Unix) or Ctrl-C / Ctrl-Break /
+//! console close / logoff / shutdown (Windows), at which point the
+//! listener is dropped, the socket file is removed (Unix; a named pipe
+//! vanishes with its process), and the persisted endpoint file is
+//! unlinked. Per-connection workers handle:
 //!
 //! 1. Read one newline-delimited [`IpcHandshakeRequest`] JSON line.
 //! 2. Validate against the in-memory endpoint with
@@ -22,8 +25,6 @@
 //! `handle_shell_launch_complete` ownership across the IPC boundary
 //! (see SPEC-2077 plan.md Phase H1-H4).
 
-#![cfg(unix)]
-
 use std::{
     collections::{HashSet, VecDeque},
     fs, io,
@@ -38,20 +39,21 @@ use std::{
 use gwt_core::daemon::{
     persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
     DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
-    RuntimeScope, DAEMON_PROTOCOL_VERSION, MAX_UNIX_SOCKET_PATH_LEN,
+    RuntimeScope, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     runtime::Builder,
-    signal::unix::{signal, SignalKind},
     sync::{broadcast::error::RecvError, mpsc, Notify},
 };
 
 use super::broadcast::{
     BroadcastHub, IssueMonitorControlCompletion, IssueMonitorControlQueueError,
     IssueMonitorControlRequest,
+};
+use super::transport::{
+    bind_is_served, cleanup_stale_bind, prepare_bind_parent, IpcListener, IpcReadHalf, IpcStream,
 };
 
 const ACCEPT_BACKOFF_MS: u64 = 50;
@@ -63,8 +65,55 @@ const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Per-test prefs budget (Issue #4033).
+    ///
+    /// Deliberately thread-local rather than an environment variable: a dozen
+    /// sibling tests hold the prefs lock and depend on the *default* budget
+    /// expiring quickly, and none of them take the process-wide env lock. A
+    /// global override would silently make those tests wait out a relaxed
+    /// budget instead. One test per thread makes this override exact.
+    static ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pin the prefs budget for the current test thread until dropped.
+#[cfg(all(test, unix))]
+struct ScopedIssueMonitorPrefsTimeout {
+    previous: Option<Duration>,
+}
+
+#[cfg(all(test, unix))]
+impl ScopedIssueMonitorPrefsTimeout {
+    fn set(timeout: Duration) -> Self {
+        Self {
+            previous: ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE
+                .with(|current| current.replace(Some(timeout))),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ScopedIssueMonitorPrefsTimeout {
+    fn drop(&mut self) {
+        ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(|current| current.set(self.previous));
+    }
+}
+
+/// The single seam for the prefs read-lock-modify-write budget.
+///
+/// Issue #4033: every prefs transaction must go through this accessor, not
+/// through [`ISSUE_MONITOR_PREFS_TIMEOUT`] directly. A test that asserts on a
+/// transaction's *outcome* is otherwise asserting on how fast the runner's
+/// filesystem happened to be that minute, and a loaded CI host silently
+/// converts a passing state machine into a failing one.
 fn issue_monitor_prefs_timeout() -> Duration {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
+    if let Some(timeout) = ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return timeout;
+    }
+    #[cfg(all(test, unix))]
     if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
         .filter(|timeout| *timeout <= 60_000)
@@ -155,6 +204,7 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
         "gwtd daemon start: bind={socket}",
         socket = socket_path.display()
     );
+    #[cfg(unix)]
     if socket.placement == DaemonSocketPlacement::Shortened {
         // The socket is not where an operator would look for it, so say
         // why it moved.
@@ -163,9 +213,11 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
             "gwtd daemon start: socket shortened; {colocated} exceeds this platform's \
              {limit}-byte sun_path limit",
             colocated = endpoint_path.with_extension("sock").display(),
-            limit = MAX_UNIX_SOCKET_PATH_LEN
+            limit = gwt_core::daemon::MAX_UNIX_SOCKET_PATH_LEN
         );
     }
+    #[cfg(windows)]
+    debug_assert_eq!(socket.placement, DaemonSocketPlacement::Colocated);
     let _ = writeln!(
         writer,
         "gwtd daemon start: pid={pid} version={version}",
@@ -195,8 +247,8 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     // daemon may have replaced them while we were serving. Our listener is
     // already dropped, so a socket that still accepts connections belongs
     // to someone else.
-    if std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
-        let _ = fs::remove_file(&socket_path);
+    if !bind_is_served(&socket_path.to_string_lossy()) {
+        cleanup_stale_bind(&socket_path);
     }
     if endpoint_descriptor_describes(&endpoint_path, &endpoint) {
         let _ = fs::remove_file(&endpoint_path);
@@ -234,7 +286,7 @@ async fn run_server_with_shutdown_and_worker_config(
     monitor_config: crate::IssueMonitorConfig,
     operation_timeout: Duration,
 ) -> Result<i32, SpecOpsError> {
-    let listener = UnixListener::bind(&socket_path).map_err(|err| {
+    let mut listener = IpcListener::bind(&socket_path).map_err(|err| {
         config_error(format!(
             "failed to bind daemon socket {}: {err}",
             socket_path.display()
@@ -272,7 +324,7 @@ async fn run_server_with_shutdown_and_worker_config(
             }
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _addr)) => {
+                    Ok(stream) => {
                         let endpoint = Arc::clone(&endpoint);
                         let hub = hub.clone();
                         let connections = Arc::clone(&connections);
@@ -312,8 +364,8 @@ async fn run_server_with_shutdown_and_worker_config(
     // settlement and child reaping unfinished.
     let worker_grace = operation_timeout
         .max(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
-        .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT)
-        .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT);
+        .saturating_add(issue_monitor_prefs_timeout())
+        .saturating_add(issue_monitor_prefs_timeout());
     match tokio::time::timeout(worker_grace, &mut issue_monitor_worker).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -352,7 +404,10 @@ impl Drop for ConnectionGuard {
     }
 }
 
+#[cfg(unix)]
 fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
+    use tokio::signal::unix::{signal, SignalKind};
+
     let term = shutdown;
     tokio::spawn(async move {
         let mut sigterm = match signal(SignalKind::terminate()) {
@@ -377,7 +432,48 @@ fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
     });
 }
 
-#[cfg(test)]
+/// Windows counterpart of the Unix signal watcher (Issue #3526 AC-5): every
+/// console control event that ends a user-session process — Ctrl-C,
+/// Ctrl-Break, console window close, logoff, and system shutdown — runs the
+/// same cooperative shutdown so the authority fence is revoked and the
+/// endpoint file is unlinked instead of leaking a stale registration.
+#[cfg(windows)]
+fn spawn_signal_watcher(shutdown: Arc<DaemonShutdown>) {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+
+    let term = shutdown;
+    tokio::spawn(async move {
+        macro_rules! install {
+            ($ctor:ident) => {
+                match $ctor() {
+                    Ok(signal) => signal,
+                    Err(err) => {
+                        tracing::warn!(
+                            "gwtd daemon: failed to install {} handler: {err}",
+                            stringify!($ctor)
+                        );
+                        return;
+                    }
+                }
+            };
+        }
+        let mut ctrl_c = install!(ctrl_c);
+        let mut ctrl_break = install!(ctrl_break);
+        let mut ctrl_close = install!(ctrl_close);
+        let mut ctrl_logoff = install!(ctrl_logoff);
+        let mut ctrl_shutdown = install!(ctrl_shutdown);
+        tokio::select! {
+            _ = ctrl_c.recv() => {}
+            _ = ctrl_break.recv() => {}
+            _ = ctrl_close.recv() => {}
+            _ = ctrl_logoff.recv() => {}
+            _ = ctrl_shutdown.recv() => {}
+        }
+        term.request();
+    });
+}
+
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_worker_with_config(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -395,18 +491,18 @@ fn spawn_issue_monitor_worker_with_config(
 
 #[derive(Clone, Default)]
 struct IssueMonitorWorkerTestHooks {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Default)]
 struct IssueMonitorScanConcurrencyProbe {
     active: AtomicUsize,
     overlap_observed: AtomicBool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl IssueMonitorScanConcurrencyProbe {
     fn enter(self: &Arc<Self>) -> IssueMonitorScanConcurrencyGuard {
         if self.active.fetch_add(1, Ordering::AcqRel) > 0 {
@@ -422,19 +518,19 @@ impl IssueMonitorScanConcurrencyProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct IssueMonitorScanConcurrencyGuard {
     probe: Arc<IssueMonitorScanConcurrencyProbe>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for IssueMonitorScanConcurrencyGuard {
     fn drop(&mut self) {
         self.probe.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_worker_with_config_and_scan_probe(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -1148,7 +1244,7 @@ impl IssueMonitorControlLaneGuard {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn new_with_authority_without_lease(
         hub: BroadcastHub,
         grant_lane_open: Arc<AtomicBool>,
@@ -1210,7 +1306,7 @@ fn load_issue_monitor_state_for_daemon(
     config: crate::IssueMonitorConfig,
 ) -> LoadedDaemonIssueMonitorState {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let authority_fence = crate::IssueMonitorAuthorityFence::current_process();
     match crate::establish_issue_monitor_authority_fence(
@@ -1274,7 +1370,7 @@ fn issue_monitor_shutdown_revoke_marker_path(prefs_path: &Path) -> PathBuf {
     crate::issue_monitor_authority_fence_path(prefs_path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn persist_issue_monitor_shutdown_revoke_marker(prefs_path: &Path) -> io::Result<()> {
     crate::persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path)
 }
@@ -1378,7 +1474,7 @@ fn revoke_issue_monitor_effect_authority_for_shutdown(
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let mut candidate = monitor.clone();
     match crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
@@ -1518,8 +1614,12 @@ enum IssueMonitorControl {
         max_active_agents: Option<usize>,
         /// Issue #3917 AC-5: explicit auto-close override.
         auto_close_merged_issues: Option<bool>,
+        /// Issue #3906 AC-1: explicit auto-apply-updates override.
+        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
+        /// Issue #4037 AC-5: raise or clear the non-destructive update drain.
+        update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
     /// SPEC #3914 FR-011: replace the launch candidate pool whole.
     ProfilesSet {
@@ -1615,7 +1715,7 @@ struct PendingIssueMonitorAuthorityControls {
 }
 
 impl PendingIssueMonitorAuthorityControls {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn after_failure(control: IssueMonitorControl) -> Self {
         Self::after_accepted_failure(AcceptedIssueMonitorControl::new(control), None)
     }
@@ -1648,7 +1748,7 @@ impl PendingIssueMonitorAuthorityControls {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn push(&mut self, control: IssueMonitorControl) {
         self.push_accepted_with_completion(AcceptedIssueMonitorControl::new(control), None);
     }
@@ -1669,7 +1769,7 @@ impl PendingIssueMonitorAuthorityControls {
             });
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn front(&self) -> Option<&IssueMonitorControl> {
         self.controls.front().map(|entry| &entry.accepted.control)
     }
@@ -1861,7 +1961,9 @@ fn try_apply_issue_monitor_control(
             autonomous_mode,
             max_active_agents,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
+            update_drain,
         } => {
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
@@ -1870,7 +1972,9 @@ fn try_apply_issue_monitor_control(
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
-                    && launch_agent.is_none())
+                    && auto_apply_updates.is_none()
+                    && launch_agent.is_none()
+                    && update_drain.is_none())
             {
                 return None;
             }
@@ -1894,6 +1998,12 @@ fn try_apply_issue_monitor_control(
                     auto_close_merged_issues,
                 ))?;
             }
+            if let Some(auto_apply_updates) = auto_apply_updates {
+                candidate.set_auto_apply_updates(Some(auto_apply_updates));
+            }
+            // Issue #4037 AC-3: the drain touches admission only, so it needs
+            // no authority-epoch advance and revokes nothing.
+            crate::cli::issue::apply_update_drain(&mut candidate, update_drain);
             *monitor = candidate;
             Some(true)
         }
@@ -2020,7 +2130,7 @@ fn try_apply_typed_issue_monitor_failure(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn apply_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
@@ -2256,7 +2366,7 @@ fn rebase_issue_monitor_control_candidate(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn apply_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2270,7 +2380,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn try_apply_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2283,7 +2393,7 @@ fn try_apply_issue_monitor_control_with_disk_migration(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn try_apply_issue_monitor_control_with_disk_migration_observed(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -2309,7 +2419,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration(
         prefs_path,
         monitor,
         accepted,
-        ISSUE_MONITOR_PREFS_TIMEOUT,
+        issue_monitor_prefs_timeout(),
         || {},
     )
 }
@@ -2488,6 +2598,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
                 };
+                let auto_apply_updates = match config.get("auto_apply_updates") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
                 // Issue #3923 AC-5: a blank agent name is a malformed control.
                 let launch_agent = match config.get("launch_agent") {
                     None | Some(serde_json::Value::Null) => None,
@@ -2499,6 +2613,17 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         Some(agent.to_string())
                     }
                 };
+                // Issue #4037 AC-5: the operator bool; #3906 AC-3: the auto
+                // drain object `{reason, version}`. Anything else is malformed.
+                let update_drain = match config.get("update_drain") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(
+                        serde_json::from_value::<crate::IssueMonitorUpdateDrainControl>(
+                            value.clone(),
+                        )
+                        .ok()?,
+                    ),
+                };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
                     || max_active_agents == Some(0)
@@ -2506,7 +2631,9 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
-                        && launch_agent.is_none())
+                        && auto_apply_updates.is_none()
+                        && launch_agent.is_none()
+                        && update_drain.is_none())
                 {
                     return None;
                 }
@@ -2515,7 +2642,9 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                     auto_close_merged_issues,
+                    auto_apply_updates,
                     launch_agent,
+                    update_drain,
                 });
             }
             if let Some(profiles_set) = payload
@@ -2796,7 +2925,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn scan_issue_monitor_once(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2820,7 +2949,7 @@ async fn scan_issue_monitor_once(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn spawn_issue_monitor_scan(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2862,12 +2991,12 @@ fn spawn_issue_monitor_scan_with_deadline(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let _scan_concurrency_guard = test_hooks
             .scan_concurrency_probe
             .as_ref()
             .map(IssueMonitorScanConcurrencyProbe::enter);
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
@@ -2907,7 +3036,7 @@ fn scan_failure_fallback(
 /// Test-only compatibility seam that scans once and persists the resulting
 /// state. Production worker scans are supervised by the revisioned single-flight
 /// driver, which persists only a result whose captured revision is still current.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn scan_and_persist_issue_monitor(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
@@ -2980,7 +3109,7 @@ fn commit_issue_monitor_scan_if_current(
     captured_authority_epoch: u64,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         return false;
@@ -3055,7 +3184,7 @@ fn accept_completed_issue_monitor_scan(
 /// to the remote executor. A caller that receives `Some` therefore has a
 /// durable `(effect_id, authority_epoch, attempt)` receipt to reconcile after a
 /// crash or outcome-ambiguous command.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn fence_next_issue_monitor_effect(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
@@ -3073,7 +3202,7 @@ fn fence_next_issue_monitor_effect_with_permit(
     permit: &IssueMonitorEffectPermitToken,
 ) -> Option<crate::PendingIssueMonitorEffect> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
@@ -3164,7 +3293,7 @@ struct IssueMonitorEffectPermitToken {
 }
 
 impl IssueMonitorEffectPermitToken {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn always_open() -> Self {
         Self {
             generation_open: Arc::new(AtomicBool::new(true)),
@@ -3263,7 +3392,7 @@ fn spawn_issue_monitor_effect(
 ) -> InFlightIssueMonitorEffect {
     let handle = tokio::task::spawn_blocking(move || {
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if let (Some(started), Some(release)) = (
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_STARTED"),
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_RELEASE"),
@@ -3473,7 +3602,7 @@ fn issue_monitor_http_client(scope: &RuntimeScope) -> Result<HttpIssueClient, St
 fn issue_monitor_http_client_with_repository(
     scope: &RuntimeScope,
 ) -> Result<(HttpIssueClient, gwt_github::client::RepositoryIdentity), String> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(marker) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_HTTP_CLIENT_MARKER") {
         let _ = fs::write(marker, b"attempted");
     }
@@ -3500,7 +3629,7 @@ fn commit_issue_monitor_effect_result(
     use gwt_github::issue_auto_claim::ClaimAcquireOutcome;
 
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
 
     let key = completed.effect.attempt_key();
@@ -4285,7 +4414,7 @@ fn issue_monitor_gui_connected(hub: &BroadcastHub) -> bool {
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: IpcStream,
     endpoint: Arc<DaemonEndpoint>,
     hub: BroadcastHub,
     started_at: Instant,
@@ -4579,7 +4708,7 @@ async fn enqueue_issue_monitor_control(
 }
 
 async fn read_handshake(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    reader: &mut BufReader<IpcReadHalf>,
 ) -> Result<IpcHandshakeRequest, String> {
     let mut line = String::new();
     let n = reader
@@ -4636,25 +4765,19 @@ where
 }
 
 fn ensure_socket_parent(socket_path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
+    prepare_bind_parent(socket_path)
 }
 
 /// Refuse to start when a live daemon still answers on `socket_path`;
 /// remove the socket file only when nothing accepts connections on it.
 fn ensure_socket_not_served(socket_path: &Path) -> Result<(), SpecOpsError> {
-    if !socket_path.exists() {
-        return Ok(());
-    }
-    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+    if bind_is_served(&socket_path.to_string_lossy()) {
         return Err(config_error(format!(
             "daemon socket {} is already served by a live daemon; refusing duplicate start",
             socket_path.display()
         )));
     }
-    let _ = fs::remove_file(socket_path);
+    cleanup_stale_bind(socket_path);
     Ok(())
 }
 
@@ -4787,7 +4910,12 @@ fn config_error(message: impl Into<String>) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message.into()))
 }
 
-#[cfg(test)]
+// The server fixtures below run fake `gh` shell scripts and raw Unix
+// streams. The transport-neutral server surface (bind / accept /
+// handshake / status / publish / subscribe) is covered on every host by
+// `super::client::tests`, `super::transport::tests`, and
+// `crate::daemon_subscriber::tests`.
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs::{self, OpenOptions},
@@ -4801,6 +4929,7 @@ mod tests {
     };
 
     use fs2::FileExt;
+    use futures_util::FutureExt;
     use gwt_core::daemon::{
         ClientFrame, DaemonEndpoint, DaemonFrame, HookEnvelope, IpcHandshakeRequest, RuntimeScope,
         RuntimeTarget, DAEMON_PROTOCOL_VERSION,
@@ -5287,6 +5416,36 @@ exit 0
         fake_gh
     }
 
+    /// Put a `git` in `dir` that costs `delay` before it does anything real.
+    ///
+    /// Issue #4033 AC-3: a scan reaches its external calls only after real
+    /// `git` subprocess work, and on a saturated CI runner that prologue is
+    /// what consumed the scan budget — the fake `gh` a test wanted to observe
+    /// was never spawned at all. Injecting the delay makes that host
+    /// deterministic instead of waiting for a bad day to reproduce it.
+    ///
+    /// Install it after the fixture's own repository setup so only the code
+    /// under test pays for it.
+    fn write_slow_git_shim(dir: &Path, delay: Duration) {
+        let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|entry| entry != dir)
+            .map(|entry| entry.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("a real git on PATH");
+        let shim = dir.join("git");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nsleep {delay}\nexec '{git}' \"$@\"\n",
+                delay = delay.as_secs_f32(),
+                git = real_git.display()
+            ),
+        )
+        .expect("write slow git shim");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod slow git shim");
+    }
+
     fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
         let mut paths = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
         if let Some(existing) = std::env::var_os("PATH") {
@@ -5302,6 +5461,37 @@ exit 0
     /// plausible scheduling delay: a saturated runner must delay a wait, never
     /// decide its outcome (Issue #3641).
     const MARKER_WAIT_HANG_GUARD: Duration = Duration::from_secs(60);
+
+    /// Run `attempt` until the kernel stops refusing to execute the program.
+    ///
+    /// A fixture writes its fake `gh` moments before it runs it. Any sibling
+    /// test thread that forks inside that write window hands its child a
+    /// descriptor on the file, and the kernel refuses to execute a file that
+    /// any process still holds open for writing (`ETXTBSY`). The refusal
+    /// belongs to that fork window rather than to the invocation that raced it,
+    /// and it clears as soon as the forked child execs - so it is waited out
+    /// here instead of failing whichever test happened to be spawning
+    /// (Issue #4012).
+    fn execute_once_the_program_is_not_busy<T>(
+        what: &str,
+        mut attempt: impl FnMut() -> std::io::Result<T>,
+    ) -> T {
+        let started = Instant::now();
+        loop {
+            match attempt() {
+                Ok(value) => return value,
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    assert!(
+                        started.elapsed() < MARKER_WAIT_HANG_GUARD,
+                        "{what}: still refused as busy after {MARKER_WAIT_HANG_GUARD:?}; \
+                         a writer that outlives a fork window is a leak, not a race"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{what}: {error}"),
+            }
+        }
+    }
 
     async fn wait_for_path(path: &Path) -> bool {
         tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
@@ -5466,10 +5656,11 @@ exit 0
         /// Start an invocation that blocks until [`Self::release`] is called.
         fn spawn(&self, name: &str) -> BlockingFakeGhChild {
             let markers = self.markers(name);
-            let child = self
-                .command(&markers)
-                .spawn()
-                .unwrap_or_else(|error| panic!("spawn {name} fake gh: {error}"));
+            let mut command = self.command(&markers);
+            let child =
+                execute_once_the_program_is_not_busy(&format!("spawn {name} fake gh"), || {
+                    command.spawn()
+                });
             BlockingFakeGhChild::new(child, markers)
         }
 
@@ -5477,9 +5668,10 @@ exit 0
         /// because `block` mode waits for it before exiting.
         fn run(&self, name: &str) -> std::process::ExitStatus {
             let markers = self.markers(name);
-            self.command(&markers)
-                .status()
-                .unwrap_or_else(|error| panic!("run {name} fake gh: {error}"))
+            let mut command = self.command(&markers);
+            execute_once_the_program_is_not_busy(&format!("run {name} fake gh"), || {
+                command.status()
+            })
         }
 
         fn release(&self) {
@@ -5719,6 +5911,28 @@ exit 0
         assert!(
             !fixture.overlap_reported(),
             "a single invocation is never an overlap, however slowly it starts"
+        );
+    }
+
+    #[test]
+    fn a_program_refused_as_busy_is_waited_out_rather_than_failed() {
+        // Issue #4012: a saturated runner made `spawn` of a freshly written
+        // fake gh fail with `ETXTBSY` and turned unrelated PRs red. That
+        // refusal is another test thread's fork window, not a fault of this
+        // invocation, and it clears without any action here.
+        let mut attempts = 0usize;
+        let value = execute_once_the_program_is_not_busy("busy fake gh", || {
+            attempts += 1;
+            if attempts <= 2 {
+                return Err(std::io::Error::from_raw_os_error(libc::ETXTBSY));
+            }
+            Ok("started")
+        });
+
+        assert_eq!(value, "started");
+        assert_eq!(
+            attempts, 3,
+            "every refusal must be waited out, not surfaced as a failure"
         );
     }
 
@@ -6015,7 +6229,14 @@ exit 0
                 let connections = Arc::clone(&connections);
                 handlers.spawn(async move {
                     let guard = ConnectionGuard::new(connections);
-                    handle_connection(stream, endpoint, hub, Instant::now(), &guard).await
+                    handle_connection(
+                        super::IpcStream::Unix(stream),
+                        endpoint,
+                        hub,
+                        Instant::now(),
+                        &guard,
+                    )
+                    .await
                 });
             }
             while let Some(result) = handlers.join_next().await {
@@ -8685,8 +8906,74 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
+            }
+        );
+        // Issue #3906 AC-1: the GUI toggle publishes the override alone and
+        // the daemon commits it without touching any other switch.
+        let auto_apply_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "auto_apply_updates": true } }),
+            std::process::id() + 1,
+        );
+        let auto_apply_control =
+            decode_issue_monitor_control(auto_apply_payload).expect("auto-apply control");
+        assert_eq!(
+            auto_apply_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            }
+        );
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            auto_apply_control
+        ));
+        assert_eq!(monitor.auto_apply_updates(), Some(true));
+        assert!(monitor.auto_apply_updates_enabled());
+        // Issue #3906 AC-3: the update mechanism raises an Auto drain for the
+        // staged version through the same control.
+        let raise_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "update_drain": { "reason": "auto", "version": "9.99.0" } } }),
+            std::process::id() + 1,
+        );
+        let raise_control = decode_issue_monitor_control(raise_payload).expect("raise control");
+        assert_eq!(
+            raise_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
+                    reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    version: "9.99.0".to_string(),
+                }),
                 launch_agent: None,
             }
+        );
+        assert!(apply_issue_monitor_control(&mut monitor, raise_control));
+        let drain = monitor.update_drain().expect("auto drain raised");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Auto);
+        assert_eq!(drain.version, "9.99.0");
+        assert!(
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "config_set": { "update_drain": "soon" } }),
+                std::process::id() + 1,
+            ))
+            .is_none(),
+            "a malformed drain control is refused whole"
         );
 
         let temp = TempDir::new().expect("tempdir");
@@ -8711,6 +8998,100 @@ exit 0
         assert!(!persisted.autonomous_mode);
         assert_eq!(persisted.max_active_agents, 4);
         assert_eq!(persisted.effect_authority_epoch, 9);
+    }
+
+    /// Issue #4037 AC-2 / AC-5: the daemon decodes `update_drain` as part of
+    /// the atomic `config_set` frame and applies it without disturbing the
+    /// launches it is draining.
+    #[test]
+    fn issue_monitor_config_set_update_drain_decodes_and_commits_non_destructively() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "config_set": {
+                    "update_drain": true,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("config control");
+        assert_eq!(
+            control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
+            }
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            launch_bindings: std::collections::BTreeMap::from([("tab-1::agent-1".to_string(), 42)]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let before = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let ledgers = |prefs: &crate::IssueMonitorPrefs| {
+            (
+                prefs.enabled,
+                prefs.autonomous_mode,
+                prefs.max_active_agents,
+                prefs.launched_issues.clone(),
+                prefs.launch_bindings.clone(),
+                prefs.launched_claims.clone(),
+                prefs.launching_issues.clone(),
+                prefs.pending_effects.clone(),
+                prefs.pending_launch_deliveries.clone(),
+                prefs.effect_authority_epoch,
+            )
+        };
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            initial.clone(),
+        );
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let drain = persisted.update_drain.clone().expect("drain persisted");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Manual);
+        assert_eq!(
+            ledgers(&persisted),
+            ledgers(&before),
+            "the drain must not touch the launch ledgers"
+        );
+
+        let clear =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "config_set": { "update_drain": false } }),
+                std::process::id() + 1,
+            ))
+            .expect("clear control");
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            clear,
+        ));
+        assert!(monitor.update_drain().is_none());
+        let cleared = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(cleared.update_drain.is_none());
+        assert_eq!(ledgers(&cleared), ledgers(&before));
     }
 
     /// SPEC #3914 FR-011: `profiles_set` reaches the daemon as one atomic
@@ -8795,7 +9176,9 @@ exit 0
                 autonomous_mode: None,
                 max_active_agents: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
+                update_drain: None,
             }
         );
 
@@ -9000,7 +9383,9 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
+                update_drain: None,
             },
         ));
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
@@ -10214,6 +10599,13 @@ exit 0
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+        // Issue #4033: these tests assert on the settlement state machine, not
+        // on how fast this host writes a small JSON file. The production 250 ms
+        // prefs budget decided their verdict on a loaded runner, so give the
+        // transaction the same hang-guard treatment every other wait in this
+        // module gets (Issue #3641): a saturated runner may delay it, never
+        // decide it.
+        let _prefs_timeout = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
 
         let workspace_home = temp.path().join("workspace");
         let bare_repo = workspace_home.join("repo.git");
@@ -10274,23 +10666,31 @@ exit 0
             .cloned()
     }
 
-    /// Fence the proposal on disk and commit the executor outcome, exactly as
-    /// the driver would.
-    fn commit_settlement(
+    /// Fence the proposal on disk exactly as the driver would, and hand back
+    /// the `Attempting` tuple its executor would carry.
+    fn fence_settlement(
         prefs_path: &Path,
         monitor: &mut crate::IssueMonitorState,
         effect: &crate::PendingIssueMonitorEffect,
-        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
-    ) -> bool {
+    ) -> crate::PendingIssueMonitorEffect {
         let key = effect.attempt_key();
         assert!(monitor.mark_pending_effect_attempting(&key));
         crate::save_issue_monitor_prefs(prefs_path, &monitor.prefs()).expect("persist attempting");
-        let attempting = monitor
+        monitor
             .pending_effects()
             .iter()
             .find(|pending| pending.attempt_key() == key)
             .cloned()
-            .expect("attempting effect");
+            .expect("attempting effect")
+    }
+
+    /// Commit the executor outcome for an already fenced proposal.
+    fn commit_fenced_settlement(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        attempting: crate::PendingIssueMonitorEffect,
+        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+    ) -> bool {
         super::commit_issue_monitor_effect_result(
             prefs_path,
             monitor,
@@ -10300,6 +10700,42 @@ exit 0
                 completed_at: "2026-09-01T01:00:00Z".to_string(),
             },
         )
+    }
+
+    /// Fence the proposal on disk and commit the executor outcome, exactly as
+    /// the driver would.
+    fn commit_settlement(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        effect: &crate::PendingIssueMonitorEffect,
+        outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
+    ) -> bool {
+        let attempting = fence_settlement(prefs_path, monitor, effect);
+        commit_fenced_settlement(prefs_path, monitor, attempting, outcome)
+    }
+
+    /// Hold the prefs lock for `hold` and return once the lock is provably
+    /// taken, so a caller can inject contention without racing the holder.
+    fn hold_prefs_lock_for(prefs_path: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let lock_path = prefs_path.with_extension("lock");
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("open prefs lock");
+            fs2::FileExt::lock_exclusive(&lock).expect("hold prefs lock");
+            acquired_tx.send(()).expect("announce the held prefs lock");
+            std::thread::sleep(hold);
+            fs2::FileExt::unlock(&lock).expect("release prefs lock");
+        });
+        acquired_rx
+            .recv_timeout(MARKER_WAIT_HANG_GUARD)
+            .expect("the injected prefs lock holder must take the lock");
+        holder
     }
 
     #[test]
@@ -10482,6 +10918,50 @@ exit 0
                     || record.state != crate::issue_monitor::IssueClosureState::Closed
             }));
         });
+    }
+
+    /// Issue #4033 AC-3: a saturated runner may delay the settlement commit,
+    /// never decide it.
+    ///
+    /// The settlement transaction used to run under a hard-wired 250 ms
+    /// budget, so on a CI runner whose test binary took three times its usual
+    /// wall time the commit simply returned `false` and reddened a PR that had
+    /// not touched any of this. The contention injected here holds the prefs
+    /// lock four times longer than that former budget: the commit must wait it
+    /// out and still succeed.
+    #[test]
+    fn a_slow_prefs_transaction_still_commits_the_merged_settlement() {
+        with_settlement_scan_fixture(
+            "settle_close",
+            delivered_prefs(true),
+            |_, prefs_path, mut monitor| {
+                let effect =
+                    settlement_effect(&monitor).expect("a merged delivery proposes a close");
+                let attempting = fence_settlement(prefs_path, &mut monitor, &effect);
+
+                let holder = hold_prefs_lock_for(prefs_path, Duration::from_millis(1_000));
+                let committed = commit_fenced_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    attempting,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: true,
+                        already_closed: false,
+                    },
+                );
+                holder.join().expect("prefs lock holder joins");
+
+                assert!(
+                    committed,
+                    "a delayed prefs transaction must still commit the settlement"
+                );
+                assert!(monitor.prefs().closure_records.iter().any(|record| {
+                    record.issue_number == 43
+                        && record.state == crate::issue_monitor::IssueClosureState::Closed
+                }));
+            },
+        );
     }
 
     #[test]
@@ -10693,6 +11173,18 @@ exit 0
         // deadline that kills the hung child, the driver records the expiry as
         // a scan error, and the next tick starts a fresh scan instead of
         // staying silently stalled.
+        //
+        // Issue #4033: the budget below is a hang guard for the scan prologue,
+        // not a calibrated one. The scan spawns real `git` before it ever
+        // reaches the fake `gh` this test wants to hang, so a budget sized to
+        // "just enough" lets a loaded runner spend it before the spawn and
+        // fail the *precondition* — which is how this test reddened PRs that
+        // had not touched the Issue Monitor at all. `GIT_PROLOGUE_DELAY` below
+        // makes that prologue expensive on purpose: the runner may delay the
+        // cut, it may never decide whether the hang was reached.
+        const GIT_PROLOGUE_DELAY: Duration = Duration::from_secs(1);
+        const SCAN_BUDGET: Duration = Duration::from_secs(5);
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10702,9 +11194,9 @@ exit 0
         let _home = ScopedGwtHome::set(&home);
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let scan_started_path = temp.path().join("scan-started");
-        // Deliberately never created: every fake gh invocation hangs until its
-        // deadline terminates the process tree.
-        let release_scan_path = temp.path().join("never-released");
+        // Created only at teardown: until then every fake gh invocation hangs
+        // until its deadline terminates the process tree.
+        let release_scan_path = temp.path().join("release-at-teardown");
         let active_scan_path = temp.path().join("active-scan");
         let overlap_scan_path = temp.path().join("overlap-scan");
         let _path = prepend_fake_gh_to_path(&fake_gh);
@@ -10736,6 +11228,13 @@ exit 0
             },
         )
         .expect("seed issue monitor prefs");
+        // Issue #4033 AC-3: stand in for the loaded runner. Every `git` the
+        // scan prologue spawns now costs a full second — far more than the
+        // three-fold slowdown that reddened unrelated PRs.
+        write_slow_git_shim(
+            fake_gh.parent().expect("fixture directory"),
+            GIT_PROLOGUE_DELAY,
+        );
 
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
@@ -10748,12 +11247,12 @@ exit 0
                 poll_interval_secs: 1,
                 ..crate::IssueMonitorConfig::default()
             },
-            Duration::from_millis(1_500),
+            SCAN_BUDGET,
         );
 
         let first_scan_started = wait_for_path(&scan_started_path).await;
         let expired_status =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(8), |status| {
+            recv_issue_monitor_status_matching(&mut status_rx, MARKER_WAIT_HANG_GUARD, |status| {
                 status.last_error.as_deref().is_some_and(|error| {
                     error.contains("deadline")
                         || error.contains("timed out")
@@ -10763,8 +11262,11 @@ exit 0
             .await;
         let driver_recovered = wait_for_marker_count(&scan_started_path, 2).await;
 
+        // Let the scan that is hanging right now finish instead of making
+        // teardown wait out another full budget.
+        fs::write(&release_scan_path, "release").expect("release the hung fake gh");
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(10), worker)
+        tokio::time::timeout(MARKER_WAIT_HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -11570,18 +12072,20 @@ exit 1
         ));
     }
 
-    #[tokio::test]
-    async fn daemon_shutdown_request_is_sticky_before_worker_wait_registration() {
+    #[test]
+    fn daemon_shutdown_request_is_sticky_before_worker_wait_registration() {
         let shutdown = DaemonShutdown::new();
         shutdown.request();
 
-        tokio::time::timeout(Duration::from_millis(50), shutdown.notified())
-            .await
-            .expect("a pre-registered shutdown request must remain observable");
+        assert_eq!(
+            shutdown.notified().now_or_never(),
+            Some(()),
+            "a pre-registered shutdown request must be immediately observable"
+        );
     }
 
-    #[tokio::test]
-    async fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
+    #[test]
+    fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
         let shutdown = DaemonShutdown::new();
         assert!(!shutdown.requested.load(Ordering::Acquire));
         let notified = shutdown.notify.notified();
@@ -11590,10 +12094,10 @@ exit 1
         // created, so a broadcast before its first poll remains observable.
         shutdown.request();
 
-        let observed = tokio::time::timeout(Duration::from_millis(50), notified).await;
-
-        observed.expect(
-            "Notified must observe notify_waiters after its generation snapshot and before polling",
+        assert_eq!(
+            notified.now_or_never(),
+            Some(()),
+            "Notified must immediately observe notify_waiters after its generation snapshot and before polling",
         );
     }
 
@@ -12114,18 +12618,29 @@ exit 1
         let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
 
+        // Issue #4033: the contended load is the subject here, so pin the
+        // budget it must give up within instead of inheriting whatever the
+        // ambient one happens to be, and bound the assertion by a multiple of
+        // that budget rather than by a wall-clock second.
+        const CONTENDED_BUDGET: Duration = Duration::from_millis(250);
         let started = Instant::now();
-        let blocked = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        let blocked = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(CONTENDED_BUDGET);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < CONTENDED_BUDGET * 8);
         assert!(blocked.recovery_blocked);
         assert!(marker.exists());
         assert_eq!(fs::read(&prefs_path).expect("reload locked prefs"), before);
         FileExt::unlock(&lock).expect("release prefs lock");
 
+        // The retry is not the subject: it must prove recovery, so a saturated
+        // runner may delay it but never decide it (Issue #3641 / #4033).
+        let _retry_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let retried = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
@@ -12243,6 +12758,9 @@ exit 1
         crate::persist_issue_monitor_authority_fence(&prefs_path, &exited_fence)
             .expect("model prior daemon process exit");
 
+        // Issue #4033: the replacement load must prove that authority is taken
+        // over, not that this host writes JSON inside 250 ms.
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let replacement = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),

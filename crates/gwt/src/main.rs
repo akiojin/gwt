@@ -76,8 +76,9 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    OutboundEvent, ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectOpenTarget, ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress,
+    WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -131,7 +132,7 @@ pub(crate) use runtime_support::{
     synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
     EPHEMERAL_WORKTREE_PREFIX,
 };
-pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
+pub(crate) use update_front_door::spawn_startup_update_check;
 #[cfg(test)]
 pub(crate) use update_front_door::{classify_startup_update_state, StartupUpdateAction};
 
@@ -277,12 +278,7 @@ fn board_projection_watch_key(project_root: &Path) -> PathBuf {
 }
 
 fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
-    matches!(
-        event,
-        FrontendEvent::OpenProjectDialog
-            | FrontendEvent::ReopenRecentProject { .. }
-            | FrontendEvent::CloseProjectTab { .. }
-    )
+    matches!(event, FrontendEvent::CloseProjectTab { .. })
 }
 
 /// Phase 0 perf instrumentation (measure-first; see plan
@@ -427,8 +423,8 @@ const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 /// minutes, which is the state Issue #3633 was filed about.
 const RUNTIME_DAEMON_ENSURE_INTERVAL: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GuiShutdownReason {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GuiShutdownReason {
     /// SPEC #2920: retained for the unit tests that still exercise
     /// `request_gui_shutdown` against the legacy native-close path. The
     /// runtime tray-resident process never constructs this variant
@@ -437,18 +433,25 @@ enum GuiShutdownReason {
     NativeClose,
     QuitApp,
     LoopDestroyed,
+    /// Issue #4038 (AC-1): the update helper has been spawned and the GUI
+    /// quits so the helper can swap the binary. Runs the same cleanup as
+    /// `QuitApp` (PTY stop, daemon shutdown, self-close grace).
+    ApplyUpdate {
+        version: String,
+    },
 }
 
 impl GuiShutdownReason {
-    fn arms_backstop(self) -> bool {
+    fn arms_backstop(&self) -> bool {
         !matches!(self, Self::LoopDestroyed)
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::NativeClose => "native close",
             Self::QuitApp => "quit app",
             Self::LoopDestroyed => "loop destroyed",
+            Self::ApplyUpdate { .. } => "apply update",
         }
     }
 }
@@ -507,7 +510,7 @@ fn request_gui_shutdown(
         "gui shutdown requested"
     );
     if reason.arms_backstop() {
-        arm_backstop(reason, GUI_SHUTDOWN_BACKSTOP_GRACE);
+        arm_backstop(reason.clone(), GUI_SHUTDOWN_BACKSTOP_GRACE);
     }
     cleanup();
     tracing::info!(
@@ -516,6 +519,52 @@ fn request_gui_shutdown(
         "gui shutdown cleanup completed"
     );
     GuiShutdownOutcome::Started
+}
+
+/// Issue #4038 (AC-1 / AC-2): resolve the payload to commit for an update
+/// apply on a worker thread — the persisted manifest when there is one,
+/// otherwise a download that is then persisted — and hand the manifest back
+/// to the event loop as `ApplyUpdateGraceful`. Failures reply with
+/// `UpdateApplyError` for `stage`.
+fn spawn_update_apply_resolution(
+    proxy: EventLoopProxy<UserEvent>,
+    state: gwt_core::update::UpdateState,
+    client_id: ClientId,
+    stage: &'static str,
+    log_stage: &'static str,
+) {
+    std::thread::spawn(move || {
+        let log_path = gwt_core::update::update_log_path()
+            .to_string_lossy()
+            .to_string();
+        let resolved = match gwt_core::update::load_pending_update_manifest() {
+            Some(manifest) => Ok(manifest),
+            None => update_front_door::prepare_and_persist_pending_update(state),
+        };
+        match resolved {
+            Ok(manifest) => {
+                let _ = proxy.send_event(UserEvent::ApplyUpdateGraceful {
+                    manifest,
+                    client_id,
+                });
+            }
+            Err(message) => {
+                gwt_core::update::log_update_event(
+                    "fail",
+                    &[("stage", log_stage), ("reason", &message)],
+                );
+                let _ = proxy.send_event(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::UpdateApplyError {
+                        message: Some(message.clone()),
+                        stage: Some(stage.to_string()),
+                        reason: Some(message),
+                        log_path: Some(log_path),
+                    },
+                )]));
+            }
+        }
+    });
 }
 
 fn spawn_gui_exit_backstop(reason: GuiShutdownReason, grace: Duration) {
@@ -932,13 +981,11 @@ fn spawn_workspace_projection_watcher(
 /// returns `None` and the entry stays unfilled. The next time
 /// [`Self::sync`] runs (after a project tab change) we retry the
 /// resolve, so a daemon that comes up later is picked up automatically.
-#[cfg(unix)]
 #[derive(Default)]
 struct BoardDaemonSubscriberRegistry {
     subscribers: HashMap<PathBuf, gwt::daemon_subscriber::DaemonSubscriber>,
 }
 
-#[cfg(unix)]
 impl BoardDaemonSubscriberRegistry {
     fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
         let mut active_roots = HashSet::new();
@@ -962,7 +1009,6 @@ impl BoardDaemonSubscriberRegistry {
     }
 }
 
-#[cfg(unix)]
 fn spawn_board_daemon_subscriber(
     project_root: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
@@ -1004,7 +1050,10 @@ fn spawn_board_daemon_subscriber(
         .map_err(|err| format!("bootstrap: {err}"))?;
         match action {
             DaemonBootstrapAction::Reuse(ep) => Ok(ep),
-            DaemonBootstrapAction::Spawn { .. } => Err("daemon not running".to_string()),
+            DaemonBootstrapAction::Spawn { .. }
+            | DaemonBootstrapAction::RetireStaleVersion { .. } => {
+                Err("daemon not running".to_string())
+            }
         }
     };
 
@@ -1028,7 +1077,6 @@ fn spawn_board_daemon_subscriber(
     )
 }
 
-#[cfg(unix)]
 fn daemon_subscriber_channels() -> Vec<String> {
     vec![
         "board".to_string(),
@@ -1041,7 +1089,6 @@ fn daemon_subscriber_channels() -> Vec<String> {
     ]
 }
 
-#[cfg(unix)]
 fn daemon_broadcast_user_event(
     channel: &str,
     payload: serde_json::Value,
@@ -1076,7 +1123,6 @@ fn daemon_broadcast_user_event(
     }
 }
 
-#[cfg(unix)]
 fn issue_monitor_daemon_user_event(
     event: serde_json::Value,
     project_root: &Path,
@@ -1090,7 +1136,9 @@ fn issue_monitor_daemon_user_event(
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
             Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus { status },
+                BackendEvent::IssueMonitorStatus {
+                    status: Box::new(status),
+                },
             )]))
         }
         "inbox" => {
@@ -1158,7 +1206,6 @@ fn issue_monitor_daemon_user_event(
 
 // Liveness probe shared with `cli::daemon` and `daemon_publisher`;
 // see `gwt::process::is_process_alive`.
-#[cfg(unix)]
 use gwt::process::is_process_alive as is_subscriber_pid_alive;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1455,6 +1502,7 @@ enum UserEvent {
         result: Box<Result<ProcessLaunch, String>>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
+    ProjectNavigationPrepared(Box<ProjectNavigationPrepared>),
     Dispatch(Vec<OutboundEvent>),
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -1486,10 +1534,20 @@ enum UserEvent {
         state: gwt_core::update::UpdateState,
         client_id: ClientId,
     },
-    /// SPEC-2041 Phase 19 (FR-058): user pressed Restart now. Apply the
-    /// prepared payload via the helper subprocess and exit the parent.
+    /// SPEC-2041 Phase 19 (FR-058): user pressed Restart now. Resolve the
+    /// prepared payload (persisted manifest, or download + persist) on a
+    /// worker thread, then route through `ApplyUpdateGraceful`.
     ApplyUpdateRestartNow {
         state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
+    /// Issue #4038 (AC-1): commit a persisted update manifest gracefully on
+    /// the event-loop thread: write the resume marker, spawn the helper
+    /// once, clear the manifest, then quit through `QuitApp` with
+    /// `GuiShutdownReason::ApplyUpdate`. Replaces every worker-thread
+    /// `exit(0)`.
+    ApplyUpdateGraceful {
+        manifest: gwt_core::update::PendingUpdateManifest,
         client_id: ClientId,
     },
     /// SPEC-2041 Phase 19 (FR-056): worker thread completed `prepare_update`
@@ -1498,6 +1556,13 @@ enum UserEvent {
     UpdatePrepared {
         version: String,
         asset_path: std::path::PathBuf,
+    },
+    /// Issue #3906 AC-2 / #4076 AC-2: the update drain tick found the host
+    /// quiescent for two ticks and the cancel grace elapsed. The persisted
+    /// manifest for `version` is committed through `ApplyUpdateGraceful`;
+    /// the automatic path never touches `ApplyUpdateRestartNow`.
+    ApplyUpdateDrained {
+        version: String,
     },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
@@ -1531,9 +1596,12 @@ enum UserEvent {
     CloneProjectError {
         message: String,
     },
-    /// SPEC-1934 US-6.8: user chose Quit from the migration modal. The event
-    /// loop exits through the same cleanup path as a window close request.
-    QuitApp,
+    /// Graceful GUI shutdown (tray Quit, SIGINT/SIGTERM, the migration
+    /// modal's Quit, or an update apply). `reason` names who asked for logs
+    /// and the exit backstop; every variant runs the same cleanup path.
+    QuitApp {
+        reason: GuiShutdownReason,
+    },
     /// SPEC #2920 Phase 4: cross-platform muda/tray-icon menu event.
     /// Was macOS-only when the legacy native menubar produced it, but
     /// the new tray menu fires it on every host OS, so the cfg gate is
@@ -1634,7 +1702,8 @@ mod tests {
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
         DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        OutboundEvent, ProcessLaunch, ProjectNavigationPrepared, ProjectTabRuntime, UserEvent,
+        WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1746,7 +1815,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_subscriber_channels_include_runtime_h2_channels() {
         let channels = super::daemon_subscriber_channels();
@@ -1813,7 +1881,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
         let project_root = Path::new("/tmp/gwt-project");
@@ -1924,11 +1991,11 @@ mod tests {
         .is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_broadcast_issue_monitor_payloads_map_to_frontend_dispatch_and_launch_request() {
         let project_root = Path::new("/tmp/gwt-project");
         let status = gwt::IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,
@@ -1943,6 +2010,7 @@ mod tests {
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
             quota_hold: None,
+            update_drain: None,
             launch_profile_candidates: Vec::new(),
             provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
@@ -1962,7 +2030,7 @@ mod tests {
                 assert!(events.iter().any(|event| {
                     matches!(
                         &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if actual == &status
+                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
                     )
                 }));
             }
@@ -2135,6 +2203,40 @@ mod tests {
         assert!(!deferred);
     }
 
+    // Issue #4038 (AC-1): the update apply quits through the same coordinator
+    // as a user Quit, with its own reason so logs and the backstop name it.
+    #[test]
+    fn apply_update_shutdown_reason_arms_backstop_and_runs_cleanup() {
+        let reason = super::GuiShutdownReason::ApplyUpdate {
+            version: "9.31.0".to_string(),
+        };
+        assert!(reason.arms_backstop());
+        assert_eq!(reason.label(), "apply update");
+
+        let mut coordinator = super::GuiShutdownCoordinator::default();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let outcome = super::request_gui_shutdown(
+            &mut coordinator,
+            reason,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("cleanup".to_string()),
+        );
+
+        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            vec![
+                "backstop:ApplyUpdate { version: \"9.31.0\" }:5s".to_string(),
+                "cleanup".to_string()
+            ]
+            .as_slice()
+        );
+    }
+
     #[test]
     fn loop_destroyed_cleanup_runs_without_backstop_when_no_prior_shutdown() {
         let mut coordinator = super::GuiShutdownCoordinator::default();
@@ -2161,16 +2263,22 @@ mod tests {
     #[test]
     fn board_projection_watcher_sync_only_for_project_tab_changes() {
         assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::OpenProjectDialog
-        ));
-        assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::ReopenRecentProject {
-                path: "/tmp/repo".to_string()
-            }
-        ));
-        assert!(super::frontend_event_may_change_project_tabs(
             &gwt::FrontendEvent::CloseProjectTab {
                 tab_id: "tab-1".to_string()
+            }
+        ));
+
+        // SPEC #3170: opening a project no longer mutates the tab set inside
+        // the frontend dispatch — the tab appears when the prepared navigation
+        // commits, and the `ProjectNavigationPrepared` arm syncs the watchers
+        // there instead. Syncing on dispatch would only walk the unchanged tab
+        // set.
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::OpenProjectDialog
+        ));
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::ReopenRecentProject {
+                path: "/tmp/repo".to_string()
             }
         ));
 
@@ -2363,6 +2471,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
             is_pm: false,
         }
     }
@@ -3111,9 +3220,15 @@ mod tests {
         let blocking_tasks = BlockingTaskSpawner::thread();
         let persist_dispatcher =
             crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
+        let (project_tab_incarnations, next_project_incarnation) =
+            crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
+            project_tab_incarnations,
+            next_project_incarnation,
+            project_navigation_request: 0,
+            pending_project_navigation: None,
             recent_projects: Vec::new(),
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
@@ -3156,6 +3271,10 @@ mod tests {
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
+            update_resume_tab_ids: std::collections::HashSet::new(),
+            update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
+            update_drain_released_projects: Vec::new(),
+            pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
@@ -3413,6 +3532,25 @@ mod tests {
         panic!("timed out waiting for {label}: {snapshot:?}");
     }
 
+    fn take_project_navigation_completion(
+        events: &Arc<Mutex<Vec<UserEvent>>>,
+    ) -> ProjectNavigationPrepared {
+        wait_for_recorded_event("project navigation completion", events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+        });
+        let mut events = events.lock().expect("event log");
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+            .expect("project navigation completion");
+        match events.remove(index) {
+            UserEvent::ProjectNavigationPrepared(prepared) => *prepared,
+            _ => unreachable!("matched project navigation completion"),
+        }
+    }
+
     #[test]
     fn frontend_sync_events_replay_status_wizard_and_pending_update() {
         let temp = tempdir().expect("tempdir");
@@ -3563,15 +3701,20 @@ mod tests {
             ),
             sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::NonRepo, &[]),
         ];
-        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-2"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), tabs, Some("tab-2"));
         runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
 
-        let existing = runtime
-            .open_project_path(repo.clone())
-            .expect("open existing project");
+        assert!(runtime.open_project_path_events(repo.clone()).is_empty());
+        let existing_events = runtime.handle_project_navigation_prepared(
+            take_project_navigation_completion(&recorded_events),
+        );
         let new_active = runtime.active_tab_id.clone().expect("active tab");
 
-        assert!(existing);
+        assert!(existing_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::LaunchWizardState { wizard: None }
+        )));
         assert_eq!(new_active, "tab-1");
         assert!(runtime.launch_wizard.is_none());
         assert!(super::same_worktree_path(
@@ -3579,11 +3722,14 @@ mod tests {
             &repo
         ));
 
-        let added = runtime
-            .open_project_path(scratch.clone())
-            .expect("open new project");
+        assert!(runtime.open_project_path_events(scratch.clone()).is_empty());
+        let added_events = runtime.handle_project_navigation_prepared(
+            take_project_navigation_completion(&recorded_events),
+        );
 
-        assert!(!added);
+        assert!(added_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
         assert_eq!(runtime.tabs.len(), 3);
         assert!(super::same_worktree_path(
             &runtime.recent_projects[0].path,
@@ -3624,7 +3770,7 @@ mod tests {
 
         let select_events = runtime.select_project_tab_events("tab-2");
 
-        assert_eq!(select_events.len(), 3);
+        assert_eq!(select_events.len(), 4);
         assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
         assert!(runtime.launch_wizard.is_none());
         assert!(matches!(
@@ -3632,14 +3778,14 @@ mod tests {
             BackendEvent::ActiveWorkProjection { .. }
         ));
         assert!(matches!(
-            select_events[2].event,
+            select_events[3].event,
             BackendEvent::LaunchWizardState { wizard: None }
         ));
 
         runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
         let close_events = runtime.close_project_tab_events("tab-2");
 
-        assert_eq!(close_events.len(), 3);
+        assert_eq!(close_events.len(), 4);
         assert_eq!(runtime.tabs.len(), 1);
         assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
         assert!(runtime.launch_wizard.is_none());
@@ -4729,7 +4875,9 @@ mod tests {
         assert!(!runtime
             .handle_frontend_event("client-1".to_string(), gwt::FrontendEvent::FrontendReady)
             .is_empty());
-        assert!(!runtime
+        // SPEC #3170: the reopen dispatch returns nothing because the open is
+        // prepared off-thread; the tab and its broadcast arrive with the commit.
+        assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::ReopenRecentProject {
@@ -4737,6 +4885,14 @@ mod tests {
                 },
             )
             .is_empty());
+        let prepared = take_project_navigation_completion(&events);
+        assert!(!runtime
+            .handle_project_navigation_prepared(prepared)
+            .is_empty());
+        assert!(runtime
+            .tabs
+            .iter()
+            .any(|tab| crate::same_worktree_path(&tab.project_root, &scratch)));
         assert!(!runtime
             .handle_frontend_event(
                 "client-1".to_string(),
@@ -8445,9 +8601,7 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start the terminal convergence tick thread");
         }
     }
-    #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
-    #[cfg(unix)]
     board_daemon_subscribers.sync(&app, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
@@ -8635,7 +8789,9 @@ fn main() -> std::io::Result<()> {
         drop(runtime.handle().spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 eprintln!("gwt: SIGINT received, shutting down…");
-                let _ = proxy_for_int.send_event(UserEvent::QuitApp);
+                let _ = proxy_for_int.send_event(UserEvent::QuitApp {
+                    reason: GuiShutdownReason::QuitApp,
+                });
             }
         }));
         #[cfg(unix)]
@@ -8646,7 +8802,9 @@ fn main() -> std::io::Result<()> {
                 if let Ok(mut sig) = signal(SignalKind::terminate()) {
                     if sig.recv().await.is_some() {
                         eprintln!("gwt: SIGTERM received, shutting down…");
-                        let _ = proxy_for_term.send_event(UserEvent::QuitApp);
+                        let _ = proxy_for_term.send_event(UserEvent::QuitApp {
+                            reason: GuiShutdownReason::QuitApp,
+                        });
                     }
                 }
             }));
@@ -8660,6 +8818,10 @@ fn main() -> std::io::Result<()> {
     let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
     let mut agent_self_close_quit_deferred = false;
+    // Issue #4038: the reason a deferred quit (waiting for agent self-close
+    // ACKs) must resume with, so an update apply is not downgraded to a
+    // plain quit once the ACKs land.
+    let mut deferred_quit_reason: Option<GuiShutdownReason> = None;
     let mut gui_shutdown_backstop_armed = false;
 
     event_loop.run(move |event, _, control_flow| {
@@ -8682,13 +8844,14 @@ fn main() -> std::io::Result<()> {
             // tray-resident process. Quit goes through the tray menu
             // (`UserEvent::QuitApp`), SIGINT/SIGTERM, or
             // `Event::LoopDestroyed` instead.
-            Event::UserEvent(UserEvent::QuitApp) => {
+            Event::UserEvent(UserEvent::QuitApp { reason }) => {
                 let self_close_was_deferred = agent_self_close_quit_deferred;
                 if agent_self_close_quit_action(
                     &mut agent_self_close_quit_deferred,
                     app.has_pending_agent_self_closes(),
                 ) == AgentSelfCloseQuitAction::Defer
                 {
+                    deferred_quit_reason = Some(reason);
                     if !self_close_was_deferred {
                         tracing::info!(
                             target: "gwt::shutdown",
@@ -8699,7 +8862,7 @@ fn main() -> std::io::Result<()> {
                 }
                 request_gui_shutdown(
                     &mut gui_shutdown,
-                    GuiShutdownReason::QuitApp,
+                    reason,
                     |reason, grace| {
                         if !is_headless && !gui_shutdown_backstop_armed {
                             spawn_gui_exit_backstop(reason, grace);
@@ -8710,12 +8873,11 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
-                        // Issue #3633: stop the daemons this GUI started. The
-                        // endpoint contract does not compare `daemon_version`,
-                        // so a survivor would be reused by the next launch even
-                        // after an update.
+                        // Issue #3633: stop the daemons this GUI started so an
+                        // update never inherits a previous build's daemon.
+                        // Issue #4038 (AC-6): the supervisor additionally
+                        // refuses to adopt a live daemon of another version.
                         app.daemon_supervisor.shutdown();
                         server.shutdown();
                     },
@@ -8751,7 +8913,6 @@ fn main() -> std::io::Result<()> {
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
-                    #[cfg(unix)]
                     board_daemon_subscribers.sync(&app, proxy.clone());
                 }
                 clients.dispatch(events);
@@ -8777,7 +8938,10 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
                 if agent_self_close_quit_deferred && !app.has_pending_agent_self_closes() {
                     agent_self_close_quit_deferred = false;
-                    let _ = proxy.send_event(UserEvent::QuitApp);
+                    let reason = deferred_quit_reason
+                        .take()
+                        .unwrap_or(GuiShutdownReason::QuitApp);
+                    let _ = proxy.send_event(UserEvent::QuitApp { reason });
                 }
             }
             Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
@@ -8969,7 +9133,10 @@ fn main() -> std::io::Result<()> {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
-                let events = app.terminal_convergence_tick_events();
+                let mut events = app.terminal_convergence_tick_events();
+                // Issue #3906 AC-8: the 15 s convergence tick is also the
+                // update drain's clock (two clear ticks = quiescent).
+                events.extend(app.update_drain_tick_events());
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::TerminalConvergenceObserved {
@@ -9110,6 +9277,20 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_issue_launch_wizard_prepared(prepared);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::ProjectNavigationPrepared(prepared)) => {
+                let may_open_project = matches!(
+                    &prepared.result,
+                    Ok(ProjectNavigationPayload::Open(_))
+                );
+                let events = app.handle_project_navigation_prepared(*prepared);
+                if may_open_project && !events.is_empty() {
+                    board_projection_watchers.sync(&app, proxy.clone());
+                    workspace_projection_watchers.sync(&app, proxy.clone());
+                    #[cfg(unix)]
+                    board_daemon_subscribers.sync(&app, proxy.clone());
+                }
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
             }
@@ -9136,29 +9317,16 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(record_update_available(&mut app, state));
             }
             Event::UserEvent(UserEvent::ApplyUpdate { state, client_id }) => {
-                let apply_proxy = proxy.clone();
-                std::thread::spawn(move || {
-                    let log_path = gwt_core::update::update_log_path()
-                        .to_string_lossy()
-                        .to_string();
-                    if let Err(message) = apply_update_state_and_exit(state) {
-                        gwt_core::update::log_update_event(
-                            "fail",
-                            &[("stage", "apply_update_legacy"), ("reason", &message)],
-                        );
-                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
-                            OutboundEvent::reply(
-                                client_id,
-                                BackendEvent::UpdateApplyError {
-                                    message: Some(message.clone()),
-                                    stage: Some("Apply update".to_string()),
-                                    reason: Some(message),
-                                    log_path: Some(log_path),
-                                },
-                            ),
-                        ]));
-                    }
-                });
+                // Issue #4038 (AC-1): the legacy toast click no longer exits
+                // from a worker thread. Resolve the payload off-thread, then
+                // commit through the graceful route.
+                spawn_update_apply_resolution(
+                    proxy.clone(),
+                    state,
+                    client_id,
+                    "Apply update",
+                    "apply_update_legacy",
+                );
             }
             Event::UserEvent(UserEvent::ApplyUpdateStart { state, client_id }) => {
                 let apply_proxy = proxy.clone();
@@ -9292,37 +9460,98 @@ fn main() -> std::io::Result<()> {
                 version,
                 asset_path,
             }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
-                    version,
+                // Issue #3906 AC-3: the manifest is persisted, so the update
+                // is staged; an unattended monitor now drains new launches.
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                    version: version.clone(),
                     asset_path: asset_path.to_string_lossy().to_string(),
-                })]);
+                })];
+                events.extend(app.update_staged_events(&version));
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateDrained { version }) => {
+                // Issue #3906 AC-2 / AC-10: the drained apply commits the
+                // manifest the staging persisted, through the same graceful
+                // route as Restart now. A manifest that vanished (cleared by
+                // hand, payload deleted) releases the drain instead of
+                // re-downloading unattended.
+                gwt_core::update::log_update_event(
+                    "auto_apply_drained",
+                    &[("version", &version)],
+                );
+                match gwt_core::update::load_pending_update_manifest() {
+                    Some(manifest) if manifest.version == version => {
+                        let _ = proxy.send_event(UserEvent::ApplyUpdateGraceful {
+                            manifest,
+                            client_id: app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.to_string(),
+                        });
+                    }
+                    _ => {
+                        let events = app.release_update_auto_apply_events(
+                            &version,
+                            app_runtime::UpdateAutoApplyRelease::PayloadMissing,
+                        );
+                        clients.dispatch(events);
+                    }
+                }
             }
             Event::UserEvent(UserEvent::ApplyUpdateRestartNow { state, client_id }) => {
-                let apply_proxy = proxy.clone();
-                std::thread::spawn(move || {
-                    let log_path = gwt_core::update::update_log_path()
-                        .to_string_lossy()
-                        .to_string();
-                    gwt_core::update::log_update_event("restart_now_requested", &[]);
-                    // SPEC-2041 Phase 19 (T-130/T-133): consume the persisted
-                    // manifest if it exists so we don't re-download the same
-                    // payload after the user already saw the progress modal.
-                    // Falls back to the legacy `apply_update_state_and_exit`
-                    // path when no manifest is present (e.g. user clicked
-                    // Restart now before download persisted, or manifest was
-                    // wiped by an external cleanup).
-                    let result = match gwt_core::update::load_pending_update_manifest() {
-                        Some(manifest) => {
-                            update_front_door::apply_pending_manifest_and_exit(manifest)
-                        }
-                        None => apply_update_state_and_exit(state),
-                    };
-                    if let Err(message) = result {
+                gwt_core::update::log_update_event("restart_now_requested", &[]);
+                // SPEC-2041 Phase 19 (T-130/T-133) + Issue #4038 (AC-2):
+                // consume the persisted manifest if it exists so we don't
+                // re-download the same payload; otherwise download + persist
+                // on a worker thread. Either way the commit happens through
+                // `ApplyUpdateGraceful` on this thread, never via `exit(0)`.
+                spawn_update_apply_resolution(
+                    proxy.clone(),
+                    state,
+                    client_id,
+                    "Restart now",
+                    "restart_now",
+                );
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateGraceful {
+                manifest,
+                client_id,
+            }) => {
+                let log_path = gwt_core::update::update_log_path()
+                    .to_string_lossy()
+                    .to_string();
+                let marker = gwt_core::update::UpdateResumeMarker {
+                    from_version: env!("CARGO_PKG_VERSION").to_string(),
+                    to_version: manifest.version.clone(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    restart_args: update_front_door::current_restart_args(),
+                    projects: app.update_resume_projects(),
+                    attempt: 1,
+                };
+                match update_front_door::stage_graceful_update_apply(manifest, &marker) {
+                    Ok(version) => {
+                        gwt_core::update::log_update_event(
+                            "graceful_apply_committed",
+                            &[("version", &version)],
+                        );
+                        let _ = proxy.send_event(UserEvent::QuitApp {
+                            reason: GuiShutdownReason::ApplyUpdate { version },
+                        });
+                    }
+                    Err(message) => {
                         gwt_core::update::log_update_event(
                             "fail",
-                            &[("stage", "restart_now"), ("reason", &message)],
+                            &[("stage", "graceful_apply"), ("reason", &message)],
                         );
-                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                        // Issue #3906 AC-12: the failure is recorded in the
+                        // notification center for every client, not only the
+                        // one that clicked (the automatic path has none).
+                        clients.dispatch(vec![
+                            OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                                level: "error".to_string(),
+                                message: format!(
+                                    "Update v{} could not be applied: {message}",
+                                    marker.to_version
+                                ),
+                                issue_number: None,
+                            }),
                             OutboundEvent::reply(
                                 client_id,
                                 BackendEvent::UpdateApplyError {
@@ -9332,9 +9561,9 @@ fn main() -> std::io::Result<()> {
                                     log_path: Some(log_path),
                                 },
                             ),
-                        ]));
+                        ]);
                     }
-                });
+                }
             }
             Event::UserEvent(UserEvent::MigrationProgress {
                 tab_id,
@@ -9356,7 +9585,6 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_migration_done(&tab_id, &branch_worktree_path);
                 board_projection_watchers.sync(&app, proxy.clone());
                 workspace_projection_watchers.sync(&app, proxy.clone());
-                #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
             }
@@ -9378,7 +9606,6 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_clone_project_done(&workspace_home);
                 board_projection_watchers.sync(&app, proxy.clone());
                 workspace_projection_watchers.sync(&app, proxy.clone());
-                #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
             }
@@ -9422,7 +9649,9 @@ fn main() -> std::io::Result<()> {
                         // Route through the same graceful shutdown
                         // path as SIGINT / SIGTERM so PTY children
                         // and watchers are torn down once.
-                        let _ = proxy.send_event(UserEvent::QuitApp);
+                        let _ = proxy.send_event(UserEvent::QuitApp {
+                            reason: GuiShutdownReason::QuitApp,
+                        });
                     }
                     Some(MenuAction::About) => {
                         let about_url =
@@ -9454,7 +9683,6 @@ fn main() -> std::io::Result<()> {
                         app.stop_all_runtimes();
                         board_projection_watchers.shutdown();
                         workspace_projection_watchers.shutdown();
-                        #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
                         app.daemon_supervisor.shutdown();
                         server.shutdown();

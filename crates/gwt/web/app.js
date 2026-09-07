@@ -76,8 +76,8 @@
       // launch-controls / interaction-guard imports) moved to
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
-      // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
-      // Settings window — the PM is configured where it is seen.
+      // SPEC-3431 FR-026 / FR-132: one shared PM settings controller feeds
+      // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
@@ -92,7 +92,14 @@
       import { createBoardLogsSurface } from "/board-logs-surface.js";
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window surface
       // moved to /knowledge-kanban-surface.js.
-      import { createKnowledgeKanbanSurface } from "/knowledge-kanban-surface.js";
+      import {
+        createKnowledgeKanbanSurface,
+        // SPEC #3885 FR-011: the canvas face of a Windowized agent is an Issue
+        // header above the interactive terminal, built from the Issue surface's
+        // own badge/action vocabulary so both faces read identically.
+        issueWindowHeaderModel,
+        renderIssueWindowHeader,
+      } from "/knowledge-kanban-surface.js";
       // SPEC-3064 Phase 3 (E6e): the Profile window surface moved to
       // /profile-window-surface.js.
       import { createProfileWindowSurface } from "/profile-window-surface.js";
@@ -285,6 +292,7 @@
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
       const renderedIssuePreviewBodyKeys = new Map();
+      const renderedIssueWindowHeaderKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
       // window-cleanup call site keeps its text).
@@ -4538,6 +4546,7 @@
       // entries, the drawer chrome wiring, and the window-cleanup call
       // sites, wired through this factory.
       const {
+        issueContextForNumber,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -4892,15 +4901,14 @@
         requestWorkAdvisory,
       });
 
-      // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
-      // `pm_status` hydration that arrives with the initial sync has somewhere
-      // to land.
+      // The controller is created before Settings so pm_status may hydrate its
+      // shared snapshot before the first Settings window is mounted.
       const pmSettingsPanel = createPmSettingsPanel({
         document,
         send,
         confirm: (message) => window.confirm(message),
       });
-      pmSettingsPanel.mount();
+      pmSettingsPanel.bindEntryPoints({ document });
 
       // SPEC #3206 v2 — notification center: bell (rail System group) + unread
       // badge + history drawer. The drawer mounts on <body>, never inside
@@ -5046,6 +5054,79 @@
           branchCleanupModal?.classList.contains("open"),
       });
 
+      // SPEC #3885 FR-011 / AC-11: a Windowized agent is an Issue window — Issue
+      // header above an interactive terminal — not a bare terminal. FR-013 keeps a
+      // session with no Issue behind it exactly as it was.
+      function issueWindowHeaderModelFor(windowData) {
+        if (presetSurface(windowData?.preset) !== "terminal") return null;
+        const issueNumber = Number(windowData?.linked_issue_number);
+        if (!Number.isFinite(issueNumber)) return null;
+        const context = issueContextForNumber(issueNumber) || {};
+        return issueWindowHeaderModel({ windowData, ...context });
+      }
+
+      function runIssueWindowHeaderAction(action, windowData) {
+        const issueNumber = Number(windowData?.linked_issue_number);
+        if (action === "return-to-list") {
+          // FR-012: the inverse of Windowize. The window already carries its Issue,
+          // so the frontend only names the window it wants folded back into the row;
+          // the shared terminal runtime is reparented into the row's status row by
+          // the same path the Issue Monitor auto-launch already uses.
+          send({ kind: "dock_agent_window_to_issue", id: windowData.id });
+          return;
+        }
+        if (action === "open-issue" && Number.isFinite(issueNumber)) {
+          const preset = "issue";
+          const windowId = focusOrSpawnPreset(preset);
+          const knowledgeKind = knowledgeKindForPreset(preset);
+          if (windowId) {
+            requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
+            return;
+          }
+          pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number: issueNumber });
+        }
+      }
+
+      function syncIssueWindowHeader(windowData, element) {
+        const body = element.querySelector(".window-body");
+        if (!body) return;
+        const model = issueWindowHeaderModelFor(windowData);
+        const existing = body.querySelector(".issue-window-header");
+        // The terminal fills the body absolutely; the class tells the stylesheet to
+        // leave the header's band free rather than letting the two overlap.
+        element.classList.toggle("has-issue-header", Boolean(model));
+        if (!model) {
+          existing?.remove();
+          return;
+        }
+        const header = renderIssueWindowHeader(document, model, (action) =>
+          runIssueWindowHeaderAction(action, windowData),
+        );
+        if (existing) {
+          existing.replaceWith(header);
+        } else {
+          body.insertBefore(header, body.firstChild);
+        }
+      }
+
+      function issueWindowHeaderRenderKey(windowData) {
+        const model = issueWindowHeaderModelFor(windowData);
+        if (!model) return "";
+        const parts = [];
+        appendRenderKeyPart(parts, "issue");
+        appendRenderKeyPart(parts, model.issueNumber);
+        appendRenderKeyPart(parts, "title");
+        appendRenderKeyPart(parts, model.title);
+        appendRenderKeyPart(parts, "badge");
+        appendRenderKeyPart(parts, model.primary.key);
+        appendRenderKeyPart(parts, model.primary.label);
+        for (const item of model.secondary) {
+          appendRenderKeyPart(parts, "secondary");
+          appendRenderKeyPart(parts, `${item.key}:${item.label}`);
+        }
+        return parts.join("");
+      }
+
       function mountWindowBody(windowData, element) {
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
@@ -5119,6 +5200,9 @@
           if (!isOffCanvasPlacement(windowData)) {
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
+          // SPEC #3885 FR-011: an Issue-bound agent gets its Issue header above the
+          // terminal it already owns; the terminal itself stays interactive.
+          syncIssueWindowHeader(windowData, element);
           return;
         }
 
@@ -5270,6 +5354,7 @@
         focusOrSpawnPreset,
         renderUsagePanel,
         indexStatusByProjectRoot,
+        pmSettingsPanel,
       });
 
       function ensureWindow(windowData) {
@@ -5502,6 +5587,16 @@
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
         }
+        // SPEC #3885 FR-011: the Issue header follows the same live state the row's
+        // badge does (agent status, Issue title, Work/PR context), so it is keyed
+        // rather than remounted with the body.
+        if (surface === "terminal") {
+          const nextIssueWindowHeaderKey = issueWindowHeaderRenderKey(windowData);
+          if (renderedIssueWindowHeaderKeys.get(windowData.id) !== nextIssueWindowHeaderKey) {
+            renderedIssueWindowHeaderKeys.set(windowData.id, nextIssueWindowHeaderKey);
+            syncIssueWindowHeader(windowData, element);
+          }
+        }
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
@@ -5668,6 +5763,7 @@
                   renderedRuntimeStatusKeys.delete(windowId);
                   renderedAgentKanbanBodyKeys.delete(windowId);
                   renderedIssuePreviewBodyKeys.delete(windowId);
+                  renderedIssueWindowHeaderKeys.delete(windowId);
                   pendingOutputMap.delete(windowId);
                   pendingSnapshotMap.delete(windowId);
                   terminalOutputBatcher.clear(windowId);
@@ -5992,6 +6088,8 @@
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
             window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
+            // Issue #3906 AC-12: the update CTA shows the drain progress.
+            updateCtaController.handleIssueMonitorStatus(event.status || {});
             break;
           case "issue_monitor_inbox":
             scheduleIssueMonitorProjectionRefresh();
@@ -6262,6 +6360,14 @@
           case "update_apply_pending_persisted":
             updateCtaController.handleUpdateApplyPendingPersisted({
               version: event.version,
+            });
+            break;
+          case "update_auto_apply":
+            // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
+            updateCtaController.handleUpdateAutoApply({
+              version: event.version,
+              phase: event.phase,
+              grace_secs: event.grace_secs,
             });
             break;
           case "custom_agent_list":
@@ -7271,6 +7377,11 @@
         const id = event.detail?.id;
         if (!id) return;
         switch (id) {
+          case "pm-settings":
+            // The shared PM settings controller owns this route. Keeping an
+            // explicit arm prevents an "unknown" diagnostic without stopping
+            // other command-bus observers.
+            return;
           case "open-board":
             focusOrSpawnPreset("board");
             return;
@@ -7304,11 +7415,6 @@
             return;
           case "stop-all-windows":
             requestStopAllWindows();
-            return;
-          case "pm-settings":
-            // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
-            // is the keyboard-only path to the same panel.
-            frontendUnits.pmSettingsPanel.open();
             return;
           case "toggle-notifications":
             notificationCenter.toggle();
@@ -7357,6 +7463,11 @@
             return;
           }
           send(detail);
+        });
+        window.__gwtPmSettingsTestApi = Object.freeze({
+          mount(container) {
+            pmSettingsPanel.mount(container);
+          },
         });
         window.__gwtTerminalTestApi = Object.freeze({
           metrics(windowId) {

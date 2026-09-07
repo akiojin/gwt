@@ -121,10 +121,18 @@ an old browser tab.
      fallback with the checkout `gwtd`. This keeps a portable bare `gwtd`
      fallback when `PATH` already resolves a stable install, preserves user
      hooks, and prevents the fresh GUI from inheriting provider-to-provider
-     fallback skew:
+     fallback skew. The block parses `hook.doctor` evidence with `jq`, which
+     is not a gwt runtime requirement, so it preflights `jq` explicitly and
+     fails closed with install guidance instead of dying on
+     `jq: command not found`. Only POSIX utilities (`grep`, `env`) are
+     assumed beyond that:
 
      ```bash
      # browser-check-hook-repair-begin
+     if ! command -v jq >/dev/null 2>&1; then
+       echo "browser-check preflight failed: jq is required to parse hook.doctor evidence; install jq (for example: brew install jq) and rerun" >&2
+       exit 1
+     fi
      HOOK_DOCTOR_ENVELOPE="$(
        jq -n \
          --arg expected_hook_bin "$CHECK_HOOK_BIN" \

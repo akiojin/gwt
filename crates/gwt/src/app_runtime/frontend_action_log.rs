@@ -209,6 +209,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::UndockAgentWindow { id, .. } => {
             FrontendUserActionLog::new("undock_agent_window", "window").window(id)
         }
+        FrontendEvent::DockAgentWindowToIssue { id } => {
+            FrontendUserActionLog::new("dock_agent_window_to_issue", "window").window(id)
+        }
         FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
             FrontendUserActionLog::new("set_agent_kanban_card_collapsed", "window")
                 .window(id)
@@ -517,6 +520,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
         }
+        FrontendEvent::CancelUpdateAutoApply => {
+            FrontendUserActionLog::new("cancel_update_auto_apply", "update")
+        }
         FrontendEvent::OpenUpdateLog { log_path } => {
             FrontendUserActionLog::new("open_update_log", "update")
                 .target(log_path.as_deref().unwrap_or_default())
@@ -659,6 +665,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
             FrontendUserActionLog::new("set_issue_monitor_max_active_agents", "issue_monitor")
                 .target(max_active_agents.to_string())
@@ -697,6 +707,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             } else {
                 "off"
             })
+        }
+        FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
+            FrontendUserActionLog::new("set_pm_loop_interval", "pm")
+                .target(loop_interval_secs.to_string())
         }
         FrontendEvent::SetPmLaunchProfile {
             agent_id, model, ..

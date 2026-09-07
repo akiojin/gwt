@@ -8,6 +8,7 @@ pub mod audit;
 pub mod backend;
 pub mod backend_store;
 pub mod claude_capabilities;
+pub mod codex_shared_state;
 pub mod custom;
 pub mod detect;
 pub mod environment;
@@ -34,6 +35,10 @@ pub use claude_capabilities::{
     claude_capability_snapshot, claude_ultracode_supported, claude_workflows_enabled,
     detect_claude_version_raw, parse_claude_semver, supports_ultracode, workflows_enabled_from,
     ClaudeCapabilitySnapshot,
+};
+pub use codex_shared_state::{
+    codex_shared_state_lock_detail, is_codex_shared_state_lock_failure, pace_shared_codex_spawn,
+    shares_user_codex_state, CodexSpawnPacer, CODEX_SHARED_STATE_SPAWN_GAP,
 };
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
@@ -91,9 +96,10 @@ pub use session::{
     PendingDiscussionResume, Session, SessionActiveLaunchHandshake, SessionActiveLaunchPhase,
     SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt,
     SessionManualHandoffFence, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
-    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind, GWT_BIN_PATH_ENV,
-    GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
+    EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,
@@ -102,7 +108,7 @@ pub use store::{
 };
 pub use types::{
     builtin_agent_descriptor_for_command, builtin_agent_descriptors, resolve_agent_id, AgentColor,
-    AgentId, AgentInfo, AgentStatus, BuiltinAgentDescriptor, DockerLifecycleIntent,
-    LaunchRuntimeTarget, SessionMode, WindowsShellKind, WorkflowBypass,
+    AgentId, AgentInfo, AgentStatus, BuiltinAgentDescriptor, DistributionRoute,
+    DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode, WindowsShellKind, WorkflowBypass,
 };
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

@@ -113,9 +113,7 @@ impl AppRuntime {
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
         if tab_changed {
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
@@ -344,6 +342,25 @@ impl AppRuntime {
                 return Vec::new();
             };
             tab.workspace.undock_agent_window(&address.raw_id, geometry)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        self.activate_tab_for_window_events(address.tab_id)
+    }
+
+    /// SPEC-3885 FR-012: return a Windowized Issue window to the Issue list. The
+    /// canvas resolves both the Issue and its host window, so a stale frontend cannot
+    /// send the window somewhere it does not belong.
+    pub(crate) fn dock_agent_window_to_issue_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.dock_agent_window_to_issue(&address.raw_id)
         };
         if !updated {
             return Vec::new();
