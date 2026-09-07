@@ -1781,7 +1781,8 @@ enabled = false
     }
 
     fn trust_state(config_path: &Path) -> toml::Table {
-        let parsed: toml::Value = toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+        let parsed: toml::Value =
+            toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
         parsed["hooks"]["state"].as_table().unwrap().clone()
     }
 
@@ -1828,7 +1829,8 @@ trusted_hash = "sha256:08adeab2"
 
         let state = trust_state(&config_path);
         for worktree in &worktrees {
-            let hooks_path = dunce::canonicalize(worktree.path().join(".codex/hooks.json")).unwrap();
+            let hooks_path =
+                dunce::canonicalize(worktree.path().join(".codex/hooks.json")).unwrap();
             for event_name in [
                 "session_start",
                 "user_prompt_submit",
@@ -1838,7 +1840,10 @@ trusted_hash = "sha256:08adeab2"
             ] {
                 let key = format!("{}:{event_name}:0:0", hooks_path.display());
                 let entry = state.get(&key).unwrap_or_else(|| {
-                    panic!("concurrent registration lost a trust entry: {key}\nstate keys: {:?}", state.keys().collect::<Vec<_>>())
+                    panic!(
+                        "concurrent registration lost a trust entry: {key}\nstate keys: {:?}",
+                        state.keys().collect::<Vec<_>>()
+                    )
                 });
                 assert_eq!(
                     entry.get("enabled").and_then(toml::Value::as_bool),
@@ -1937,7 +1942,13 @@ trust_level = "trusted"
 
         let after: toml::Value =
             toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        for key in ["model", "model_reasoning_effort", "model_providers", "projects", "features"] {
+        for key in [
+            "model",
+            "model_reasoning_effort",
+            "model_providers",
+            "projects",
+            "features",
+        ] {
             assert_eq!(
                 after.get(key),
                 before.get(key),
