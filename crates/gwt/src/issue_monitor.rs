@@ -2983,6 +2983,12 @@ pub struct IssueMonitorState {
     /// Issue #4084 AC-5: an operator asked the next scan to release idle rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_idle_release: Option<IssueMonitorIdleReleaseRequest>,
+    /// Issue #4084: windows a close was already requested for. A pane the GUI
+    /// has not finished closing is still on the next snapshot, and asking
+    /// again every scan would spam the close path for a decision already made.
+    /// An id leaves the set once the window is gone from the canvas.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    idle_pane_closes_requested: BTreeSet<String>,
 }
 
 /// Issue #3478 (AC-5): one answered handoff ready to be delivered back to the
@@ -4675,6 +4681,7 @@ impl IssueMonitorState {
             idle_windows: BTreeMap::new(),
             pending_idle_pane_closes: VecDeque::new(),
             pending_idle_release: None,
+            idle_pane_closes_requested: BTreeSet::new(),
         }
     }
 
@@ -12214,6 +12221,19 @@ impl IssueMonitorState {
         now: &str,
     ) -> IssueMonitorIdleReconciliation {
         let classified = self.classify_idle_windows(settlements, now);
+        // A close request lives exactly as long as the window it named. Once
+        // the pane is gone the id may be issued again, so nothing is retained.
+        if let Some(snapshot) = self.fresh_window_snapshot(now) {
+            let live = snapshot
+                .windows
+                .iter()
+                .map(|observed| observed.window_id.clone())
+                .collect::<BTreeSet<_>>();
+            self.idle_pane_closes_requested.retain(|window_id| {
+                live.iter()
+                    .any(|observed| issue_monitor_window_ids_match(window_id, observed))
+            });
+        }
         self.idle_windows = classified
             .iter()
             .map(|idle| (idle.window_id.clone(), idle.clone()))
@@ -12303,7 +12323,11 @@ impl IssueMonitorState {
                     }
                 }
             }
-            if idle.pane_present {
+            if idle.pane_present
+                && self
+                    .idle_pane_closes_requested
+                    .insert(idle.window_id.clone())
+            {
                 self.pending_idle_pane_closes
                     .push_back(IssueMonitorIdlePaneClose {
                         window_id: idle.window_id.clone(),
