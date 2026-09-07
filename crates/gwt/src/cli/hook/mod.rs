@@ -168,6 +168,28 @@ pub enum HookError {
     MissingEnv(&'static str),
     #[error("invalid hook event: {0}")]
     InvalidEvent(String),
+    /// A named dispatcher step failed (Issue #3541). Wraps the underlying
+    /// error so diagnostics can attribute the failure to `event`/`handler`.
+    #[error("hook handler {handler} failed: {source}")]
+    HandlerFailure {
+        event: String,
+        handler: String,
+        #[source]
+        source: Box<HookError>,
+    },
+}
+
+impl HookError {
+    pub fn handler_failure(self, event: &str, handler: &str) -> Self {
+        match self {
+            already @ Self::HandlerFailure { .. } => already,
+            source => Self::HandlerFailure {
+                event: event.to_string(),
+                handler: handler.to_string(),
+                source: Box::new(source),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -253,9 +275,9 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, provider_event, skill_build_spec_stop_check,
-        skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
-        workflow_policy, HookKind, HookOutput,
+        block_bash_policy, event_dispatcher, provider_event, runtime_state,
+        skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
+        skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -265,6 +287,21 @@ pub fn run_daemon_hook<E: CliEnv>(
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
     fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        write_hook_output(env, output).unwrap_or_else(|code| code)
+    }
+    /// Issue #3541: an event only counts as completed once its protocol
+    /// output has been written, so stamp the runtime state on `Ok` only.
+    fn emit_event_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match write_hook_output(env, output) {
+            Ok(code) => {
+                runtime_state::record_hook_event_completed_from_env();
+                code
+            }
+            Err(code) => code,
+        }
+    }
+    /// `Ok(exit_code)` when the envelope reached stdout, `Err(1)` otherwise.
+    fn write_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> Result<i32, i32> {
         match output.serialize_to(env.stdout()) {
             Ok(()) => {
                 if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
@@ -281,16 +318,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                     );
                     let _ = writeln!(env.stderr(), "{grok_reason}");
                 }
-                output.exit_code()
+                Ok(output.exit_code())
             }
             Err(err) => {
                 let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
-                1
+                Err(1)
             }
         }
     }
+    /// Legacy per-kind hooks (runtime-state, forward, ...) keep the plain
+    /// ledger row from Issue #3778; the event dispatcher uses
+    /// `emit_event_error` below for handler-attributed diagnostics.
     fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let message = format!("{err}");
+        let message = gwt_core::error_ledger::sanitize_error_message(&format!("{err}"));
         crate::error_report::report_error_and_publish(
             gwt_core::error_ledger::ErrorKind::HookFailure,
             format!("{name}: {message}"),
@@ -301,6 +341,54 @@ pub fn run_daemon_hook<E: CliEnv>(
             },
         );
         let _ = writeln!(env.stderr(), "gwtd hook {name}: {message}");
+        1
+    }
+    /// Issue #3541: persist the failure with event/handler context in the
+    /// host error ledger and tell the user where it is and that no Board /
+    /// Issue report has been sent for it.
+    fn emit_event_error<E: CliEnv>(env: &mut E, name: &str, event: &str, err: &HookError) -> i32 {
+        use gwt_core::error_ledger::{sanitize_error_message, ErrorKind, ErrorTarget};
+
+        let (event, handler, detail) = match err {
+            HookError::HandlerFailure {
+                event,
+                handler,
+                source,
+            } => (event.as_str(), handler.as_str(), source.to_string()),
+            other => (event, "dispatch", other.to_string()),
+        };
+        let detail = sanitize_error_message(&detail);
+        let linked_issue = runtime_state::linked_issue_from_env();
+        let context = std::collections::BTreeMap::from([
+            ("event".to_string(), event.to_string()),
+            ("handler".to_string(), handler.to_string()),
+            ("exit_status".to_string(), "1".to_string()),
+            ("fail_open".to_string(), "false".to_string()),
+        ]);
+        let recorded = crate::error_report::report_error_and_publish_with_context(
+            ErrorKind::HookFailure,
+            format!("{event}/{handler}: {detail}"),
+            ErrorTarget {
+                issue: linked_issue,
+                session_id: std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok(),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..ErrorTarget::default()
+            },
+            context,
+        );
+        let diagnostic = match recorded {
+            Some(record) => format!("errors.list id={}", record.id),
+            None => {
+                "errors.list (row not appended: recent duplicate or ledger unavailable)".to_string()
+            }
+        };
+        let report_target = linked_issue
+            .map(|number| format!("Board/Issue #{number}"))
+            .unwrap_or_else(|| "Board/owning Issue".to_string());
+        let _ = writeln!(
+            env.stderr(),
+            "gwtd hook {name}: {event}/{handler} failed: {detail} | diagnostic={diagnostic} report_status=not_sent report_target={report_target}"
+        );
         1
     }
 
@@ -319,8 +407,8 @@ pub fn run_daemon_hook<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
+                Ok(output) => Ok(emit_event_output(env, &output)),
+                Err(err) => Ok(emit_event_error(env, name, event, &err)),
             }
         }
         HookKind::ProviderEvent => {
@@ -348,8 +436,13 @@ pub fn run_daemon_hook<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
+                Ok(output) => Ok(emit_event_output(env, &output)),
+                Err(err) => Ok(emit_event_error(
+                    env,
+                    name,
+                    &format!("{provider}:{native_event}"),
+                    &err,
+                )),
             }
         }
         HookKind::RuntimeState => {
