@@ -281,6 +281,24 @@ pub fn spawn_source<S: AsRef<str>>(args: &[S]) -> String {
     format!("{} {shape}", process_origin())
 }
 
+/// SPEC #4093 FR-004: the source label for a call this process makes over
+/// HTTP (the `gwt-github` client) rather than through a `gh` spawn, in the
+/// same shape as [`spawn_source`] so the two transports line up in a
+/// breakdown (`gwtd http api graphql`).
+pub fn http_source<S: AsRef<str>>(args: &[S]) -> String {
+    spawn_source(args).replacen(" gh ", " http ", 1)
+}
+
+/// SPEC #4093 FR-004 / AC-6: the source label for a `gh` command an agent
+/// pane ran, as the hook records it (`agent gh pr list`).
+pub fn agent_spawn_source<S: AsRef<str>>(args: &[S]) -> String {
+    let labelled = spawn_source(args);
+    match labelled.split_once(' ') {
+        Some((_, shape)) => format!("agent {shape}"),
+        None => labelled,
+    }
+}
+
 /// The file stem of the running executable (`gwt`, `gwtd`), so the breakdown
 /// separates the GUI's resync from the CLI's reads.
 fn process_origin() -> &'static str {

@@ -3900,6 +3900,11 @@ pub struct PmLoopState {
     /// `stop_hook_active` chain that a different Stop gate started.
     #[serde(default)]
     pub pending_own_block: bool,
+    /// SPEC #4093 FR-008 (Issue #3879): fingerprint of the monitor snapshot
+    /// the previous cycle saw. A cycle that sees the same fingerprint is an
+    /// empty cycle even while launches run — nothing new to supervise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_snapshot_fingerprint: Option<String>,
     /// The last prompt injection by a wake path (delta or periodic). Both
     /// wake flavours stamp it so they cannot double-fire within one quiet
     /// window, without touching the Stop-gate floor clock.

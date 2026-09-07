@@ -934,6 +934,10 @@ pub fn try_issue_completed_by_merged_pr(
 #[derive(Debug, Default)]
 pub struct LinkedPrProbeBatch {
     linked: BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
+    /// Why the bulk read failed, when it did. A refused bulk read is the
+    /// candidates' refusal too: re-probing them one by one would spend the
+    /// same budget again and hide GitHub's own wording behind the local gate.
+    failure: Option<String>,
 }
 
 impl LinkedPrProbeBatch {
@@ -964,15 +968,26 @@ impl LinkedPrProbeBatch {
             return Self::default();
         }
         match fetch(numbers) {
-            Ok(linked) => Self { linked },
+            Ok(linked) => Self {
+                linked,
+                failure: None,
+            },
             Err(error) => {
                 tracing::debug!(
                     error = %error,
-                    "bulk linked-PR read failed; candidates fall back to single probes"
+                    "bulk linked-PR read failed; its candidates report that failure"
                 );
-                Self::default()
+                Self {
+                    linked: BTreeMap::new(),
+                    failure: Some(error.to_string()),
+                }
             }
         }
+    }
+
+    /// The bulk read's failure, when the batch holds nothing because of it.
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
     }
 
     /// Whether the batch answers `issue`, and how.
@@ -1022,8 +1037,18 @@ pub fn try_issue_completed_by_merged_pr_classified_with(
     issue: &IssueMonitorIssue,
     batch: Option<&LinkedPrProbeBatch>,
 ) -> Result<bool, IssueMonitorCompletionProbeFailure> {
-    if let Some(completed) = batch.and_then(|batch| batch.completed(issue)) {
-        return Ok(completed);
+    if let Some(batch) = batch {
+        if let Some(completed) = batch.completed(issue) {
+            return Ok(completed);
+        }
+        if let Some(failure) = batch.failure().filter(|_| is_spec_candidate(issue)) {
+            return Err(IssueMonitorCompletionProbeFailure::Operation(
+                IssueMonitorScanFailure::new(
+                    IssueMonitorScanStage::ClaimCompletionReadback,
+                    failure.to_string(),
+                ),
+            ));
+        }
     }
     try_issue_completed_by_merged_pr_classified(owner, repo, issue)
 }
@@ -2089,6 +2114,21 @@ mod linked_pr_batch_tests {
             batch.completed(&issues[2]),
             None,
             "an unreturned candidate falls back to the single probe"
+        );
+
+        let refused = LinkedPrProbeBatch::prefetch_with(&[1], |_| {
+            Err(std::io::Error::other(
+                "gh api graphql failed: API rate limit already exceeded",
+            ))
+        });
+        assert!(refused.is_empty());
+        assert!(refused.failure().is_some_and(|f| f.contains("rate limit")));
+        let error =
+            try_issue_completed_by_merged_pr_classified_with("o", "r", &issues[0], Some(&refused))
+                .expect_err("a refused bulk read is the candidate's refusal");
+        assert!(
+            error.into_failure().detail.contains("rate limit"),
+            "GitHub's own wording is preserved"
         );
     }
 }
