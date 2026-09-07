@@ -3715,6 +3715,7 @@ fn sample_runtime_with_events(
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         update_resume_tab_ids: HashSet::new(),
+        update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
@@ -43535,12 +43536,15 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             latest, &loaded, &repo, now,
         );
         latest.set_gui_connected(true);
+        // Issue #3528: an outcome is bound to the Issue it was observed for,
+        // and a candidate without one is deferred — so the fixture states that
+        // #42 was probed this tick and is still open.
         prepare_local_issue_monitor_claim_proposals(
             latest,
             &loaded,
             "windows-host/session",
             now,
-            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeMap::from([(42, false)]),
         );
     })
     .expect("latest-state transaction commits the prepared claim proposal");
@@ -43682,12 +43686,15 @@ fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposa
             latest, &loaded, &repo, now,
         );
         latest.set_gui_connected(true);
+        // Issue #3528: an outcome is bound to the Issue it was observed for,
+        // and a candidate without one is deferred — so the fixture states that
+        // #42 was probed this tick and is still open.
         prepare_local_issue_monitor_claim_proposals(
             latest,
             &loaded,
             "windows-host/session",
             now,
-            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeMap::from([(42, false)]),
         );
         // The proposal exists in memory; the durable rename is what comes next.
         thread::sleep(persist_delay);
@@ -44365,6 +44372,443 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert!(persisted.autonomous_mode);
     assert_eq!(persisted.effect_authority_epoch, 7);
+}
+
+/// Issue #3906 AC-3: a staged update raises the `Auto` drain for the staged
+/// version when the monitor is unattended and auto-apply is on (the default
+/// while autonomous); an explicit `auto_apply_updates:false` keeps the manual
+/// button path and raises nothing. Launch ledgers are untouched (#4037).
+#[test]
+fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let seed = |auto_apply_updates: Option<bool>| {
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                auto_apply_updates,
+                effect_authority_epoch: 7,
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+    };
+
+    seed(Some(false));
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    assert!(runtime.update_staged_events("9.99.0").is_empty());
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("reload")
+        .update_drain
+        .is_none());
+
+    seed(None);
+    let events = runtime.update_staged_events("9.99.0");
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("drain status broadcast");
+    let drain = status.update_drain.as_ref().expect("drain raised");
+    assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
+    assert_eq!(drain.version, "9.99.0");
+    assert!(
+        drain.blocking.is_empty(),
+        "no agent pane, claim, execution or lease"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let persisted_drain = persisted.update_drain.expect("drain persisted");
+    assert_eq!(persisted_drain.version, "9.99.0");
+    assert!(persisted.autonomous_mode);
+    assert_eq!(
+        persisted.effect_authority_epoch, 7,
+        "the drain revokes nothing"
+    );
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "launch ledger untouched"
+    );
+}
+
+/// Issue #3906 AC-8 / AC-12: the status view names the blockers this
+/// process observes — a Running agent pane and a pending `AcquireClaim` —
+/// and an Idle pane is not one of them.
+#[test]
+fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claims() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor
+        .prepare_pending_effect(
+            "claim-effect-42",
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-09-06T01:00:00Z".to_string(),
+                expires_at: "2026-09-06T01:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        )
+        .expect("prepare claim");
+    monitor.set_update_drain(
+        gwt::IssueMonitorUpdateDrainReason::Auto,
+        "9.99.0",
+        "2026-09-06T01:00:00Z",
+    );
+
+    // An Agent pane with a live PTY but no hook state yet composes to
+    // `Starting` (no agent session bound), which blocks just like Running.
+    let blocking = runtime.update_drain_blockers(&monitor);
+    assert_eq!(
+        blocking,
+        vec![
+            gwt::update_drain::UpdateBlocker::ActivePane {
+                window_id: "tab-1::agent-1".to_string(),
+                label: "Sample".to_string(),
+                state: WindowProcessStatus::Starting,
+            },
+            gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 },
+        ]
+    );
+
+    // A hook-reported Idle pane no longer blocks; the claim still does.
+    runtime
+        .window_hook_states
+        .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    assert_eq!(
+        runtime.update_drain_blockers(&monitor),
+        vec![gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 }]
+    );
+}
+
+/// Issue #4076 AC-2 (the 2026-09-07 01:52Z incident): staging an update in
+/// autonomous mode raises the drain and records it, and sends nothing that
+/// could restart gwt — no `ApplyUpdateRestartNow`, no `ApplyUpdateGraceful`,
+/// no `ApplyUpdateDrained`. The only automatic route to a restart is the
+/// drain tick below.
+#[test]
+fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.update_staged_events_with("9.99.0", None);
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorStatus { status } if status.update_drain.is_some()
+        )),
+        "the drain is raised"
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "drain start is recorded once: {toasts:?}");
+    assert!(
+        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        "notice names the version and the drain: {}",
+        toasts[0].1
+    );
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "staging sends no event-loop request that could restart gwt"
+    );
+}
+
+/// Issue #4076 AC-2 / AC-5 (#3906 AC-2 / AC-7 / AC-8): the drain tick applies
+/// only after two consecutive quiet ticks plus the 60 s cancel grace, through
+/// `ApplyUpdateDrained` (which main.rs routes into `ApplyUpdateGraceful`); a
+/// Running agent pane keeps it from firing and a long drain is recorded with
+/// its blockers without stopping anything.
+#[test]
+fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+        .expect("since")
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. }))
+            .count()
+    };
+    let at = |secs: i64| since + chrono::Duration::seconds(secs);
+
+    // Blocked by the Running pane: quiet ticks, nothing sent, until the
+    // AC-9 notice cadence (1800 s) is reached — then the blockers are named.
+    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
+    assert!(runtime.update_drain_tick_events_at(at(30)).is_empty());
+    let notice = runtime.update_drain_tick_events_at(at(1800));
+    let toasts = update_resume_toasts(&notice);
+    assert_eq!(toasts.len(), 1, "long-drain notice: {toasts:?}");
+    assert_eq!(toasts[0].0, "warn");
+    assert!(
+        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("Sample"),
+        "the notice names the blocking pane: {}",
+        toasts[0].1
+    );
+    assert_eq!(drained_events(&user_events), 0);
+
+    // The pane goes Idle: the first quiet tick settles, the second schedules
+    // the apply with the cancel grace, and the apply fires once it elapsed.
+    runtime
+        .window_hook_states
+        .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    assert!(runtime.update_drain_tick_events_at(at(1815)).is_empty());
+    let scheduled = runtime.update_drain_tick_events_at(at(1830));
+    assert!(
+        scheduled.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                grace_secs: Some(60),
+            } if version == "9.99.0"
+        )),
+        "the grace is announced to the CTA: {scheduled:?}"
+    );
+    assert_eq!(
+        update_resume_toasts(&scheduled).len(),
+        1,
+        "the grace is recorded"
+    );
+    assert_eq!(
+        drained_events(&user_events),
+        0,
+        "nothing applies inside the grace"
+    );
+    assert!(runtime.update_drain_tick_events_at(at(1845)).is_empty());
+    assert_eq!(drained_events(&user_events), 0);
+    let applying = runtime.update_drain_tick_events_at(at(1890));
+    assert!(
+        applying.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                ..
+            }
+        )),
+        "the apply is announced: {applying:?}"
+    );
+    assert_eq!(
+        drained_events(&user_events),
+        1,
+        "exactly one graceful apply request"
+    );
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .all(|event| !matches!(event, UserEvent::ApplyUpdateRestartNow { .. })),
+        "the automatic path never uses the Restart-now route"
+    );
+}
+
+/// Issue #4076 AC-2 / AC-5 (#3906 AC-7 / AC-13): cancelling inside the grace
+/// releases the drain (the update stays staged for the manual button) and the
+/// tick never reschedules that version.
+#[test]
+fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+        .expect("since")
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let at = |secs: i64| since + chrono::Duration::seconds(secs);
+    runtime.update_drain_tick_events_at(at(15));
+    let scheduled = runtime.update_drain_tick_events_at(at(30));
+    assert!(scheduled.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateAutoApply {
+            phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+            ..
+        }
+    )));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::CancelUpdateAutoApply);
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                ..
+            } if version == "9.99.0"
+        )),
+        "the CTA learns about the cancellation: {events:?}"
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload")
+            .update_drain
+            .is_none(),
+        "the hold is released so launches resume"
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "the cancellation is recorded: {toasts:?}");
+    assert!(toasts[0].1.contains("cancel"), "{}", toasts[0].1);
+    for secs in [45, 60, 120, 600] {
+        assert!(runtime.update_drain_tick_events_at(at(secs)).is_empty());
+    }
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "no apply request after a cancel"
+    );
+}
+
+/// Issue #4076 AC-4 (#3906 AC-5 / AC-6): an install that needs elevation, or
+/// a version whose apply already failed, is never applied unattended — no
+/// drain is raised, the manual button path stays, and the notification
+/// center says why.
+#[test]
+fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    for refusal in [
+        gwt::update_drain::UpdateAutoApplyRefusal::RequiresElevation,
+        gwt::update_drain::UpdateAutoApplyRefusal::PreviousFailure {
+            version: "9.99.0".to_string(),
+        },
+    ] {
+        let events = runtime.update_staged_events_with("9.99.0", Some(refusal.clone()));
+        assert!(
+            gwt::load_issue_monitor_prefs(&prefs_path)
+                .expect("reload")
+                .update_drain
+                .is_none(),
+            "no drain for {refusal:?}"
+        );
+        let toasts = update_resume_toasts(&events);
+        assert_eq!(
+            toasts.len(),
+            1,
+            "one fallback notice for {refusal:?}: {toasts:?}"
+        );
+        assert_eq!(toasts[0].0, "warn");
+        assert!(
+            toasts[0].1.contains("9.99.0") && toasts[0].1.contains("manually"),
+            "the notice names the manual fallback: {}",
+            toasts[0].1
+        );
+    }
 }
 
 #[test]
@@ -62601,12 +63045,14 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
     let candidates = (1..=50).collect::<Vec<u64>>();
     let probed = std::cell::RefCell::new(Vec::new());
 
-    let completed = super::completed_claim_candidates(1, candidates.clone(), |issue_number| {
-        probed.borrow_mut().push(issue_number);
-        false
-    });
+    let observed =
+        super::claim_candidate_completion_observations(1, candidates.clone(), |issue_number| {
+            probed.borrow_mut().push(issue_number);
+            Ok::<_, std::convert::Infallible>(false)
+        })
+        .expect("infallible probe");
 
-    assert!(completed.is_empty());
+    assert_eq!(observed, std::collections::BTreeMap::from([(1, false)]));
     assert_eq!(
         probed.into_inner(),
         vec![1],
@@ -62614,15 +63060,220 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
     );
 
     // A completed candidate frees no slot, so the walk continues past it
-    // exactly like the claim planner does.
+    // exactly like the claim planner does. Every answer is kept by identity.
     let probed = std::cell::RefCell::new(Vec::new());
-    let completed = super::completed_claim_candidates(1, candidates, |issue_number| {
+    let observed = super::claim_candidate_completion_observations(1, candidates, |issue_number| {
         probed.borrow_mut().push(issue_number);
-        issue_number <= 2
+        Ok::<_, std::convert::Infallible>(issue_number <= 2)
+    })
+    .expect("infallible probe");
+
+    assert_eq!(
+        observed,
+        std::collections::BTreeMap::from([(1, true), (2, true), (3, false)])
+    );
+    assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+}
+
+/// Issue #3528 driver fixture: an enabled autonomous monitor whose live issue
+/// list (fake `gh`) carries one claimable candidate, #43.
+fn seed_scheduled_scan_claim_fixture(
+    temp: &tempfile::TempDir,
+    launch_profile: Option<gwt::IssueMonitorLaunchProfile>,
+) -> (PathBuf, PathBuf) {
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    (repo, prefs_path)
+}
+
+fn pending_claim_issue_numbers(prefs: &gwt::IssueMonitorPrefs) -> Vec<u64> {
+    prefs
+        .pending_effects
+        .iter()
+        .filter_map(|effect| match effect.payload {
+            gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Issue #3528 (SPEC #3200 FR-057): without a saved launch profile the scan
+/// can never claim, so it must not spend a single `gh` probe on the frontier.
+#[test]
+fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, _prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |issue_number| {
+            probed.lock().expect("probe log").push(issue_number);
+            Ok(false)
+        }
     });
 
-    assert_eq!(completed, std::collections::BTreeSet::from([1, 2]));
-    assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        None,
+        "2026-09-07T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan");
+    assert!(matches!(
+        outcome,
+        ScheduledIssueMonitorScanOutcome::Applied(_)
+    ));
+    assert!(
+        probed.lock().expect("probe log").is_empty(),
+        "no launch profile means no claim, so no completion probe"
+    );
+}
+
+/// Issue #3528 (SPEC #3200 FR-059 / FR-060, #3165 FR-098): a completion probe
+/// that hits the observation deadline is fail-closed for the claim proposal —
+/// no candidate is claimed on a partial answer — while the read model and the
+/// typed stage error still commit under the fresh commit budget.
+#[test]
+fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, prefs_path) =
+        seed_scheduled_scan_claim_fixture(&temp, Some(sample_issue_monitor_launch_profile()));
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |issue_number| {
+            probed.lock().expect("probe log").push(issue_number);
+            Err(
+                gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Deadline(
+                    gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                        gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                        "operation deadline expired during claim-completion-readback",
+                    ),
+                ),
+            )
+        }
+    });
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        None,
+        "2026-09-07T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("an expired probe must not fail the commit");
+
+    let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
+        panic!("the scan holds authority, so it must commit its own findings");
+    };
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[43]);
+    let status = state.status_view();
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("claim-completion-readback")),
+        "the expired probe must be reported as its stage: {:?}",
+        status.last_error
+    );
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-09-07T07:00:00Z"));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        pending_claim_issue_numbers(&persisted).is_empty(),
+        "an expired observation must not turn into a claim: {:?}",
+        persisted.pending_effects
+    );
+}
+
+/// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): an ordinary readback error
+/// while the deadline is still valid keeps the #3165 fail-open contract, so a
+/// transient `gh` failure never blocks real work.
+#[test]
+fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, prefs_path) =
+        seed_scheduled_scan_claim_fixture(&temp, Some(sample_issue_monitor_launch_profile()));
+    let _hook = super::set_local_completion_probe_test_hook(|_| {
+        Err(
+            gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Operation(
+                gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                    gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                    "gh merged query failed",
+                ),
+            ),
+        )
+    });
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        None,
+        "2026-09-07T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan");
+    assert!(matches!(
+        outcome,
+        ScheduledIssueMonitorScanOutcome::Applied(_)
+    ));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        pending_claim_issue_numbers(&persisted),
+        vec![43],
+        "an ordinary probe error within budget stays fail-open"
+    );
 }
 
 /// Issue #3528: the read/probe phase and the commit phase shared one deadline,
@@ -64973,7 +65624,18 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
         version: "9.99.0".to_string(),
         since: "2026-09-07T00:00:00Z".to_string(),
         reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+        blocking: Vec::new(),
     });
+    // Issue #3906 AC-4 / #4076 AC-3: the monitor state the apply left behind
+    // (enabled, parallelism, the launches being drained) must come back
+    // exactly, never reset the way the 2026-09-02 restart did (#3883).
+    prefs.enabled = true;
+    prefs.autonomous_mode = true;
+    prefs.max_active_agents = 3;
+    prefs.launched_issues = vec![gwt::IssueMonitorLaunchedIssue {
+        issue_number: 4076,
+        window_id: "tab-update::agent-4076".to_string(),
+    }];
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed update_drain hold");
     (worktree, runtime)
 }
@@ -65037,6 +65699,24 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     assert!(
         !update_drain_is_raised(&worktree),
         "the settling bootstrap releases the update_drain hold on disk"
+    );
+    let restored =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&worktree))
+            .expect("prefs after the settling bootstrap");
+    assert!(
+        restored.enabled,
+        "the monitor stays enabled across the apply"
+    );
+    assert!(restored.autonomous_mode);
+    assert_eq!(restored.max_active_agents, 3, "parallelism is restored");
+    assert_eq!(
+        restored
+            .launched_issues
+            .iter()
+            .map(|launch| launch.issue_number)
+            .collect::<Vec<_>>(),
+        vec![4076],
+        "the launches being drained stay attributable after the restart"
     );
 
     assert_eq!(
