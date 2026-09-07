@@ -198,7 +198,20 @@ export function createUpdateCtaController({
   function handleIssueMonitorStatus(monitorStatus) {
     const drain = monitorStatus?.update_drain;
     if (drain && drain.version) {
-      if (status === "applying") return;
+      if (status === "applying") {
+        // Issue #4076 AC-2 (2026-09-07 01:52Z): the drain is raised the
+        // moment the download is persisted, while the ready modal is still
+        // inviting "Restart now". Unattended, that modal must give way to
+        // the draining CTA — the only automatic route to a restart is the
+        // drain tick. A download still in flight keeps its modal.
+        const modal = document.getElementById(modalId);
+        if (!(drain.reason === "auto" && modal && modal.dataset.state === "ready")) return;
+        closeModal();
+      }
+      // Issue #3906 AC-7: a scheduled apply is superseded by the drain view
+      // only when the backend withdraws it (`update_auto_apply` postponed /
+      // cancelled); status ticks alone never hide the cancel control.
+      if (status === "scheduled") return;
       if (status === "dismissed" && dismissedDrainVersion === drain.version) return;
       showDraining(drain);
       return;
@@ -264,6 +277,41 @@ export function createUpdateCtaController({
     }
   }
 
+  // Issue #3906 AC-7 / AC-12 (#4076 AC-2 / AC-5): the backend's automatic
+  // apply phases. `scheduled` turns the CTA into the cancel control for the
+  // grace; `postponed` / `cancelled` withdraw it; `applying` precedes the
+  // graceful restart.
+  function handleUpdateAutoApply(payload) {
+    const version = payload?.version;
+    if (!version) return;
+    switch (payload.phase) {
+      case "scheduled": {
+        removeLegacyUpdateSurfaces();
+        closeModal();
+        pendingVersion = version;
+        const grace = Number.isFinite(payload.grace_secs) ? payload.grace_secs : 60;
+        renderCta("scheduled", `Update v${version} applies in ${grace} s — click to cancel`);
+        announceUpdateAvailable();
+        return;
+      }
+      case "postponed":
+        pendingVersion = version;
+        renderCta("draining", `Update v${version} pending — waiting for the host to go quiet`);
+        return;
+      case "cancelled":
+        pendingVersion = version;
+        showReadyPending(version);
+        return;
+      case "applying":
+        closeModal();
+        pendingVersion = version;
+        renderCta("applying", `Applying update v${version}…`);
+        return;
+      default:
+        return;
+    }
+  }
+
   function handleUpdateApplyPendingPersisted(payload) {
     if (!payload || !payload.version) return;
     showReadyPending(payload.version);
@@ -283,7 +331,22 @@ export function createUpdateCtaController({
 
   function handleClick() {
     if (status === "applying") return;
-    if ((status === "ready" || status === "draining") && pendingVersion) {
+    if (status === "scheduled") {
+      // Issue #3906 AC-7: the CTA is the cancel control during the grace.
+      // The backend answers with `update_auto_apply` cancelled.
+      send({ kind: "cancel_update_auto_apply" });
+      const cta = document.getElementById("update-cta");
+      if (cta) cta.textContent = "Cancelling automatic update…";
+      return;
+    }
+    if (status === "draining" && pendingVersion) {
+      // Issue #3906 AC-13: "Apply now anyway" — the user's explicit override
+      // of the drain, on the same graceful route as Restart now.
+      renderCta("applying", "Applying update...");
+      renderModalReady(pendingVersion, { anyway: true });
+      return;
+    }
+    if (status === "ready" && pendingVersion) {
       // Re-open the modal at the ready panel; no second download.
       renderCta("applying", "Applying update...");
       renderModalReady(pendingVersion);
@@ -421,14 +484,20 @@ export function createUpdateCtaController({
     }
   }
 
-  function renderModalReady(version) {
+  function renderModalReady(version, { anyway = false } = {}) {
     const modal = ensureModal();
     // See renderModalDownloading: idempotency guard for repeated events.
-    if (modal.dataset.state === "ready" && modal.dataset.version === String(version || "")) {
+    const variant = anyway ? "anyway" : "ready";
+    if (
+      modal.dataset.state === "ready" &&
+      modal.dataset.version === String(version || "") &&
+      modal.dataset.variant === variant
+    ) {
       return;
     }
     modal.dataset.state = "ready";
     modal.dataset.version = String(version || "");
+    modal.dataset.variant = variant;
     clearChildren(modal);
 
     const later = el("button", {
@@ -441,7 +510,7 @@ export function createUpdateCtaController({
     const restartNow = el("button", {
       type: "button",
       className: "update-modal__btn update-modal__btn--primary",
-      text: "Restart now",
+      text: anyway ? "Apply now anyway" : "Restart now",
       data: { updateModalRestartNow: "true" },
       onClick: onApplyRestartNow,
     });
@@ -466,7 +535,9 @@ export function createUpdateCtaController({
       }),
       el("p", {
         className: "update-modal__hint",
-        text: "Restart now to launch the new version.",
+        text: anyway
+          ? "The Issue Monitor is draining agents and will apply it automatically once the host is quiet. Apply now anyway restarts gwt immediately through the same graceful path."
+          : "Restart now to launch the new version.",
       }),
       releaseNotesLink,
       el("div", { className: "update-modal__actions" }, actionChildren),
@@ -633,6 +704,7 @@ export function createUpdateCtaController({
     handleUpdateApplyError,
     handleUpdateApplyPendingPersisted,
     handleIssueMonitorStatus,
+    handleUpdateAutoApply,
     showAvailable,
     showReadyPending,
     showError,

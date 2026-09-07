@@ -203,6 +203,159 @@ pub fn auto_apply_blocked_by_previous_failure(
     }
 }
 
+/// AC-7: default seconds between the "applying soon" notice and the apply,
+/// during which the user can cancel from the update banner.
+pub const DEFAULT_AUTO_APPLY_GRACE_SECS: u64 = 60;
+
+/// One drain tick as [`UpdateAutoApplyPlanner::tick`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAutoApplyObservation<'a> {
+    /// The staged version the drain is about.
+    pub version: &'a str,
+    /// Wall clock of this tick, in seconds.
+    pub now_secs: u64,
+    /// Seconds since the drain was raised.
+    pub drained_for_secs: u64,
+    /// [`update_quiescence`] for this tick.
+    pub outcome: Result<(), Vec<UpdateBlocker>>,
+    /// `AutonomousTuning::update_drain_notify_after_secs`.
+    pub notify_after_secs: u64,
+    /// Cancel grace between the notice and the apply (AC-7).
+    pub grace_secs: u64,
+}
+
+/// What the runtime should do after one drain tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateAutoApplyStep {
+    /// Nothing to say: blocked within the notice cadence, settling, waiting
+    /// out the grace, or the version was cancelled.
+    Idle,
+    /// AC-9: still blocked after `notify_after_secs`; warn with the blockers.
+    StillDraining(Vec<UpdateBlocker>),
+    /// AC-7: the host went quiet; the apply fires at `apply_at_secs` unless
+    /// cancelled. Announced once.
+    Scheduled { apply_at_secs: u64 },
+    /// A blocker appeared during the grace; the scheduled apply is withdrawn.
+    Postponed(Vec<UpdateBlocker>),
+    /// AC-2: the grace elapsed on a quiet host — apply through the graceful
+    /// path now.
+    Apply,
+}
+
+/// AC-2 / AC-7 / AC-8 / AC-9: the pure state of the automatic apply — the
+/// two-tick quiescence streak, the long-drain notice cadence, the cancel
+/// grace, and the user's cancellation. The runtime feeds it one observation
+/// per tick and acts on the returned step; it never kills an agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateAutoApplyPlanner {
+    tracker: UpdateQuiescenceTracker,
+    last_notice_at_secs: Option<u64>,
+    scheduled_at_secs: Option<u64>,
+    cancelled_version: Option<String>,
+}
+
+impl UpdateAutoApplyPlanner {
+    pub fn tick(&mut self, observation: UpdateAutoApplyObservation<'_>) -> UpdateAutoApplyStep {
+        if self.is_cancelled(observation.version) {
+            return UpdateAutoApplyStep::Idle;
+        }
+        match self.tracker.observe(observation.outcome) {
+            UpdateQuiescenceVerdict::Blocked(blockers) => {
+                if self.scheduled_at_secs.take().is_some() {
+                    return UpdateAutoApplyStep::Postponed(blockers);
+                }
+                if update_drain_notice_due(
+                    observation.drained_for_secs,
+                    self.last_notice_at_secs,
+                    observation.notify_after_secs,
+                ) {
+                    self.last_notice_at_secs = Some(observation.drained_for_secs);
+                    return UpdateAutoApplyStep::StillDraining(blockers);
+                }
+                UpdateAutoApplyStep::Idle
+            }
+            UpdateQuiescenceVerdict::Settling { .. } => UpdateAutoApplyStep::Idle,
+            UpdateQuiescenceVerdict::Quiesced => match self.scheduled_at_secs {
+                None => {
+                    self.scheduled_at_secs = Some(observation.now_secs);
+                    UpdateAutoApplyStep::Scheduled {
+                        apply_at_secs: observation.now_secs.saturating_add(observation.grace_secs),
+                    }
+                }
+                Some(scheduled_at)
+                    if observation.now_secs
+                        >= scheduled_at.saturating_add(observation.grace_secs) =>
+                {
+                    UpdateAutoApplyStep::Apply
+                }
+                Some(_) => UpdateAutoApplyStep::Idle,
+            },
+        }
+    }
+
+    /// AC-7 / AC-13: the user cancelled the automatic apply of `version`;
+    /// the tick never reschedules it. A newer staged version starts fresh.
+    pub fn cancel(&mut self, version: &str) {
+        self.reset();
+        self.cancelled_version = Some(version.to_string());
+    }
+
+    pub fn is_cancelled(&self, version: &str) -> bool {
+        self.cancelled_version.as_deref() == Some(version)
+    }
+
+    /// The drain is gone (cleared, applied, or never raised): forget the
+    /// streak, the notice cadence and the grace. Keeps the cancellation.
+    pub fn reset(&mut self) {
+        self.tracker.reset();
+        self.last_notice_at_secs = None;
+        self.scheduled_at_secs = None;
+    }
+}
+
+/// AC-5 / AC-6: why a staged update must not be applied automatically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateAutoApplyRefusal {
+    /// The install location is not writable by this user (administrator
+    /// install): keep the manual button, which asks the OS for elevation.
+    RequiresElevation,
+    /// This version's apply already failed once; never retry unattended.
+    PreviousFailure { version: String },
+}
+
+impl UpdateAutoApplyRefusal {
+    /// The notification-center line that names the manual fallback.
+    pub fn notice(&self, version: &str) -> String {
+        match self {
+            Self::RequiresElevation => format!(
+                "Update v{version} needs elevated permissions to install — apply it manually from the update button."
+            ),
+            Self::PreviousFailure { .. } => format!(
+                "Update v{version} was not applied automatically because its previous apply failed — retry manually from the update button."
+            ),
+        }
+    }
+}
+
+/// AC-5 / AC-6: decide whether the staged `target_version` may be applied
+/// unattended. `last_failed_version` is the version of the last recorded
+/// failed apply, if any.
+pub fn auto_apply_refusal(
+    requires_elevation: bool,
+    last_failed_version: Option<&str>,
+    target_version: &str,
+) -> Option<UpdateAutoApplyRefusal> {
+    if requires_elevation {
+        return Some(UpdateAutoApplyRefusal::RequiresElevation);
+    }
+    if auto_apply_blocked_by_previous_failure(last_failed_version, target_version) {
+        return Some(UpdateAutoApplyRefusal::PreviousFailure {
+            version: target_version.trim().trim_start_matches('v').to_string(),
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +591,157 @@ mod tests {
                 "failed={failed:?} target={target}"
             );
         }
+    }
+
+    fn observation<'a>(
+        version: &'a str,
+        now_secs: u64,
+        drained_for_secs: u64,
+        outcome: Result<(), Vec<UpdateBlocker>>,
+    ) -> UpdateAutoApplyObservation<'a> {
+        UpdateAutoApplyObservation {
+            version,
+            now_secs,
+            drained_for_secs,
+            outcome,
+            notify_after_secs: 1800,
+            grace_secs: 60,
+        }
+    }
+
+    fn blocked() -> Result<(), Vec<UpdateBlocker>> {
+        Err(vec![UpdateBlocker::PendingAcquireClaim { issue_number: 7 }])
+    }
+
+    #[test]
+    fn planner_applies_only_after_two_clear_ticks_and_the_cancel_grace() {
+        // AC-2 / AC-7 / AC-8: one clear tick settles, the second schedules the
+        // apply and announces the grace, and the apply itself fires only once
+        // the grace has elapsed on a still-quiet host.
+        let mut planner = UpdateAutoApplyPlanner::default();
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_000, 30, Ok(()))),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_015, 45, Ok(()))),
+            UpdateAutoApplyStep::Scheduled {
+                apply_at_secs: 1_075
+            }
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_030, 60, Ok(()))),
+            UpdateAutoApplyStep::Idle,
+            "the grace is announced once, then waited out silently"
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_074, 104, Ok(()))),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_075, 105, Ok(()))),
+            UpdateAutoApplyStep::Apply
+        );
+    }
+
+    #[test]
+    fn planner_postpones_when_a_blocker_appears_during_the_grace() {
+        // AC-8: the two-tick streak restarts on any blocker, and a scheduled
+        // apply is withdrawn instead of firing over a busy host.
+        let mut planner = UpdateAutoApplyPlanner::default();
+        planner.tick(observation("9.99.0", 1_000, 30, Ok(())));
+        planner.tick(observation("9.99.0", 1_015, 45, Ok(())));
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_030, 60, blocked())),
+            UpdateAutoApplyStep::Postponed(vec![UpdateBlocker::PendingAcquireClaim {
+                issue_number: 7
+            }])
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_045, 75, Ok(()))),
+            UpdateAutoApplyStep::Idle,
+            "one clear tick after a blocker is not enough"
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_060, 90, Ok(()))),
+            UpdateAutoApplyStep::Scheduled {
+                apply_at_secs: 1_120
+            }
+        );
+    }
+
+    #[test]
+    fn planner_notices_a_long_drain_at_the_configured_cadence_without_killing() {
+        // AC-9: a blocked host is reported once per `notify_after_secs`, with
+        // the blockers, and the planner never returns Apply while blocked.
+        let mut planner = UpdateAutoApplyPlanner::default();
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_000, 1_799, blocked())),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_001, 1_800, blocked())),
+            UpdateAutoApplyStep::StillDraining(vec![UpdateBlocker::PendingAcquireClaim {
+                issue_number: 7
+            }])
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_002, 3_599, blocked())),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.0", 1_003, 3_600, blocked())),
+            UpdateAutoApplyStep::StillDraining(vec![UpdateBlocker::PendingAcquireClaim {
+                issue_number: 7
+            }])
+        );
+    }
+
+    #[test]
+    fn planner_stays_idle_for_a_cancelled_version_until_reset() {
+        // AC-7: after the user cancels, the same staged version is never
+        // rescheduled by the tick; a newer version is.
+        let mut planner = UpdateAutoApplyPlanner::default();
+        planner.tick(observation("9.99.0", 1_000, 30, Ok(())));
+        planner.tick(observation("9.99.0", 1_015, 45, Ok(())));
+        planner.cancel("9.99.0");
+        assert!(planner.is_cancelled("9.99.0"));
+        for now in [1_030, 1_045, 1_200] {
+            assert_eq!(
+                planner.tick(observation("9.99.0", now, now - 970, Ok(()))),
+                UpdateAutoApplyStep::Idle
+            );
+        }
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_215, 15, Ok(()))),
+            UpdateAutoApplyStep::Idle
+        );
+        assert_eq!(
+            planner.tick(observation("9.99.1", 1_230, 30, Ok(()))),
+            UpdateAutoApplyStep::Scheduled {
+                apply_at_secs: 1_290
+            }
+        );
+    }
+
+    #[test]
+    fn auto_apply_refusal_falls_back_to_manual_for_elevation_and_previous_failure() {
+        // AC-5 / AC-6: an install that needs elevation and a version whose
+        // apply already failed both keep the manual button path.
+        assert_eq!(auto_apply_refusal(false, None, "9.99.0"), None);
+        assert_eq!(
+            auto_apply_refusal(true, None, "9.99.0"),
+            Some(UpdateAutoApplyRefusal::RequiresElevation)
+        );
+        assert_eq!(
+            auto_apply_refusal(false, Some("v9.99.0"), "9.99.0"),
+            Some(UpdateAutoApplyRefusal::PreviousFailure {
+                version: "9.99.0".to_string()
+            })
+        );
+        assert_eq!(auto_apply_refusal(false, Some("9.98.0"), "9.99.0"), None);
+        assert!(UpdateAutoApplyRefusal::RequiresElevation
+            .notice("9.99.0")
+            .contains("manually"));
     }
 }

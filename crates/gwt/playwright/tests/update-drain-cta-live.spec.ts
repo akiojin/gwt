@@ -80,4 +80,71 @@ test.describe("Update drain CTA", () => {
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
+
+  // Issue #3906 AC-7 / #4076 AC-5: the backend's `update_auto_apply` phases
+  // turn the CTA into the cancel control for the grace, withdraw it, and
+  // announce the apply. The click during the grace sends the cancel request.
+  test("update_auto_apply phases drive the CTA and clicking during the grace cancels", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.addInitScript(() => {
+      (window as any).__gwtSentKinds = [];
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+        try {
+          const payload = typeof data === "string" ? JSON.parse(data) : null;
+          if (payload && typeof payload.kind === "string") {
+            (window as any).__gwtSentKinds.push(payload.kind);
+          }
+        } catch {
+          /* no-op */
+        }
+        return originalSend.call(this, data);
+      };
+    });
+
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressUpdateApplyStart: true,
+    });
+
+    const inject = (detail: Record<string, unknown>) =>
+      page.evaluate((payload) => {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+      }, detail);
+
+    await inject({ kind: "update_apply_pending_persisted", version: "9.99.0" });
+    const cta = page.locator("#update-cta");
+    await expect(cta).toHaveText(/Update v9\.99\.0 ready/);
+
+    await inject({ kind: "update_auto_apply", version: "9.99.0", phase: "scheduled", grace_secs: 60 });
+    await expect(cta).toHaveAttribute("data-status", "scheduled");
+    await expect(cta).toHaveClass(/is-scheduled/);
+    await expect(cta).toHaveText("Update v9.99.0 applies in 60 s — click to cancel");
+    await expect(cta).toBeEnabled();
+    await expect(page.locator("#update-modal")).toHaveCount(0);
+
+    await cta.click();
+    await expect(cta).toHaveText("Cancelling automatic update…");
+    const sentKinds = await page.evaluate(() => (window as any).__gwtSentKinds as string[]);
+    expect(sentKinds).toContain("cancel_update_auto_apply");
+
+    await inject({ kind: "update_auto_apply", version: "9.99.0", phase: "cancelled" });
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await expect(cta).toHaveText(/Update v9\.99\.0 ready/);
+
+    await inject({ kind: "update_auto_apply", version: "9.99.0", phase: "applying" });
+    await expect(cta).toHaveAttribute("data-status", "applying");
+    await expect(cta).toHaveText("Applying update v9.99.0…");
+    await expect(cta).toBeDisabled();
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
 });

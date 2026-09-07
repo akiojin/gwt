@@ -6362,6 +6362,14 @@
               version: event.version,
             });
             break;
+          case "update_auto_apply":
+            // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
+            updateCtaController.handleUpdateAutoApply({
+              version: event.version,
+              phase: event.phase,
+              grace_secs: event.grace_secs,
+            });
+            break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
             customAgentsState.loading = false;

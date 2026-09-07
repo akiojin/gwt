@@ -3715,6 +3715,7 @@ fn sample_runtime_with_events(
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         update_resume_tab_ids: HashSet::new(),
+        update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
@@ -44501,6 +44502,309 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
     );
 }
 
+/// Issue #4076 AC-2 (the 2026-09-07 01:52Z incident): staging an update in
+/// autonomous mode raises the drain and records it, and sends nothing that
+/// could restart gwt — no `ApplyUpdateRestartNow`, no `ApplyUpdateGraceful`,
+/// no `ApplyUpdateDrained`. The only automatic route to a restart is the
+/// drain tick below.
+#[test]
+fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.update_staged_events_with("9.99.0", None);
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorStatus { status } if status.update_drain.is_some()
+        )),
+        "the drain is raised"
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "drain start is recorded once: {toasts:?}");
+    assert!(
+        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        "notice names the version and the drain: {}",
+        toasts[0].1
+    );
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "staging sends no event-loop request that could restart gwt"
+    );
+}
+
+/// Issue #4076 AC-2 / AC-5 (#3906 AC-2 / AC-7 / AC-8): the drain tick applies
+/// only after two consecutive quiet ticks plus the 60 s cancel grace, through
+/// `ApplyUpdateDrained` (which main.rs routes into `ApplyUpdateGraceful`); a
+/// Running agent pane keeps it from firing and a long drain is recorded with
+/// its blockers without stopping anything.
+#[test]
+fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+        .expect("since")
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. }))
+            .count()
+    };
+    let at = |secs: i64| since + chrono::Duration::seconds(secs);
+
+    // Blocked by the Running pane: quiet ticks, nothing sent, until the
+    // AC-9 notice cadence (1800 s) is reached — then the blockers are named.
+    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
+    assert!(runtime.update_drain_tick_events_at(at(30)).is_empty());
+    let notice = runtime.update_drain_tick_events_at(at(1800));
+    let toasts = update_resume_toasts(&notice);
+    assert_eq!(toasts.len(), 1, "long-drain notice: {toasts:?}");
+    assert_eq!(toasts[0].0, "warn");
+    assert!(
+        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("Sample"),
+        "the notice names the blocking pane: {}",
+        toasts[0].1
+    );
+    assert_eq!(drained_events(&user_events), 0);
+
+    // The pane goes Idle: the first quiet tick settles, the second schedules
+    // the apply with the cancel grace, and the apply fires once it elapsed.
+    runtime
+        .window_hook_states
+        .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    assert!(runtime.update_drain_tick_events_at(at(1815)).is_empty());
+    let scheduled = runtime.update_drain_tick_events_at(at(1830));
+    assert!(
+        scheduled.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                grace_secs: Some(60),
+            } if version == "9.99.0"
+        )),
+        "the grace is announced to the CTA: {scheduled:?}"
+    );
+    assert_eq!(
+        update_resume_toasts(&scheduled).len(),
+        1,
+        "the grace is recorded"
+    );
+    assert_eq!(
+        drained_events(&user_events),
+        0,
+        "nothing applies inside the grace"
+    );
+    assert!(runtime.update_drain_tick_events_at(at(1845)).is_empty());
+    assert_eq!(drained_events(&user_events), 0);
+    let applying = runtime.update_drain_tick_events_at(at(1890));
+    assert!(
+        applying.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                ..
+            }
+        )),
+        "the apply is announced: {applying:?}"
+    );
+    assert_eq!(
+        drained_events(&user_events),
+        1,
+        "exactly one graceful apply request"
+    );
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .all(|event| !matches!(event, UserEvent::ApplyUpdateRestartNow { .. })),
+        "the automatic path never uses the Restart-now route"
+    );
+}
+
+/// Issue #4076 AC-2 / AC-5 (#3906 AC-7 / AC-13): cancelling inside the grace
+/// releases the drain (the update stays staged for the manual button) and the
+/// tick never reschedules that version.
+#[test]
+fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+        .expect("since")
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let at = |secs: i64| since + chrono::Duration::seconds(secs);
+    runtime.update_drain_tick_events_at(at(15));
+    let scheduled = runtime.update_drain_tick_events_at(at(30));
+    assert!(scheduled.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::UpdateAutoApply {
+            phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+            ..
+        }
+    )));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::CancelUpdateAutoApply);
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+                ..
+            } if version == "9.99.0"
+        )),
+        "the CTA learns about the cancellation: {events:?}"
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload")
+            .update_drain
+            .is_none(),
+        "the hold is released so launches resume"
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "the cancellation is recorded: {toasts:?}");
+    assert!(toasts[0].1.contains("cancel"), "{}", toasts[0].1);
+    for secs in [45, 60, 120, 600] {
+        assert!(runtime.update_drain_tick_events_at(at(secs)).is_empty());
+    }
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "no apply request after a cancel"
+    );
+}
+
+/// Issue #4076 AC-4 (#3906 AC-5 / AC-6): an install that needs elevation, or
+/// a version whose apply already failed, is never applied unattended — no
+/// drain is raised, the manual button path stays, and the notification
+/// center says why.
+#[test]
+fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    for refusal in [
+        gwt::update_drain::UpdateAutoApplyRefusal::RequiresElevation,
+        gwt::update_drain::UpdateAutoApplyRefusal::PreviousFailure {
+            version: "9.99.0".to_string(),
+        },
+    ] {
+        let events = runtime.update_staged_events_with("9.99.0", Some(refusal.clone()));
+        assert!(
+            gwt::load_issue_monitor_prefs(&prefs_path)
+                .expect("reload")
+                .update_drain
+                .is_none(),
+            "no drain for {refusal:?}"
+        );
+        let toasts = update_resume_toasts(&events);
+        assert_eq!(
+            toasts.len(),
+            1,
+            "one fallback notice for {refusal:?}: {toasts:?}"
+        );
+        assert_eq!(toasts[0].0, "warn");
+        assert!(
+            toasts[0].1.contains("9.99.0") && toasts[0].1.contains("manually"),
+            "the notice names the manual fallback: {}",
+            toasts[0].1
+        );
+    }
+}
+
 #[test]
 fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
     let temp = tempdir().expect("tempdir");
@@ -65109,6 +65413,16 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
         reason: gwt::IssueMonitorUpdateDrainReason::Auto,
         blocking: Vec::new(),
     });
+    // Issue #3906 AC-4 / #4076 AC-3: the monitor state the apply left behind
+    // (enabled, parallelism, the launches being drained) must come back
+    // exactly, never reset the way the 2026-09-02 restart did (#3883).
+    prefs.enabled = true;
+    prefs.autonomous_mode = true;
+    prefs.max_active_agents = 3;
+    prefs.launched_issues = vec![gwt::IssueMonitorLaunchedIssue {
+        issue_number: 4076,
+        window_id: "tab-update::agent-4076".to_string(),
+    }];
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed update_drain hold");
     (worktree, runtime)
 }
@@ -65172,6 +65486,24 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     assert!(
         !update_drain_is_raised(&worktree),
         "the settling bootstrap releases the update_drain hold on disk"
+    );
+    let restored =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&worktree))
+            .expect("prefs after the settling bootstrap");
+    assert!(
+        restored.enabled,
+        "the monitor stays enabled across the apply"
+    );
+    assert!(restored.autonomous_mode);
+    assert_eq!(restored.max_active_agents, 3, "parallelism is restored");
+    assert_eq!(
+        restored
+            .launched_issues
+            .iter()
+            .map(|launch| launch.issue_number)
+            .collect::<Vec<_>>(),
+        vec![4076],
+        "the launches being drained stay attributable after the restart"
     );
 
     assert_eq!(

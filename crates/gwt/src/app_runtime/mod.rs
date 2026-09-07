@@ -35,6 +35,29 @@ impl AppEventProxy {
     }
 }
 
+/// Issue #3906 AC-2: the client id the automatic apply commits under; no
+/// frontend client owns it, so failures are broadcast, never replied.
+pub(crate) const UPDATE_AUTO_APPLY_CLIENT_ID: &str = "update-auto-apply";
+
+/// Why [`AppRuntime::release_update_auto_apply_events`] released the drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateAutoApplyRelease {
+    /// The user cancelled during the grace (AC-7).
+    Cancelled,
+    /// The persisted manifest for the drained version is gone.
+    PayloadMissing,
+}
+
+/// A notification-center record about the self-update (AC-12), broadcast to
+/// every client through the Issue Monitor toast channel.
+fn update_notice(level: &str, message: String) -> OutboundEvent {
+    OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        level: level.to_string(),
+        message,
+        issue_number: None,
+    })
+}
+
 #[cfg(test)]
 pub(crate) type BlockingTestTask = Box<dyn FnOnce() + Send + 'static>;
 #[cfg(test)]
@@ -1193,6 +1216,11 @@ pub struct AppRuntime {
     /// apply began. Their sessions bypass the 24h startup auto-resume
     /// freshness gate on the launch that settles the resume marker.
     pub(crate) update_resume_tab_ids: HashSet<String>,
+    /// Issue #3906 AC-2 / AC-7 / AC-8: the automatic apply's pure state
+    /// (quiescence streak, long-drain notice cadence, cancel grace) for the
+    /// active project's `Auto` update drain. Advanced by
+    /// [`AppRuntime::update_drain_tick_events`].
+    pub(crate) update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner,
     /// Issue #4038 (AC-4 / AC-5): project hashes whose `update_drain` hold
     /// (#4037) the settling bootstrap released. The Issue Monitor hold itself
     /// lands with #4037; this is the seam it reads.
@@ -2558,6 +2586,7 @@ impl AppRuntime {
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             update_resume_tab_ids: HashSet::new(),
+            update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             pending_launch_feedback_contexts: HashMap::new(),
@@ -6126,10 +6155,30 @@ impl AppRuntime {
     /// Issue #3906 AC-3: a staged update (manifest persisted) raises the
     /// `Auto` update drain when the Issue Monitor runs unattended and
     /// auto-apply is on (the default while autonomous). Attended mode keeps
-    /// the manual update button and raises nothing. The drain rides the same
-    /// `config_set` control the operator uses, so daemon and local fallback
-    /// agree; nothing about launches in flight changes (#4037).
+    /// the manual update button and raises nothing. AC-5 / AC-6: an install
+    /// that needs elevation, or a version whose apply already failed, is
+    /// refused unattended and falls back to the manual button with a notice.
     pub(crate) fn update_staged_events(&mut self, version: &str) -> Vec<OutboundEvent> {
+        let last_failed_version = gwt_core::update::load_update_apply_result()
+            .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
+            .map(|result| result.to_version);
+        let refusal = gwt::update_drain::auto_apply_refusal(
+            gwt_core::update::install_requires_elevation(),
+            last_failed_version.as_deref(),
+            version,
+        );
+        self.update_staged_events_with(version, refusal)
+    }
+
+    /// The drain rides the same `config_set` control the operator uses, so
+    /// daemon and local fallback agree; nothing about launches in flight
+    /// changes (#4037). Sends nothing to the event loop: the only automatic
+    /// route to a restart is [`Self::update_drain_tick_events`] (#4076 AC-2).
+    pub(crate) fn update_staged_events_with(
+        &mut self,
+        version: &str,
+        refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
+    ) -> Vec<OutboundEvent> {
         let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
             return Vec::new();
         };
@@ -6141,18 +6190,28 @@ impl AppRuntime {
         if !(prefs.autonomous_mode && auto_apply) {
             return Vec::new();
         }
+        if let Some(refusal) = refusal {
+            tracing::warn!(
+                target: "gwt::update",
+                version,
+                ?refusal,
+                "staged update is not applied automatically; manual update button kept"
+            );
+            return vec![update_notice("warn", refusal.notice(version))];
+        }
         tracing::info!(
             target: "gwt::update",
             version,
             "staged update raises the Issue Monitor update drain (autonomous auto-apply)"
         );
+        self.update_auto_apply.reset();
         let version = version.to_string();
         let publication = self.publish_active_issue_monitor_control(serde_json::json!({
             "config_set": {
                 "update_drain": { "reason": "auto", "version": version },
             }
         }));
-        match publication {
+        let mut events = match publication {
             Ok(()) => Vec::new(),
             Err(error) if error.allows_local_fallback() => {
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -6166,6 +6225,198 @@ impl AppRuntime {
                     Ok((monitor, ())) => {
                         self.issue_monitor_snapshot_events_for(None, Some(&project_root), monitor)
                     }
+                    Err(local_error) => {
+                        return self.issue_monitor_control_error_events(
+                            None,
+                            local_error,
+                            "update-drain",
+                            None,
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                return self.issue_monitor_control_error_events(None, error, "update-drain", None)
+            }
+        };
+        // AC-12: drain start is a notification-center record.
+        events.push(update_notice(
+            "info",
+            format!(
+                "Update v{version} staged — draining agents before applying automatically; new launches are held."
+            ),
+        ));
+        events
+    }
+
+    /// Issue #3906 AC-2 / AC-7 / AC-8 / AC-9 (#4076 AC-2 / AC-5): one drain
+    /// tick. While the active project holds an `Auto` update drain, observe
+    /// the host, and act on the planner's step: warn with the blockers when
+    /// the drain has lasted `update_drain_notify_after_secs`, announce the
+    /// cancel grace once the host is quiescent, and request the graceful
+    /// apply through `ApplyUpdateDrained` when the grace elapsed. Agents are
+    /// never stopped here.
+    pub(crate) fn update_drain_tick_events(&mut self) -> Vec<OutboundEvent> {
+        self.update_drain_tick_events_at(chrono::Utc::now())
+    }
+
+    pub(crate) fn update_drain_tick_events_at(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let Some((prefs, drain)) = self.active_auto_update_drain() else {
+            self.update_auto_apply.reset();
+            return Vec::new();
+        };
+        let monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
+        let snapshot = self.update_quiescence_snapshot(&monitor);
+        let drained_for_secs = chrono::DateTime::parse_from_rfc3339(&drain.since)
+            .ok()
+            .map(|since| {
+                (now - since.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0) as u64
+            })
+            .unwrap_or(0);
+        let step = self
+            .update_auto_apply
+            .tick(gwt::update_drain::UpdateAutoApplyObservation {
+                version: &drain.version,
+                now_secs: now.timestamp().max(0) as u64,
+                drained_for_secs,
+                outcome: gwt::update_drain::update_quiescence(&snapshot),
+                notify_after_secs: prefs.autonomous_tuning.update_drain_notify_after_secs,
+                grace_secs: gwt::update_drain::DEFAULT_AUTO_APPLY_GRACE_SECS,
+            });
+        let version = drain.version.clone();
+        let blocker_list = |blockers: &[gwt::update_drain::UpdateBlocker]| {
+            blockers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match step {
+            gwt::update_drain::UpdateAutoApplyStep::Idle => Vec::new(),
+            gwt::update_drain::UpdateAutoApplyStep::StillDraining(blockers) => {
+                vec![update_notice(
+                    "warn",
+                    format!(
+                        "Update v{version} still pending after {} min — waiting for: {}. Agents are never stopped automatically.",
+                        drained_for_secs / 60,
+                        blocker_list(&blockers)
+                    ),
+                )]
+            }
+            gwt::update_drain::UpdateAutoApplyStep::Scheduled { .. } => {
+                let grace = gwt::update_drain::DEFAULT_AUTO_APPLY_GRACE_SECS;
+                vec![
+                    update_notice(
+                        "info",
+                        format!(
+                            "Update v{version} applies in {grace} s — the host is quiet. Cancel from the update banner to keep this gwt running."
+                        ),
+                    ),
+                    OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                        version,
+                        phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                        grace_secs: Some(grace),
+                    }),
+                ]
+            }
+            gwt::update_drain::UpdateAutoApplyStep::Postponed(blockers) => vec![
+                update_notice(
+                    "info",
+                    format!(
+                        "Update v{version} automatic apply postponed — waiting for: {}.",
+                        blocker_list(&blockers)
+                    ),
+                ),
+                OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                    version,
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Postponed,
+                    grace_secs: None,
+                }),
+            ],
+            gwt::update_drain::UpdateAutoApplyStep::Apply => {
+                tracing::info!(
+                    target: "gwt::update",
+                    version,
+                    "host quiescent and grace elapsed; requesting graceful update apply"
+                );
+                self.proxy.send(UserEvent::ApplyUpdateDrained {
+                    version: version.clone(),
+                });
+                vec![
+                    update_notice(
+                        "info",
+                        format!("Update v{version} applying now — gwt restarts and resumes."),
+                    ),
+                    OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                        version,
+                        phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                        grace_secs: None,
+                    }),
+                ]
+            }
+        }
+    }
+
+    /// The active project's prefs and its `Auto` update drain, if raised.
+    fn active_auto_update_drain(
+        &self,
+    ) -> Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)> {
+        let project_root = self.active_project_root()?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .ok()?;
+        let drain = prefs
+            .update_drain
+            .clone()
+            .filter(|drain| drain.reason == gwt::IssueMonitorUpdateDrainReason::Auto)?;
+        Some((prefs, drain))
+    }
+
+    /// Issue #3906 AC-7 / AC-13 (#4076 AC-2): the user cancelled the
+    /// automatic apply from the update banner.
+    fn cancel_update_auto_apply_events(&mut self) -> Vec<OutboundEvent> {
+        let Some((_, drain)) = self.active_auto_update_drain() else {
+            return vec![update_notice(
+                "info",
+                "No automatic update apply is pending.".to_string(),
+            )];
+        };
+        self.release_update_auto_apply_events(&drain.version, UpdateAutoApplyRelease::Cancelled)
+    }
+
+    /// Release the `Auto` update drain for `version` without applying: the
+    /// planner forgets the version, the hold is cleared through the same
+    /// control the operator uses (launches resume), and the CTA plus the
+    /// notification center learn why. The staged payload, when still on
+    /// disk, stays available to the manual update button.
+    pub(crate) fn release_update_auto_apply_events(
+        &mut self,
+        version: &str,
+        release: UpdateAutoApplyRelease,
+    ) -> Vec<OutboundEvent> {
+        self.update_auto_apply.cancel(version);
+        let project_root = self.active_project_root().map(Path::to_path_buf);
+        let publication = self.publish_active_issue_monitor_control(
+            serde_json::json!({ "config_set": { "update_drain": false } }),
+        );
+        let mut events = match publication {
+            Ok(()) => Vec::new(),
+            Err(error) if error.allows_local_fallback() => {
+                match self
+                    .commit_local_issue_monitor_control(|monitor| monitor.clear_update_drain())
+                {
+                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
+                        None,
+                        project_root.as_deref(),
+                        monitor,
+                    ),
                     Err(local_error) => self.issue_monitor_control_error_events(
                         None,
                         local_error,
@@ -6177,7 +6428,28 @@ impl AppRuntime {
             Err(error) => {
                 self.issue_monitor_control_error_events(None, error, "update-drain", None)
             }
-        }
+        };
+        let (level, message) = match release {
+            UpdateAutoApplyRelease::Cancelled => (
+                "info",
+                format!(
+                    "Update v{version} automatic apply cancelled — the update stays staged; use the update button when ready."
+                ),
+            ),
+            UpdateAutoApplyRelease::PayloadMissing => (
+                "error",
+                format!(
+                    "Update v{version} is no longer staged on disk — the drain was released; download it again from the update button."
+                ),
+            ),
+        };
+        events.push(update_notice(level, message));
+        events.push(OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+            version: version.to_string(),
+            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+            grace_secs: None,
+        }));
+        events
     }
 
     pub(crate) fn register_agent_backend_connection_probe(
@@ -6914,6 +7186,7 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
             }

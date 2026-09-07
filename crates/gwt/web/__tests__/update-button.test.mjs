@@ -856,3 +856,108 @@ test("issue #3906: .update-cta.is-draining is styled with Operator state tokens"
   assert.match(rule, /var\(--color-state-needs-input/);
   assert.doesNotMatch(rule, /#[0-9a-f]{3,8}\b|rgba?\(/i, "no raw colors");
 });
+
+// Issue #4076 AC-2 (the 2026-09-07 01:52Z incident): the only sender of
+// `apply_update_restart_now` is the ready modal's button. When the drain is
+// raised right after the download (autonomous auto-apply), that modal must
+// give way to the draining CTA instead of inviting an immediate restart.
+test("issue #4076: an auto drain arriving on the ready modal closes it and shows the draining CTA", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-07T01:52:00Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.91.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.91.0", asset_path: "/x" });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "ready");
+
+  controller.handleIssueMonitorStatus({
+    autonomous_mode: true,
+    update_drain: { version: "9.91.0", since: "2026-09-07T01:51:57Z", reason: "auto", blocking: [] },
+  });
+  assert.equal(fixture.document.getElementById("update-modal") === null, true, "the ready modal is gone");
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "draining");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }], "nothing restarts by itself");
+
+  // A drain that arrives while the download is still running leaves the
+  // downloading modal alone; the ready transition then drains as above.
+  const downloading = createFixture();
+  const downloadingController = createUpdateCtaController(downloading.options);
+  downloadingController.showAvailable("9.91.0");
+  downloading.document.getElementById("update-cta").click();
+  downloadingController.handleIssueMonitorStatus({
+    update_drain: { version: "9.91.0", since: "2026-09-07T01:51:57Z", reason: "auto", blocking: [] },
+  });
+  assert.equal(downloading.document.getElementById("update-modal").dataset.state, "downloading");
+});
+
+// Issue #3906 AC-13: "Apply now anyway" is the user's explicit override of
+// the drain and rides the same graceful route as Restart now.
+test("issue #3906: clicking the draining CTA offers Apply now anyway through apply_update_restart_now", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-07T02:00:00Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.91.0" });
+  controller.handleIssueMonitorStatus({
+    update_drain: {
+      version: "9.91.0",
+      since: "2026-09-07T01:51:57Z",
+      reason: "auto",
+      blocking: [{ kind: "active_pane", window_id: "w1", label: "work/issue-1", state: "running" }],
+    },
+  });
+  fixture.document.getElementById("update-cta").click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "ready");
+  const anyway = modal.querySelector("[data-update-modal-restart-now]");
+  assert.equal(anyway.textContent, "Apply now anyway");
+  assert.match(modal.textContent, /draining/);
+  anyway.click();
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_restart_now" }]);
+});
+
+// Issue #3906 AC-7 / #4076 AC-5: the backend announces the cancel grace; the
+// CTA turns into the cancel control, and the cancellation returns it to the
+// staged state.
+test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends cancel_update_auto_apply", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-07T02:00:00Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.91.0" });
+  controller.handleIssueMonitorStatus({
+    update_drain: { version: "9.91.0", since: "2026-09-07T01:51:57Z", reason: "auto", blocking: [] },
+  });
+
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "scheduled", grace_secs: 60 });
+  let cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "scheduled");
+  assert.equal(cta.className, "update-cta is-scheduled");
+  assert.equal(cta.textContent, "Update v9.91.0 applies in 60 s — click to cancel");
+  assert.equal(cta.disabled, false);
+  assert.equal(fixture.document.getElementById("update-modal") === null, true);
+
+  cta.click();
+  assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
+  assert.equal(fixture.document.getElementById("update-cta").textContent, "Cancelling automatic update…");
+
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "cancelled" });
+  cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "ready");
+  assert.equal(cta.textContent, "Update v9.91.0 ready — Restart now");
+
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "scheduled", grace_secs: 60 });
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "postponed" });
+  cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "draining");
+  assert.equal(cta.textContent, "Update v9.91.0 pending — waiting for the host to go quiet");
+
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "applying" });
+  cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "applying");
+  assert.equal(cta.textContent, "Applying update v9.91.0…");
+  assert.equal(cta.disabled, true);
+
+  assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
+  assert.match(
+    appSource,
+    /case "update_auto_apply":[\s\S]{0,200}updateCtaController\.handleUpdateAutoApply\(/,
+    "app.js must hand update_auto_apply to the update CTA controller",
+  );
+});
