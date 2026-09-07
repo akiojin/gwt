@@ -58,6 +58,7 @@ pub struct TestEnv {
     pub pr_list: Vec<gwt_git::PrInventoryItem>,
     pub pr_list_call_count: usize,
     pub pr_list_options: Option<gwt_git::PrInventoryOptions>,
+    pub pr_unlanded_branches: Vec<gwt_git::UnlandedBranch>,
     /// Issue #3891: the `gh api rate_limit` payload `github.budget` reads.
     pub github_rate_limit_payload: Option<String>,
     pub github_rate_limit_probe_count: usize,
@@ -108,6 +109,7 @@ impl TestEnv {
             pr_list: Vec::new(),
             pr_list_call_count: 0,
             pr_list_options: None,
+            pr_unlanded_branches: Vec::new(),
             github_rate_limit_payload: None,
             github_rate_limit_probe_count: 0,
             pr_view_call_log: Vec::new(),
@@ -315,6 +317,7 @@ impl CliEnv for TestEnv {
             cache_age_secs: Some(0),
             throttled: None,
             github_calls: 1,
+            unlanded_branches: self.pr_unlanded_branches.clone(),
         })
     }
     fn probe_github_rate_limit(&mut self) -> io::Result<String> {
