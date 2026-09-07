@@ -229,7 +229,7 @@ fn handle_at(
     }
     let interval_secs = pm_registry::load_pm_prefs(&pm_prefs_path)
         .map(|prefs| prefs.settings.loop_interval_secs_clamped())
-        .unwrap_or(60);
+        .unwrap_or(pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS);
     if !has_unconsumed_observations && state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
         end_own_chain(&mut state);
         return HookOutput::Silent;
@@ -239,7 +239,7 @@ fn handle_at(
             chrono::DateTime::parse_from_rfc3339(now),
             chrono::DateTime::parse_from_rfc3339(last),
         ) {
-            if (now_t - last_t).num_seconds() < interval_secs as i64 {
+            if (now_t - last_t).num_seconds() < i64::try_from(interval_secs).unwrap_or(i64::MAX) {
                 end_own_chain(&mut state);
                 return HookOutput::Silent;
             }
@@ -1117,6 +1117,44 @@ mod tests {
             ),
             HookOutput::StopBlock { .. }
         ));
+    }
+
+    #[test]
+    fn next_stop_cycle_reloads_the_updated_loop_interval() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        let first = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        let HookOutput::StopBlock { reason } = first else {
+            panic!("expected initial cycle, got {first:?}");
+        };
+        assert!(reason.contains("timeout_seconds:60"));
+
+        let prefs_path = pm_registry::pm_loop_state_path_for_pm_worktree(&worktree)
+            .expect("loop state path")
+            .parent()
+            .expect("project state")
+            .join("pm.json");
+        pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.loop_interval_secs = 10;
+        })
+        .expect("update loop interval");
+
+        let next = handle_at(
+            &worktree,
+            "2026-08-08T00:00:10Z",
+            true,
+            Some(FIXTURE_PM_SESSION),
+        );
+        let HookOutput::StopBlock { reason } = next else {
+            panic!("updated interval must apply to the next Stop cycle, got {next:?}");
+        };
+        assert!(reason.contains("timeout_seconds:10"));
     }
 
     /// Monitor off = parked project; and no other worktree is ever driven.

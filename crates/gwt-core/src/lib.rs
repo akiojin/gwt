@@ -9,6 +9,7 @@ pub mod board_remote_roots;
 pub mod config;
 pub mod coordination;
 pub mod daemon;
+pub mod daemon_pipe_name;
 pub mod error;
 pub mod error_ledger;
 pub mod github_budget;
@@ -17,6 +18,8 @@ pub mod index;
 pub mod index_coordinator;
 pub mod logging;
 pub mod migration;
+#[cfg(windows)]
+pub mod named_pipe;
 pub mod operation_deadline;
 pub mod paths;
 pub mod process;

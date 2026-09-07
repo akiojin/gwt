@@ -423,7 +423,7 @@ fn resolve_docker_exec_program(
 }
 
 pub fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
-    let package = config.agent_id.package_name()?;
+    let package = config.agent_id.npm_package()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
         return None;

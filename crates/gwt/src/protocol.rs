@@ -22,6 +22,25 @@ use crate::{
     worktree_inventory::WorktreeEntry,
 };
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum U64OrDecimalString {
+    Number(u64),
+    Decimal(String),
+}
+
+fn deserialize_u64_or_decimal_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match U64OrDecimalString::deserialize(deserializer)? {
+        U64OrDecimalString::Number(value) => Ok(value),
+        U64OrDecimalString::Decimal(value) => {
+            value.parse::<u64>().map_err(serde::de::Error::custom)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileContentMode {
@@ -296,6 +315,11 @@ pub enum FrontendEvent {
     SetPmAutoStart {
         enabled: bool,
     },
+    /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
+    SetPmLoopInterval {
+        #[serde(deserialize_with = "deserialize_u64_or_decimal_string")]
+        loop_interval_secs: u64,
+    },
     /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
     /// pane is untouched; applying the change is the explicit restart below.
     SetPmLaunchProfile {
@@ -371,6 +395,11 @@ pub enum FrontendEvent {
     UndockAgentWindow {
         id: String,
         geometry: Option<WindowGeometry>,
+    },
+    /// SPEC-3885 FR-012: fold a Windowized Issue window back into its Issue row. The
+    /// window already knows its Issue, so the frontend only names the window.
+    DockAgentWindowToIssue {
+        id: String,
     },
     SetAgentKanbanCardCollapsed {
         id: String,
@@ -765,6 +794,12 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
+    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
+    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
+    /// the setting follows `autonomous_mode`.
+    SetIssueMonitorAutoApplyUpdates {
+        enabled: bool,
+    },
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },
@@ -810,6 +845,11 @@ pub enum FrontendEvent {
     /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
     /// the prepared binary via the helper subprocess and exits the parent.
     ApplyUpdateRestartNow,
+    /// Issue #3906 AC-7 / #4076 AC-2: the user cancelled the automatic apply
+    /// during its grace. The `update_drain` hold is released, the staged
+    /// update stays on disk for the manual button, and the tick never
+    /// reschedules that version.
+    CancelUpdateAutoApply,
     /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
     /// modal. Backend opens the log file in the OS default application.
     OpenUpdateLog {
@@ -1646,6 +1686,17 @@ pub struct PmAgentOption {
     pub name: String,
 }
 
+/// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
+/// [`BackendEvent::UpdateAutoApply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateAutoApplyPhase {
+    Scheduled,
+    Postponed,
+    Cancelled,
+    Applying,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -1751,7 +1802,18 @@ pub enum BackendEvent {
     /// the panel's "restart to apply" affordance exists precisely because a
     /// profile change cannot migrate a running conversation.
     PmStatus {
+        /// Whether the active tab is a Git project with PM settings.
+        /// `false` clears shared Settings mounts after switching to a
+        /// non-project surface or closing the final project tab.
+        available: bool,
         auto_start: bool,
+        /// SPEC-3431 FR-132: effective resident-loop interval after applying
+        /// the backend minimum to legacy or manually edited preferences.
+        loop_interval_secs: u64,
+        /// Lossless decimal mirror for JavaScript clients. JSON numbers above
+        /// 2^53 are rounded by `JSON.parse`; the numeric field remains for
+        /// backwards compatibility while this field preserves every u64.
+        loop_interval_secs_decimal: String,
         configured_agent_id: String,
         configured_model: Option<String>,
         configured_reasoning: Option<String>,
@@ -1762,7 +1824,9 @@ pub enum BackendEvent {
         agent_options: Vec<PmAgentOption>,
     },
     IssueMonitorStatus {
-        status: IssueMonitorStatusView,
+        /// Boxed: the view is by far the largest payload in this enum
+        /// (clippy `large_enum_variant`), and every broadcast clones it.
+        status: Box<IssueMonitorStatusView>,
     },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
@@ -2140,6 +2204,17 @@ pub enum BackendEvent {
     /// the bootstrap path lands in T-133). Frontend morphs the CTA to ready.
     UpdateApplyPendingPersisted {
         version: String,
+    },
+    /// Issue #3906 AC-7 / AC-12 (#4076 AC-2 / AC-5): the automatic apply of
+    /// a staged update moved phase. `Scheduled` carries the cancel grace the
+    /// CTA offers to cancel; `Postponed` withdraws it because a blocker
+    /// reappeared; `Cancelled` follows [`FrontendEvent::CancelUpdateAutoApply`]
+    /// or a lost payload; `Applying` precedes the graceful restart.
+    UpdateAutoApply {
+        version: String,
+        phase: UpdateAutoApplyPhase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grace_secs: Option<u64>,
     },
     UpdateApplyError {
         /// Phase 14 free-form message. Still emitted for backward compat.
@@ -2797,6 +2872,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "update_auto_apply",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "update_apply_pending_persisted",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3021,6 +3101,7 @@ impl BackendEvent {
             BackendEvent::UpdateState(_) => "update_state",
             BackendEvent::UpdateProgress { .. } => "update_progress",
             BackendEvent::UpdateReady { .. } => "update_ready",
+            BackendEvent::UpdateAutoApply { .. } => "update_auto_apply",
             BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
@@ -3156,6 +3237,99 @@ mod tests {
             FrontendEvent::PaneSendInput { session_id, text }
                 if session_id == "session-1" && text == "/goal all tests pass\r"
         ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_deserializes_seconds_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_pm_loop_interval",
+            "loop_interval_secs": 10
+        }))
+        .expect("deserialize PM loop interval setting");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SetPmLoopInterval {
+                loop_interval_secs: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_accepts_u64_max_exactly() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_pm_loop_interval",
+            "loop_interval_secs": u64::MAX
+        }))
+        .expect("deserialize maximum u64 PM loop interval");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SetPmLoopInterval { loop_interval_secs }
+                if loop_interval_secs == u64::MAX
+        ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_accepts_lossless_decimal_string() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_pm_loop_interval",
+            "loop_interval_secs": u64::MAX.to_string()
+        }))
+        .expect("deserialize maximum u64 PM loop interval from browser-safe decimal text");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SetPmLoopInterval { loop_interval_secs }
+                if loop_interval_secs == u64::MAX
+        ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_rejects_negative_and_fractional_numbers() {
+        for invalid in [serde_json::json!(-1), serde_json::json!(10.5)] {
+            let result = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "set_pm_loop_interval",
+                "loop_interval_secs": invalid
+            }));
+
+            assert!(
+                result.is_err(),
+                "loop_interval_secs must preserve the u64 wire contract"
+            );
+        }
+    }
+
+    #[test]
+    fn pm_status_serializes_effective_loop_interval() {
+        let event = BackendEvent::PmStatus {
+            available: true,
+            auto_start: true,
+            loop_interval_secs: u64::MAX,
+            loop_interval_secs_decimal: u64::MAX.to_string(),
+            configured_agent_id: "claude".to_string(),
+            configured_model: None,
+            configured_reasoning: None,
+            running_agent_id: None,
+            running_model: None,
+            running_reasoning: None,
+            is_running: false,
+            agent_options: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize PM status");
+        assert_eq!(value.get("kind").and_then(Value::as_str), Some("pm_status"));
+        assert_eq!(value.get("available").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            value.get("loop_interval_secs").and_then(Value::as_u64),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            value
+                .get("loop_interval_secs_decimal")
+                .and_then(Value::as_str),
+            Some("18446744073709551615")
+        );
     }
 
     #[test]

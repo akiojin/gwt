@@ -52,7 +52,13 @@ struct SearchFixture {
 
 /// Fake runner script: records each invocation and answers with the
 /// configured payload (also satisfies the runtime probes).
+///
+/// `GWT_FAKE_RUNNER_STARTUP_DELAY` (Issue #4033) makes every invocation cost
+/// what it would on a saturated runner, so a test that depends on real
+/// subprocess work fitting inside a budget can reproduce that host on demand
+/// instead of waiting for a bad CI day.
 const FAKE_RUNNER_PASSTHROUGH: &str = "#!/bin/sh\n\
+if [ -n \"$GWT_FAKE_RUNNER_STARTUP_DELAY\" ]; then sleep \"$GWT_FAKE_RUNNER_STARTUP_DELAY\"; fi\n\
 echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
 printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
 
@@ -486,7 +492,16 @@ fn ambient_deadline_expiry_after_broken_scope_stays_typed_not_ready() {
         setup_search_fixture(r#"{"ok": true, "scopes": {"files": {"state": "missing"}}}"#);
     gwt_core::runtime::ensure_project_index_runtime()
         .expect("prime the managed runtime outside the shortened search deadline");
-    let _deadline_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "250");
+    // Issue #4033: the attempt budget has to cover git context resolution and
+    // the first `search-multi` subprocess before the broken scope is even
+    // observed. A budget sized to "just enough" made a loaded CI runner decide
+    // which error type came back — the search failed before it could classify
+    // the broken scope, and an unrelated PR went red. The injected delay makes
+    // every runner call cost far more than the three-fold slowdown that did
+    // it, and the budget below is a hang guard for that prologue rather than a
+    // calibrated one; the deadline is still what ends the repair wait.
+    let _slow_runner_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_STARTUP_DELAY", "0.3");
+    let _deadline_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "2000");
     let _wait_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_WAIT_MS", "30000");
 
     let error = gwt::search_project_index(

@@ -383,6 +383,7 @@ impl WindowCanvasState {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
             is_pm: false,
         };
         self.persisted.next_z_index += 1;
@@ -595,7 +596,56 @@ impl WindowCanvasState {
             issue_window_id: issue_window_id.to_string(),
             issue_number,
         };
+        // SPEC-3885 FR-011: remember the Issue itself, not just where the window is
+        // drawn, so Windowize can keep showing it.
+        self.persisted.windows[source_index].linked_issue_number = Some(issue_number);
         true
+    }
+
+    /// SPEC-3885 FR-011: bind an agent window to an Issue without moving it. Launches
+    /// that keep the window on the canvas still produce an Issue window rather than a
+    /// bare terminal.
+    pub fn set_linked_issue_number(&mut self, id: &str, issue_number: Option<u64>) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        self.persisted.windows[index].linked_issue_number = issue_number;
+        true
+    }
+
+    /// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this
+    /// tab. A canvas Issue window is preferred over one that is itself contained, and
+    /// creation order breaks ties so repeated launches land in the same pane. Since
+    /// SPEC-3885 FR-012 the return-to-list control shares this lookup with launch, so
+    /// the two can never disagree about which Issue window hosts a preview.
+    pub fn issue_preview_host_window_id(&self) -> Option<String> {
+        let windows = &self.persisted.windows;
+        windows
+            .iter()
+            .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
+            .or_else(|| {
+                windows
+                    .iter()
+                    .find(|window| window.preset.hosts_issue_preview())
+            })
+            .map(|window| window.id.clone())
+    }
+
+    /// SPEC-3885 FR-012: the inverse of Windowize. The window already carries its Issue,
+    /// so folding it back into the list needs no arguments. Refused when the window has
+    /// no Issue behind it (FR-013) or no Issue window is left to host it — either way the
+    /// window stays on the canvas rather than vanishing into a placement nothing renders.
+    pub fn dock_agent_window_to_issue(&mut self, id: &str) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let Some(issue_number) = self.persisted.windows[index].linked_issue_number else {
+            return false;
+        };
+        let Some(issue_window_id) = self.issue_preview_host_window_id() else {
+            return false;
+        };
+        self.place_agent_window_in_issue_preview(id, &issue_window_id, issue_number)
     }
 
     pub fn move_agent_kanban_card(
@@ -1242,6 +1292,110 @@ mod tests {
         );
     }
 
+    // SPEC-3885 FR-011 / AC-11: the Issue a window belongs to outlives its placement.
+    // Windowize moves the window to the canvas, and the canvas body can only render
+    // the Issue header if the link survives that transition.
+    #[test]
+    fn windowized_agent_window_keeps_its_linked_issue() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3885));
+        assert_eq!(
+            workspace
+                .window(&agent.id)
+                .expect("agent")
+                .linked_issue_number,
+            Some(3885)
+        );
+
+        assert!(workspace.undock_agent_window(&agent.id, None));
+
+        let undocked = workspace.window(&agent.id).expect("agent");
+        assert_eq!(undocked.placement, WindowPlacement::Canvas);
+        assert_eq!(undocked.linked_issue_number, Some(3885));
+    }
+
+    // SPEC-3885 FR-012 / AC-12: returning an Issue window to the list is the inverse of
+    // Windowize and needs no arguments — the window already knows its Issue, and the host
+    // is resolved from the tab's Issue window.
+    #[test]
+    fn docking_agent_window_back_to_issue_returns_it_to_the_preview() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3885));
+        assert!(workspace.undock_agent_window(&agent.id, None));
+
+        assert!(workspace.dock_agent_window_to_issue(&agent.id));
+
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: issue.id.clone(),
+                issue_number: 3885,
+            }
+        );
+    }
+
+    // SPEC-3885 FR-013 / AC-13: a session with no Issue behind it stays a bare terminal
+    // window; there is no list row to fold it back into.
+    #[test]
+    fn docking_agent_window_without_a_linked_issue_is_refused() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let _issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+
+        assert!(!workspace.dock_agent_window_to_issue(&agent.id));
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::Canvas
+        );
+        assert_eq!(
+            workspace
+                .window(&agent.id)
+                .expect("agent")
+                .linked_issue_number,
+            None
+        );
+    }
+
+    // SPEC-3885 FR-012: with no Issue window left to host it the window stays on the
+    // canvas rather than disappearing into a placement nothing renders.
+    #[test]
+    fn docking_agent_window_without_an_issue_host_is_refused() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3885));
+        assert!(workspace.undock_agent_window(&agent.id, None));
+        assert!(workspace.close_window(&issue.id));
+
+        assert!(!workspace.dock_agent_window_to_issue(&agent.id));
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::Canvas
+        );
+    }
+
+    // SPEC-3885: the host lookup Issue Monitor launches use is now the canvas's own, so
+    // launch and the dock-back control can never disagree about which Issue window hosts
+    // a preview.
+    #[test]
+    fn issue_preview_host_prefers_a_canvas_placed_issue_window() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let board = workspace.add_window(WindowPreset::Board, arrange_bounds());
+        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+
+        assert_eq!(
+            workspace.issue_preview_host_window_id(),
+            Some(issue.id.clone())
+        );
+        assert!(workspace.close_window(&board.id));
+        assert!(workspace.close_window(&issue.id));
+        assert_eq!(workspace.issue_preview_host_window_id(), None);
+    }
+
     // SPEC-3671: closing the Issue window that hosts a preview must release the preview
     // rather than stranding a window nothing can render.
     #[test]
@@ -1431,6 +1585,7 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
                 is_pm: false,
             }],
             next_z_index: 2,

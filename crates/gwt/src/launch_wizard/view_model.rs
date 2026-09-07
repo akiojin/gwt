@@ -107,9 +107,11 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && self.agent_is_codex(),
             show_hermes_options,
-            hermes_needs_setup: show_hermes_options && self.hermes_needs_setup,
+            hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
-            opencode_needs_setup: show_opencode_options && self.opencode_needs_setup,
+            opencode_needs_setup: show_opencode_options
+                && self.agent_needs_configuration("opencode"),
+            agent_setup: self.agent_setup_view(show_manual_setup),
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_choices.providers.clone(),
             hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
@@ -372,6 +374,24 @@ impl LaunchWizardState {
                 runtime_status: window_status_wire(entry.runtime_status).to_string(),
             })
             .collect()
+    }
+
+    /// SPEC-3864 FR-013: before launch the wizard states whether `Installed`,
+    /// `latest`, or setup applies to the selected agent; this is the setup
+    /// branch of that decision.
+    fn agent_setup_view(&self, show_manual_setup: bool) -> Option<LaunchWizardAgentSetupView> {
+        if !show_manual_setup || !self.launch_target_is_agent() {
+            return None;
+        }
+        let agent = self.selected_agent()?;
+        let affordance = self.agent_setup_affordance_for(agent)?;
+        Some(LaunchWizardAgentSetupView {
+            agent_id: agent.id.clone(),
+            kind: affordance.kind.wire_value().to_string(),
+            title: affordance.title,
+            detail: affordance.detail,
+            action_label: affordance.action_label,
+        })
     }
 
     fn agent_options_view(&self) -> Vec<LaunchWizardOptionView> {

@@ -147,7 +147,8 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 #[test]
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
-        status: IssueMonitorStatusView {
+        status: Box::new(IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -161,11 +162,12 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
             quota_hold: None,
+            update_drain: None,
             autonomous_issues: Vec::new(),
             launch_profile_candidates: Vec::new(),
             provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
-        },
+        }),
     };
 
     let value = serde_json::to_value(event).expect("serialize status");

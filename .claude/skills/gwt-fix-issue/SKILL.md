@@ -95,8 +95,10 @@ fitting owner. Creating a new SPEC is the last resort, decided through
 5. **Gate the PR.** PR work goes through `gwt-manage-pr`, which requires
    `gwt-verify --mode pre-pr` and a recorded `User Verification Result`. Do not
    create or update a Ready PR until that result is `confirmed` (UI-affecting
-   changes) or `n/a` (no user-visible surface). Never open a Ready PR on a
-   `pending` verification. For code-changing direct fixes, PR handoff is part
+   changes), `n/a` (no user-visible surface), or `n/a (autonomous)` (an
+   unattended gwt Issue Monitor launch, where the handoff is waived and
+   `Agent Visual Check: pass` covers any UI surface). Never open a Ready PR on
+   a `pending` verification. For code-changing direct fixes, PR handoff is part
    of completion: a commit hash, branch push, and closure comment are
    push-only evidence, not completion. If no PR URL or PR number exists yet,
    report `PR handoff pending` or `blocked(<reason>)` and keep working through

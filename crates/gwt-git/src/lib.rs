@@ -13,6 +13,7 @@ pub mod merged_branch_prune;
 pub mod migration;
 pub mod pr_status;
 pub mod refs;
+pub mod release_status;
 pub mod repository;
 pub mod worktree;
 

@@ -875,37 +875,16 @@ pub(crate) fn heal_lost_generation_publication_best_effort(
 /// generation. When a holder Session dies without settling, every later fresh
 /// launch (Issue Monitor retries included) collides here, so the refusal names
 /// the blocking generation, its holder and durable state, and both recovery
-/// routes. Diagnostics are best effort: an unreadable holder Session degrades
-/// the detail, never the refusal.
+/// routes. Issue #4042 AC-1: the holder is read through the same
+/// `OwnerGenerationHold` projection the Issue Monitor reclaim uses, so the
+/// refusal and the reclaim can never describe one holder differently.
 fn existing_generation_conflict_detail(
     sessions_dir: &Path,
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
 ) -> String {
-    let status = ledger
-        .current_effective_status()
-        .map_or("unknown", |status| match status {
-            gwt::cli::execution_state::ExecutionControlStatus::Active => "active",
-            gwt::cli::execution_state::ExecutionControlStatus::Completed => "completed",
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked => "blocked",
-        });
-    let holder = ledger.current_generation().map(|generation| {
-        let session_id = generation.identity.initial_session_id.clone();
-        let session_state =
-            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).map_or_else(
-                |_| "durable Session unreadable".to_string(),
-                |session| format!("{:?}", session.status),
-            );
-        format!(" held by Session {session_id} ({session_state})")
-    });
-    format!(
-        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
-        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
-        owner.kind.as_str(),
-        owner.number,
-        status,
-        holder.unwrap_or_default(),
-    )
+    let hold = gwt::cli::execution_state::owner_generation_hold_from_ledger(sessions_dir, ledger);
+    gwt::cli::execution_state::execution_generation_conflict_refusal(owner, hold.as_ref())
 }
 
 struct FinalizedAgentCapabilityLaunch<'a> {
@@ -1973,22 +1952,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
     WindowProcessStatus::Running
 }
 
-/// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this tab.
-/// A canvas Issue window is preferred over one that is itself contained, and creation
-/// order breaks ties so repeated launches land in the same pane.
-fn issue_preview_host_window_id(workspace: &gwt::WindowCanvasState) -> Option<String> {
-    let windows = &workspace.persisted().windows;
-    windows
-        .iter()
-        .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
-        .or_else(|| {
-            windows
-                .iter()
-                .find(|window| window.preset.hosts_issue_preview())
-        })
-        .map(|window| window.id.clone())
-}
-
 #[derive(Debug, Clone)]
 enum AgentWindowPlacement {
     Centered(WindowGeometry),
@@ -2012,11 +1975,20 @@ struct AgentWindowSpawnOptions {
     continuation: Option<PendingContinueWork>,
 }
 
+/// SPEC-3864 T-006: install detection runs off the startup critical path.
+/// The slot starts as a background thread and is joined on first wizard
+/// access; clones share the same slot so a joined result is reused.
+#[derive(Debug)]
+enum AgentOptionsSlot {
+    Loading(Option<std::thread::JoinHandle<Vec<gwt::AgentOption>>>),
+    Ready(Vec<gwt::AgentOption>),
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchWizardMemoryCache {
     sessions_dir: PathBuf,
     sessions: Vec<gwt_agent::Session>,
-    agent_options: Vec<gwt::AgentOption>,
+    agent_options: Arc<Mutex<AgentOptionsSlot>>,
     // SPEC-3170 FR-001: Claude capability detection may read settings and run
     // `claude --version` once per process. The wizard stores the booleans at
     // cache load time and reuses them on every open.
@@ -2030,7 +2002,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options: Self::load_agent_options(),
+            agent_options: Self::spawn_agent_options_detection(),
             claude_ultracode_supported: claude_capabilities.ultracode_supported,
             claude_workflows_enabled: claude_capabilities.workflows_enabled,
         }
@@ -2054,7 +2026,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options,
+            agent_options: Arc::new(Mutex::new(AgentOptionsSlot::Ready(agent_options))),
             claude_ultracode_supported,
             claude_workflows_enabled,
         }
@@ -2081,12 +2053,44 @@ impl LaunchWizardMemoryCache {
         ))
     }
 
+    /// Start install detection on a background thread so `load` (and thus
+    /// app startup / settings updates) never waits on `<agent> --version`
+    /// probes. A thread that cannot be spawned falls back to synchronous
+    /// detection so the options are never silently empty.
+    fn spawn_agent_options_detection() -> Arc<Mutex<AgentOptionsSlot>> {
+        let slot = match std::thread::Builder::new()
+            .name("gwt-agent-detect".to_string())
+            .spawn(Self::load_agent_options)
+        {
+            Ok(handle) => AgentOptionsSlot::Loading(Some(handle)),
+            Err(error) => {
+                tracing::warn!(error = %error, "agent detection thread unavailable; detecting inline");
+                AgentOptionsSlot::Ready(Self::load_agent_options())
+            }
+        };
+        Arc::new(Mutex::new(slot))
+    }
+
     pub(super) fn refresh_agent_options(&mut self) {
-        self.agent_options = Self::load_agent_options();
+        self.agent_options = Self::spawn_agent_options_detection();
     }
 
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
-        self.agent_options.clone()
+        let mut slot = self
+            .agent_options
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let AgentOptionsSlot::Loading(handle) = &mut *slot {
+            let options = handle
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_else(Self::load_agent_options);
+            *slot = AgentOptionsSlot::Ready(options);
+        }
+        match &*slot {
+            AgentOptionsSlot::Ready(options) => options.clone(),
+            AgentOptionsSlot::Loading(_) => unreachable!("slot joined above"),
+        }
     }
 
     /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
@@ -2688,11 +2692,12 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                     codex_config_path.display()
                 )
             })?;
-            if !report.untrusted_gwt_hooks.is_empty() {
-                return Err(format!(
-                    "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}",
-                    report.untrusted_gwt_hooks.join(", ")
-                ));
+            // Issue #4071 AC-2: the reason says whether any trust state was
+            // written and what each hooks file was compared against, so a
+            // skipped registration and a trusted_hash / path-form mismatch
+            // are told apart in the launch failure record.
+            if let Some(reason) = report.hooks_need_review_reason() {
+                return Err(reason);
             }
             Ok(Some(report))
         }
@@ -3473,9 +3478,14 @@ impl AppRuntime {
                         // `launch_feedback_context` (and therefore the same
                         // delivery id).
                         if !is_fresh_execution_launch && autonomous_handoff_delivery.is_none() {
-                            if let Some(issue_number) = launch_feedback_context
-                                .as_ref()
-                                .and_then(|context| context.issue_monitor_issue_number)
+                            // Issue #4041: a review dispatch window never
+                            // ACKs the Issue's launch — that would rebind
+                            // `launched_issues` away from the running
+                            // implementation window.
+                            if let Some(issue_number) =
+                                launch_feedback_context.as_ref().and_then(|context| {
+                                    context.issue_monitor_launch_binding_issue_number()
+                                })
                             {
                                 let delivery_id =
                                     launch_feedback_context.as_ref().and_then(|context| {
@@ -4335,6 +4345,11 @@ impl AppRuntime {
         let _ = tab
             .workspace
             .set_agent_id(&window.id, config.agent_id.command().to_string());
+        // SPEC-3885 FR-011: an Issue-originated launch produces an Issue window, not a
+        // bare terminal, wherever it is drawn. FR-013 leaves a non-Issue session `None`.
+        let _ = tab
+            .workspace
+            .set_linked_issue_number(&window.id, config.linked_issue_number);
         if let Some(target) = agent_kanban_target.as_ref() {
             let _ = tab.workspace.place_agent_window_in_kanban(
                 &window.id,
@@ -4347,7 +4362,7 @@ impl AppRuntime {
             // window instead of opening a canvas window. FR-003 keeps every manual
             // launch (Start Work / Launch Agent) on the canvas, and a tab with no
             // Issue window keeps the canvas fallback so the agent is never invisible.
-            if let Some(issue_window_id) = issue_preview_host_window_id(&tab.workspace) {
+            if let Some(issue_window_id) = tab.workspace.issue_preview_host_window_id() {
                 let _ = tab.workspace.place_agent_window_in_issue_preview(
                     &window.id,
                     &issue_window_id,
@@ -4395,6 +4410,13 @@ impl AppRuntime {
             );
         }
         if let Some(context) = launch_feedback_context {
+            // Issue #4084 AC-2: remember which windows are independent review
+            // dispatches (Issue #4041) so an idle one with a published verdict
+            // is classified as review rather than as an unexplained stall.
+            if context.issue_monitor_review_dispatch {
+                self.issue_monitor_review_dispatch_windows
+                    .insert(window_id.clone());
+            }
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }

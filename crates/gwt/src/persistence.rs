@@ -172,6 +172,12 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3885 FR-011: the Issue this agent window belongs to. It is durable and
+    /// independent of `placement`, so Windowize (IssuePreview -> Canvas) keeps the
+    /// Issue header and FR-012's return-to-list knows which row to fold back into.
+    /// `None` is a session with no Issue behind it, which stays a bare terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_issue_number: Option<u64>,
     /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
     /// window, recomputed per broadcast from the durable PM registration. It
     /// is never deserialized from disk — a stored flag would drift from
@@ -293,6 +299,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -319,6 +326,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
                 is_pm: false,
             },
         ],
@@ -707,6 +715,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -733,6 +742,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
             ],
@@ -1252,6 +1262,7 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                linked_issue_number: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1343,6 +1354,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1417,6 +1429,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1443,6 +1456,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
             ],
@@ -1657,6 +1671,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1683,6 +1698,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
                     is_pm: false,
                 },
             ],

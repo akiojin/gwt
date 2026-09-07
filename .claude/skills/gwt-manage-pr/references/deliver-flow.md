@@ -48,9 +48,10 @@ Deliver applies a stricter gate than Create/Fix because auto-merge removes the
 last human checkpoint:
 
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`.
-- `User Verification Result` is `confirmed` (user visually verified) or `n/a`
+- `User Verification Result` is `confirmed` (user visually verified), `n/a`
   (the change has no user-visible surface, so visual verification does not
-  apply).
+  apply), or `n/a (autonomous)` (an unattended gwt Issue Monitor launch, where
+  the handoff is waived and `Agent Visual Check: pass` carries any UI surface).
 - The PR is a releaseable slice with no known blockers in its scope.
 - The PR is **not** a Draft (auto-merge cannot be armed on a Draft PR, and a
   Draft is by definition unfinished).
@@ -61,7 +62,10 @@ Refuse to arm auto-merge when any of these hold:
   completed) or `rejected(<reason>)` (the user declined).
 - `User Verification Result` is `skipped(<reason>)`. A skip is acceptable for
   *creating* a Draft/Ready PR per the shared Ready PR Gate, but it is **not**
-  sufficient to merge unattended — Deliver requires `confirmed` or `n/a`.
+  sufficient to merge unattended — Deliver requires `confirmed`, `n/a`, or
+  `n/a (autonomous)`. Never relabel a `skipped(<reason>)` as
+  `n/a (autonomous)`: the waiver comes from `GWT_AUTONOMOUS_EXECUTION`, not
+  from the agent finding the check inconvenient.
 - `gwt-verify --mode pre-pr` returns `Overall: FAIL` or `failed: tooling-missing`.
 
 On gate failure, stop. Do not run `gh pr merge --auto`. Route the failure for

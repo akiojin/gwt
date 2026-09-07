@@ -325,7 +325,7 @@ pub fn durable_session_launch_command(config: &LaunchConfig) -> String {
     let Some(provenance) = config.tool_runtime_provenance.as_ref() else {
         return config.command.clone();
     };
-    if config.agent_id.package_name() != Some(provenance.official_package.as_str()) {
+    if config.agent_id.npm_package() != Some(provenance.official_package.as_str()) {
         return config.command.clone();
     }
 
@@ -508,6 +508,11 @@ pub struct SessionRuntimeState {
     pub child_started_at: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
+    /// When the most recent managed hook event finished successfully,
+    /// protocol output included (Issue #3541). `hook.health` compares it with
+    /// the newest hook failure to tell "recovered" from "unresolved".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completed_hook_event_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
@@ -1577,6 +1582,7 @@ impl SessionRuntimeState {
             child_pid: None,
             child_started_at: None,
             source_event: None,
+            last_completed_hook_event_at: None,
             pending_discussion: None,
         }
     }
