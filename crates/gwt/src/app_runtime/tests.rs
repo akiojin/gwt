@@ -1051,8 +1051,14 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh refresh failed\r\n\
   exit /b 1\r\n\
 )\r\n\
+set \"gwt_arg1=%~1\"\r\n\
+set \"gwt_arg2=%~2\"\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
-  if /I \"%1 %2\"==\"pr list\" (\r\n\
+  if /I \"%gwt_arg2:~0,26%\"==\"repos/{owner}/{repo}/pulls\" (\r\n\
+    echo []\r\n\
+    exit /b 0\r\n\
+  )\r\n\
+  if /I \"%gwt_arg1% %gwt_arg2%\"==\"pr list\" (\r\n\
     echo []\r\n\
     exit /b 0\r\n\
   )\r\n\
@@ -1082,7 +1088,12 @@ exit /b 0\r\n",
 	  printf '%s\n' 'gh refresh failed' >&2
 	  exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+# SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync.
+case "$1 $2" in
+  "api repos/{owner}/{repo}/pulls?state=closed"*) merged_pulls_query=1 ;;
+  *) merged_pulls_query=0 ;;
+esac
+if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && { [ "$merged_pulls_query" = "1" ] || { [ "$1" = "pr" ] && [ "$2" = "list" ]; }; }; then
   printf '%s\n' '[]'
   exit 0
 fi
@@ -1090,7 +1101,7 @@ if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ]; then
   printf '%s\n' 'gh refresh failed' >&2
   exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && { [ "$merged_pulls_query" = "1" ] || { [ "$1" = "pr" ] && [ "$2" = "list" ]; }; }; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
 fi
@@ -7648,6 +7659,7 @@ fn issue_monitor_autonomous_record(
         wait: None,
         needs_human_kind: None,
         steering: None,
+        review_dispatch_hold: None,
     }
 }
 
@@ -42896,6 +42908,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
