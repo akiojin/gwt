@@ -356,11 +356,70 @@ missed:
   exact Session (settled and terminal, nothing open), the Issue's
   durable closed record or Monitor row, and `pane.read` for a
   diagnostic. A NeedsHuman row, an Error pane, an open obligation, or
-  any fact you cannot read keeps the window.
+  any fact you cannot read keeps the window. An Error pane is never
+  fallback cleanup; it goes through *Error pane triage and disposition*
+  below.
 - Close only that exact inert window with `pane.close`, and say in the
   digest which runtime miss you are cleaning up. Never sweep panes in
   bulk, and never close a window whose Work is still open — that close
   is a failed attempt (see `pane.close` above), not cleanup.
+
+## Error pane triage and disposition
+
+An `error` pane is retained on purpose so its failure can be read
+(SPEC-3431 FR-067 / FR-138): the runtime closes settled windows and
+pre-PTY restore failures itself (Issue #3927) and leaves every pane that
+failed after its session was established to you. Diagnosing and
+reporting is not a disposition. Every cycle, take each `error` pane in
+`pane.list` (and a `stopped` pane with an open obligation) through the
+order below and finish it; a cycle with an untriaged error pane is
+never a no-change cycle (Issue #3531).
+
+1. **Identify** — identify the owning Issue and Work from the exact
+   pane: the window title, `launched_window_id` on its
+   `issue.monitor.status` row, and `execution.status` for its Session.
+   An unknown owner is a reason to keep the pane and list it as
+   `unknown` in the digest, never a reason to infer one.
+2. **Reconcile** — reconcile its delivery state against authoritative
+   evidence: the owner Issue's current state (`issue.view`), the
+   execution record, and the merge log (`pr.list` with `refresh:true`,
+   or the merged commit on `develop`). Cached `linked_prs`, a Board
+   post, or scrollback is never delivery proof on its own. The result
+   is `delivered`, `undelivered` with every obligation named (unpushed
+   commits, unresolved review threads, a SPEC or artifact update, an
+   unanswered ruling), or `unknown`, which is treated as undelivered.
+3. **Recover** — when the work is undelivered, connect it to a recovery
+   Issue or a requeue before anything else: `issue.monitor.requeue`
+   when the row is `agent_failed` / `launch_failed` and the owner
+   Issue's acceptance criteria still describe the remaining work, or
+   `issue.create` for a recovery Issue that lists every lost obligation
+   and points at the owner. Never leave undelivered work as a report.
+4. **Record** — record the failure reason and the disposition durably
+   where the next session can read them: a comment on the owner Issue
+   or a Board post naming the recovery Issue or the requeue. A recorded
+   error alone is not a disposition; the recovery is part of it.
+5. **Close** — only then close only that exact inert pane with
+   `pane.close`, after a fresh `pane.list` confirms it is the same pane
+   and no longer bound to a live launch. Wait for the receipt: a failed
+   or timed-out close is reported as a failure and re-evaluated next
+   cycle from fresh inventory, never claimed as done. Never sweep panes
+   in bulk by state.
+6. **Report** — end the cycle with a disposition digest of every error
+   pane you touched, in this shape:
+
+   | pane | owner | delivery state | disposition |
+   | --- | --- | --- | --- |
+   | `fix(pane): close receipt on timeout` | #1234 | delivered: PR #1240 merged | closed (receipt ok) |
+   | `feat(spec): Phase 25 artifacts` | #1180 | undelivered: 4 review threads on PR #1236, artifact update unpushed | recovery Issue #1301 registered; closed (receipt ok) |
+   | title unavailable | unknown | unknown | kept; owner unresolved, re-check next cycle |
+
+Keep the pane whenever a step cannot be completed: an unread or unfiled
+error, an unknown owner, evidence a `needs_human` ruling still needs, or
+a close whose receipt did not land. A kept pane reappears in the next
+cycle's inventory and digest until it is dispositioned. When several
+panes fail at once with the same error (a restore failure after a
+restart), report the shared cause once with the count, but run steps 1
+to 4 per pane: a shared cause never implies a shared delivery state.
 
 ## Steering the running agents
 
@@ -561,6 +620,11 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   *Steering the running agents*): a stalled, drifting, or
   next-action-waiting launch gets its directive in the same cycle,
   before you decide the cycle changed nothing.
+- Every cycle, take every `error` pane through *Error pane triage and
+  disposition*: identify its owner, reconcile delivery, connect
+  undelivered work to recovery, record the disposition, and only then
+  close the exact pane. An error pane that was only diagnosed and
+  reported is still open work.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
@@ -829,6 +893,10 @@ and urgency.
   reportable milestone or escalation under the conditional rule below.
   Only an empty stalled-item inventory may end silently; a non-empty
   inventory is not a no-change cycle.
+- Error panes you dispositioned this cycle are reported as the
+  disposition digest (see *Error pane triage and disposition*). A
+  recovery Issue registered from one is a milestone; a pane kept because
+  its owner or delivery is unknown is an escalation until resolved.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
 - A cycle that produced no milestone and no escalation, with no open
@@ -1076,6 +1144,13 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // Issue #3531 (SPEC-3431 FR-137〜140): an error pane is triaged to
+            // a durable disposition, never only diagnosed and reported.
+            "## Error pane triage and disposition",
+            "Diagnosing and reporting is not a disposition",
+            "recovery Issue",
+            "`issue.monitor.requeue`",
+            "| pane | owner | delivery state | disposition |",
             // Issue #3776: a slow gwtd process cannot own the PM turn.
             "## gwtd execution isolation",
             "short read-only gwtd operations",
@@ -1721,6 +1796,107 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "FR-066: the close footgun is bounded in requeue_window, not by \
              taking the capability away from the PM"
         );
+    }
+
+    /// Issue #3531 AC-1 / AC-3 (SPEC-3431 FR-137〜140): an error pane is not
+    /// finished when it has been diagnosed. The contract fixes the order —
+    /// identify the owner, reconcile delivery against authoritative evidence,
+    /// connect undelivered work to a recovery Issue or a requeue, record the
+    /// disposition durably, close only the exact inert pane, and report the
+    /// disposition — because the pane may be the last trace of work that was
+    /// never delivered (PR #3520's review threads were lost this way).
+    #[test]
+    fn contract_triages_error_panes_to_recovery_before_cleanup() {
+        let triage = section("## Error pane triage and disposition");
+        let position = |phrase: &str| {
+            triage
+                .find(phrase)
+                .unwrap_or_else(|| panic!("error pane triage contract is missing: {phrase}"))
+        };
+        let identify = position("identify the owning Issue and Work");
+        let reconcile = position("reconcile its delivery state");
+        let recover = position("connect it to a recovery Issue or a requeue");
+        let durable = position("record the failure reason and the disposition durably");
+        let close = position("close only that exact inert pane");
+        let digest = position("disposition digest");
+        assert!(
+            identify < reconcile,
+            "identify the owner before reconciling delivery"
+        );
+        assert!(reconcile < recover, "reconcile delivery before recovering");
+        assert!(recover < durable, "recovery precedes the durable record");
+        assert!(durable < close, "a durable disposition precedes the close");
+        assert!(close < digest, "the digest reports what was closed");
+
+        // AC-3: undelivered work is never left as a report.
+        for phrase in [
+            "`issue.create`",
+            "`issue.monitor.requeue`",
+            "Never leave undelivered work as a report",
+            "Cached `linked_prs`",
+            "never delivery proof on its own",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane recovery contract is missing: {phrase}"
+            );
+        }
+        // Fail-closed retention (FR-138) survives the new cleanup duty.
+        for phrase in [
+            "unknown owner",
+            "keep the pane",
+            "Never sweep panes in bulk",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane retention contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3531 AC-1: "diagnosed and reported" is explicitly not an
+    /// allowed end state for an error pane, and the resident loop invokes the
+    /// triage every cycle so the duty cannot depend on session memory.
+    #[test]
+    fn contract_forbids_ending_error_pane_triage_at_a_report() {
+        let triage = section("## Error pane triage and disposition");
+        for phrase in [
+            "Diagnosing and reporting is not a disposition",
+            "never a no-change cycle",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane triage contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            section("## Resident loop (unattended)").contains("Error pane triage and disposition"),
+            "the resident cycle must invoke the error pane triage every cycle"
+        );
+        assert!(
+            section("## Reporting cadence").contains("disposition digest"),
+            "the disposition digest must be part of the reporting cadence"
+        );
+    }
+
+    /// Issue #3531 AC-4: the disposition report has a fixed shape (pane /
+    /// owner / delivery state / disposition) and the skill shows an example so
+    /// every PM session reports the same columns.
+    #[test]
+    fn contract_shows_the_disposition_digest_format() {
+        let triage = section("## Error pane triage and disposition");
+        for phrase in [
+            "| pane | owner | delivery state | disposition |",
+            "recovery Issue #",
+            "closed (receipt",
+            "kept",
+            "title unavailable",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "disposition digest example is missing: {phrase}"
+            );
+        }
     }
 
     #[test]
