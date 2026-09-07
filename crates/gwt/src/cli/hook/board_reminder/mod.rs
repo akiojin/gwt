@@ -229,9 +229,7 @@ fn append_title_summary_required_context(
         }
         // Inject even when there is no board reminder this turn, so a fresh
         // agent's first UserPromptSubmit always carries the title instruction.
-        HookOutput::Silent => {
-            HookOutput::hook_specific_additional_context(event, required.to_string())
-        }
+        HookOutput::Silent => HookOutput::hook_specific_additional_context(event, required),
         other => other,
     }
 }
@@ -304,12 +302,11 @@ fn append_title_summary_stale_context(
     output: HookOutput,
     event: IntentBoundaryEvent,
     stale: bool,
-    language: &str,
 ) -> HookOutput {
     if !stale || event != IntentBoundaryEvent::UserPromptSubmit {
         return output;
     }
-    let stale_text = texts::title_summary_stale_reminder(language);
+    let stale_text = texts::TITLE_SUMMARY_STALE_REMINDER;
     match output {
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{stale_text}"))
@@ -408,13 +405,11 @@ fn append_progress_summary_context(
     event: IntentBoundaryEvent,
     missing: bool,
     stale: bool,
-    language: &str,
 ) -> HookOutput {
     if !missing && !stale {
         return output;
     }
-    let reminder =
-        texts::progress_summary_reminder(language, stale, event == IntentBoundaryEvent::Stop);
+    let reminder = texts::progress_summary_reminder(stale, event == IntentBoundaryEvent::Stop);
     match output {
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{reminder}"))
@@ -480,12 +475,11 @@ fn append_memory_update_context(
     event: IntentBoundaryEvent,
     present: bool,
     suppress: bool,
-    language: &str,
 ) -> HookOutput {
     if !present || event == IntentBoundaryEvent::SessionStart || suppress {
         return output;
     }
-    let reminder = texts::memory_update_reminder(language, event == IntentBoundaryEvent::Stop);
+    let reminder = texts::memory_update_reminder(event == IntentBoundaryEvent::Stop);
     match output {
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{reminder}"))
@@ -540,6 +534,8 @@ pub fn compute_plan(
     )?;
 
     let self_match_keys = build_self_match_keys(session);
+    // Issue #4080: the setting only steers the narrative directive; every
+    // injected instruction body below is English.
     let language = resolve_narrative_language();
     // SPEC #3245 FR-004: the Work-state reminders (title purpose, progress
     // summary) fire for every session — the intake lane suppression is gone.
@@ -566,10 +562,9 @@ pub fn compute_plan(
         self_workspace_id,
     });
     if suppress_work_state_reminders {
-        plan.output =
-            replace_with_terminal_settlement_reminder(plan.output, intent_event, &language);
+        plan.output = replace_with_terminal_settlement_reminder(plan.output, intent_event);
     } else if is_resident_pm {
-        plan.output = replace_with_pm_reminder(plan.output, intent_event, &language);
+        plan.output = replace_with_pm_reminder(plan.output);
     }
 
     if emit_work_state_reminders {
@@ -595,8 +590,7 @@ pub fn compute_plan(
     );
     plan.next_reminders = updated_state;
     if emit_work_state_reminders {
-        plan.output =
-            append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+        plan.output = append_title_summary_stale_context(plan.output, intent_event, stale);
     }
     let (progress_missing, progress_stale, progress_state) = compute_progress_summary_state(
         intent_event,
@@ -611,20 +605,14 @@ pub fn compute_plan(
             intent_event,
             progress_missing,
             progress_stale,
-            &language,
         );
     }
     let memory_present = memory_source_present(&session.worktree_path);
     let (memory_suppress, memory_state) =
         compute_memory_reminder_state(intent_event, memory_present, &plan.next_reminders, now);
     plan.next_reminders = memory_state;
-    plan.output = append_memory_update_context(
-        plan.output,
-        intent_event,
-        memory_present,
-        memory_suppress,
-        &language,
-    );
+    plan.output =
+        append_memory_update_context(plan.output, intent_event, memory_present, memory_suppress);
 
     Ok(Some(plan))
 }
@@ -648,16 +636,8 @@ fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -
 /// SPEC-3431 FR-064: swap the implementation-agent reminder for the PM's.
 /// Shares [`replace_with_terminal_settlement_reminder`]'s substitution so both
 /// stay in step when a base reminder variant is added.
-fn replace_with_pm_reminder(
-    output: HookOutput,
-    _event: IntentBoundaryEvent,
-    language: &str,
-) -> HookOutput {
-    let replacement = match texts::reminder_language(language) {
-        texts::ReminderLanguage::Ja => texts::PM_REMINDER_JA,
-        texts::ReminderLanguage::En => texts::PM_REMINDER,
-    };
-    replace_base_reminders(output, replacement)
+fn replace_with_pm_reminder(output: HookOutput) -> HookOutput {
+    replace_base_reminders(output, texts::PM_REMINDER)
 }
 
 fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
@@ -665,12 +645,8 @@ fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
         [
             texts::USER_PROMPT_REMINDER,
             texts::USER_PROMPT_REMINDER_SHORT,
-            texts::USER_PROMPT_REMINDER_JA,
-            texts::USER_PROMPT_REMINDER_SHORT_JA,
             texts::STOP_REMINDER,
             texts::STOP_REMINDER_SHORT,
-            texts::STOP_REMINDER_JA,
-            texts::STOP_REMINDER_SHORT_JA,
         ]
         .into_iter()
         .fold(text, |text, base| text.replace(base, replacement))
@@ -687,44 +663,18 @@ fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
 fn replace_with_terminal_settlement_reminder(
     output: HookOutput,
     event: IntentBoundaryEvent,
-    language: &str,
 ) -> HookOutput {
-    let replacement = match (texts::reminder_language(language), event) {
-        (texts::ReminderLanguage::Ja, IntentBoundaryEvent::Stop) => {
-            texts::TERMINAL_SETTLEMENT_STOP_REMINDER_JA
-        }
-        (texts::ReminderLanguage::En, IntentBoundaryEvent::Stop) => {
-            texts::TERMINAL_SETTLEMENT_STOP_REMINDER
-        }
-        (texts::ReminderLanguage::Ja, _) => texts::TERMINAL_SETTLEMENT_REMINDER_JA,
-        (texts::ReminderLanguage::En, _) => texts::TERMINAL_SETTLEMENT_REMINDER,
+    let replacement = match event {
+        IntentBoundaryEvent::Stop => texts::TERMINAL_SETTLEMENT_STOP_REMINDER,
+        _ => texts::TERMINAL_SETTLEMENT_REMINDER,
     };
-    let replace_base = |text: String| {
-        [
-            texts::USER_PROMPT_REMINDER,
-            texts::USER_PROMPT_REMINDER_SHORT,
-            texts::USER_PROMPT_REMINDER_JA,
-            texts::USER_PROMPT_REMINDER_SHORT_JA,
-            texts::STOP_REMINDER,
-            texts::STOP_REMINDER_SHORT,
-            texts::STOP_REMINDER_JA,
-            texts::STOP_REMINDER_SHORT_JA,
-        ]
-        .into_iter()
-        .fold(text, |text, base| text.replace(base, replacement))
-    };
-    match output {
-        HookOutput::HookSpecificAdditionalContext { event, text } => {
-            HookOutput::hook_specific_additional_context(event, replace_base(text))
-        }
-        HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
-        other => other,
-    }
+    replace_base_reminders(output, replacement)
 }
 
 /// Resolve the narrative-output language from the global gwt config
 /// (SPEC-1933 FR-009 / FR-010). Falls back to `"en"` when settings
-/// cannot be loaded.
+/// cannot be loaded. Only the `Use language: <lang>` directive follows this
+/// value; injected instruction bodies stay English (Issue #4080).
 fn resolve_narrative_language() -> String {
     gwt_config::Settings::load()
         .map(|settings| settings.ai.effective_language().to_string())
@@ -879,8 +829,8 @@ mod tests {
     }
 
     /// Issue #3767 AC-2: the intent-boundary reminder the PM reads every turn
-    /// carries the steering obligation in both languages, so the injected
-    /// prompt cannot quietly outrank the skill body back into "observe only".
+    /// carries the steering obligation, so the injected prompt cannot quietly
+    /// outrank the skill body back into "observe only".
     #[test]
     fn the_resident_pm_is_told_to_steer_running_launches() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -901,37 +851,16 @@ mod tests {
             HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
             other => panic!("expected additional context, got {other:?}"),
         };
-        assert!(
-            text.contains("Steer them before you judge the cycle unchanged")
-                || text.contains("「変化なし」と判定する前に稼働中の launch を steering"),
-            "the PM reminder must carry the steering obligation:\n{text}"
-        );
-        for (reminder, phrases) in [
-            (
-                texts::PM_REMINDER,
-                [
-                    "Steer them before you judge the cycle unchanged",
-                    "stalled, drifting out of scope, or waiting for its next action",
-                    "`board.post` with a mention or `pm.message.send`",
-                    "never inject launch instructions past the Issue Monitor",
-                ],
-            ),
-            (
-                texts::PM_REMINDER_JA,
-                [
-                    "「変化なし」と判定する前に稼働中の launch を steering",
-                    "停滞・スコープ逸脱・次アクション待ち",
-                    "`board.post` の mention か `pm.message.send`",
-                    "Issue Monitor を迂回した起動系注入はしません",
-                ],
-            ),
+        for phrase in [
+            "Steer them before you judge the cycle unchanged",
+            "stalled, drifting out of scope, or waiting for its next action",
+            "`board.post` with a mention or `pm.message.send`",
+            "never inject launch instructions past the Issue Monitor",
         ] {
-            for phrase in phrases {
-                assert!(
-                    reminder.contains(phrase),
-                    "PM reminder is missing `{phrase}`:\n{reminder}"
-                );
-            }
+            assert!(
+                text.contains(phrase),
+                "PM reminder is missing `{phrase}`:\n{text}"
+            );
         }
     }
 
@@ -959,7 +888,7 @@ mod tests {
             other => panic!("expected additional context, got {other:?}"),
         };
         assert!(
-            !text.contains("resident PM") && !text.contains("常駐 PM"),
+            !text.contains("resident PM"),
             "a non-PM worktree must never receive the PM reminder:\n{text}"
         );
         assert!(
@@ -968,8 +897,97 @@ mod tests {
         );
     }
 
+    fn contains_japanese(text: &str) -> bool {
+        text.chars().any(|c| {
+            matches!(c,
+                '\u{3040}'..='\u{30FF}' // Hiragana / Katakana
+                | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+                | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+                | '\u{FF00}'..='\u{FFEF}' // Halfwidth / Fullwidth forms
+            )
+        })
+    }
+
+    /// Issue #4080 AC-4: the injected instruction text stays English no
+    /// matter what `settings.ai.language` resolves to. Only the narrative
+    /// language is steered, through the `Use language: <lang>` directive.
     #[test]
-    fn title_summary_guard_injects_japanese_required_update_when_missing() {
+    fn hook_injection_text_is_english_even_when_language_is_ja() {
+        let inputs = |event| ReminderInputs {
+            event,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![BoardEntry::new(
+                AuthorKind::Agent,
+                "OtherAgent",
+                BoardEntryKind::Status,
+                "other agent status",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_branch("feature/other")
+            .with_origin_session_id("sess-other")],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "ja".to_string(),
+            self_workspace_id: None,
+        };
+
+        for event in [
+            IntentBoundaryEvent::SessionStart,
+            IntentBoundaryEvent::UserPromptSubmit,
+            IntentBoundaryEvent::Stop,
+        ] {
+            for short in [false, true] {
+                let mut input = inputs(event);
+                input.has_recent_own_status = short;
+                let base = plan_reminder(input).output;
+                let variants = [
+                    ("base", base.clone()),
+                    ("pm", replace_with_pm_reminder(base.clone())),
+                    (
+                        "terminal-settlement",
+                        replace_with_terminal_settlement_reminder(base.clone(), event),
+                    ),
+                    ("work-state", {
+                        let with_title =
+                            append_title_summary_required_context(base.clone(), event, true, "ja");
+                        let with_stale =
+                            append_title_summary_stale_context(with_title, event, true);
+                        let with_progress =
+                            append_progress_summary_context(with_stale, event, true, true);
+                        append_memory_update_context(with_progress, event, true, false)
+                    }),
+                ];
+                for (label, output) in variants {
+                    let text = match &output {
+                        HookOutput::HookSpecificAdditionalContext { text, .. } => text.as_str(),
+                        HookOutput::SystemMessage(text) => text.as_str(),
+                        other => panic!("unexpected output for {event:?}/{label}: {other:?}"),
+                    };
+                    assert!(
+                        !contains_japanese(text),
+                        "{event:?}/{label}/short={short}: injected instruction text must be English:\n{text}"
+                    );
+                    if event != IntentBoundaryEvent::Stop {
+                        assert!(
+                            text.contains("Use language: ja"),
+                            "{event:?}/{label}: narrative directive must follow the setting:\n{text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue #4080: the title-required instruction is English under a `ja`
+    /// setting; the directive still names `ja` for the title-summary itself.
+    #[test]
+    fn title_summary_guard_injects_english_required_update_with_ja_directive() {
         let output = HookOutput::hook_specific_additional_context(
             IntentBoundaryEvent::UserPromptSubmit,
             "existing reminder",
@@ -991,31 +1009,18 @@ mod tests {
         assert!(text.contains(r#""operation":"workspace.update""#));
         assert!(text.contains(r#""purpose""#));
         assert!(!text.contains("--title-summary"));
-        assert!(text.contains("作業名"));
-        assert!(text.contains("完了"));
+        assert!(text.contains("short work purpose"));
+        assert!(text.contains("provisional"));
+        assert!(!text.contains("作業名"));
         assert!(text.contains("Use language: ja"));
     }
 
     /// SPEC-2359 Phase W-11 (US-58 / US-59 / SC-229): the required reminder
     /// must instruct the agent to author the work purpose (not the raw
     /// prompt), set a provisional purpose when it is not settled, and update
-    /// it once confirmed — in both Japanese and English.
+    /// it once confirmed.
     #[test]
     fn title_summary_required_reminder_instructs_provisional_purpose() {
-        let ja_text = texts::title_summary_required_reminder("ja");
-        assert!(ja_text.contains("目的"), "{ja_text}");
-        assert!(ja_text.contains("暫定"), "{ja_text}");
-        assert!(ja_text.contains("生プロンプト"), "{ja_text}");
-        // Imperative: must instruct setting the title before responding.
-        assert!(ja_text.contains("応答する前に"), "{ja_text}");
-        assert!(ja_text.contains("最初のアクション"), "{ja_text}");
-        assert!(
-            ja_text.contains(r#""operation":"workspace.update""#),
-            "{ja_text}"
-        );
-        assert!(ja_text.contains(r#""purpose""#), "{ja_text}");
-        assert!(!ja_text.contains("--title-summary"), "{ja_text}");
-
         let en_text = texts::title_summary_required_reminder("en");
         assert!(en_text.contains("purpose"), "{en_text}");
         assert!(en_text.contains("provisional"), "{en_text}");
@@ -1033,13 +1038,9 @@ mod tests {
 
     /// Issue #3184: the required reminder is what pushes agents to write a
     /// title every turn until one is set; it must explicitly forbid transient
-    /// activity phases (browser check etc.) as the purpose, in both languages.
+    /// activity phases (browser check etc.) as the purpose.
     #[test]
     fn title_summary_required_reminder_forbids_transient_activity_labels() {
-        let ja_text = texts::title_summary_required_reminder("ja");
-        assert!(ja_text.contains("browser check"), "{ja_text}");
-        assert!(ja_text.contains("current_focus"), "{ja_text}");
-
         let en_text = texts::title_summary_required_reminder("en");
         assert!(en_text.contains("browser check"), "{en_text}");
         assert!(en_text.contains("transient activity"), "{en_text}");
@@ -1693,7 +1694,7 @@ mod tests {
         // the append functions inject.
         let language = resolve_narrative_language();
         let title_reminder = texts::title_summary_required_reminder(&language);
-        let progress_reminder = texts::progress_summary_reminder(&language, false, false);
+        let progress_reminder = texts::progress_summary_reminder(false, false);
 
         // Execution (signal unset -> default Execution): both Work reminders fire.
         let exec = compute_plan("UserPromptSubmit", &session, Utc::now())
@@ -1701,7 +1702,7 @@ mod tests {
             .expect("plan");
         let exec_text = additional_context(&exec.output);
         assert!(
-            exec_text.contains(title_reminder),
+            exec_text.contains(&title_reminder),
             "execution session must still receive the title-summary Work reminder"
         );
         assert!(
@@ -1717,7 +1718,7 @@ mod tests {
             .expect("plan");
         let intake_text = additional_context(&intake.output);
         assert!(
-            intake_text.contains(title_reminder),
+            intake_text.contains(&title_reminder),
             "intake-kind session must receive the same title-summary Work reminder: {intake_text}"
         );
         assert!(
@@ -1924,9 +1925,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let text = additional_context(&plan.output);
-        assert!(
-            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
-        );
+        assert!(text.contains("posted to the Board recently"));
     }
 
     #[test]
@@ -1944,9 +1943,7 @@ mod tests {
 
         let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
         let text = system_message(&plan.output);
-        assert!(
-            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
-        );
+        assert!(text.contains("posted to the Board recently"));
     }
 
     #[test]
@@ -2353,7 +2350,6 @@ mod tests {
             IntentBoundaryEvent::Stop,
             true,
             false,
-            "en",
         );
         let text = system_message(&output);
         assert!(text.contains("Progress Summary Reminder"));
@@ -2380,7 +2376,7 @@ mod tests {
                 language: "en".to_string(),
                 self_workspace_id: None,
             });
-            let replaced = replace_with_terminal_settlement_reminder(planned.output, event, "en");
+            let replaced = replace_with_terminal_settlement_reminder(planned.output, event);
             let text = match &replaced {
                 HookOutput::HookSpecificAdditionalContext { text, .. }
                 | HookOutput::SystemMessage(text) => text,
