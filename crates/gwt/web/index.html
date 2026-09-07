@@ -608,13 +608,9 @@
                   <span>Open the board surface</span>
                 </span>
               </button>
-              <button class="preset-button" data-preset="work" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">◆</span>
-                <span class="preset-button__text">
-                  <strong>Work</strong>
-                  <span>Open the Work overview</span>
-                </span>
-              </button>
+              <!-- SPEC-3671 FR-016 (T-029): the Work window left this deck once
+                   every Work information item moved to the Issue row. Already
+                   open Work windows keep working (preset `work` still resolves). -->
             </div>
           </div>
           <div class="preset-section" data-category="knowledge">
