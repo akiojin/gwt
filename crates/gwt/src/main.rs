@@ -1191,6 +1191,25 @@ fn issue_monitor_daemon_user_event(
                 launch_session_strategy,
             })
         }
+        // Issue #4084 AC-2/AC-3: the daemon released an idle launch and asks
+        // the GUI to close the pane it just unbound.
+        "idle_pane_close" => {
+            let window_id = payload.get("window_id")?.as_str()?.to_string();
+            if window_id.is_empty() {
+                return None;
+            }
+            Some(UserEvent::IssueMonitorIdlePaneClose {
+                window_id,
+                issue_number: payload
+                    .get("issue_number")
+                    .and_then(serde_json::Value::as_u64),
+                idle_kind: payload
+                    .get("idle_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        }
         "review_dispatch" => {
             // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
             // review agent for a PR-ready autonomous issue.
@@ -1295,6 +1314,8 @@ enum UserEvent {
         id: String,
         incarnation: u64,
         data: Vec<u8>,
+        /// Pane stream position after this chunk was parsed (Issue #4095).
+        seq: u64,
     },
     /// A submit-terminated choice or standalone Escape is about to be written
     /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
@@ -1448,6 +1469,13 @@ enum UserEvent {
     /// Completion of an off-event-loop physical answer submit to an exact
     /// live pane. Durable delivery acknowledgment begins only on this event.
     IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
+    /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
+    /// Issue Monitor launch the daemon already released (daemon → GUI).
+    IssueMonitorIdlePaneClose {
+        window_id: String,
+        issue_number: Option<u64>,
+        idle_kind: String,
+    },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -1556,6 +1584,13 @@ enum UserEvent {
     UpdatePrepared {
         version: String,
         asset_path: std::path::PathBuf,
+    },
+    /// Issue #3906 AC-2 / #4076 AC-2: the update drain tick found the host
+    /// quiescent for two ticks and the cancel grace elapsed. The persisted
+    /// manifest for `version` is committed through `ApplyUpdateGraceful`;
+    /// the automatic path never touches `ApplyUpdateRestartNow`.
+    ApplyUpdateDrained {
+        version: String,
     },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
@@ -1988,6 +2023,7 @@ mod tests {
     fn daemon_broadcast_issue_monitor_payloads_map_to_frontend_dispatch_and_launch_request() {
         let project_root = Path::new("/tmp/gwt-project");
         let status = gwt::IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,
@@ -2885,7 +2921,7 @@ mod tests {
                 WindowProcessStatus::Ready,
                 "Shell ready".to_string(),
             )],
-            vec![("tab-1::shell-1".to_string(), snapshot)],
+            vec![("tab-1::shell-1".to_string(), snapshot, None)],
             None,
             Some(UpdateState::UpToDate { checked_at: None }),
         );
@@ -3215,6 +3251,7 @@ mod tests {
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
+            issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
             project_tab_incarnations,
@@ -3264,6 +3301,7 @@ mod tests {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             update_resume_tab_ids: std::collections::HashSet::new(),
+            update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
@@ -3351,7 +3389,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 Vec::new(),
             ),
@@ -3471,7 +3508,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
@@ -5583,7 +5619,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 sample_wizard_stale_agent_options(),
                 Vec::new(),
@@ -8964,8 +8999,9 @@ fn main() -> std::io::Result<()> {
                 id,
                 incarnation,
                 data,
+                seq,
             }) => {
-                let events = app.handle_runtime_output_event(id, incarnation, data);
+                let events = app.handle_runtime_output_event(id, incarnation, data, seq);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
@@ -9124,7 +9160,10 @@ fn main() -> std::io::Result<()> {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
-                let events = app.terminal_convergence_tick_events();
+                let mut events = app.terminal_convergence_tick_events();
+                // Issue #3906 AC-8: the 15 s convergence tick is also the
+                // update drain's clock (two clear ticks = quiescent).
+                events.extend(app.update_drain_tick_events());
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::TerminalConvergenceObserved {
@@ -9170,6 +9209,15 @@ fn main() -> std::io::Result<()> {
                 events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                     items,
                 }));
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
+                window_id,
+                issue_number,
+                idle_kind,
+            }) => {
+                let events =
+                    app.issue_monitor_idle_pane_close_events(&window_id, issue_number, &idle_kind);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {
@@ -9448,10 +9496,40 @@ fn main() -> std::io::Result<()> {
                 version,
                 asset_path,
             }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
-                    version,
+                // Issue #3906 AC-3: the manifest is persisted, so the update
+                // is staged; an unattended monitor now drains new launches.
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                    version: version.clone(),
                     asset_path: asset_path.to_string_lossy().to_string(),
-                })]);
+                })];
+                events.extend(app.update_staged_events(&version));
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateDrained { version }) => {
+                // Issue #3906 AC-2 / AC-10: the drained apply commits the
+                // manifest the staging persisted, through the same graceful
+                // route as Restart now. A manifest that vanished (cleared by
+                // hand, payload deleted) releases the drain instead of
+                // re-downloading unattended.
+                gwt_core::update::log_update_event(
+                    "auto_apply_drained",
+                    &[("version", &version)],
+                );
+                match gwt_core::update::load_pending_update_manifest() {
+                    Some(manifest) if manifest.version == version => {
+                        let _ = proxy.send_event(UserEvent::ApplyUpdateGraceful {
+                            manifest,
+                            client_id: app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.to_string(),
+                        });
+                    }
+                    _ => {
+                        let events = app.release_update_auto_apply_events(
+                            &version,
+                            app_runtime::UpdateAutoApplyRelease::PayloadMissing,
+                        );
+                        clients.dispatch(events);
+                    }
+                }
             }
             Event::UserEvent(UserEvent::ApplyUpdateRestartNow { state, client_id }) => {
                 gwt_core::update::log_update_event("restart_now_requested", &[]);
@@ -9498,15 +9576,28 @@ fn main() -> std::io::Result<()> {
                             "fail",
                             &[("stage", "graceful_apply"), ("reason", &message)],
                         );
-                        clients.dispatch(vec![OutboundEvent::reply(
-                            client_id,
-                            BackendEvent::UpdateApplyError {
-                                message: Some(message.clone()),
-                                stage: Some("Restart now".to_string()),
-                                reason: Some(message),
-                                log_path: Some(log_path),
-                            },
-                        )]);
+                        // Issue #3906 AC-12: the failure is recorded in the
+                        // notification center for every client, not only the
+                        // one that clicked (the automatic path has none).
+                        clients.dispatch(vec![
+                            OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                                level: "error".to_string(),
+                                message: format!(
+                                    "Update v{} could not be applied: {message}",
+                                    marker.to_version
+                                ),
+                                issue_number: None,
+                            }),
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError {
+                                    message: Some(message.clone()),
+                                    stage: Some("Restart now".to_string()),
+                                    reason: Some(message),
+                                    log_path: Some(log_path),
+                                },
+                            ),
+                        ]);
                     }
                 }
             }

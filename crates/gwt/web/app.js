@@ -166,6 +166,7 @@
         mapAgentTelemetryState,
         normalizeWindowRuntimeState,
         presetSupportsWaitingStatus,
+        selectNextAgentFocusWindowId,
         windowRuntimeLabel,
       } from "/window-runtime-state.js";
       import {
@@ -1703,11 +1704,16 @@
       // remaining caller).
 
       function runtimeStateForWindow(windowData) {
-        const cachedState = windowRuntimeStateMap.get(windowData.id);
-        if (cachedState) {
-          return cachedState;
-        }
-        return normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        const sourceState = windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id)
+          : windowData.status;
+        return normalizeWindowRuntimeState(sourceState, windowData.preset);
+      }
+
+      function runtimeStateForAgentFocus(windowData) {
+        return windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id)
+          : windowData.status;
       }
 
       // SPEC-3064 Phase 3 (E7): the Window List dropdown
@@ -2279,7 +2285,12 @@
       function resolvePendingWindowFrames() {
         if (pendingFrameWindowId) {
           const windowId = pendingFrameWindowId;
-          if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+          const windowData = workspaceWindowById(windowId);
+          if (
+            windowData &&
+            visibleWindowData(windowData) &&
+            windowMap.has(windowId)
+          ) {
             pendingFrameWindowId = null;
             frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
           }
@@ -2470,25 +2481,29 @@
       }
 
       function cycleFocus(direction) {
-        if (windowMap.size === 0) {
-          return;
-        }
-        // SPEC-2008 camera-focus: cycling flies the local camera between
-        // windows in creation order (per viewer) instead of asking the backend
-        // to move a shared focus. Keep notifying the backend of the new focus
-        // for z-order/highlight, but the camera move is local.
-        const windows = (activeWorkspace().windows || []).filter(visibleWindowData);
-        if (windows.length === 0) {
-          return;
-        }
-        const currentIndex = windows.findIndex(
-          (windowData) => windowData.id === focusedId,
+        // SPEC-3263 FR-014..FR-019 / Issue #3551: cycle the Canvas Agent
+        // projection in runtime-priority order. Hidden tab members remain
+        // candidates and are activated before the existing local camera frame
+        // path notifies the backend of focus for z-order/highlight.
+        const windows = activeWorkspace().windows || [];
+        const nextWindowId = selectNextAgentFocusWindowId(
+          windows,
+          focusedId,
+          direction,
+          runtimeStateForAgentFocus,
         );
-        const delta = direction === "backward" ? -1 : 1;
-        const baseIndex = currentIndex === -1 ? 0 : currentIndex;
-        const nextIndex =
-          (baseIndex + delta + windows.length) % windows.length;
-        frameWindow(windows[nextIndex].id);
+        if (!nextWindowId) {
+          return;
+        }
+        const nextWindow = windows.find(
+          (windowData) => windowData.id === nextWindowId,
+        );
+        if (nextWindow?.tab_group_id && !nextWindow.tab_group_active) {
+          pendingFrameWindowId = nextWindowId;
+          send({ kind: "activate_window_tab", id: nextWindowId });
+          return;
+        }
+        frameWindow(nextWindowId);
       }
 
       function shouldHandleFocusShortcut(event) {
@@ -3451,10 +3466,20 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
-            if (windowRuntimeStateMap.get(windowId) !== runtimeState) {
+            // Issue #3551: the map keeps the raw source state so Agent focus
+            // ordering can fail closed on unknown states. Compare the
+            // normalized display state so the since-timestamp still tracks
+            // display transitions, not legacy-alias spellings of the same one.
+            const previousRuntimeState = windowRuntimeStateMap.has(windowId)
+              ? normalizeWindowRuntimeState(
+                  windowRuntimeStateMap.get(windowId),
+                  windowData?.preset,
+                )
+              : undefined;
+            if (previousRuntimeState !== runtimeState) {
               windowRuntimeStateSinceMap.set(windowId, Date.now());
             }
-            windowRuntimeStateMap.set(windowId, runtimeState);
+            windowRuntimeStateMap.set(windowId, status);
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3708,9 +3733,7 @@
           return;
         }
         const isAgentWindow = shouldShowRuntimeStatus(windowData);
-        const runtimeState =
-          windowRuntimeStateMap.get(windowId) ||
-          normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        const runtimeState = runtimeStateForWindow(windowData);
         windowCloseConfirmState = {
           open: true,
           windowId,
@@ -3735,9 +3758,7 @@
           if (!element) continue;
           const windowData = workspaceWindowById(windowId);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
-          const runtimeState =
-            windowRuntimeStateMap.get(windowId) ||
-            normalizeWindowRuntimeState(windowData.status, windowData.preset);
+          const runtimeState = runtimeStateForWindow(windowData);
           if (!STOPPED_RUNTIME_STATES.has(runtimeState)) {
             count += 1;
           }
@@ -3765,10 +3786,7 @@
       // surfaces render plain tabs.
       function windowTabTelemetryState(tab) {
         if (!shouldShowRuntimeStatus(tab)) return "";
-        const runtimeState =
-          windowRuntimeStateMap.get(tab.id) ||
-          normalizeWindowRuntimeState(tab.status, tab.preset);
-        return runtimeState;
+        return runtimeStateForWindow(tab);
       }
 
       // AS-2.2: a runtime state change must repaint the tab strip of every
@@ -4886,7 +4904,6 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openIntakePendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -6088,6 +6105,8 @@
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
             window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
+            // Issue #3906 AC-12: the update CTA shows the drain progress.
+            updateCtaController.handleIssueMonitorStatus(event.status || {});
             break;
           case "issue_monitor_inbox":
             scheduleIssueMonitorProjectionRefresh();
@@ -6322,8 +6341,8 @@
             applyLaunchWizardStateEvent(event);
             break;
           case "work_advisory_result":
-            // SPEC-2359 US-80: duplicate-work advisory results for the Start
-            // Work intake prompt.
+            // SPEC-2359 US-80: duplicate-work advisory results for the Plan
+            // Agent work-registration prompt.
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
@@ -6358,6 +6377,14 @@
           case "update_apply_pending_persisted":
             updateCtaController.handleUpdateApplyPendingPersisted({
               version: event.version,
+            });
+            break;
+          case "update_auto_apply":
+            // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
+            updateCtaController.handleUpdateAutoApply({
+              version: event.version,
+              phase: event.phase,
+              grace_secs: event.grace_secs,
             });
             break;
           case "custom_agent_list":
@@ -7045,6 +7072,12 @@
             return;
           }
           event.preventDefault();
+          // Issue #4069: this listener runs in the capture phase, but xterm.js
+          // still receives the chord on its textarea and translates
+          // Ctrl+Shift+Arrow into CSI input for the focused terminal
+          // (Meta+Arrow is dropped by xterm, which is why macOS never showed
+          // it). Focus cycling is navigation-only, so stop the event here.
+          event.stopPropagation();
           cycleFocus(event.key === "ArrowRight" ? "forward" : "backward");
         },
         true,
@@ -7064,14 +7097,8 @@
         openModal();
       });
 
-      // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
-      document
-        .getElementById("canvas-empty-intake")
-        ?.addEventListener("click", () => {
-          document.dispatchEvent(
-            new CustomEvent("op:command", { detail: { id: "intake-session" } }),
-          );
-        });
+      // SPEC-3038 AS-4.5 / SPEC-3245 Stage E: the empty canvas keeps the
+      // normal Workspace and Add Window actions after Intake removal.
       document
         .getElementById("canvas-empty-open-workspace")
         ?.addEventListener("click", () => {
@@ -7395,13 +7422,6 @@
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");
-            return;
-          case "intake-session":
-            // SPEC-3214 Phase 3: ephemeral intake session (branchless).
-            openIntakePendingWizard();
-            frontendUnits.socketTransport.send({
-              kind: "open_intake_session",
-            });
             return;
           case "stop-all-windows":
             requestStopAllWindows();

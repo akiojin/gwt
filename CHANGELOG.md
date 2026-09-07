@@ -1,6 +1,196 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.92.0] - 2026-09-07
+
+### Bug Fixes
+
+- **agent:** 起動時のインストール検出を起動経路から外し version probe を 5 秒で打ち切る
+- **test:** Fake gh fixture の exec を ETXTBSY 収束待ちにする
+- **gui:** PM Settings の project 境界と live E2E を修復する
+- **daemon:** 稼働中 daemon の endpoint 消失を防ぎ未登録状態を可視化する
+- **app-runtime:** Tab 切替の broadcast で agent worktree form と recent title を失わない
+- **gwt-git:** .git コピー中に消えたエントリで migration を中断させない
+- **gwt-core:** 消えた子エントリで migration の validate を失敗させない
+- **test:** Daemon scan の締切依存テストを上限付き状態収束へ置換する
+- **test:** Prefs 予算の test override を thread-local にし retry 系 assert を hang guard 化する
+- **gwt-terminal:** PTY テストの読み取り判定から ANSI 制御シーケンスを除去する
+- **test:** 締切依存テストを決定論化する
+- **test:** Issue Monitor のホームをテストごとに隔離する
+- **test:** Converge on the foreign heavy scan instead of a fixed 300ms wait
+- **test:** Attribute the sibling heavy scan by binary path, not cwd
+- **app-runtime:** GUI-local prefs persist の deadline 失効を無言で成功扱いしない
+- **hooks:** Tracked な hook 設定へ machine-local 絶対パスを書かない
+- **hooks:** Tracked な hook 設定の Codex trust 事前登録を canonical 形に合わせる
+- **hooks:** Hook 生成と Codex trust で同じ per-path 解決を共有する
+- **hooks:** Tracked な .codex/hooks.json の commit 済み絶対 install path を canonical gwtd へ正規化する
+- **issue-monitor:** レビュー dispatch 窓が実装 launch の binding を奪わないようにする
+- **daemon:** Windows の served 判定を pipe namespace の列挙にして接続を消費しない
+- **daemon:** Named pipe の squatting を server pid で拒否し prefix 判定を UTF-8 安全にする
+- **test:** Cli::board のテストで HOME 差し替えを thread-local ScopedGwtHome に置換
+- **hooks:** Hook failure を handler 単位で error ledger に記録し hook.health で回復状態を区別する (#3541)
+- **hooks:** Browser-check の jq preflight を追加し Windows の remove→rename gap を解消する (#3532)
+- **update:** 更新適用を QuitApp 経由の graceful 経路にし resume marker で再起動後に再開する
+- **update:** Resume marker に update_drain を記録し再起動後の bootstrap で hold を解除する
+- **daemon:** Windows の stale daemon retire を hidden_command 経由の taskkill にし disallowed method を避ける
+- **test:** Managed_assets_test の GWT_HOOK_BIN 依存を thread-local seam に置換する
+- **gui:** Issue Monitor の Autonomous トグルを状態スイッチにしサーバー状態のみを表示する
+- **issue-monitor:** Completion probe の deadline 超過を fail-closed にし GUI-local scan の契約を統一する
+- **test:** Effect commit / control CAS テストを 250ms prefs budget から隔離して CI flake を止める
+- **issue-monitor:** Generation reclaim の判定源を launch refusal と統一し reclaim loop を停止する
+- **launch:** Codex hook trust の事前登録を Codex が読む plain key で書き照合失敗を区別して報告する
+- **issue-monitor:** Idle 解放の clippy 指摘とテストの誤ったアサーションを修正する
+- **issue-monitor:** 解放済み idle 窓へ pane close を毎 scan 再送しないようにする
+- **hooks:** Board / PM reminder の注入指示文を言語設定に関わらず英語に固定する
+- **launch:** 共有 Codex config の read-modify-write を排他ロックで直列化する
+- **gui:** フォーカス巡回の Ctrl+Shift+Arrow が focused terminal に CSI 入力として漏れる問題を修正
+- Remove deprecated intake launch route
+- **test:** Intake 撤去後に残った live spec の起動経路を通常 branch wizard へ差し替える
+- **gui:** Agent pane の snapshot が含む出力を再送せず spinner 再描画の行重なりを防ぐ
+- 未着地 commit を持つ launch ref を needs_human ではなく継承 launch にする
+- **test:** Spawn pacing テストの実時間判定に許容誤差を入れて 62us 不足の締切依存 flake を止める
+
+### Documentation
+
+- **gwt-skills:** Build_output_owner_root の rustdoc から private intra-doc link を外す
+- **update:** Resume marker の rustdoc で argv[0] を code span にし intra-doc link 誤認を防ぐ
+
+### Features
+
+- **verify:** 自動実行では視覚確認 gate を外し agent の自己 browser-check と区別する
+- **agent:** 起動ウィザードにインストール検出を配線し Installed を実検出から導出
+- **agent:** 配布経路を DistributionRoute で表現し npm 以外の経路を記述可能にする
+- **gui:** 起動ウィザードのセットアップ導線をエージェント非依存化し preflight 失敗でも案内を出す
+- **gui:** PM 設定を Settings surface に統合し全 PM 設定を露出する
+- **issue-monitor:** Update_drain ホールドで進行中 launch を壊さず新規 launch だけを止める
+- **app-runtime:** Project open/switch を非同期 prepare → commit に分離する
+- **pm:** 中断した /release を検知する standing check を追加する
+- **gui:** WINDOWIZE を Issue ウィンドウ化し一覧へ戻せるようにする (SPEC #3885 Phase 2b)
+- **daemon:** Windows で runtime daemon を named pipe で常駐させる
+- **daemon:** Windows でも runtime publish と daemon 依存ヘルパを有効化する
+- **daemon:** Windows の scan_now は daemon 不在時に GUI WebSocket 経路へ戻す
+- **pm:** Gwt-pm guidance に error pane triage と disposition 報告の契約を追加する
+- **update:** 自己更新の drain-and-apply 向けに静止判定・auto_apply_updates 設定・draining CTA を追加
+- **update:** Staged 更新で自動 update_drain を立て status に blocking[] を載せる
+- **update:** 静止判定と猶予を経た graceful 自動適用と cancel 導線を結線する
+- **codex:** Gwt 起動時に Codex config.toml へ context_management.experimental_mode を managed key として書き込む
+- **issue-monitor:** Idle 窓を分類して自動解放し PM の手動 stop + pane.close を不要にする
+- **gui:** ADD WINDOW の一覧から Work ウィンドウを外す
+- Agent の状態優先フォーカス巡回を追加
+
+### Miscellaneous Tasks
+
+- **work:** 実行イベントストアを更新
+- **work:** SPEC #3864 の Work event shard を追跡する
+- **work:** SPEC #3864 の Work event shard を追跡する (視覚検証 confirmed)
+- **work:** SPEC #3864 の Work event shard を追跡する（develop 取り込み後）
+- **work:** SPEC #3864 の検証 Work event shard を追跡する
+- **work:** SPEC #3864 の終端 Work event shard を追跡する
+- **work:** SPEC #3864 作業中に生成された Work event shard を追跡に追加
+- **work:** SPEC #3864 の Work event shard を追跡に追加
+- **work:** 実行イベントストアを更新
+- **work:** 実行イベントストアを更新
+- **work:** Issue #4012 の終端 Work update で生成された event shard を追跡に追加
+- **work:** Issue #3988 の Work event shard を追跡に追加
+- **work:** #3508 の作業イベントを記録する
+- **work:** #3508 の実行イベントを記録する
+- **work:** #3508 の実行イベントを記録する
+- **work:** #3508 の終端 Work event を記録する
+- **work:** #3508 の Work event receipt を更新する
+- **work:** #2338 の作業開始時点の Work event と生成 hooks 設定を記録
+- **work:** #2338 の Work event を記録
+- **work:** #2338 の現世代 Work event を記録
+- **work:** #2338 の Work を done で終端する
+- **work:** #4037 の Work event receipt を更新する
+- **work:** #4037 の Work event receipt を更新する
+- **work:** Record work event shard for issue #3170 execution
+- **work:** Record work state shard for issue #3170 handoff
+- **work:** Issue #3728 の Work イベント shard を記録する
+- **work:** Develop 取り込み後の Work イベント shard を追跡に追加
+- **work:** Issue #3728 の終端 Work イベント shard を追跡に追加
+- **work:** Record work event shard for issue #3170 merge resolution
+- **work:** 実行イベントストアを更新
+- **work:** 実行イベントストアを更新
+- **work:** ランタイム生成の hooks 設定と実行イベントを記録する
+- **work:** #4033 の実行イベント receipt を記録する
+- **work:** Runtime が書き出した work event を取り込む
+- **work:** Runtime が書き出した work event を取り込む
+- **work:** 完了時の work event receipt を取り込む
+- **work:** Record runtime work events
+- **work:** Record runtime work events
+- **work:** Record terminal work event
+- Record runtime work events
+- Record runtime work events
+- Record runtime work events
+- Record runtime work events
+- **work:** #4045 の実行イベント receipt を記録する
+- **work:** Record issue 3567 work events
+- **work:** Record issue 4044 work events
+- **work:** Record issue 4044 work events
+- **work:** Record issue 4044 work events (done)
+- **work:** #4041 の Work event shard を追跡する
+- **work:** #4045 の Work event shard を追記する
+- **work:** Issue #3526 の Work event shard を記録
+- **work:** Issue #3526 の Work event log を追記
+- **work:** Issue #3526 の完了 Work event receipt を記録
+- **work:** Record issue 4052 work events (done)
+- **work:** Record issue 4052 work events (delivery)
+- **work:** Issue 3541 の Work event shard を追記する (#3541)
+- **work:** Issue 3541 の Work event shard を追記する (#3541)
+- **work:** Issue #3532 の作業状態を記録
+- **work:** Record issue 4055 work events (done)
+- **work:** Record issue 4055 work events (verify)
+- **work:** Issue #3531 の Work イベントを記録する
+- **work:** #4038 の Work event receipt を更新する
+- **work:** #4038 の終端 Work event receipt を記録する
+- **work:** Issue #4057 の Work event shard を記録する
+- **work:** Issue #3561 の Work event shard を記録する
+- **work:** Issue #3906 の Work イベント shard を追跡に追加
+- **work:** Issue #3528 の Work event shard を記録する
+- **work:** Issue #4064 の Work event shard を記録する
+- **work:** Issue #4064 のレビュー窓 resume event shard を記録する
+- **work:** #4096 の実行イベント receipt を記録する
+- **work:** #4075 の Work event shard を記録する
+- **work:** Issue #4080 の Work event shard を記録する
+- **work:** Issue #3671 の Work event を記録する
+- **work:** Issue #3671 の完了 Work event を記録する
+- **work:** Issue 4069 の実行イベント記録を追加 (#4069)
+- **work:** Issue #3571 の Work event shard を追跡に追加
+- **work:** Issue #3571 の終端 Work event shard を追跡に追加
+- **work:** #4095 の Work event shard を記録する
+- **work:** Work event shard を追跡に追加
+
+### Styling
+
+- **gwt-git:** Release_status の整形を rustfmt に合わせる
+- **skills:** Rustfmt で新規テストの整形を揃える
+
+### Testing
+
+- **e2e:** 起動ウィザードのセットアップ導線を実ブラウザで検証する live spec を追加
+- **agent:** Grok 検出テストが PATH を丸ごと差し替えず前置する
+- **gwt:** 起動時検出の非ブロックテストを壁時計非依存の sentinel 方式にする
+- **gui:** Hermes options の section 区切りを SPEC-3864 後のコメントに合わせる
+- **agent:** 検出プローブの時限テストが process PATH を汚さず probe env へ注入する
+- **agent:** OpenClaw が未インストールでも latest 経路で起動できることを固定する
+- **gwt:** Agent_pane_sync_with_full_scrollback_stays_bounded を時計非依存の構造判定に置換する
+- **gui:** PM runtime test の HOME を隔離する
+- **app-runtime:** 同期 open を前提としていた既存テストを prepare → commit へ追随させる
+- **daemon:** Windows のテストビルドで unix 専用 fixture を cfg(unix) に閉じる
+- **daemon:** Server.rs のテスト専用 hook を Unix 限定テストモジュールに揃える
+- **pm:** Error pane triage の契約 test phrase を本文の大文字表記に揃える
+- **gui:** Autonomous スイッチの track 色判定を transition 完了までリトライする
+- **app-runtime:** #4045 の slow persist テストを #3528 の identity-bound observations 契約に合わせる
+- **gui:** Agent フォーカス巡回 E2E に console / page error ゼロの guard を追加
+
+### Ci
+
+- **test:** Give the default-parallel Windows proof an honest budget
+- **test:** Scope the default-parallel proof to targets that can pass today
+- **test:** Name #4014 as the owner of the excluded --bin gwt target
+- **test:** Narrow the default-parallel proof to gwt --lib
+- **test:** Run tests step の timeout-minutes を 25 分へ引き上げ job 上限 60 分を明示
+
 ## [9.91.0] - 2026-09-06
 
 ### Bug Fixes

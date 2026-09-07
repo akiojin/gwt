@@ -1614,10 +1614,12 @@ enum IssueMonitorControl {
         max_active_agents: Option<usize>,
         /// Issue #3917 AC-5: explicit auto-close override.
         auto_close_merged_issues: Option<bool>,
+        /// Issue #3906 AC-1: explicit auto-apply-updates override.
+        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise or clear the non-destructive update drain.
-        update_drain: Option<bool>,
+        update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
     /// SPEC #3914 FR-011: replace the launch candidate pool whole.
     ProfilesSet {
@@ -1664,6 +1666,18 @@ enum IssueMonitorControl {
     WindowClosed {
         window_id: String,
         target: Option<crate::IssueMonitorStopTarget>,
+    },
+    /// Issue #4084 AC-1: the GUI published the complete agent-window canvas
+    /// for one project tab. The scan classifies idle windows against it;
+    /// absence from a fresh snapshot is what makes a binding dead.
+    WindowSnapshot {
+        snapshot: crate::IssueMonitorWindowSnapshot,
+    },
+    /// Issue #4084 AC-5: an operator asked the next scan to release idle
+    /// windows (`number: None` releases every releasable row).
+    IdleRelease {
+        number: Option<u64>,
+        reason: String,
     },
     /// Issue #3927 (SPEC #3340 Phase 10S, PM ruling `1f7fdc9e`): the GUI
     /// runtime observed a successful exact terminal delivery and asks the
@@ -1959,6 +1973,7 @@ fn try_apply_issue_monitor_control(
             autonomous_mode,
             max_active_agents,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
             update_drain,
         } => {
@@ -1969,6 +1984,7 @@ fn try_apply_issue_monitor_control(
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
+                    && auto_apply_updates.is_none()
                     && launch_agent.is_none()
                     && update_drain.is_none())
             {
@@ -1993,6 +2009,9 @@ fn try_apply_issue_monitor_control(
                 candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
                     auto_close_merged_issues,
                 ))?;
+            }
+            if let Some(auto_apply_updates) = auto_apply_updates {
+                candidate.set_auto_apply_updates(Some(auto_apply_updates));
             }
             // Issue #4037 AC-3: the drain touches admission only, so it needs
             // no authority-epoch advance and revokes nothing.
@@ -2336,6 +2355,17 @@ fn apply_routine_issue_monitor_control(
             // a possibly newer same-id launch.
             None => false,
         },
+        IssueMonitorControl::WindowSnapshot { snapshot } => {
+            monitor.record_window_snapshot(snapshot);
+            // A canvas observation is not a durable decision; the next scan
+            // reads it. Committing the snapshot itself would rewrite prefs on
+            // every GUI tick for nothing.
+            false
+        }
+        IssueMonitorControl::IdleRelease { number, reason } => {
+            monitor.request_idle_release(number, reason);
+            true
+        }
         IssueMonitorControl::TerminalDelivered { target } => {
             monitor.settle_exact_terminal_delivery(&target).is_ok()
         }
@@ -2591,6 +2621,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
                 };
+                let auto_apply_updates = match config.get("auto_apply_updates") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
                 // Issue #3923 AC-5: a blank agent name is a malformed control.
                 let launch_agent = match config.get("launch_agent") {
                     None | Some(serde_json::Value::Null) => None,
@@ -2602,10 +2636,16 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         Some(agent.to_string())
                     }
                 };
-                // Issue #4037 AC-5: the update drain, a plain bool.
+                // Issue #4037 AC-5: the operator bool; #3906 AC-3: the auto
+                // drain object `{reason, version}`. Anything else is malformed.
                 let update_drain = match config.get("update_drain") {
                     None | Some(serde_json::Value::Null) => None,
-                    Some(value) => Some(value.as_bool()?),
+                    Some(value) => Some(
+                        serde_json::from_value::<crate::IssueMonitorUpdateDrainControl>(
+                            value.clone(),
+                        )
+                        .ok()?,
+                    ),
                 };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
@@ -2614,6 +2654,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
+                        && auto_apply_updates.is_none()
                         && launch_agent.is_none()
                         && update_drain.is_none())
                 {
@@ -2624,6 +2665,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                     auto_close_merged_issues,
+                    auto_apply_updates,
                     launch_agent,
                     update_drain,
                 });
@@ -2879,6 +2921,28 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         window_id: Some(window_id.clone()),
                     });
                 return Some(IssueMonitorControl::WindowClosed { window_id, target });
+            }
+            if let Some(snapshot) = payload.get("window_snapshot") {
+                let snapshot =
+                    serde_json::from_value::<crate::IssueMonitorWindowSnapshot>(snapshot.clone())
+                        .ok()?;
+                if snapshot.project_tab_id.trim().is_empty()
+                    || snapshot.observed_at.trim().is_empty()
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::WindowSnapshot { snapshot });
+            }
+            if let Some(release) = payload.get("idle_release") {
+                let number = match release.get("number") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_u64()?),
+                };
+                let reason = release.get("reason")?.as_str()?.trim().to_string();
+                if reason.is_empty() {
+                    return None;
+                }
+                return Some(IssueMonitorControl::IdleRelease { number, reason });
             }
             if let Some(delivered) = payload.get("terminal_delivered") {
                 let target = crate::IssueMonitorStopTarget {
@@ -3605,6 +3669,27 @@ fn commit_issue_monitor_effect_result(
     monitor: &mut crate::IssueMonitorState,
     completed: CompletedIssueMonitorEffect,
 ) -> bool {
+    match try_commit_issue_monitor_effect_result(prefs_path, monitor, completed) {
+        Ok(settled) => settled,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "issue monitor effect result commit failed"
+            );
+            false
+        }
+    }
+}
+
+/// [`commit_issue_monitor_effect_result`] with the prefs transaction failure
+/// kept as the error instead of folded into `false`. `Err` means the volatile
+/// mutation was revoked and the durable attempt is untouched (Issue #4096:
+/// the reason a commit did not settle must stay readable to the caller).
+fn try_commit_issue_monitor_effect_result(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    completed: CompletedIssueMonitorEffect,
+) -> io::Result<bool> {
     use gwt_git::pr_status::AutoMergeMutationOutcome;
     use gwt_github::client::OwnerMutationError;
     use gwt_github::issue_auto_claim::ClaimAcquireOutcome;
@@ -3938,19 +4023,10 @@ fn commit_issue_monitor_effect_result(
             *disk = candidate.prefs();
         },
     );
-    match transaction {
-        Ok(_) => {
-            *monitor = candidate;
-            settled
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "issue monitor effect result commit failed"
-            );
-            false
-        }
-    }
+    transaction.map(|_| {
+        *monitor = candidate;
+        settled
+    })
 }
 
 /// SPEC #3200 Option A: a per-process secret the daemon uses to sign autonomous
@@ -4173,6 +4249,15 @@ fn scan_issue_monitor_once_blocking(
         );
     }
     monitor.recover_stuck_autonomous(&now);
+    // Issue #4084 AC-2/AC-3/AC-4: classify the idle windows the GUI last
+    // observed and release the ones no human has to judge, before this scan
+    // decides what it may launch. `stuck_unknown` stays on the steering path
+    // `recover_stuck_autonomous` above owns.
+    crate::issue_monitor_worker::reconcile_issue_monitor_idle_windows(
+        &mut monitor,
+        &scope.project_root,
+        &now,
+    );
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
     // `gh pr merge --disable-auto` here would let a stale cloned scan mutate
     // GitHub even after the canonical driver rejected its result. The durable
@@ -5442,6 +5527,54 @@ exit 0
     /// plausible scheduling delay: a saturated runner must delay a wait, never
     /// decide its outcome (Issue #3641).
     const MARKER_WAIT_HANG_GUARD: Duration = Duration::from_secs(60);
+
+    /// Issue #4096: commit an executor result the way every effect-commit test
+    /// must. Each test owns its `prefs_path`, but the production 250 ms prefs
+    /// budget still decided their verdict on a loaded runner: a durable write
+    /// that took longer than the budget failed the transaction and surfaced as
+    /// a bare `false`. Pin the hang-guard budget so a saturated runner may
+    /// delay the transaction but never decide it (Issue #3641 / #4033), and
+    /// name the transaction failure instead of hiding it behind `false`.
+    fn commit_effect_result_for_test(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        completed: super::CompletedIssueMonitorEffect,
+    ) -> bool {
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        super::try_commit_issue_monitor_effect_result(prefs_path, monitor, completed)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "issue monitor effect commit transaction failed on {}: {error}",
+                    prefs_path.display()
+                )
+            })
+    }
+
+    /// Issue #4096: the control CAS counterpart of
+    /// [`commit_effect_result_for_test`]. A `RetryableFailure` here means the
+    /// prefs transaction itself failed — no test in this module races a second
+    /// writer through this helper — so it is reported with the reason the
+    /// commit recorded rather than compared as an opaque variant.
+    fn apply_control_for_test(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        control: IssueMonitorControl,
+    ) -> super::IssueMonitorControlCommit {
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let commit = super::try_apply_issue_monitor_control_with_disk_migration(
+            prefs_path, monitor, control,
+        );
+        assert!(
+            commit != super::IssueMonitorControlCommit::RetryableFailure,
+            "issue monitor control transaction failed on {}: {}",
+            prefs_path.display(),
+            monitor
+                .status_view()
+                .last_error
+                .unwrap_or_else(|| "no commit error recorded".to_string())
+        );
+        commit
+    }
 
     /// Run `attempt` until the kernel stops refusing to execute the program.
     ///
@@ -6837,7 +6970,7 @@ exit 0
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 
         assert!(matches!(
-            super::try_apply_issue_monitor_control_with_disk_migration(
+            apply_control_for_test(
                 &prefs_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
@@ -6869,7 +7002,7 @@ exit 0
         // lifecycle-state heuristics, distinguishes it from the first control's
         // durability retry.
         assert!(matches!(
-            super::try_apply_issue_monitor_control_with_disk_migration(
+            apply_control_for_test(
                 &prefs_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
@@ -7443,7 +7576,7 @@ exit 0
         };
         crate::save_issue_monitor_prefs(&prefs_path, &successor).expect("seed successor prefs");
 
-        let committed = super::try_apply_issue_monitor_control_with_disk_migration(
+        let committed = apply_control_for_test(
             &prefs_path,
             &mut stale_daemon,
             IssueMonitorControl::WindowClosed {
@@ -7549,6 +7682,7 @@ exit 0
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -7655,6 +7789,7 @@ exit 0
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -8887,9 +9022,74 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             }
+        );
+        // Issue #3906 AC-1: the GUI toggle publishes the override alone and
+        // the daemon commits it without touching any other switch.
+        let auto_apply_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "auto_apply_updates": true } }),
+            std::process::id() + 1,
+        );
+        let auto_apply_control =
+            decode_issue_monitor_control(auto_apply_payload).expect("auto-apply control");
+        assert_eq!(
+            auto_apply_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            }
+        );
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            auto_apply_control
+        ));
+        assert_eq!(monitor.auto_apply_updates(), Some(true));
+        assert!(monitor.auto_apply_updates_enabled());
+        // Issue #3906 AC-3: the update mechanism raises an Auto drain for the
+        // staged version through the same control.
+        let raise_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "update_drain": { "reason": "auto", "version": "9.99.0" } } }),
+            std::process::id() + 1,
+        );
+        let raise_control = decode_issue_monitor_control(raise_payload).expect("raise control");
+        assert_eq!(
+            raise_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
+                    reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    version: "9.99.0".to_string(),
+                }),
+                launch_agent: None,
+            }
+        );
+        assert!(apply_issue_monitor_control(&mut monitor, raise_control));
+        let drain = monitor.update_drain().expect("auto drain raised");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Auto);
+        assert_eq!(drain.version, "9.99.0");
+        assert!(
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "config_set": { "update_drain": "soon" } }),
+                std::process::id() + 1,
+            ))
+            .is_none(),
+            "a malformed drain control is refused whole"
         );
 
         let temp = TempDir::new().expect("tempdir");
@@ -8939,7 +9139,8 @@ exit 0
                 max_active_agents: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             }
         );
 
@@ -9091,6 +9292,7 @@ exit 0
                 autonomous_mode: None,
                 max_active_agents: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             }
@@ -9297,6 +9499,7 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -10604,7 +10807,7 @@ exit 0
         attempting: crate::PendingIssueMonitorEffect,
         outcome: crate::issue_monitor_settlement::MergedIssueSettlementOutcome,
     ) -> bool {
-        super::commit_issue_monitor_effect_result(
+        commit_effect_result_for_test(
             prefs_path,
             monitor,
             super::CompletedIssueMonitorEffect {
@@ -11270,6 +11473,7 @@ exit 0
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -11761,6 +11965,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14009,6 +14214,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14016,7 +14222,7 @@ exit 1
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14073,6 +14279,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14080,7 +14287,7 @@ exit 1
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14098,6 +14305,72 @@ exit 1
             record.last_heartbeat.as_deref(),
             Some("2026-07-28T00:00:00Z"),
             "an unrelated runtime effect must not masquerade as restart recovery",
+        );
+    }
+
+    /// Issue #4096: the CI flake, made deterministic. Every effect-commit test
+    /// owns its `prefs_path`, so what decided their verdict on a loaded runner
+    /// was the production prefs budget expiring inside the durable write. An
+    /// already-spent budget reproduces exactly that: the production wrapper
+    /// reports an unsettled attempt, and the `try_` seam names the deadline.
+    #[test]
+    fn effect_commit_under_an_expired_prefs_budget_names_the_deadline() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let release = crate::PendingIssueMonitorEffect {
+            effect_id: "release:77:claim-77:7".to_string(),
+            authority_epoch: 7,
+            attempt: 1,
+            state: crate::IssueMonitorEffectState::Attempting,
+            payload: crate::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 77,
+                claim_id: "claim-77".to_string(),
+                owner: "host/session".to_string(),
+            },
+        };
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![release.clone()],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let completed = || super::CompletedIssueMonitorEffect {
+            effect: release.clone(),
+            outcome: super::IssueMonitorEffectOutcome::Release(Ok(
+                gwt_github::issue_auto_claim::ClaimReleaseOutcome::AlreadyReleased(None),
+            )),
+            completed_at: "2026-07-28T00:00:01Z".to_string(),
+        };
+        let _spent_budget = super::ScopedIssueMonitorPrefsTimeout::set(Duration::ZERO);
+
+        assert!(
+            !super::commit_issue_monitor_effect_result(&prefs_path, &mut monitor, completed()),
+            "a spent prefs budget is reported as an unsettled attempt, never as a settlement"
+        );
+        let error =
+            super::try_commit_issue_monitor_effect_result(&prefs_path, &mut monitor, completed())
+                .expect_err("a spent prefs budget fails the transaction");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            error.to_string().contains("operation deadline expired"),
+            "the failure names the prefs budget, not a bare false: {error}"
+        );
+        assert_eq!(
+            monitor.pending_effects().to_vec(),
+            vec![release],
+            "a failed transaction revokes the volatile mutation"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("reload prefs")
+                .pending_effects
+                .len(),
+            1,
+            "a failed transaction leaves the durable attempt untouched"
         );
     }
 
@@ -14124,6 +14397,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -14141,6 +14415,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -14208,6 +14483,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14289,7 +14565,7 @@ exit 1
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::commit_issue_monitor_effect_result(
+            commit_effect_result_for_test(
                 &prefs_path,
                 &mut monitor,
                 super::CompletedIssueMonitorEffect {
@@ -14337,7 +14613,7 @@ exit 1
         let attempting = monitor.pending_effects()[0].clone();
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14408,7 +14684,7 @@ exit 1
         ));
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist requeue");
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14476,7 +14752,7 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
             .expect("persist excluded state");
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14599,7 +14875,7 @@ exit 1
                     winning_claim,
                 }
             };
-            assert!(super::commit_issue_monitor_effect_result(
+            assert!(commit_effect_result_for_test(
                 &prefs_path,
                 &mut monitor,
                 super::CompletedIssueMonitorEffect {
@@ -14642,7 +14918,7 @@ exit 1
         let live_pid = std::process::id();
 
         assert!(matches!(
-            super::try_apply_issue_monitor_control_with_disk_migration(
+            apply_control_for_test(
                 &prefs_path,
                 &mut monitor,
                 super::IssueMonitorControl::ClaimLaunchDelivery {
@@ -14656,7 +14932,7 @@ exit 1
             super::IssueMonitorControlCommit::Committed { .. }
         ));
         assert!(matches!(
-            super::try_apply_issue_monitor_control_with_disk_migration(
+            apply_control_for_test(
                 &prefs_path,
                 &mut monitor,
                 super::IssueMonitorControl::ClaimLaunchDelivery {
@@ -14678,7 +14954,7 @@ exit 1
             Some("tab-a::agent-1")
         );
 
-        let _ = super::try_apply_issue_monitor_control_with_disk_migration(
+        let _ = apply_control_for_test(
             &prefs_path,
             &mut monitor,
             super::IssueMonitorControl::LaunchFailed {
@@ -14697,7 +14973,7 @@ exit 1
             1,
         );
 
-        let _ = super::try_apply_issue_monitor_control_with_disk_migration(
+        let _ = apply_control_for_test(
             &prefs_path,
             &mut monitor,
             super::IssueMonitorControl::Launched {
@@ -14733,11 +15009,7 @@ exit 1
                 delivery_id: Some("launch:effect-42".to_string()),
             },
         ] {
-            let _ = super::try_apply_issue_monitor_control_with_disk_migration(
-                &prefs_path,
-                &mut monitor,
-                control,
-            );
+            let _ = apply_control_for_test(&prefs_path, &mut monitor, control);
         }
         assert!(crate::load_issue_monitor_prefs(&prefs_path)
             .expect("reload exact ACK")
@@ -14824,6 +15096,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14840,7 +15113,7 @@ exit 1
             )
         ));
         assert!(!arm_marker.exists(), "replay must not resend arm");
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14865,7 +15138,7 @@ exit 1
             disarm_marker.exists(),
             "compensation must disable auto-merge"
         );
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14906,7 +15179,7 @@ exit 1
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
-        assert!(!super::commit_issue_monitor_effect_result(
+        assert!(!commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -14963,6 +15236,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14970,7 +15244,7 @@ exit 1
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -15032,7 +15306,7 @@ exit 1
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
-        assert!(!super::commit_issue_monitor_effect_result(
+        assert!(!commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -15097,6 +15371,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15104,7 +15379,7 @@ exit 1
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
-        assert!(super::commit_issue_monitor_effect_result(
+        assert!(commit_effect_result_for_test(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {
@@ -15450,6 +15725,7 @@ exit 1
             wait: None,
             needs_human_kind: None,
             steering: None,
+            review_dispatch_hold: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -15674,6 +15950,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -15919,7 +16196,7 @@ exit 1
             },
         );
 
-        let commit = super::try_apply_issue_monitor_control_with_disk_migration(
+        let commit = apply_control_for_test(
             &prefs_path,
             &mut stale_local,
             IssueMonitorControl::Enabled(false),
@@ -16685,6 +16962,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -16976,6 +17254,7 @@ exit 1
             wait: None,
             needs_human_kind: None,
             steering: None,
+            review_dispatch_hold: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -17396,11 +17675,7 @@ exit 1
             crate::save_issue_monitor_prefs(&prefs_path, &before_prefs).expect("seed max prefs");
             let before_bytes = fs::read(&prefs_path).expect("read seeded prefs bytes");
 
-            let commit = super::try_apply_issue_monitor_control_with_disk_migration(
-                &prefs_path,
-                &mut monitor,
-                control,
-            );
+            let commit = apply_control_for_test(&prefs_path, &mut monitor, control);
 
             assert_eq!(
                 commit,
