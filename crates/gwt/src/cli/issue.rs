@@ -1195,6 +1195,10 @@ fn run_monitor_requeue<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Issue #4077 AC-3: read the claim hold before releasing the local one. A
+    // foreign claim outlives this operation, and answering `requeued` while it
+    // is live is the false `queued` the PM read for 29 minutes.
+    let blocked_by_claim = monitor_projection_blocked_by_claim(&project_root, number);
     let (prefs, (outcome, completion_hold_cleared)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -1264,13 +1268,14 @@ fn run_monitor_requeue<E: CliEnv>(
             // an operator release if so; the driver adopts it on its next
             // prefs rebase. Without a daemon there is no in-memory hold to
             // release and the `not_held` refusal stands.
-            if monitor_projection_reports_blocked_by_claim(&project_root, number) {
+            if let Some(blocked_by_claim) = blocked_by_claim.as_ref() {
                 return run_monitor_release_claim_block(
                     &prefs_path,
                     &project_root,
                     number,
                     reason,
                     &now,
+                    blocked_by_claim,
                     out,
                 );
             }
@@ -1290,10 +1295,15 @@ fn run_monitor_requeue<E: CliEnv>(
 
     let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
 
+    // Issue #4077 AC-3: the local hold is gone, but a live claim still owns the
+    // issue on GitHub. Name it instead of reporting a queue position the next
+    // scan cannot honour.
+    let live_claim = blocked_by_claim.filter(|blocked| blocked.is_live_at(&now));
     out.push_str(
         &serde_json::json!({
             "number": number,
-            "status": "requeued",
+            "status": if live_claim.is_some() { "blocked_by_claim" } else { "requeued" },
+            "blocked_by_claim": live_claim.as_ref().map(MonitorBlockedClaim::as_json),
             "reason": reason,
             "stale_window_id": stale_window_id,
             "released_at": now,
@@ -1317,30 +1327,65 @@ fn run_monitor_requeue<E: CliEnv>(
     Ok(0)
 }
 
-/// Issue #3683 (AC-3): whether the live daemon's status projection reports
-/// this issue as `blocked_by_claim`. A missing daemon or an unreadable
-/// projection means no verifiable in-memory claim hold, so the caller keeps
-/// the fail-closed `not_held` refusal.
-fn monitor_projection_reports_blocked_by_claim(
-    project_root: &std::path::Path,
-    number: u64,
-) -> bool {
-    let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root) else {
-        return false;
-    };
-    let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status) else {
-        return false;
-    };
-    agent_status_reports_blocked_by_claim(&status, number)
+/// Issue #4077 AC-3: the claim a `BlockedByClaim` row is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MonitorBlockedClaim {
+    owner: Option<String>,
+    claim_id: Option<String>,
+    expires_at: Option<String>,
 }
 
-fn agent_status_reports_blocked_by_claim(
+impl MonitorBlockedClaim {
+    /// Whether the claim is still holding the issue at `now`.
+    ///
+    /// An unknown expiry counts as live: the block exists, and reporting
+    /// `requeued` for a hold nobody can date is exactly the false `queued` this
+    /// answer replaces.
+    fn is_live_at(&self, now: &str) -> bool {
+        self.expires_at
+            .as_deref()
+            .is_none_or(|expires_at| expires_at > now)
+    }
+
+    fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "claim_id": self.claim_id,
+            "owner": self.owner,
+            "expires_at": self.expires_at,
+        })
+    }
+}
+
+/// Issue #3683 (AC-3): whether the live daemon's status projection reports
+/// this issue as `blocked_by_claim`, and Issue #4077 AC-3: which claim it is.
+/// A missing daemon or an unreadable projection means no verifiable in-memory
+/// claim hold, so the caller keeps the fail-closed `not_held` refusal.
+fn monitor_projection_blocked_by_claim(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Option<MonitorBlockedClaim> {
+    let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root) else {
+        return None;
+    };
+    let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status).ok()?;
+    agent_status_blocked_by_claim(&status, number)
+}
+
+fn agent_status_blocked_by_claim(
     status: &crate::IssueMonitorAgentStatus,
     number: u64,
-) -> bool {
-    status.inbox.iter().any(|row| {
-        row.issue_number == number && row.state == crate::MonitorInboxState::BlockedByClaim
-    })
+) -> Option<MonitorBlockedClaim> {
+    status
+        .inbox
+        .iter()
+        .find(|row| {
+            row.issue_number == number && row.state == crate::MonitorInboxState::BlockedByClaim
+        })
+        .map(|row| MonitorBlockedClaim {
+            owner: row.blocked_by_owner.clone(),
+            claim_id: row.blocked_by_claim_id.clone(),
+            expires_at: row.claim_expires_at.clone(),
+        })
 }
 
 /// Issue #3683 (AC-3): publish an operator release for a daemon-reported
@@ -1354,6 +1399,7 @@ fn run_monitor_release_claim_block(
     number: u64,
     reason: &str,
     now: &str,
+    blocked_by_claim: &MonitorBlockedClaim,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
@@ -1404,10 +1450,14 @@ fn run_monitor_release_claim_block(
 
     let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(project_root));
 
+    // Issue #4077 AC-3: releasing our own hold does not expire the other
+    // Monitor's claim comment; the issue stays unlaunchable until it lapses.
+    let live_claim = blocked_by_claim.is_live_at(now);
     out.push_str(
         &serde_json::json!({
             "number": number,
-            "status": "requeued",
+            "status": if live_claim { "blocked_by_claim" } else { "requeued" },
+            "blocked_by_claim": live_claim.then(|| blocked_by_claim.as_json()),
             "released_hold": "blocked_by_claim",
             "reason": reason,
             "released_at": now,
@@ -2805,9 +2855,9 @@ mod tests {
         }))
         .expect("projection wire format deserializes");
 
-        assert!(agent_status_reports_blocked_by_claim(&status, 42));
-        assert!(!agent_status_reports_blocked_by_claim(&status, 7));
-        assert!(!agent_status_reports_blocked_by_claim(&status, 99));
+        assert!(agent_status_blocked_by_claim(&status, 42).is_some());
+        assert!(agent_status_blocked_by_claim(&status, 7).is_none());
+        assert!(agent_status_blocked_by_claim(&status, 99).is_none());
     }
 
     fn set_modified(path: &Path, modified: SystemTime) {
@@ -3739,6 +3789,9 @@ mod tests {
                 recoverable_merged: false,
                 completion_reason: None,
                 blocked_by_owner: None,
+                claim_expires_at: None,
+                blocked_by_claim_id: None,
+                exclusion_reason: None,
                 launched_window_id: None,
                 error_message: None,
                 last_activity_at: None,
@@ -3835,6 +3888,9 @@ mod tests {
                     recoverable_merged: false,
                     completion_reason: None,
                     blocked_by_owner: None,
+                    claim_expires_at: None,
+                    blocked_by_claim_id: None,
+                    exclusion_reason: None,
                     launched_window_id: None,
                     error_message: None,
                     last_activity_at: None,
@@ -5188,6 +5244,85 @@ mod tests {
         );
         assert_eq!(resolve_monitor_wait_issue_number(None, Some(" ")), None);
         assert_eq!(resolve_monitor_wait_issue_number(None, None), None);
+    }
+
+    /// Issue #4077 AC-3: a requeue that leaves a live foreign claim in place
+    /// must name the claim and its deadline rather than reporting `queued`.
+    ///
+    /// The response is built from the daemon's status projection, so this pins
+    /// the projection→answer decision the operation makes.
+    #[test]
+    fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
+        let status = crate::IssueMonitorAgentStatus {
+            queue: Vec::new(),
+            active_launches: Vec::new(),
+            max_active: 3,
+            enabled: true,
+            autonomous_mode: true,
+            has_launch_profile: true,
+            quota_hold: None,
+            update_drain: None,
+            launch_profile_summary: String::new(),
+            launch_profile_candidates: Vec::new(),
+            usage_threshold_percent: 80,
+            provider_quota_holds: Vec::new(),
+            needs_human: Vec::new(),
+            inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                issue_number: 4077,
+                state: crate::MonitorInboxState::BlockedByClaim,
+                github_state: crate::IssueMonitorIssueState::Open,
+                issue_updated_at: Some("2026-09-07T02:08:00Z".to_string()),
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
+                recoverable_merged: false,
+                completion_reason: None,
+                blocked_by_owner: Some("akiojin:77083".to_string()),
+                claim_expires_at: Some("2026-09-07T02:37:00Z".to_string()),
+                blocked_by_claim_id: Some("gwt-auto-improve:df524fc5".to_string()),
+                exclusion_reason: Some("blocked by claim".to_string()),
+                launched_window_id: None,
+                error_message: None,
+                last_activity_at: None,
+                retry_not_before: None,
+                retry_hold_reason: None,
+                claim_id: None,
+                delivery_id: None,
+                waiting: None,
+                steering: None,
+            }],
+            last_error: None,
+            last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
+            scan_stall: None,
+            github_budget: None,
+            generation_reclaim: None,
+        };
+
+        let blocked = agent_status_blocked_by_claim(&status, 4077).expect("blocked row");
+        assert_eq!(
+            blocked.claim_id.as_deref(),
+            Some("gwt-auto-improve:df524fc5")
+        );
+        assert_eq!(blocked.owner.as_deref(), Some("akiojin:77083"));
+        assert_eq!(blocked.expires_at.as_deref(), Some("2026-09-07T02:37:00Z"));
+        assert!(
+            blocked.is_live_at("2026-09-07T02:09:00Z"),
+            "the claim still owns the issue, so the answer cannot be `requeued`"
+        );
+        assert!(
+            !blocked.is_live_at("2026-09-07T02:38:00Z"),
+            "past its expiry the claim no longer holds anything"
+        );
+        assert_eq!(
+            blocked.as_json(),
+            serde_json::json!({
+                "claim_id": "gwt-auto-improve:df524fc5",
+                "owner": "akiojin:77083",
+                "expires_at": "2026-09-07T02:37:00Z",
+            })
+        );
+        assert!(
+            agent_status_blocked_by_claim(&status, 4078).is_none(),
+            "an issue with no blocked row has nothing to report"
+        );
     }
 
     /// Issue #3645 AC-1 / #3628 AC-2: the recovery an operator reaches for when

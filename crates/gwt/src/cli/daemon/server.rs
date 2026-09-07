@@ -3686,7 +3686,12 @@ fn commit_issue_monitor_effect_result(
                             .inbox_item(*issue_number)
                             .map(|item| item.issue.clone())
                         {
-                            candidate.record_blocked_by_claim(issue, claim.owner, claim.expires_at);
+                            candidate.record_blocked_by_claim(
+                                issue,
+                                claim.owner.clone(),
+                                claim.expires_at.clone(),
+                                Some(claim.claim_id.as_str()),
+                            );
                         }
                     }
                     settled = true;
@@ -3706,8 +3711,9 @@ fn commit_issue_monitor_effect_result(
                         {
                             candidate.record_blocked_by_claim(
                                 issue,
-                                winning_claim.owner,
-                                winning_claim.expires_at,
+                                winning_claim.owner.clone(),
+                                winning_claim.expires_at.clone(),
+                                Some(winning_claim.claim_id.as_str()),
                             );
                         }
                     }
