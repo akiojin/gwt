@@ -10092,7 +10092,9 @@ exit 0
     /// process is open, the scan issues no GraphQL call at all, still completes
     /// from the cached candidates, defers the candidate whose pre-launch
     /// readback was refused instead of aborting the pass, and reports the
-    /// throttle together with the next attempt time.
+    /// throttle together with the next attempt time. SPEC #4093 FR-003: the
+    /// merged-PR readback lives on the REST budget now, so a GraphQL window
+    /// no longer defers merge reconciliation at all.
     #[test]
     fn a_persisted_rate_limit_window_defers_the_readback_and_the_scan_completes() {
         let _env_lock = crate::env_test_lock()
@@ -10148,7 +10150,8 @@ exit 0
             enabled: true,
             max_active_agents: 2,
             launch_profile: Some(sample_issue_monitor_profile()),
-            // An active launch makes merge reconciliation spend GraphQL too.
+            // An active launch makes the scan run merge reconciliation, which
+            // reads merged PRs over REST and must not be caught by the window.
             launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "window-43".to_string(),
@@ -10188,12 +10191,15 @@ exit 0
             "continued_with_previous_candidates",
             "continued_with_deferred_candidates",
             "#44",
-            "merge-reconciliation",
             gwt_core::github_quota::RATE_LIMITED_ERROR_CODE,
             "retry_after_secs=",
         ] {
             assert!(last_error.contains(expected), "{expected}: {last_error}");
         }
+        assert!(
+            !last_error.contains("merge-reconciliation"),
+            "the REST merged-PR sync completes inside a GraphQL window: {last_error}"
+        );
         assert!(
             last_error.contains(&format!(
                 "reset_at={}",
