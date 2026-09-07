@@ -251,7 +251,9 @@ You are this project's resident PM. Your operating contract is the `gwt-pm` skil
 \n\
 Report to the user in conversation, at milestones, as a digest (`needs_human` and fatal failures immediately). Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
 \n\
-Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past the Issue Monitor.";
+Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past the Issue Monitor.\n\
+\n\
+Every cycle, also read `unlanded_branches` from `pr.list` and take stock: each row is work that is committed but has no PR carrying it. Relaunch the owner Issue or rule the branch archived — a row that survives a cycle unaddressed is an escalation, not a no-change cycle.";
 
 pub(super) const PM_REMINDER_JA: &str = "# Project Manager\n\
 \n\
@@ -259,7 +261,9 @@ pub(super) const PM_REMINDER_JA: &str = "# Project Manager\n\
 \n\
 報告はユーザーとの会話で、節目ごとに digest として行います（`needs_human` と致命的失敗は即時）。`board.post` は他 agent へ話しかけるときだけ mention 付きで使い、`board.show` は他 agent の自己申告を読むために使います。自分の作業 phase を Board に流さないでください。\n\
 \n\
-毎周回、`issue.monitor.status` を取り直して照合し、動いている agent を確認します。「変化なし」と判定する前に稼働中の launch を steering します。停滞・スコープ逸脱・次アクション待ちの launch には `board.post` の mention か `pm.message.send` で指示を出し、Issue Monitor を迂回した起動系注入はしません。";
+毎周回、`issue.monitor.status` を取り直して照合し、動いている agent を確認します。「変化なし」と判定する前に稼働中の launch を steering します。停滞・スコープ逸脱・次アクション待ちの launch には `board.post` の mention か `pm.message.send` で指示を出し、Issue Monitor を迂回した起動系注入はしません。\n\
+\n\
+毎周回、`pr.list` の `unlanded_branches` も読んで棚卸しします。各行は commit 済みなのに PR が無い作業です。owner Issue を再起動するか archive を裁定してください。未対応のまま次周回へ持ち越した行は escalation であり、「変化なし」ではありません。";
 
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion です。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
 

@@ -914,6 +914,11 @@ mod tests {
                     "stalled, drifting out of scope, or waiting for its next action",
                     "`board.post` with a mention or `pm.message.send`",
                     "never inject launch instructions past the Issue Monitor",
+                    // Issue #4074 AC-4: the unlanded-branch stocktake.
+                    "read `unlanded_branches` from `pr.list`",
+                    "committed but has no PR carrying it",
+                    "Relaunch the owner Issue or rule the branch archived",
+                    "a row that survives a cycle unaddressed is an escalation",
                 ],
             ),
             (
@@ -923,6 +928,10 @@ mod tests {
                     "停滞・スコープ逸脱・次アクション待ち",
                     "`board.post` の mention か `pm.message.send`",
                     "Issue Monitor を迂回した起動系注入はしません",
+                    "`pr.list` の `unlanded_branches` も読んで棚卸し",
+                    "commit 済みなのに PR が無い作業",
+                    "owner Issue を再起動するか archive を裁定",
+                    "未対応のまま次周回へ持ち越した行は escalation",
                 ],
             ),
         ] {
