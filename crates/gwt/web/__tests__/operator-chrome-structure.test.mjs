@@ -1818,8 +1818,8 @@ test("window tabs receive agent runtime state from runtime status (SPEC-3038 US-
   // window chrome keeps the semantic telemetry mapping.
   assert.match(
     appSource,
-    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?normalizeWindowRuntimeState\(tab\.status,\s*tab\.preset\)[\s\S]{0,120}?return\s+runtimeState/,
-    "expected a tab telemetry helper that gates on agent windows and returns raw runtime state for the tab cue",
+    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?return\s+runtimeStateForWindow\(tab\)/,
+    "expected a tab telemetry helper that gates on agent windows and returns normalized runtime state for the tab cue",
   );
   const renderTabsBody = extractFunctionBody(appSource, "renderWindowTabs");
   assert.match(
@@ -5390,7 +5390,7 @@ test("Runtime status key covers state detail preset visibility and cleanup", () 
   }
 
   const statusBody = extractFunctionBody(appSource, "applyStatus");
-  const stateMapIndex = statusBody.indexOf("windowRuntimeStateMap.set(windowId, runtimeState);");
+  const stateMapIndex = statusBody.indexOf("windowRuntimeStateMap.set(windowId, status);");
   const effectiveDetailIndex = statusBody.indexOf("const effectiveDetail = detailMap.get(windowId)");
   const keyIndex = statusBody.indexOf(
     "const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(",
