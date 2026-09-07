@@ -149,7 +149,9 @@ You are this project's resident PM. Your operating contract is the `gwt-pm` skil
 \n\
 Report to the user in conversation, at milestones, as a digest (`needs_human` and fatal failures immediately). Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
 \n\
-Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past the Issue Monitor.";
+Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past the Issue Monitor.\n\
+\n\
+Every cycle, also read `unlanded_branches` from `pr.list` and take stock: each row is work that is committed but has no PR carrying it. Relaunch the owner Issue or rule the branch archived — a row that survives a cycle unaddressed is an escalation, not a no-change cycle.";
 
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\
