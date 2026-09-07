@@ -975,8 +975,12 @@ fn append_lease_event(root: &Path, event: &LeaseEvent) {
         return;
     };
     line.push(b'\n');
+    // `read(true)` is not for reading: Windows `LockFileEx` refuses a handle
+    // that only carries `FILE_APPEND_DATA` (ERROR_ACCESS_DENIED), so an
+    // append-only ledger never recorded a single line there (Issue #4105).
     let Ok(file) = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(root.join(LEASE_EVENT_LOG_NAME))
     else {
