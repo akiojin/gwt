@@ -9878,15 +9878,14 @@ fn concurrent_generation_record_for_session(
     if ledger.current_generation_id == generation.identity.generation_id {
         return Ok(None);
     }
-    let record = serde_json::from_str::<ExecutionControlRecord>(
-        ledger.effective_projection_for(generation),
-    )
-    .map(hydrate_recovery_envelopes)
-    .map_err(|error| {
-        invalid_generation_data(format!(
-            "concurrent generation projection is malformed: {error}"
-        ))
-    })?;
+    let record =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(generation))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "concurrent generation projection is malformed: {error}"
+                ))
+            })?;
     Ok((record.primary_session_id == session_id && integrity_ok(&record)).then_some(record))
 }
 

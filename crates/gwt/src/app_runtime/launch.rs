@@ -1164,7 +1164,25 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     // longer a reason to refuse. The launch starts its own
                     // generation beside the holder's, and both Sessions settle
                     // the generation they own (FR-009).
-                    None => FreshSuccessorRoute::Concurrent,
+                    //
+                    // The one case that is not concurrency is this exact
+                    // Session relaunching itself: its own generation is mid
+                    // transaction, so a second generation for the same Session
+                    // would strand the first. That is a same-lifetime resume,
+                    // and Continue work owns it.
+                    None => {
+                        if gwt::cli::execution_state::load(worktree)
+                            .map_err(|error| error.to_string())?
+                            .is_some_and(|record| record.primary_session_id == session.id)
+                        {
+                            return Err(format!(
+                                "this Session already holds an unreconciled active execution generation for {} #{}; use Continue work to resume it, or run the execution.status JSON operation for the exact recovery route",
+                                owner.kind.as_str(),
+                                owner.number,
+                            ));
+                        }
+                        FreshSuccessorRoute::Concurrent
+                    }
                 },
             };
 
@@ -6207,22 +6225,20 @@ mod agent_endpoint_env_tests {
         // The launch leaves its successor Prepared; the runtime activates it
         // when the pane starts producing. Drive that step so both generations
         // are live at once, which is the state FR-009 is about.
-        let prepared = gwt::cli::execution_state::load_generation_ledger(
-            &launch.project,
-            launch.owner,
-        )
-        .expect("load owner ledger")
-        .expect("owner ledger exists")
-        .continuation_attempts
-        .iter()
-        .rev()
-        .find(|attempt| {
-            attempt.request.source
-                == gwt::cli::execution_state::CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
-        })
-        .expect("the concurrent launch must record a successor attempt")
-        .request
-        .clone();
+        let prepared =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("load owner ledger")
+                .expect("owner ledger exists")
+                .continuation_attempts
+                .iter()
+                .rev()
+                .find(|attempt| {
+                    attempt.request.source
+                        == gwt::cli::execution_state::CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
+                })
+                .expect("the concurrent launch must record a successor attempt")
+                .request
+                .clone();
         gwt::cli::execution_state::activate_successor(&launch.project, launch.owner, &prepared)
             .expect("activate the concurrent successor");
 
