@@ -108,7 +108,11 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
 };
 
 /// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
-const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this from here rather than recovering it
+/// out of the persisted `launch_args`.
+pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
 /// SPEC-3431 T-093 (FR-012): a wake the monitor-event path decided on — which
 /// pane receives the prompt and what it says. The window id is only ever the
