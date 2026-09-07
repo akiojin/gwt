@@ -329,7 +329,17 @@ the `gwtd` JSON operations `issue.monitor.status`,
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. `issue.monitor.profiles` reads the launch
+an explicit action in the GUI. Idle agent windows free their slot on
+their own: each scan classifies every launched window as
+`review_verdict_published`, `execution_settled`, `binding_dead`, or
+`stuck_unknown` (visible per row and in `idle_windows` in
+`issue.monitor.status`), releases the first three without requeueing the Issue,
+and closes their panes. Only `stuck_unknown` — a window that is idle while its
+execution record is still active — stays for a human, and it asks for a
+decision once it has been idle for twice the stuck timeout.
+`issue.monitor.release_idle` runs the same release by hand for one Issue or
+every idle row, and `dry_run: true` reports the targets without touching
+anything. `issue.monitor.profiles` reads the launch
 candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
 candidates the Monitor launches each Issue with the first eligible candidate
 (rate-limit holds, the usage threshold, and `prefer_for` routing decide

@@ -227,7 +227,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.questions | issue.monitor.question.answer",
         "  issue.monitor.wait",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
-        "  issue.monitor.reconcile",
+        "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -246,6 +246,10 @@ fn format_issue_help() -> String {
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
+        "  number?, dry_run                      issue.monitor.release_idle frees the slots",
+        "                                        of idle windows (review verdict published /",
+        "                                        settled execution / dead binding) and closes",
+        "                                        their panes; dry_run reports only",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -1083,6 +1087,8 @@ mod tests {
             // launch. If it is not discoverable here, the operator falls back
             // to hand-editing the state file, which is the bug.
             "issue.monitor.requeue",
+            // Issue #4084: the manual half of idle-window release.
+            "issue.monitor.release_idle",
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",

@@ -1211,6 +1211,11 @@ pub struct AppRuntime {
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
     /// terminal close, keyed by combined window id. Process-local only.
+    /// Issue #4084: agent windows launched as independent review dispatches
+    /// (Issue #4041), so an idle one with a published verdict can be told from
+    /// an idle implementation window. Process-local: a window whose runtime
+    /// restarted classifies as unknown and is never released automatically.
+    pub(crate) issue_monitor_review_dispatch_windows: HashSet<String>,
     pub(crate) terminal_close_candidates:
         HashMap<String, terminal_convergence::TerminalCloseCandidate>,
     /// One background terminal-convergence scan at a time.
@@ -2280,6 +2285,7 @@ fn run_scheduled_issue_monitor_scan(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
     live_window_ids: Option<&std::collections::BTreeSet<String>>,
+    window_snapshot: Option<&gwt::IssueMonitorWindowSnapshot>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
@@ -2287,11 +2293,39 @@ fn run_scheduled_issue_monitor_scan(
         project_root,
         expected_project_tab_id,
         live_window_ids,
+        window_snapshot,
         now,
         issue_client_factory,
         ISSUE_MONITOR_SCAN_BUDGET,
         ISSUE_MONITOR_COMMIT_BUDGET,
     )
+}
+
+/// Issue #4084 AC-1: hand the canvas snapshot to the live daemon, which owns
+/// the scan in production. Failure is not an error: without a daemon this
+/// process is the driver and classifies against the same snapshot itself.
+fn publish_issue_monitor_window_snapshot(
+    project_root: &Path,
+    snapshot: &gwt::IssueMonitorWindowSnapshot,
+) {
+    #[cfg(unix)]
+    {
+        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "window_snapshot": snapshot }),
+            std::process::id(),
+        );
+        if let Err(error) =
+            gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+        {
+            tracing::debug!(
+                %error,
+                "Issue Monitor window snapshot stayed local; no daemon accepted it"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (project_root, snapshot);
 }
 
 /// The read/probe phase's own budget. Exceeding it degrades the scan's
@@ -2350,6 +2384,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
     live_window_ids: Option<&std::collections::BTreeSet<String>>,
+    window_snapshot: Option<&gwt::IssueMonitorWindowSnapshot>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
     scan_budget: std::time::Duration,
@@ -2362,6 +2397,13 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // `env_test_lock()` and repoint `HOME` instead. The rule is enforced by
     // `crates/gwt/tests/bin_gwt_home_isolation_contract_test.rs`.
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+
+    // Issue #4084 AC-1: publish the canvas before the authority probe. A live
+    // daemon owns the scan in production and would otherwise never see the
+    // window statuses this process is the only one able to read.
+    if let Some(snapshot) = window_snapshot {
+        publish_issue_monitor_window_snapshot(project_root, snapshot);
+    }
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
         .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
@@ -2398,6 +2440,11 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     }
 
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    // Issue #4084: this process is the local driver, so it classifies against
+    // the canvas it just observed.
+    if let Some(snapshot) = window_snapshot {
+        monitor.record_window_snapshot(snapshot.clone());
+    }
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
     let mut completion_probe_error = None;
@@ -2459,6 +2506,18 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             Err(error) => monitor.record_scan_error(now, error.to_string()),
         }
     }
+
+    // Issue #4084: read every launched Issue's execution record before taking
+    // the prefs lock. The classification itself is pure; only this read is
+    // I/O, and an unreadable record fails closed to `stuck_unknown`.
+    let idle_settlements = window_snapshot
+        .map(|_| {
+            gwt::issue_monitor_worker::read_execution_settlements(
+                project_root,
+                &monitor.active_issue_numbers(),
+            )
+        })
+        .unwrap_or_default();
 
     // A daemon may have started while the side-effect-free scan was running.
     // The second lease acquisition is the commit-time authority decision; the
@@ -2527,6 +2586,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         observations,
                     );
                 }
+            }
+            // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
+            // same transaction that persists this scan, after re-adoption has
+            // restored every binding a live window still owns.
+            if window_snapshot.is_some() {
+                latest.reconcile_idle_windows(&idle_settlements, now);
             }
             record_issue_monitor_scan_failures(latest, now, merge_reconciliation_error, Vec::new());
             if let Some(error) = completion_probe_error {
@@ -2706,6 +2771,7 @@ impl AppRuntime {
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             terminal_close_grace: std::time::Duration::from_secs(
@@ -5752,12 +5818,19 @@ impl AppRuntime {
                     )
                 })
                 .collect();
+            // Issue #4084 AC-1: the same canvas, with the per-window facts the
+            // idle classifier needs (linked Issue, runtime status, and whether
+            // the window is a review dispatch). Ids are qualified with the
+            // owning tab so a released binding keeps its provenance.
+            let window_snapshot =
+                self.issue_monitor_window_snapshot_for_tab(&expected_project_tab_id, now);
             match self.enqueue_issue_monitor_scan_worker(
                 &project_root,
                 &prefs_path,
                 &expected_project_tab_id,
                 now,
                 live_windows_per_tab,
+                window_snapshot,
             ) {
                 Ok(()) | Err(IssueMonitorScanEnqueueError::AlreadyInFlight) => {}
                 Err(IssueMonitorScanEnqueueError::WorkerUnavailable(error)) => {
@@ -5828,6 +5901,47 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #4084 AC-1: the complete agent-window canvas of one project tab.
+    ///
+    /// Absence from this snapshot is what makes a launch binding dead, so it
+    /// must describe the whole tab: a partial list would release live work.
+    pub(crate) fn issue_monitor_window_snapshot_for_tab(
+        &self,
+        project_tab_id: &str,
+        now: &str,
+    ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        let tab = self.tab(project_tab_id)?;
+        let windows = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset.requires_process())
+            .map(|window| {
+                let window_id = combined_window_id(&tab.id, &window.id);
+                let issue_number = window.linked_issue_number.or_else(|| {
+                    let session_id = window.session_id.as_deref()?;
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number)
+                });
+                gwt::IssueMonitorWindowObservation {
+                    review_dispatch: self
+                        .issue_monitor_review_dispatch_windows
+                        .contains(&window_id),
+                    window_id,
+                    issue_number,
+                    status: window.status,
+                }
+            })
+            .collect();
+        Some(gwt::IssueMonitorWindowSnapshot {
+            project_tab_id: project_tab_id.to_string(),
+            observed_at: now.to_string(),
+            windows,
+        })
+    }
+
     fn enqueue_issue_monitor_scan_worker(
         &mut self,
         project_root: &Path,
@@ -5835,6 +5949,7 @@ impl AppRuntime {
         expected_project_tab_id: &str,
         now: &str,
         live_windows_per_tab: Vec<(String, std::collections::BTreeSet<String>)>,
+        window_snapshot: Option<gwt::IssueMonitorWindowSnapshot>,
     ) -> Result<(), IssueMonitorScanEnqueueError> {
         if !self
             .issue_monitor_scheduled_scans_in_flight
@@ -5849,6 +5964,7 @@ impl AppRuntime {
         let worker_now = now.to_string();
         let issue_client_factory = self.issue_client_factory.clone();
         let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
+        let window_snapshot = window_snapshot;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let vanished_window_failures =
@@ -5868,6 +5984,7 @@ impl AppRuntime {
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
                     expected_live_windows,
+                    window_snapshot.as_ref(),
                     &worker_now,
                     &issue_client_factory,
                 );
@@ -5959,12 +6076,17 @@ impl AppRuntime {
             }
         }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // Issue #4084: an on-demand scan classifies idle windows too, so the
+        // PM's `scan_now` frees a slot the same way the periodic tick does.
+        let window_snapshot =
+            self.issue_monitor_window_snapshot_for_tab(&expected_project_tab_id, &now);
         match self.enqueue_issue_monitor_scan_worker(
             &worker_project_root,
             &prefs_path,
             &expected_project_tab_id,
             &now,
             Vec::new(),
+            window_snapshot,
         ) {
             Ok(()) => reply(true, None),
             Err(error) => reply(false, Some(error.reason())),
@@ -6044,6 +6166,18 @@ impl AppRuntime {
         if let Ok(latest) = gwt::load_issue_monitor_prefs(prefs_path) {
             monitor.rebase_gui_observer_prefs(&latest);
         }
+        // Issue #4084 AC-2/AC-3: the scan already committed the release, so the
+        // pane is closed without publishing a second `window_closed` control.
+        for close in monitor.take_pending_idle_pane_closes() {
+            tracing::info!(
+                target: "gwt.pane.teardown",
+                window_id = %close.window_id,
+                issue_number = ?close.issue_number,
+                idle_kind = close.idle_kind.as_str(),
+                "closing an idle agent window whose Issue Monitor launch was released"
+            );
+            events.extend(self.close_window_after_issue_monitor_finalize_events(&close.window_id));
+        }
         events.extend(self.issue_monitor_snapshot_events_for(
             None,
             Some(&project_root),
@@ -6051,6 +6185,24 @@ impl AppRuntime {
         ));
         events.extend(self.pm_periodic_wake_events_for_monitor_at(&project_root, &monitor, now));
         events
+    }
+
+    /// Issue #4084 AC-2/AC-3: close one pane the daemon released. The daemon
+    /// committed the lifecycle edge, so this must not publish another one.
+    pub(crate) fn issue_monitor_idle_pane_close_events(
+        &mut self,
+        window_id: &str,
+        issue_number: Option<u64>,
+        idle_kind: &str,
+    ) -> Vec<OutboundEvent> {
+        tracing::info!(
+            target: "gwt.pane.teardown",
+            window_id,
+            ?issue_number,
+            idle_kind,
+            "closing an idle agent window released by the Issue Monitor daemon"
+        );
+        self.close_window_after_issue_monitor_finalize_events(window_id)
     }
 
     fn issue_monitor_snapshot_events_for(

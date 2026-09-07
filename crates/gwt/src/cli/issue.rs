@@ -253,6 +253,11 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorQuotaHoldList { project_root } => {
             run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
         }
+        IssueCommand::MonitorReleaseIdle {
+            project_root,
+            number,
+            dry_run,
+        } => run_monitor_release_idle(env, project_root.as_deref(), number, dry_run, out)?,
         IssueCommand::MonitorReconcile { project_root } => {
             run_monitor_reconcile(env, project_root.as_deref(), out)?
         }
@@ -796,6 +801,114 @@ fn run_monitor_reconcile<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #4084 AC-5: release the idle launched windows the live classification
+/// found, or report them without touching anything (`dry_run`).
+///
+/// The classification lives with the driver that observes the canvas — a scan
+/// is the only thing that can see which panes exist and what state they are
+/// in — so this operation reads that live projection and asks the driver to
+/// act. It never invents a classification of its own: without a live monitor
+/// projection nothing is released, because a release decided from stale state
+/// is exactly the mistaken teardown AC-6 forbids.
+fn run_monitor_release_idle<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: Option<u64>,
+    dry_run: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let status = crate::daemon_publisher::read_issue_monitor_status(&project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+        .map(serde_json::from_value::<crate::IssueMonitorAgentStatus>)
+        .transpose()
+        .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    let Some(status) = status else {
+        out.push_str(
+            &serde_json::json!({
+                "status": "refused",
+                "reason": "no_live_classification",
+                "detail": "no live Issue Monitor driver is publishing the window classification; \
+                           start the GWT app for this project and retry",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    };
+    let targets = status
+        .idle_windows
+        .iter()
+        .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
+        .map(|idle| {
+            serde_json::json!({
+                "window_id": idle.window_id,
+                "issue_number": idle.issue_number,
+                "idle_kind": idle.idle_kind.as_str(),
+                "idle_since": idle.idle_since,
+                "bound": idle.bound,
+                "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+            })
+        })
+        .collect::<Vec<_>>();
+    if dry_run {
+        out.push_str(
+            &serde_json::json!({
+                "status": "dry_run",
+                "number": number,
+                "targets": targets,
+                "idle_window_counts": status.idle_window_counts,
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(0);
+    }
+    let reason = match number {
+        Some(number) => format!("released by the operator for Issue #{number}"),
+        None => "released by the operator".to_string(),
+    };
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "idle_release": {
+                "number": number,
+                "reason": reason,
+            }
+        }),
+        std::process::id(),
+    );
+    match publish_monitor_config_set(&project_root, payload) {
+        Ok(()) => {
+            out.push_str(
+                &serde_json::json!({
+                    "status": "requested",
+                    "number": number,
+                    "reason": reason,
+                    "targets": targets,
+                    "detail": "the next scan releases these windows and closes their panes; \
+                               a stuck_unknown row is reported, never released",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        Err(error) => {
+            out.push_str(
+                &serde_json::json!({
+                    "status": "refused",
+                    "reason": "control_publish_failed",
+                    "detail": error.to_string(),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            Ok(1)
+        }
+    }
 }
 
 /// Issue #3923 AC-1 / Issue #3961 AC-4: release one provider's quota
@@ -3687,6 +3800,8 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
         };
         merge_board_escalations_into_needs_human(&repo, &mut published);
         assert!(published.queue.is_empty());
@@ -3726,12 +3841,16 @@ mod tests {
                 delivery_id: None,
                 waiting: None,
                 steering: None,
+                idle_kind: None,
+                idle_since: None,
             }],
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
         };
         merge_board_escalations_into_needs_human(&repo, &mut live_open);
         assert_eq!(live_open.queue, vec![2338]);
@@ -3822,12 +3941,16 @@ mod tests {
                     delivery_id: None,
                     waiting: None,
                     steering: None,
+                    idle_kind: None,
+                    idle_since: None,
                 }],
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                idle_windows: Vec::new(),
+                idle_window_counts: std::collections::BTreeMap::new(),
             };
             merge_board_escalations_into_needs_human(&repo, &mut status);
             assert_eq!(
@@ -3880,6 +4003,8 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
         };
 
         merge_board_escalations_into_needs_human(&repo, &mut published);

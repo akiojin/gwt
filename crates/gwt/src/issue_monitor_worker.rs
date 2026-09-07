@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    IssueMonitorCandidateSource, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState, MonitorInboxState,
+    IssueMonitorCandidateSource, IssueMonitorExecutionSettlement, IssueMonitorInboxItem,
+    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary,
+    IssueMonitorState, MonitorInboxState,
 };
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
@@ -286,6 +287,62 @@ where
     Ok(value)
 }
 
+/// Issue #4084: read the execution record state of every launched Issue so the
+/// idle classifier can tell a settled implementation window from a live one.
+///
+/// The owner diagnosis is repository-scoped, so any worktree in the repository
+/// answers for every owner. An unreadable or absent record is `Unknown`, which
+/// classifies as `stuck_unknown` and is therefore never released automatically.
+pub fn read_execution_settlements(
+    project_root: &Path,
+    issue_numbers: &[u64],
+) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
+    use crate::cli::execution_state::{
+        diagnose_owner, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    issue_numbers
+        .iter()
+        .map(|issue_number| {
+            let diagnosis = diagnose_owner(
+                project_root,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: *issue_number,
+                },
+            );
+            let settlement = match diagnosis.ecr_status {
+                Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Active,
+                Some(ExecutionControlStatus::Completed) => {
+                    IssueMonitorExecutionSettlement::Completed
+                }
+                Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
+                None => IssueMonitorExecutionSettlement::Unknown,
+            };
+            (*issue_number, settlement)
+        })
+        .collect()
+}
+
+/// Issue #4084 AC-2/AC-3: classify the launched windows against the last
+/// canvas snapshot and release the ones no human has to judge.
+pub fn reconcile_issue_monitor_idle_windows(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> crate::IssueMonitorIdleReconciliation {
+    let settlements = read_execution_settlements(project_root, &monitor.active_issue_numbers());
+    let outcome = monitor.reconcile_idle_windows(&settlements, now);
+    if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
+        tracing::info!(
+            released = ?outcome.released,
+            rebound = ?outcome.rebound,
+            pane_closes = ?outcome.pane_closes,
+            "released idle Issue Monitor windows"
+        );
+    }
+    outcome
+}
+
 pub fn issue_monitor_daemon_payloads(
     monitor: &mut IssueMonitorState,
     gui_connected: bool,
@@ -315,6 +372,19 @@ pub fn issue_monitor_daemon_payloads(
                     }),
                 });
             }
+        }
+        // Issue #4084 AC-2/AC-3: ask the GUI to close the panes whose launch
+        // this scan already released. The lifecycle edge is committed, so the
+        // GUI must close them without publishing a second `window_closed`.
+        for close in monitor.take_pending_idle_pane_closes() {
+            payloads.push(IssueMonitorDaemonPayload {
+                event: "idle_pane_close".to_string(),
+                payload: serde_json::json!({
+                    "window_id": close.window_id,
+                    "issue_number": close.issue_number,
+                    "idle_kind": close.idle_kind.as_str(),
+                }),
+            });
         }
         // SPEC #3200 Option A: surface review-agent spawn requests to the GUI.
         for dispatch in monitor.take_pending_review_dispatches() {

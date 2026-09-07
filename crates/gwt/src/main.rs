@@ -1191,6 +1191,25 @@ fn issue_monitor_daemon_user_event(
                 launch_session_strategy,
             })
         }
+        // Issue #4084 AC-2/AC-3: the daemon released an idle launch and asks
+        // the GUI to close the pane it just unbound.
+        "idle_pane_close" => {
+            let window_id = payload.get("window_id")?.as_str()?.to_string();
+            if window_id.is_empty() {
+                return None;
+            }
+            Some(UserEvent::IssueMonitorIdlePaneClose {
+                window_id,
+                issue_number: payload
+                    .get("issue_number")
+                    .and_then(serde_json::Value::as_u64),
+                idle_kind: payload
+                    .get("idle_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        }
         "review_dispatch" => {
             // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
             // review agent for a PR-ready autonomous issue.
@@ -1448,6 +1467,13 @@ enum UserEvent {
     /// Completion of an off-event-loop physical answer submit to an exact
     /// live pane. Durable delivery acknowledgment begins only on this event.
     IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
+    /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
+    /// Issue Monitor launch the daemon already released (daemon → GUI).
+    IssueMonitorIdlePaneClose {
+        window_id: String,
+        issue_number: Option<u64>,
+        idle_kind: String,
+    },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -3215,6 +3241,7 @@ mod tests {
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
+            issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
             project_tab_incarnations,
@@ -9170,6 +9197,15 @@ fn main() -> std::io::Result<()> {
                 events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                     items,
                 }));
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
+                window_id,
+                issue_number,
+                idle_kind,
+            }) => {
+                let events =
+                    app.issue_monitor_idle_pane_close_events(&window_id, issue_number, &idle_kind);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {

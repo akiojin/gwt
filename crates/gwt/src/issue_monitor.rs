@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs,
+    fmt, fs,
     io::{self, Write},
     path::Path,
 };
@@ -20,7 +20,7 @@ use gwt_github::{
 
 use crate::{
     has_gwt_spec_label, knowledge_launch_target_branch_name, LaunchWizardPreviousProfile,
-    LinkedIssueKind,
+    LinkedIssueKind, WindowState,
 };
 
 const GITHUB_AUTH_SETUP_MESSAGE: &str = concat!(
@@ -1792,6 +1792,140 @@ pub struct IssueMonitorStopTarget {
     pub window_id: Option<String>,
 }
 
+/// Issue #4084 AC-1: why a launched agent window is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorIdleKind {
+    /// An independent review window whose verdict the daemon already judged.
+    ReviewVerdictPublished,
+    /// An implementation window whose execution record settled (Completed or
+    /// Blocked), whatever the state of its Draft / Ready PR.
+    ExecutionSettled,
+    /// The bound window is gone from the owning tab's canvas, or its process
+    /// exited without settling anything.
+    BindingDead,
+    /// The execution record is still Active while the pane is idle. Only a
+    /// human can tell a stall from a pause, so this stays on the steering path.
+    StuckUnknown,
+}
+
+impl IssueMonitorIdleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewVerdictPublished => "review_verdict_published",
+            Self::ExecutionSettled => "execution_settled",
+            Self::BindingDead => "binding_dead",
+            Self::StuckUnknown => "stuck_unknown",
+        }
+    }
+
+    /// Whether the Monitor may release this window without a human decision.
+    fn releasable(self) -> bool {
+        !matches!(self, Self::StuckUnknown)
+    }
+}
+
+impl fmt::Display for IssueMonitorIdleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Issue #4084: one agent window as the GUI observed it on the owning project
+/// tab's canvas. `issue_number` is the window's linked Issue;
+/// `review_dispatch` marks an independent review window (Issue #4041).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWindowObservation {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    pub status: WindowState,
+    #[serde(default)]
+    pub review_dispatch: bool,
+}
+
+/// Issue #4084: the complete set of agent windows on one project tab at
+/// `observed_at`. Absence from a fresh snapshot is what makes a binding dead,
+/// so a partial or stale snapshot must never be judged (see
+/// [`IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWindowSnapshot {
+    pub project_tab_id: String,
+    pub observed_at: String,
+    #[serde(default)]
+    pub windows: Vec<IssueMonitorWindowObservation>,
+}
+
+/// Issue #4084: the execution record state of one launched Issue, as the scan
+/// read it from the repository-scoped trusted store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorExecutionSettlement {
+    Active,
+    Completed,
+    Blocked,
+    Unknown,
+}
+
+/// Issue #4084 AC-1: one idle window and its classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorIdleWindow {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    pub idle_kind: IssueMonitorIdleKind,
+    /// When this window was first observed idle (RFC3339). Kept across scans
+    /// while the window stays idle; forgotten once it runs again.
+    pub idle_since: String,
+    /// The window holds the Issue's launch binding, and therefore a slot.
+    pub bound: bool,
+    /// The pane still exists on the canvas, so a close is possible.
+    pub pane_present: bool,
+    /// A live implementation window for the same Issue that the slot moves to
+    /// instead of being freed (AC-2, the 9.91.0 review-binding shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebind_to: Option<String>,
+}
+
+/// Issue #4084: one pane the GUI closes because the Monitor released it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorIdlePaneClose {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    pub idle_kind: IssueMonitorIdleKind,
+}
+
+/// Issue #4084 AC-5: an operator's request that the next scan release idle
+/// windows regardless of the autonomous-mode gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorIdleReleaseRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    pub reason: String,
+}
+
+/// Issue #4084: what one idle reconciliation classified and did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueMonitorIdleReconciliation {
+    /// Every idle window found this scan, released or not.
+    pub idle_windows: Vec<IssueMonitorIdleWindow>,
+    /// Issues whose slot was freed (no requeue).
+    pub released: Vec<u64>,
+    /// Issues whose slot moved to a running implementation window.
+    pub rebound: Vec<(u64, String)>,
+    /// Panes queued for the GUI to close.
+    pub pane_closes: Vec<String>,
+    /// Issues asked to be steered because their idle pane is unexplained.
+    pub steering_requested: Vec<u64>,
+    /// Idle windows an operator request could not release automatically.
+    pub skipped: Vec<(u64, IssueMonitorIdleKind)>,
+}
+
+/// Issue #4084: a canvas snapshot older than this proves nothing about the
+/// windows it omits. Two scheduled ticks plus slack.
+pub const IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS: i64 = 600;
+
 /// Issue #3927 (SPEC #3340 FR-044): the durable Monitor facts the runtime's
 /// canonical terminal predicate reads for one Issue-linked window. Read-only;
 /// the runtime decides, the Monitor only reports.
@@ -2235,6 +2369,13 @@ pub struct IssueMonitorAgentStatus {
     /// surface from the machine-local ledger; `None` in daemon projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_budget: Option<BTreeMap<String, gwt_core::github_budget::ResourceBudgetStatus>>,
+    /// Issue #4084 AC-1: every idle window found by the last scan, bound or
+    /// not, so the PM can see what will be released and what needs a call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub idle_windows: Vec<IssueMonitorIdleWindow>,
+    /// Issue #4084 AC-1: idle windows per kind (`stuck_unknown` etc.).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub idle_window_counts: BTreeMap<String, usize>,
     /// Issue #3964 AC-4: the last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
@@ -2664,6 +2805,12 @@ pub struct IssueMonitorInboxSummary {
     /// so a silent row can be told apart from a stalled one by its reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<IssueMonitorWaitSummary>,
+    /// Issue #4084 AC-1: why the bound window is idle, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_kind: Option<IssueMonitorIdleKind>,
+    /// Issue #4084 AC-1: when the bound window was first seen idle (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
     /// Issue #3944 AC-2: the Monitor's open request that the PM steer this
     /// launch (stuck with a live window, attempts exhausted, or a held gate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2821,6 +2968,21 @@ pub struct IssueMonitorState {
     /// intercepting hook and driven to `AwaitingHuman` / `Resumed` here.
     #[serde(default)]
     autonomous_handoffs: Vec<AutonomousQuestionHandoff>,
+    /// Issue #4084: the latest canvas observation the GUI published for this
+    /// project tab. In-memory only; a restart simply waits for the next tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_snapshot: Option<IssueMonitorWindowSnapshot>,
+    /// Issue #4084 AC-1: idle windows keyed by window id, carrying the first
+    /// scan at which each was seen idle.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    idle_windows: BTreeMap<String, IssueMonitorIdleWindow>,
+    /// Issue #4084 AC-2/AC-3: panes released this scan, drained by the
+    /// daemon→GUI payload builder (or the local fallback scan's completion).
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pending_idle_pane_closes: VecDeque<IssueMonitorIdlePaneClose>,
+    /// Issue #4084 AC-5: an operator asked the next scan to release idle rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_idle_release: Option<IssueMonitorIdleReleaseRequest>,
 }
 
 /// Issue #3478 (AC-5): one answered handoff ready to be delivered back to the
@@ -4509,6 +4671,10 @@ impl IssueMonitorState {
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
             autonomous_handoffs: Vec::new(),
+            window_snapshot: None,
+            idle_windows: BTreeMap::new(),
+            pending_idle_pane_closes: VecDeque::new(),
+            pending_idle_release: None,
         }
     }
 
@@ -7990,6 +8156,25 @@ impl IssueMonitorState {
         self.agent_status_without_scan_at(&now)
     }
 
+    /// Issue #4084 AC-1: the idle classification of the window bound to
+    /// `issue_number`, if that window is idle.
+    fn bound_idle_window(&self, issue_number: u64) -> Option<&IssueMonitorIdleWindow> {
+        self.idle_windows
+            .values()
+            .find(|idle| idle.bound && idle.issue_number == Some(issue_number))
+    }
+
+    /// Issue #4084 AC-1: idle windows per kind, for the status CTA and notices.
+    pub fn idle_window_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for idle in self.idle_windows.values() {
+            *counts
+                .entry(idle.idle_kind.as_str().to_string())
+                .or_insert(0) += 1;
+        }
+        counts
+    }
+
     fn agent_status_without_scan_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         IssueMonitorAgentStatus {
@@ -8062,6 +8247,12 @@ impl IssueMonitorState {
                         steering: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| record.steering.clone()),
+                        idle_kind: self
+                            .bound_idle_window(item.issue.number)
+                            .map(|idle| idle.idle_kind),
+                        idle_since: self
+                            .bound_idle_window(item.issue.number)
+                            .map(|idle| idle.idle_since.clone()),
                     }
                 })
                 .collect(),
@@ -8070,6 +8261,8 @@ impl IssueMonitorState {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: self.generation_reclaim.clone(),
+            idle_windows: self.idle_windows(),
+            idle_window_counts: self.idle_window_counts(),
         }
     }
 
@@ -11835,6 +12028,390 @@ impl IssueMonitorState {
         Ok(issue_number)
     }
 
+    /// Issue #4084: record the GUI's canvas observation for the next scan.
+    pub fn record_window_snapshot(&mut self, snapshot: IssueMonitorWindowSnapshot) {
+        self.window_snapshot = Some(snapshot);
+    }
+
+    /// Issue #4084 AC-5: ask the next scan to release idle windows on the
+    /// operator's authority (`number: None` releases every releasable row).
+    pub fn request_idle_release(&mut self, number: Option<u64>, reason: impl Into<String>) {
+        self.pending_idle_release = Some(IssueMonitorIdleReleaseRequest {
+            number,
+            reason: reason.into(),
+        });
+    }
+
+    /// Issue #4084 AC-1: the idle windows found by the last reconciliation,
+    /// ordered by Issue then window id.
+    pub fn idle_windows(&self) -> Vec<IssueMonitorIdleWindow> {
+        let mut idle = self.idle_windows.values().cloned().collect::<Vec<_>>();
+        idle.sort_by(|a, b| {
+            a.issue_number
+                .cmp(&b.issue_number)
+                .then_with(|| a.window_id.cmp(&b.window_id))
+        });
+        idle
+    }
+
+    /// Issue #4084: drain the panes the GUI should close.
+    pub fn take_pending_idle_pane_closes(&mut self) -> Vec<IssueMonitorIdlePaneClose> {
+        self.pending_idle_pane_closes.drain(..).collect()
+    }
+
+    fn fresh_window_snapshot(&self, now: &str) -> Option<&IssueMonitorWindowSnapshot> {
+        let snapshot = self.window_snapshot.as_ref()?;
+        let age = rfc3339_elapsed_secs(&snapshot.observed_at, now)?;
+        (age <= IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS).then_some(snapshot)
+    }
+
+    fn review_verdict_published(&self, issue_number: u64) -> bool {
+        self.autonomous_records
+            .get(&issue_number)
+            .is_some_and(|record| record.review_passed.is_some())
+    }
+
+    /// Issue #4084 AC-1: classify every idle launched window against the last
+    /// fresh canvas snapshot. Pure: nothing is mutated, and a missing, stale,
+    /// or foreign-tab snapshot classifies nothing (a binding is judged dead
+    /// only against the complete canvas of its own tab, as
+    /// [`Self::vanished_launched_windows`] judges it).
+    ///
+    /// `settlements` is the execution record state per launched Issue, read by
+    /// the caller from the trusted store; an absent entry is `Unknown`.
+    pub fn classify_idle_windows(
+        &self,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        now: &str,
+    ) -> Vec<IssueMonitorIdleWindow> {
+        let Some(snapshot) = self.fresh_window_snapshot(now) else {
+            return Vec::new();
+        };
+        let observation = |window_id: &str| {
+            snapshot
+                .windows
+                .iter()
+                .find(|observed| issue_monitor_window_ids_match(window_id, &observed.window_id))
+        };
+        let idle_since = |window_id: &str| {
+            self.idle_windows
+                .get(window_id)
+                .map(|idle| idle.idle_since.clone())
+                .unwrap_or_else(|| now.to_string())
+        };
+        let mut classified = Vec::new();
+        for (issue_number, window_id) in &self.launched_windows {
+            let owned_here = issue_monitor_qualified_window_id(window_id)
+                .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
+            if !owned_here {
+                continue;
+            }
+            let (idle_kind, pane_present, rebind_to) = match observation(window_id) {
+                None => (IssueMonitorIdleKind::BindingDead, false, None),
+                Some(observed) => match observed.status {
+                    WindowState::Stopped => (IssueMonitorIdleKind::BindingDead, true, None),
+                    WindowState::Idle => {
+                        if observed.review_dispatch && self.review_verdict_published(*issue_number)
+                        {
+                            let rebind_to = snapshot
+                                .windows
+                                .iter()
+                                .find(|other| {
+                                    other.issue_number == Some(*issue_number)
+                                        && !other.review_dispatch
+                                        && idle_window_is_alive(other.status)
+                                        && !issue_monitor_window_ids_match(
+                                            window_id,
+                                            &other.window_id,
+                                        )
+                                })
+                                .map(|other| other.window_id.clone());
+                            (
+                                IssueMonitorIdleKind::ReviewVerdictPublished,
+                                true,
+                                rebind_to,
+                            )
+                        } else if matches!(
+                            settlements.get(issue_number),
+                            Some(
+                                IssueMonitorExecutionSettlement::Completed
+                                    | IssueMonitorExecutionSettlement::Blocked
+                            )
+                        ) {
+                            (IssueMonitorIdleKind::ExecutionSettled, true, None)
+                        } else {
+                            (IssueMonitorIdleKind::StuckUnknown, true, None)
+                        }
+                    }
+                    // Running / Starting / Waiting / Error are never idle
+                    // (AC-6); an Error pane is a diagnostic to keep.
+                    WindowState::Running
+                    | WindowState::Starting
+                    | WindowState::Waiting
+                    | WindowState::Error => continue,
+                },
+            };
+            classified.push(IssueMonitorIdleWindow {
+                window_id: window_id.clone(),
+                issue_number: Some(*issue_number),
+                idle_kind,
+                idle_since: idle_since(window_id),
+                bound: true,
+                pane_present,
+                rebind_to,
+            });
+        }
+        // Issue #4041 shape: the review window is not the launch binding, so
+        // it holds no slot; once its verdict is judged the pane is just idle.
+        for observed in &snapshot.windows {
+            if !observed.review_dispatch
+                || !matches!(observed.status, WindowState::Idle | WindowState::Stopped)
+            {
+                continue;
+            }
+            let Some(issue_number) = observed.issue_number else {
+                continue;
+            };
+            if !self.review_verdict_published(issue_number) {
+                continue;
+            }
+            let bound = self
+                .launched_windows
+                .values()
+                .any(|bound| issue_monitor_window_ids_match(bound, &observed.window_id));
+            if bound {
+                continue;
+            }
+            classified.push(IssueMonitorIdleWindow {
+                window_id: observed.window_id.clone(),
+                issue_number: Some(issue_number),
+                idle_kind: IssueMonitorIdleKind::ReviewVerdictPublished,
+                idle_since: idle_since(&observed.window_id),
+                bound: false,
+                pane_present: true,
+                rebind_to: None,
+            });
+        }
+        classified
+    }
+
+    /// Issue #4084 AC-2/AC-3/AC-4: classify the idle windows, then act.
+    ///
+    /// Automatic release runs only under autonomous mode — the same fail-closed
+    /// gate as [`Self::recover_stuck_autonomous`], so the default human-gated
+    /// flow observes but never tears anything down — or when an operator
+    /// asked through [`Self::request_idle_release`]. `stuck_unknown` is never
+    /// released here; past twice `stuck_timeout_secs` of idleness it asks the
+    /// PM for a decision instead. Release frees the slot and unbinds the window
+    /// without spending an attempt or requeueing the Issue (AC-2/AC-3): the row
+    /// stays `Launched` out of the queue, exactly as
+    /// [`Self::settle_exact_terminal_delivery`] leaves it, until the ordinary
+    /// completion probe or the PM ends it. Nothing here changes `enabled`,
+    /// `max_active_agents`, or any claim (AC-6).
+    pub fn reconcile_idle_windows(
+        &mut self,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        now: &str,
+    ) -> IssueMonitorIdleReconciliation {
+        let classified = self.classify_idle_windows(settlements, now);
+        self.idle_windows = classified
+            .iter()
+            .map(|idle| (idle.window_id.clone(), idle.clone()))
+            .collect();
+        let mut outcome = IssueMonitorIdleReconciliation {
+            idle_windows: classified,
+            ..IssueMonitorIdleReconciliation::default()
+        };
+        match self.pending_idle_release.take() {
+            Some(request) => {
+                self.apply_idle_release(&mut outcome, request.number, &request.reason, true);
+            }
+            None if self.autonomous_mode => {
+                self.apply_idle_release(
+                    &mut outcome,
+                    None,
+                    "released automatically by the Issue Monitor",
+                    false,
+                );
+                self.notify_stuck_idle_windows(&mut outcome, now);
+            }
+            None => {}
+        }
+        outcome
+    }
+
+    /// Issue #4084 AC-5: release the idle windows found by the last
+    /// reconciliation on the operator's authority, whatever the mode. A
+    /// `stuck_unknown` row is reported as skipped, never released.
+    pub fn release_idle_windows(
+        &mut self,
+        number: Option<u64>,
+        reason: &str,
+        _now: &str,
+    ) -> IssueMonitorIdleReconciliation {
+        let mut outcome = IssueMonitorIdleReconciliation {
+            idle_windows: self.idle_windows(),
+            ..IssueMonitorIdleReconciliation::default()
+        };
+        self.apply_idle_release(&mut outcome, number, reason, true);
+        outcome
+    }
+
+    fn apply_idle_release(
+        &mut self,
+        outcome: &mut IssueMonitorIdleReconciliation,
+        number: Option<u64>,
+        reason: &str,
+        forced: bool,
+    ) {
+        let targets = self
+            .idle_windows()
+            .into_iter()
+            .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
+            .collect::<Vec<_>>();
+        for idle in targets {
+            if !idle.idle_kind.releasable() {
+                if forced {
+                    if let Some(issue_number) = idle.issue_number {
+                        outcome.skipped.push((issue_number, idle.idle_kind));
+                    }
+                }
+                continue;
+            }
+            if idle.bound {
+                let Some(issue_number) = idle.issue_number else {
+                    continue;
+                };
+                match idle.rebind_to.as_deref() {
+                    Some(to) => {
+                        self.rebind_launch_window(
+                            issue_number,
+                            &idle.window_id,
+                            to,
+                            idle.idle_kind,
+                        );
+                        outcome.rebound.push((issue_number, to.to_string()));
+                    }
+                    None => {
+                        self.release_idle_launch(
+                            issue_number,
+                            &idle.window_id,
+                            idle.idle_kind,
+                            reason,
+                        );
+                        outcome.released.push(issue_number);
+                    }
+                }
+            }
+            if idle.pane_present {
+                self.pending_idle_pane_closes
+                    .push_back(IssueMonitorIdlePaneClose {
+                        window_id: idle.window_id.clone(),
+                        issue_number: idle.issue_number,
+                        idle_kind: idle.idle_kind,
+                    });
+                outcome.pane_closes.push(idle.window_id.clone());
+            }
+            self.idle_windows.remove(&idle.window_id);
+        }
+    }
+
+    /// Free the slot held by `window_id` for `issue_number` without spending an
+    /// attempt or requeueing. Mirrors [`Self::settle_exact_terminal_delivery`],
+    /// plus dropping the binding ledger entry so a pane that survives its close
+    /// cannot be re-adopted into the slot it just left.
+    fn release_idle_launch(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        idle_kind: IssueMonitorIdleKind,
+        reason: &str,
+    ) {
+        self.clear_active_tracking(issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        self.launch_bindings
+            .retain(|bound, _| !issue_monitor_window_ids_match(bound, window_id));
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: released idle window {window_id} ({idle_kind}) — {reason}"
+            ),
+        );
+    }
+
+    /// AC-2: the review window held the binding while the implementation
+    /// window kept running (9.91.0 shape); move the slot to the running window.
+    fn rebind_launch_window(
+        &mut self,
+        issue_number: u64,
+        from: &str,
+        to: &str,
+        idle_kind: IssueMonitorIdleKind,
+    ) {
+        self.launched_windows.insert(issue_number, to.to_string());
+        self.launch_bindings
+            .retain(|bound, _| !issue_monitor_window_ids_match(bound, from));
+        self.launch_bindings.insert(to.to_string(), issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = Some(to.to_string());
+        }
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: launch binding moved from idle window {from} ({idle_kind}) to running window {to}"
+            ),
+        );
+    }
+
+    /// AC-4: an Active record whose pane has been idle for twice
+    /// `stuck_timeout_secs` needs a human; ask the PM, naming the count.
+    fn notify_stuck_idle_windows(
+        &mut self,
+        outcome: &mut IssueMonitorIdleReconciliation,
+        now: &str,
+    ) {
+        let threshold = i64::try_from(self.autonomous_tuning.stuck_timeout_secs.saturating_mul(2))
+            .unwrap_or(i64::MAX);
+        let stuck = self
+            .idle_windows()
+            .into_iter()
+            .filter(|idle| idle.bound && idle.idle_kind == IssueMonitorIdleKind::StuckUnknown)
+            .collect::<Vec<_>>();
+        let count = stuck.len();
+        for idle in stuck {
+            let Some(issue_number) = idle.issue_number else {
+                continue;
+            };
+            let overdue = rfc3339_elapsed_secs(&idle.idle_since, now)
+                .is_some_and(|elapsed| elapsed >= threshold);
+            if !overdue {
+                continue;
+            }
+            self.request_autonomous_steering(
+                issue_number,
+                format!(
+                    "stuck_unknown: window {} has been idle since {} while the execution record is still Active; {count} idle window(s) need a decision",
+                    idle.window_id, idle.idle_since
+                ),
+                now,
+            );
+            outcome.steering_requested.push(issue_number);
+        }
+    }
+
     /// [`Self::requeue_window`] with an injected clock for the backoff floor.
     ///
     /// SPEC-3431 FR-066: a close is a bounded retry, not a free one. It used to
@@ -12150,6 +12727,14 @@ fn expiry_from_now_lexical(now: &str, ttl_secs: u64) -> String {
         .unwrap_or_else(|_| now.to_string())
 }
 
+/// Issue #4084: a pane whose process can still make progress or answer.
+fn idle_window_is_alive(status: WindowState) -> bool {
+    matches!(
+        status,
+        WindowState::Running | WindowState::Starting | WindowState::Idle | WindowState::Waiting
+    )
+}
+
 fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
     if stored == incoming {
         return true;
@@ -12390,6 +12975,8 @@ mod tests {
                     delivery_id: None,
                     waiting: None,
                     steering: None,
+                    idle_kind: None,
+                    idle_since: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -12398,6 +12985,8 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                idle_windows: Vec::new(),
+                idle_window_counts: BTreeMap::new(),
             }
         );
     }
@@ -24316,6 +24905,549 @@ mod tests {
         assert_eq!(
             monitor.inbox_item(3928).map(|item| item.state),
             Some(MonitorInboxState::AgentFailed)
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #4084: idle-window classification and automatic release.
+    // ------------------------------------------------------------------
+
+    const IDLE_NOW: &str = "2026-09-07T04:00:00Z";
+
+    fn idle_observation(
+        window_id: &str,
+        issue_number: Option<u64>,
+        status: WindowState,
+        review_dispatch: bool,
+    ) -> IssueMonitorWindowObservation {
+        IssueMonitorWindowObservation {
+            window_id: window_id.to_string(),
+            issue_number,
+            status,
+            review_dispatch,
+        }
+    }
+
+    fn idle_snapshot(
+        observed_at: &str,
+        windows: Vec<IssueMonitorWindowObservation>,
+    ) -> IssueMonitorWindowSnapshot {
+        IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: observed_at.to_string(),
+            windows,
+        }
+    }
+
+    fn settlements(
+        entries: &[(u64, IssueMonitorExecutionSettlement)],
+    ) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
+        entries.iter().copied().collect()
+    }
+
+    /// An autonomous cohort of launched Issues, each bound to a window on
+    /// `tab-1`, with the launch profile and slot cap the Issue's incident had.
+    fn autonomous_launched_cohort(bindings: &[(u64, &str)]) -> IssueMonitorState {
+        let mut monitor = launched_cohort(bindings);
+        monitor.set_autonomous_mode(true);
+        monitor
+    }
+
+    fn idle_kind_of(monitor: &IssueMonitorState, window_id: &str) -> Option<IssueMonitorIdleKind> {
+        monitor
+            .idle_windows()
+            .iter()
+            .find(|idle| idle.window_id == window_id)
+            .map(|idle| idle.idle_kind)
+    }
+
+    #[test]
+    fn idle_windows_are_classified_per_launched_row() {
+        // AC-1: four launched rows, one per classification.
+        let mut monitor = autonomous_launched_cohort(&[
+            (41, "tab-1::review-41"),
+            (42, "tab-1::impl-42"),
+            (43, "tab-1::dead-43"),
+            (44, "tab-1::stuck-44"),
+        ]);
+        // #41: the bound window is the review dispatch and its verdict landed.
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, true);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::review-41", Some(41), WindowState::Idle, true),
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Idle, false),
+                // #43's window is gone from the canvas entirely.
+                idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+            ],
+        ));
+        let classified = monitor.classify_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Blocked),
+                (44, IssueMonitorExecutionSettlement::Active),
+            ]),
+            IDLE_NOW,
+        );
+        let kinds = classified
+            .iter()
+            .map(|idle| (idle.issue_number, idle.idle_kind, idle.bound))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                (Some(41), IssueMonitorIdleKind::ReviewVerdictPublished, true),
+                (Some(42), IssueMonitorIdleKind::ExecutionSettled, true),
+                (Some(43), IssueMonitorIdleKind::BindingDead, true),
+                (Some(44), IssueMonitorIdleKind::StuckUnknown, true),
+            ]
+        );
+        assert!(
+            classified.iter().all(|idle| idle.idle_since == IDLE_NOW),
+            "first observation stamps idle_since with the scan time"
+        );
+
+        // The status projection carries the classification per inbox row.
+        monitor.reconcile_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Blocked),
+                (44, IssueMonitorExecutionSettlement::Active),
+            ]),
+            IDLE_NOW,
+        );
+        let status = monitor.agent_status_at(IDLE_NOW);
+        let row = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .expect("row present")
+        };
+        assert_eq!(
+            row(44).idle_kind,
+            Some(IssueMonitorIdleKind::StuckUnknown),
+            "an unreleased row keeps its classification on the status row"
+        );
+        assert_eq!(row(44).idle_since.as_deref(), Some(IDLE_NOW));
+        assert_eq!(
+            status.idle_windows.len(),
+            1,
+            "released windows leave the idle list; only the stuck row remains"
+        );
+        assert_eq!(
+            status.idle_window_counts.get("stuck_unknown").copied(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn idle_since_is_carried_across_scans_and_cleared_when_the_window_wakes_up() {
+        let mut monitor = autonomous_launched_cohort(&[(44, "tab-1::stuck-44")]);
+        let active = settlements(&[(44, IssueMonitorExecutionSettlement::Active)]);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::stuck-44",
+                Some(44),
+                WindowState::Idle,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(&active, IDLE_NOW);
+        assert_eq!(
+            idle_kind_of(&monitor, "tab-1::stuck-44"),
+            Some(IssueMonitorIdleKind::StuckUnknown)
+        );
+
+        let later = "2026-09-07T04:10:00Z";
+        monitor.record_window_snapshot(idle_snapshot(
+            later,
+            vec![idle_observation(
+                "tab-1::stuck-44",
+                Some(44),
+                WindowState::Idle,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(&active, later);
+        assert_eq!(
+            monitor.idle_windows()[0].idle_since,
+            IDLE_NOW,
+            "a window that stays idle keeps its first idle_since"
+        );
+
+        let awake = "2026-09-07T04:20:00Z";
+        monitor.record_window_snapshot(idle_snapshot(
+            awake,
+            vec![idle_observation(
+                "tab-1::stuck-44",
+                Some(44),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(&active, awake);
+        assert!(
+            monitor.idle_windows().is_empty(),
+            "a running window is not idle and its idle_since is forgotten"
+        );
+    }
+
+    #[test]
+    fn review_verdict_published_and_binding_dead_release_the_slot_without_requeue() {
+        // AC-2: both kinds free the slot in one reconcile; the row leaves
+        // `launched` but is not requeued; the review pane is closed.
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::review-41"), (43, "tab-1::dead-43")]);
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, true);
+        let claim_before = monitor.prefs().launched_claims.clone();
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::review-41",
+                Some(41),
+                WindowState::Idle,
+                true,
+            )],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert_eq!(outcome.released, vec![41, 43]);
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "both slots are free after one scan"
+        );
+        assert_eq!(monitor.launched_window_id(41), None);
+        assert_eq!(monitor.launched_window_id(43), None);
+        assert!(
+            monitor.queued_issue_numbers().is_empty(),
+            "release is not a requeue"
+        );
+        for number in [41, 43] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::Launched),
+                "the row stays out of the queue until the completion probe ends it"
+            );
+            assert_eq!(monitor.inbox_item(number).unwrap().launched_window_id, None);
+        }
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| (close.window_id, close.issue_number, close.idle_kind))
+                .collect::<Vec<_>>(),
+            vec![(
+                "tab-1::review-41".to_string(),
+                Some(41),
+                IssueMonitorIdleKind::ReviewVerdictPublished
+            )],
+            "only the pane that still exists is closed"
+        );
+        // AC-6: prefs stay as they were apart from the launch itself.
+        let prefs = monitor.prefs();
+        assert!(prefs.enabled);
+        assert_eq!(prefs.max_active_agents, 2);
+        assert!(!claim_before.is_empty());
+        assert!(
+            prefs.launch_bindings.is_empty(),
+            "a released window cannot be re-adopted into the slot it just left"
+        );
+        // A second reconcile is a no-op.
+        let again = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(again.released.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+    }
+
+    #[test]
+    fn review_verdict_published_rebinds_the_slot_to_a_running_implementation_window() {
+        // AC-2: 9.91.0 shape — the review window overwrote the binding while
+        // the implementation window keeps running in another pane.
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::review-41")]);
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, false);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::review-41", Some(41), WindowState::Idle, true),
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert_eq!(outcome.rebound, vec![(41, "tab-1::impl-41".to_string())]);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 1, "the slot moves, it is not freed");
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("tab-1::impl-41"),
+            Some(&41)
+        );
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::review-41".to_string()]
+        );
+    }
+
+    #[test]
+    fn unbound_idle_review_window_with_a_verdict_is_closed_without_touching_the_slot() {
+        // #4041 shape: the review window is not the launch binding.
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, true);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Idle, true),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::review-41".to_string()]
+        );
+    }
+
+    #[test]
+    fn execution_settled_releases_the_slot_regardless_of_pr_state_and_closes_the_pane() {
+        // AC-3: Completed and Blocked both settle; the Issue is not closed
+        // and not relaunched by the monitor.
+        for settlement in [
+            IssueMonitorExecutionSettlement::Completed,
+            IssueMonitorExecutionSettlement::Blocked,
+        ] {
+            let mut monitor = autonomous_launched_cohort(&[(42, "tab-1::impl-42")]);
+            monitor.record_window_snapshot(idle_snapshot(
+                IDLE_NOW,
+                vec![idle_observation(
+                    "tab-1::impl-42",
+                    Some(42),
+                    WindowState::Idle,
+                    false,
+                )],
+            ));
+            let outcome =
+                monitor.reconcile_idle_windows(&settlements(&[(42, settlement)]), IDLE_NOW);
+            assert_eq!(outcome.released, vec![42], "{settlement:?}");
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::Launched)
+            );
+            assert_eq!(
+                monitor
+                    .take_pending_idle_pane_closes()
+                    .into_iter()
+                    .map(|close| close.window_id)
+                    .collect::<Vec<_>>(),
+                vec!["tab-1::impl-42".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn stuck_unknown_stays_on_the_steering_path_and_notifies_after_twice_the_timeout() {
+        // AC-4: an Active record with an idle pane is never released; past
+        // 2 × stuck_timeout_secs the PM is asked for a decision with the count.
+        let mut monitor =
+            autonomous_launched_cohort(&[(44, "tab-1::stuck-44"), (45, "tab-1::stuck-45")]);
+        monitor.autonomous_tuning.stuck_timeout_secs = 600;
+        let active = settlements(&[
+            (44, IssueMonitorExecutionSettlement::Active),
+            (45, IssueMonitorExecutionSettlement::Active),
+        ]);
+        let observe = |monitor: &mut IssueMonitorState, at: &str| {
+            monitor.record_window_snapshot(idle_snapshot(
+                at,
+                vec![
+                    idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+                    idle_observation("tab-1::stuck-45", Some(45), WindowState::Idle, false),
+                ],
+            ));
+        };
+        observe(&mut monitor, IDLE_NOW);
+        let outcome = monitor.reconcile_idle_windows(&active, IDLE_NOW);
+        assert!(outcome.released.is_empty());
+        assert!(outcome.steering_requested.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+
+        // 19 minutes later: under 2 × 600 s, still quiet.
+        let before = "2026-09-07T04:19:00Z";
+        observe(&mut monitor, before);
+        let outcome = monitor.reconcile_idle_windows(&active, before);
+        assert!(outcome.steering_requested.is_empty());
+        assert!(monitor.autonomous_record(44).unwrap().steering.is_none());
+
+        // 21 minutes later: both rows ask the PM, naming the count.
+        let after = "2026-09-07T04:21:00Z";
+        observe(&mut monitor, after);
+        let outcome = monitor.reconcile_idle_windows(&active, after);
+        assert_eq!(outcome.steering_requested, vec![44, 45]);
+        assert_eq!(monitor.active_count(), 2, "steering never frees the slot");
+        let steering = monitor
+            .autonomous_record(44)
+            .unwrap()
+            .steering
+            .clone()
+            .unwrap();
+        assert!(
+            steering.reason.contains("2 idle window"),
+            "reason names the idle count: {}",
+            steering.reason
+        );
+        assert!(steering.reason.contains("stuck_unknown"));
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.level == "warn" && notice.message.contains("2 idle window")),
+            "a PM-facing notice carries the count: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn idle_release_never_touches_running_or_starting_panes_or_monitor_config() {
+        // AC-6: a settled record with a live pane is not idle; nothing moves.
+        let mut monitor =
+            autonomous_launched_cohort(&[(42, "tab-1::impl-42"), (46, "tab-1::impl-46")]);
+        monitor.begin_review(42, 420, "sha42");
+        monitor.record_review_verdict(42, true);
+        let before = monitor.prefs();
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Running, true),
+                idle_observation("tab-1::impl-46", Some(46), WindowState::Starting, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Completed),
+                (46, IssueMonitorExecutionSettlement::Blocked),
+            ]),
+            IDLE_NOW,
+        );
+        assert!(outcome.idle_windows.is_empty());
+        assert!(outcome.released.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        let after = monitor.prefs();
+        assert_eq!(after.enabled, before.enabled);
+        assert_eq!(after.max_active_agents, before.max_active_agents);
+        assert_eq!(after.launched_claims, before.launched_claims);
+        assert_eq!(after.launched_issues, before.launched_issues);
+        assert_eq!(after.launch_bindings, before.launch_bindings);
+    }
+
+    #[test]
+    fn idle_release_is_inert_outside_autonomous_mode_but_the_operator_can_force_it() {
+        // Fail-closed like `recover_stuck_autonomous`: the default human-gated
+        // flow classifies but never releases on its own. AC-5's manual path
+        // applies the same actions on request.
+        let mut monitor = launched_cohort(&[(42, "tab-1::impl-42"), (44, "tab-1::stuck-44")]);
+        assert!(!monitor.autonomous_mode());
+        let settled = settlements(&[
+            (42, IssueMonitorExecutionSettlement::Completed),
+            (44, IssueMonitorExecutionSettlement::Active),
+        ]);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Idle, false),
+                idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settled, IDLE_NOW);
+        assert_eq!(outcome.idle_windows.len(), 2, "classification still runs");
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+
+        // The operator asks for one Issue: the stuck row is reported, not released.
+        let forced = monitor.release_idle_windows(Some(44), "operator", IDLE_NOW);
+        assert!(forced.released.is_empty());
+        assert_eq!(
+            forced.skipped,
+            vec![(44, IssueMonitorIdleKind::StuckUnknown)]
+        );
+        assert_eq!(monitor.active_count(), 2);
+
+        // Without a filter every releasable row goes.
+        let forced = monitor.release_idle_windows(None, "operator", IDLE_NOW);
+        assert_eq!(forced.released, vec![42]);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::impl-42".to_string()]
+        );
+    }
+
+    #[test]
+    fn stale_or_foreign_snapshots_never_produce_a_dead_binding() {
+        // A snapshot older than the freshness window, or from another tab,
+        // proves nothing about this tab's windows.
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        let stale = "2026-09-07T03:00:00Z";
+        monitor.record_window_snapshot(idle_snapshot(stale, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(outcome.idle_windows.is_empty(), "stale snapshot is ignored");
+        assert_eq!(monitor.active_count(), 1);
+
+        monitor.record_window_snapshot(IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-2".to_string(),
+            observed_at: IDLE_NOW.to_string(),
+            windows: Vec::new(),
+        });
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(
+            outcome.idle_windows.is_empty(),
+            "another tab cannot see tab-1"
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        // A pane that exists but whose process exited is a dead binding too.
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::dead-43",
+                Some(43),
+                WindowState::Stopped,
+                false,
+            )],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::dead-43".to_string()],
+            "the exited pane is closed once the slot is released"
         );
     }
 }

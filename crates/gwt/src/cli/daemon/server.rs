@@ -1665,6 +1665,18 @@ enum IssueMonitorControl {
         window_id: String,
         target: Option<crate::IssueMonitorStopTarget>,
     },
+    /// Issue #4084 AC-1: the GUI published the complete agent-window canvas
+    /// for one project tab. The scan classifies idle windows against it;
+    /// absence from a fresh snapshot is what makes a binding dead.
+    WindowSnapshot {
+        snapshot: crate::IssueMonitorWindowSnapshot,
+    },
+    /// Issue #4084 AC-5: an operator asked the next scan to release idle
+    /// windows (`number: None` releases every releasable row).
+    IdleRelease {
+        number: Option<u64>,
+        reason: String,
+    },
     /// Issue #3927 (SPEC #3340 Phase 10S, PM ruling `1f7fdc9e`): the GUI
     /// runtime observed a successful exact terminal delivery and asks the
     /// daemon to release the slot before it closes the window itself.
@@ -2336,6 +2348,17 @@ fn apply_routine_issue_monitor_control(
             // a possibly newer same-id launch.
             None => false,
         },
+        IssueMonitorControl::WindowSnapshot { snapshot } => {
+            monitor.record_window_snapshot(snapshot);
+            // A canvas observation is not a durable decision; the next scan
+            // reads it. Committing the snapshot itself would rewrite prefs on
+            // every GUI tick for nothing.
+            false
+        }
+        IssueMonitorControl::IdleRelease { number, reason } => {
+            monitor.request_idle_release(number, reason);
+            true
+        }
         IssueMonitorControl::TerminalDelivered { target } => {
             monitor.settle_exact_terminal_delivery(&target).is_ok()
         }
@@ -2879,6 +2902,28 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         window_id: Some(window_id.clone()),
                     });
                 return Some(IssueMonitorControl::WindowClosed { window_id, target });
+            }
+            if let Some(snapshot) = payload.get("window_snapshot") {
+                let snapshot =
+                    serde_json::from_value::<crate::IssueMonitorWindowSnapshot>(snapshot.clone())
+                        .ok()?;
+                if snapshot.project_tab_id.trim().is_empty()
+                    || snapshot.observed_at.trim().is_empty()
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::WindowSnapshot { snapshot });
+            }
+            if let Some(release) = payload.get("idle_release") {
+                let number = match release.get("number") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_u64()?),
+                };
+                let reason = release.get("reason")?.as_str()?.trim().to_string();
+                if reason.is_empty() {
+                    return None;
+                }
+                return Some(IssueMonitorControl::IdleRelease { number, reason });
             }
             if let Some(delivered) = payload.get("terminal_delivered") {
                 let target = crate::IssueMonitorStopTarget {
@@ -4173,6 +4218,15 @@ fn scan_issue_monitor_once_blocking(
         );
     }
     monitor.recover_stuck_autonomous(&now);
+    // Issue #4084 AC-2/AC-3/AC-4: classify the idle windows the GUI last
+    // observed and release the ones no human has to judge, before this scan
+    // decides what it may launch. `stuck_unknown` stays on the steering path
+    // `recover_stuck_autonomous` above owns.
+    crate::issue_monitor_worker::reconcile_issue_monitor_idle_windows(
+        &mut monitor,
+        &scope.project_root,
+        &now,
+    );
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
     // `gh pr merge --disable-auto` here would let a stale cloned scan mutate
     // GitHub even after the canonical driver rejected its result. The durable

@@ -4430,6 +4430,13 @@ impl AppRuntime {
             );
         }
         if let Some(context) = launch_feedback_context {
+            // Issue #4084 AC-2: remember which windows are independent review
+            // dispatches (Issue #4041) so an idle one with a published verdict
+            // is classified as review rather than as an unexplained stall.
+            if context.issue_monitor_review_dispatch {
+                self.issue_monitor_review_dispatch_windows
+                    .insert(window_id.clone());
+            }
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }

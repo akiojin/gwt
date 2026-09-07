@@ -210,6 +210,13 @@ pub enum IssueCommand {
     /// Issue #3883 AC-6: put the still-running agent windows back under slot
     /// accounting. Additive only — no pane is closed and no slot is taken
     /// away — so it is safe to run against a project mid-flight.
+    /// Issue #4084 AC-5: release idle launched windows on the operator's
+    /// authority, or (with `dry_run`) report only what would be released.
+    MonitorReleaseIdle {
+        project_root: Option<std::path::PathBuf>,
+        number: Option<u64>,
+        dry_run: bool,
+    },
     MonitorReconcile {
         project_root: Option<std::path::PathBuf>,
     },
