@@ -726,6 +726,10 @@ impl ManualLaunchHolderIntent {
 pub struct IssueMonitorProfileSaveContext {
     pub(crate) client_id: ClientId,
     pub(crate) issue_number: Option<u64>,
+    /// Issue #4079 AC-2: the candidate pool as it was when the form opened, so
+    /// the wizard can say which candidate the save replaces without re-reading
+    /// preferences on every keystroke.
+    pub(crate) pool: Vec<gwt::IssueMonitorLaunchProfile>,
 }
 
 #[derive(Debug, Clone)]

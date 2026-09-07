@@ -6419,6 +6419,23 @@ body {
   align-self: flex-start;
 }
 
+/* Issue 4079 AC-2 — which pool candidate an Agent Settings save writes.
+   (No `#` before the number: the token audits scan this block for hex colors.) */
+.launch-pool-impact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-raised, var(--color-surface));
+}
+
+.launch-pool-impact__title {
+  color: var(--color-text-strong);
+}
+
 /* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */
 .launch-intake-input {
   width: 100%;
