@@ -81,7 +81,9 @@ use super::{
     WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::app_runtime::initial_project_tab_incarnations;
-use crate::embedded_server::AgentPmSendResponder;
+use crate::embedded_server::{
+    prepare_outbound_event, AgentPmSendResponder, ClientQueue, DrainStep,
+};
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
     AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
@@ -30464,6 +30466,7 @@ fn stale_runtime_events_cannot_mutate_same_session_window_successor() {
         window_id.clone(),
         predecessor_incarnation,
         b"late predecessor output".to_vec(),
+        1,
     );
     let status_events = runtime.handle_runtime_status_event(
         window_id.clone(),
@@ -56017,6 +56020,169 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
             );
         }
         other => panic!("expected TerminalSnapshot, got {other:?}"),
+    }
+}
+
+/// Issue #4095 AC-1 fixture: an Ink-style renderer (Claude Code) redraws its
+/// two dynamic lines with cursor-up + erase-line sequences while multi-line
+/// tool output streams, cut into PTY-sized reads that ignore frame and escape
+/// boundaries (only UTF-8 boundaries are honored; a read never splits a glyph
+/// in this fixture).
+fn spinner_redraw_pty_chunks() -> Vec<Vec<u8>> {
+    const ERASE_DYNAMIC_LINES: &str = "\x1b[2K\x1b[1A\x1b[2K\x1b[G";
+    const SPINNERS: [&str; 4] = ["✻", "✢", "✶", "✽"];
+    const READ_SIZE: usize = 48;
+    let dynamic = |tick: usize| {
+        format!(
+            "{} Frosting… (1h 57m {:02}s · ↓85.5k tokens) · esc to interrupt\r\n  Tip: Use /clear to start fresh when switching topics",
+            SPINNERS[tick % SPINNERS.len()],
+            tick % 60
+        )
+    };
+    let mut stream = dynamic(0);
+    for tick in 1..=24 {
+        stream.push_str(ERASE_DYNAMIC_LINES);
+        if tick % 4 == 0 {
+            stream.push_str(&format!(
+                "● Bash(sleep 570; gh run view 3408017659{tick} --repo akiojin/gwt --json status)\r\n  ⎿  Running… ({tick}m 43s · timeout 10m)\r\n     (ctrl+b to run in background)\r\n"
+            ));
+        }
+        stream.push_str(&dynamic(tick));
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < stream.len() {
+        let mut end = (start + READ_SIZE).min(stream.len());
+        while !stream.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(stream.as_bytes()[start..end].to_vec());
+        start = end;
+    }
+    chunks
+}
+
+/// Replay one client's drained queue into a fresh vt100 model the way
+/// xterm.js applies it: a snapshot resets the terminal, output appends.
+fn replay_client_terminal(queue: &ClientQueue) -> vt100::Parser {
+    let mut client = vt100::Parser::new(24, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+    while let Some(step) = queue.try_next() {
+        let DrainStep::Message { payload, .. } = step else {
+            break;
+        };
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("client payload");
+        let Some(data) = value.get("data_base64").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .expect("terminal payload base64");
+        match value.get("kind").and_then(serde_json::Value::as_str) {
+            Some("terminal_snapshot") => {
+                client = vt100::Parser::new(24, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+                client.process(&bytes);
+            }
+            Some("terminal_output") => client.process(&bytes),
+            _ => {}
+        }
+    }
+    client
+}
+
+// Issue #4095 AC-1 / AC-2: a snapshot serialized while the PTY reader is ahead
+// of the event loop already contains chunks whose `terminal_output` has not
+// been dispatched yet. Replaying those chunks after the snapshot re-applies
+// relative cursor moves on a screen that already moved — the "✻ Fro" fragment
+// rows and overlapping lines from the field screenshot. Both the
+// queue-pressure repair snapshot (client-1) and a scrollback re-sync on
+// reconnect (client-2) must leave the client screen identical to the pane's.
+#[test]
+fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        project,
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let window_id = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| combined_window_id("tab-1", &window.id))
+        .next()
+        .expect("agent window");
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let (incarnation, pane) = {
+        let window_runtime = runtime.runtimes.get(&window_id).expect("runtime");
+        (window_runtime.incarnation, Arc::clone(&window_runtime.pane))
+    };
+
+    let repair_queue = ClientQueue::default();
+    let resync_queue = ClientQueue::default();
+    let mut resync_connected = false;
+    let mut undispatched: Vec<(Vec<u8>, u64)> = Vec::new();
+    for (index, chunk) in spinner_redraw_pty_chunks().into_iter().enumerate() {
+        // Reader thread: parse under the pane lock and note the position.
+        let seq = {
+            let mut pane = pane.lock().expect("pane lock");
+            pane.process_bytes(&chunk);
+            pane.output_seq()
+        };
+        undispatched.push((chunk, seq));
+        // The event loop lags behind the reader for chunks 8..=19.
+        let reader_ahead = (8..=19).contains(&index);
+        if index == 19 {
+            for event in runtime
+                .client_pane_snapshot_repair_events("client-1", std::slice::from_ref(&window_id))
+            {
+                repair_queue.enqueue(&prepare_outbound_event(&event));
+            }
+            for event in runtime.frontend_sync_events("client-2") {
+                resync_queue.enqueue(&prepare_outbound_event(&event));
+            }
+            resync_connected = true;
+        }
+        if !reader_ahead || index == 19 {
+            for (data, seq) in undispatched.drain(..) {
+                for event in
+                    runtime.handle_runtime_output_event(window_id.clone(), incarnation, data, seq)
+                {
+                    let prepared = prepare_outbound_event(&event);
+                    repair_queue.enqueue(&prepared);
+                    if resync_connected {
+                        resync_queue.enqueue(&prepared);
+                    }
+                }
+            }
+        }
+    }
+
+    let (expected_rows, expected_cursor) = {
+        let pane = pane.lock().expect("pane lock");
+        (pane.screen().contents(), pane.screen().cursor_position())
+    };
+    for (client, queue) in [
+        ("client-1 repair", &repair_queue),
+        ("client-2 resync", &resync_queue),
+    ] {
+        let replayed = replay_client_terminal(queue);
+        assert_eq!(
+            replayed.screen().contents(),
+            expected_rows,
+            "{client}: client screen must equal the pane screen after the snapshot"
+        );
+        assert_eq!(
+            replayed.screen().cursor_position(),
+            expected_cursor,
+            "{client}: client cursor must equal the pane cursor after the snapshot"
+        );
     }
 }
 

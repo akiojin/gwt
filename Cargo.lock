@@ -1306,6 +1306,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "uuid",
+ "vt100",
  "which",
  "whoami",
  "windows-registry",
