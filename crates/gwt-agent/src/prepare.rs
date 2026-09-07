@@ -298,7 +298,7 @@ struct PackageRunnerProgram {
     args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostRunnerProbeKind {
     Direct,
     /// Legacy/non-targeted package-runner executable health check.
@@ -360,6 +360,20 @@ impl HostRunnerProbeOutcome {
         }
     }
 
+    /// Synthesized outcome for a runner that never spawned (e.g. the direct
+    /// executable is not on PATH). SPEC-3864 T-011: it carries no
+    /// `exit_code`, so the diagnostic cannot read as a real process exit.
+    pub fn unresolved(reason: &str) -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: Some(reason.to_string()),
+        }
+    }
+
     fn combined_output(&self) -> String {
         format!("{}\n{}", self.stdout, self.stderr)
     }
@@ -387,6 +401,365 @@ impl HostRunnerProbeOutcome {
             format!("Probe detail: {}.", parts.join("; "))
         }
     }
+}
+
+const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const PACKAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn host_runner_probe_timeout(kind: HostRunnerProbeKind) -> Duration {
+    match kind {
+        HostRunnerProbeKind::Direct | HostRunnerProbeKind::Runner => DIRECT_RUNNER_PROBE_TIMEOUT,
+        HostRunnerProbeKind::Metadata => METADATA_PROBE_TIMEOUT,
+        HostRunnerProbeKind::Package => PACKAGE_PROBE_TIMEOUT,
+    }
+}
+
+/// Issue #3941 AC-3: stable phrase carried by every launch abort that the
+/// Issue Monitor may retry on its own without spending an attempt. The
+/// monitor classifies on this phrase, so the wording is part of the contract.
+pub const TRANSIENT_LAUNCH_RETRY_HINT: &str =
+    "gwt retries this launch automatically without spending an attempt";
+
+/// Whether a launch failure message describes transient infrastructure
+/// (an exact package probe timeout with no cached version, or a remote-
+/// tracking ref race between concurrent fetches) rather than a broken agent
+/// or a broken launch profile.
+pub fn is_transient_launch_failure(message: &str) -> bool {
+    message.contains(TRANSIENT_LAUNCH_RETRY_HINT)
+        || gwt_git::worktree::is_remote_tracking_ref_cas_conflict(message)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalPackageCacheRoot {
+    /// npm's `_npx` directory: `<root>/<hash>/node_modules/<package>`.
+    Npx(PathBuf),
+    /// bun's install cache: `<root>/[<scope>/]<name>@<version>[@@@<n>]`.
+    Bun(PathBuf),
+}
+
+impl LocalPackageCacheRoot {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Npx(path) | Self::Bun(path) => path,
+        }
+    }
+}
+
+fn launch_env_value(env_vars: &HashMap<String, String>, key: &str) -> Option<String> {
+    env_vars
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+fn local_package_cache_roots(env_vars: &HashMap<String, String>) -> Vec<LocalPackageCacheRoot> {
+    let home = launch_env_value(env_vars, "HOME")
+        .or_else(|| launch_env_value(env_vars, "USERPROFILE"))
+        .map(PathBuf::from);
+    let npm_cache = launch_env_value(env_vars, "npm_config_cache")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(windows) {
+                launch_env_value(env_vars, "LOCALAPPDATA")
+                    .map(|base| PathBuf::from(base).join("npm-cache"))
+            } else {
+                home.as_ref().map(|home| home.join(".npm"))
+            }
+        });
+    let bun_cache = launch_env_value(env_vars, "BUN_INSTALL_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            launch_env_value(env_vars, "BUN_INSTALL")
+                .map(|base| PathBuf::from(base).join("install").join("cache"))
+        })
+        .or_else(|| {
+            home.as_ref()
+                .map(|home| home.join(".bun").join("install").join("cache"))
+        });
+    let mut roots = Vec::new();
+    if let Some(npm_cache) = npm_cache {
+        roots.push(LocalPackageCacheRoot::Npx(npm_cache.join("_npx")));
+    }
+    if let Some(bun_cache) = bun_cache {
+        roots.push(LocalPackageCacheRoot::Bun(bun_cache));
+    }
+    roots
+}
+
+fn package_json_version(package_dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(package_dir.join("package.json")).ok()?;
+    let manifest = serde_json::from_str::<serde_json::Value>(&manifest).ok()?;
+    manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn npx_cache_hit(root: &Path, package: &str, exact_version: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    entries.flatten().find_map(|entry| {
+        let package_dir = entry.path().join("node_modules").join(package);
+        (package_json_version(&package_dir).as_deref() == Some(exact_version))
+            .then_some(package_dir)
+    })
+}
+
+fn bun_cache_hit(root: &Path, package: &str, exact_version: &str) -> Option<PathBuf> {
+    let (scope_dir, name) = match package
+        .strip_prefix('@')
+        .and_then(|rest| rest.split_once('/'))
+    {
+        Some((scope, name)) => (root.join(format!("@{scope}")), name),
+        None => (root.to_path_buf(), package),
+    };
+    let prefix = format!("{name}@{exact_version}");
+    let entries = std::fs::read_dir(scope_dir).ok()?;
+    entries.flatten().find_map(|entry| {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let remainder = file_name.strip_prefix(prefix.as_str())?;
+        if !(remainder.is_empty() || remainder.starts_with("@@@")) {
+            return None;
+        }
+        let package_dir = entry.path();
+        (package_json_version(&package_dir).as_deref() == Some(exact_version))
+            .then_some(package_dir)
+    })
+}
+
+/// Issue #3941 AC-1: locate `package@exact_version` in the local package-runner
+/// caches (npm `_npx`, bun install cache) using the launch's effective
+/// environment. A hit means `npx --yes package@exact_version` can start without
+/// the registry, so a timed-out health probe is not a reason to abort.
+pub fn local_exact_package_cache_hit(
+    package: &str,
+    exact_version: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    local_package_cache_roots(env_vars)
+        .into_iter()
+        .find_map(|root| match root {
+            LocalPackageCacheRoot::Npx(base) => npx_cache_hit(&base, package, exact_version),
+            LocalPackageCacheRoot::Bun(base) => bun_cache_hit(&base, package, exact_version),
+        })
+}
+
+/// `package@<semver>` → `(package, semver)`; `None` for `latest` / range specs.
+fn exact_package_spec(version_spec: &str) -> Option<(&str, &str)> {
+    let at = version_spec.rfind('@').filter(|index| *index > 0)?;
+    let (package, version) = (&version_spec[..at], &version_spec[at + 1..]);
+    semver::Version::parse(version)
+        .ok()
+        .map(|_| (package, version))
+}
+
+/// Issue #3941 AC-1/AC-3: decide a timed-out exact package probe. A cached
+/// version continues the launch with a report message; otherwise the abort
+/// message states the cause (timeout), the cache miss, and the next action,
+/// and carries [`TRANSIENT_LAUNCH_RETRY_HINT`].
+fn resolve_exact_probe_timeout(
+    package: &str,
+    exact_version: &str,
+    timeout: Duration,
+    after_repair: bool,
+    env_vars: &HashMap<String, String>,
+    report: &mut HostRunnerHealthReport,
+) -> Result<(), String> {
+    let secs = timeout.as_secs();
+    let phase = if after_repair {
+        " after npm cache repair"
+    } else {
+        ""
+    };
+    if let Some(cached) = local_exact_package_cache_hit(package, exact_version, env_vars) {
+        report.messages.push(format!(
+            "exact npx package probe timed out for {package}@{exact_version} after {secs} seconds{phase}; continuing because the requested version is present in the local package cache at {}",
+            cached.display()
+        ));
+        return Ok(());
+    }
+    let roots = local_package_cache_roots(env_vars)
+        .iter()
+        .map(|root| root.path().display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "exact npx package probe timed out for {package}@{exact_version} after {secs} seconds{phase} and the requested version is not in the local package cache; launch was aborted before spawn. \
+         Cause: probe timeout (npm registry latency or concurrent npx contention). \
+         Cache: {package}@{exact_version} absent from [{roots}]. \
+         Next: warm the cache once with `npx --yes {package}@{exact_version} --version`; {TRANSIENT_LAUNCH_RETRY_HINT}."
+    ))
+}
+
+/// Identity of one package-runner probe for in-process sharing. The working
+/// directory is deliberately excluded: `npx --yes pkg@x --version` answers
+/// the same for every worktree, and concurrent launches all use different
+/// worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProbeSingleFlightKey {
+    pub kind: HostRunnerProbeKind,
+    pub command: String,
+    pub args: Vec<String>,
+    pub path: String,
+}
+
+impl ProbeSingleFlightKey {
+    fn new(
+        kind: HostRunnerProbeKind,
+        command: &str,
+        args: &[String],
+        env_vars: &HashMap<String, String>,
+    ) -> Self {
+        Self {
+            kind,
+            command: command.to_string(),
+            args: args.to_vec(),
+            path: launch_env_value(env_vars, "PATH").unwrap_or_default(),
+        }
+    }
+}
+
+/// How a probe result reached the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeShare {
+    /// This caller ran the probe process.
+    Led,
+    /// This caller waited for another launch's in-flight probe.
+    Joined,
+    /// A recent successful probe was replayed without a process.
+    Reused,
+}
+
+const PROBE_RESULT_REUSE_TTL: Duration = Duration::from_secs(300);
+
+enum ProbeSlotState {
+    InFlight,
+    Done {
+        outcome: HostRunnerProbeOutcome,
+        completed_at: Instant,
+    },
+}
+
+struct ProbeSlot {
+    state: Mutex<ProbeSlotState>,
+    ready: std::sync::Condvar,
+}
+
+impl ProbeSlot {
+    fn in_flight() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ProbeSlotState::InFlight),
+            ready: std::sync::Condvar::new(),
+        })
+    }
+
+    fn complete(&self, outcome: HostRunnerProbeOutcome) {
+        *lock_ignoring_poison(&self.state) = ProbeSlotState::Done {
+            outcome,
+            completed_at: Instant::now(),
+        };
+        self.ready.notify_all();
+    }
+}
+
+/// Settles the slot if the leader unwinds, so joined launches never hang on
+/// a probe that will not finish.
+struct ProbeLeaderGuard<'a> {
+    slot: &'a ProbeSlot,
+    completed: bool,
+}
+
+impl Drop for ProbeLeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.slot.complete(runner_probe_internal_error(
+                "probe leader unwound before completing".to_string(),
+            ));
+        }
+    }
+}
+
+fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Issue #3941 AC-2: one probe process per (runner, package spec) at a time.
+/// Concurrent launches in the same scan join the in-flight probe instead of
+/// each spawning `npx --yes pkg@x --version` and racing the registry; a
+/// successful result is replayed for five minutes. Failures
+/// and timeouts are never replayed.
+#[derive(Default)]
+pub struct HostRunnerProbeSingleFlight {
+    slots: Mutex<HashMap<ProbeSingleFlightKey, Arc<ProbeSlot>>>,
+}
+
+impl HostRunnerProbeSingleFlight {
+    pub fn run(
+        &self,
+        key: ProbeSingleFlightKey,
+        run: impl FnOnce() -> HostRunnerProbeOutcome,
+    ) -> (HostRunnerProbeOutcome, ProbeShare) {
+        enum Admission {
+            Lead(Arc<ProbeSlot>),
+            Join(Arc<ProbeSlot>),
+            Reuse(HostRunnerProbeOutcome),
+        }
+        let admission = {
+            let mut slots = lock_ignoring_poison(&self.slots);
+            let existing =
+                slots
+                    .get(&key)
+                    .and_then(|slot| match &*lock_ignoring_poison(&slot.state) {
+                        ProbeSlotState::InFlight => Some(Admission::Join(Arc::clone(slot))),
+                        ProbeSlotState::Done {
+                            outcome,
+                            completed_at,
+                        } if outcome.success && completed_at.elapsed() < PROBE_RESULT_REUSE_TTL => {
+                            Some(Admission::Reuse(outcome.clone()))
+                        }
+                        ProbeSlotState::Done { .. } => None,
+                    });
+            existing.unwrap_or_else(|| {
+                let slot = ProbeSlot::in_flight();
+                slots.insert(key, Arc::clone(&slot));
+                Admission::Lead(slot)
+            })
+        };
+        match admission {
+            Admission::Reuse(outcome) => (outcome, ProbeShare::Reused),
+            Admission::Lead(slot) => {
+                let mut guard = ProbeLeaderGuard {
+                    slot: &slot,
+                    completed: false,
+                };
+                let outcome = run();
+                slot.complete(outcome.clone());
+                guard.completed = true;
+                (outcome, ProbeShare::Led)
+            }
+            Admission::Join(slot) => {
+                let state = lock_ignoring_poison(&slot.state);
+                let state = slot
+                    .ready
+                    .wait_while(state, |state| matches!(state, ProbeSlotState::InFlight))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match &*state {
+                    ProbeSlotState::Done { outcome, .. } => (outcome.clone(), ProbeShare::Joined),
+                    ProbeSlotState::InFlight => unreachable!("wait_while exits on Done"),
+                }
+            }
+        }
+    }
+}
+
+fn host_runner_probe_single_flight() -> &'static HostRunnerProbeSingleFlight {
+    static REGISTRY: std::sync::OnceLock<HostRunnerProbeSingleFlight> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(HostRunnerProbeSingleFlight::default)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -921,7 +1294,7 @@ where
     let direct_probe_args = crate::launch::builtin_version_probe_args(&config.agent_id)
         .expect("built-in descriptor checked above");
     let direct_probe = direct_command.as_deref().map_or_else(
-        || HostRunnerProbeOutcome::failure_with_stderr("direct runner executable not resolved"),
+        || HostRunnerProbeOutcome::unresolved("direct runner executable not resolved"),
         |direct_command| {
             probe(
                 HostRunnerProbeKind::Direct,
@@ -970,9 +1343,20 @@ where
         );
         return Ok(report);
     }
-    let Some(package) = config.agent_id.package_name() else {
+    let Some(package) = config.agent_id.npm_package() else {
+        // SPEC-3864 FR-013 / T-010: no runtime `latest` route exists, so the
+        // only recovery is a pre-install. Name the route's install command
+        // when the descriptor declares one.
+        let setup_hint = config
+            .agent_id
+            .distribution()
+            .install_shell_command()
+            .map_or_else(
+                || " Setup required: install it manually and relaunch.".to_string(),
+                |command| format!(" Setup required: install it with `{command}` and relaunch."),
+            );
         return Err(format!(
-            "{agent_name} installed runner failed its health check. {direct_diagnostic} No supported npm fallback is available."
+            "{agent_name} installed runner failed its health check. {direct_diagnostic} No runtime package route is available.{setup_hint}"
         ));
     };
 
@@ -1052,7 +1436,7 @@ where
 {
     let package = config
         .agent_id
-        .package_name()
+        .npm_package()
         .expect("targeted official provider has an npm package");
     let version_spec = host_package_runner_version_spec(config);
     let agent_args = version_spec.as_deref().map_or_else(
@@ -1286,10 +1670,14 @@ where
         return Ok(());
     }
     if first.timed_out {
-        return Err(format!(
-            "exact npx package probe timed out for {}@{} after 120 seconds; launch was aborted before spawn.",
-            plan.provenance.official_package, plan.provenance.resolved_exact_version
-        ));
+        return resolve_exact_probe_timeout(
+            &plan.provenance.official_package,
+            &plan.provenance.resolved_exact_version,
+            PACKAGE_PROBE_TIMEOUT,
+            false,
+            &config.env_vars,
+            report,
+        );
     }
     let probe_output = first.combined_output();
     let repair_candidate = npx_cache_base
@@ -1326,10 +1714,14 @@ where
         config.working_dir.clone(),
     );
     if second.timed_out {
-        return Err(format!(
-            "exact npx package probe timed out after npm cache repair for {}@{} after 120 seconds; launch was aborted before spawn.",
-            plan.provenance.official_package, plan.provenance.resolved_exact_version
-        ));
+        return resolve_exact_probe_timeout(
+            &plan.provenance.official_package,
+            &plan.provenance.resolved_exact_version,
+            PACKAGE_PROBE_TIMEOUT,
+            true,
+            &config.env_vars,
+            report,
+        );
     }
     if !second.success {
         return Err(format!(
@@ -1729,6 +2121,17 @@ where
         )
     };
     let mut report = HostRunnerHealthReport::default();
+    let finish = |config: &mut LaunchConfig, mut report: HostRunnerHealthReport| {
+        config.command = npx_executable.clone();
+        config.args = fallback_args.clone();
+        report.switched_to_fallback = using_bunx;
+        if using_bunx {
+            report
+                .messages
+                .push("bunx unavailable, switching to npx...".to_string());
+        }
+        report
+    };
     let first_npx_probe = probe(
         HostRunnerProbeKind::Runner,
         &npx_executable,
@@ -1738,17 +2141,22 @@ where
         cwd.clone(),
     );
     if first_npx_probe.success {
-        config.command = npx_executable;
-        config.args = fallback_args;
-        report.switched_to_fallback = using_bunx;
-        if using_bunx {
-            report
-                .messages
-                .push("bunx unavailable, switching to npx...".to_string());
-        }
-        return Ok(report);
+        return Ok(finish(config, report));
     }
     if first_npx_probe.timed_out {
+        // Issue #3941 AC-1: an exact version already in the local cache is
+        // launchable even when the health probe could not answer in time.
+        if let Some((package, exact_version)) = exact_package_spec(&version_spec) {
+            resolve_exact_probe_timeout(
+                package,
+                exact_version,
+                DIRECT_RUNNER_PROBE_TIMEOUT,
+                false,
+                &config.env_vars,
+                &mut report,
+            )?;
+            return Ok(finish(config, report));
+        }
         return Err(format!(
             "npx package-runner probe timed out for {version_spec}; launch was aborted because the runner was not proven healthy. Retry `npx --yes {version_spec} --version` in a terminal before launching again."
         ));
@@ -1789,6 +2197,17 @@ where
         cwd,
     );
     if second_npx_probe.timed_out {
+        if let Some((package, exact_version)) = exact_package_spec(&version_spec) {
+            resolve_exact_probe_timeout(
+                package,
+                exact_version,
+                DIRECT_RUNNER_PROBE_TIMEOUT,
+                true,
+                &config.env_vars,
+                &mut report,
+            )?;
+            return Ok(finish(config, report));
+        }
         return Err(format!(
             "npx package-runner probe timed out after npm cache repair for {version_spec}; launch was aborted because the repaired runner was not proven healthy. Retry `npx --yes {version_spec} --version` in a terminal before launching again."
         ));
@@ -1801,15 +2220,7 @@ where
         ));
     }
 
-    config.command = npx_executable;
-    config.args = fallback_args;
-    report.switched_to_fallback = using_bunx;
-    if using_bunx {
-        report
-            .messages
-            .push("bunx unavailable, switching to npx...".to_string());
-    }
-    Ok(report)
+    Ok(finish(config, report))
 }
 
 fn package_runner_probe_args(_version_spec: &str, _npx_yes: bool) -> Vec<String> {
@@ -1844,21 +2255,31 @@ fn probe_host_runner_outcome(
     remove_env: &[String],
     cwd: Option<PathBuf>,
 ) -> HostRunnerProbeOutcome {
-    let timeout = match kind {
-        HostRunnerProbeKind::Direct | HostRunnerProbeKind::Runner => Duration::from_secs(5),
-        HostRunnerProbeKind::Metadata => Duration::from_secs(15),
-        HostRunnerProbeKind::Package => Duration::from_secs(120),
-    };
-    probe_host_runner_with_timeout(
-        kind,
-        command,
-        args,
-        env_vars,
-        remove_env,
-        cwd,
-        timeout,
-        Duration::from_millis(50),
-    )
+    let key = ProbeSingleFlightKey::new(kind, command, &args, env_vars);
+    let (outcome, share) = host_runner_probe_single_flight().run(key, || {
+        probe_host_runner_with_timeout(
+            kind,
+            command,
+            args,
+            env_vars,
+            remove_env,
+            cwd,
+            host_runner_probe_timeout(kind),
+            Duration::from_millis(50),
+        )
+    });
+    if share != ProbeShare::Led {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            label = %runner_probe_trace_label(kind),
+            probe_kind = ?kind,
+            share = ?share,
+            success = outcome.success,
+            "probe result shared with a concurrent launch",
+        );
+    }
+    outcome
 }
 
 #[doc(hidden)]
@@ -2096,6 +2517,19 @@ fn probe_host_runner_bounded_with_hub(
     let spawn_id = next_agent_spawn_id();
     let label = runner_probe_trace_label(kind);
     let start = Instant::now();
+    if let Some(denial) = package_runner_probe_denial(kind, command, &args, env_vars) {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            spawn_id = spawn_id,
+            label = %label,
+            probe_kind = ?kind,
+            phase = "end",
+            success = false,
+            "package-runner probe refused by the test guard",
+        );
+        return HostRunnerProbeOutcome::failure_with_stderr(&denial);
+    }
     tracing::info!(
         target: "gwt.process.summary",
         kind = "agent",
@@ -2202,6 +2636,43 @@ fn runner_probe_trace_label(kind: HostRunnerProbeKind) -> &'static str {
         HostRunnerProbeKind::Metadata => "package metadata probe",
         HostRunnerProbeKind::Package => "exact package runner health probe",
     }
+}
+
+/// Issue #3972: probes that spawn the host package runner (`npx` / `bunx`) or
+/// query the registry through it. `Direct` is excluded — it probes the agent's
+/// own CLI, which tests already pin to a fixture executable on the launch
+/// `PATH`.
+fn is_package_runner_probe(kind: HostRunnerProbeKind) -> bool {
+    matches!(
+        kind,
+        HostRunnerProbeKind::Runner | HostRunnerProbeKind::Metadata | HostRunnerProbeKind::Package
+    )
+}
+
+/// The test guard's refusal for this probe, or `None` when it may proceed.
+///
+/// Markers are looked up in the launch environment the probe would run with
+/// before the process environment, so a test can scope the opt-in to one
+/// `LaunchConfig` instead of mutating the process-global environment
+/// (Issue #3895).
+fn package_runner_probe_denial(
+    kind: HostRunnerProbeKind,
+    command: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if !is_package_runner_probe(kind) {
+        return None;
+    }
+    gwt_core::process_console::real_package_runner_probe_denial(
+        &format!("{command} {}", args.join(" ")),
+        |marker| {
+            env_vars
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case(marker))
+                || std::env::var_os(marker).is_some()
+        },
+    )
 }
 
 fn run_runner_probe_in_isolated_runtime(
@@ -3588,7 +4059,7 @@ fn resolve_docker_exec_program(
 }
 
 fn package_runner_version_spec(config: &LaunchConfig) -> Option<String> {
-    let package = config.agent_id.package_name()?;
+    let package = config.agent_id.npm_package()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
         return None;
@@ -5860,11 +6331,13 @@ mod tests {
         let worktree = temp.path().join("repo-feature");
         let sessions_dir = temp.path().join("sessions");
         fs::create_dir_all(&worktree).expect("create worktree");
-        let direct = temp.path().join("openclaw");
+        // SPEC-3864: Antigravity has no runtime package route, so a hanging
+        // direct runner cannot be rescued by a bunx/npx fallback.
+        let direct = temp.path().join("agy");
         fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
         fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
             .expect("chmod hanging runner");
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenClaw)
+        let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
             .working_dir(&worktree)
             .build();
         config.command = direct.display().to_string();
@@ -8299,5 +8772,376 @@ fi
             Some("false")
         );
         assert!(summaries[1].fields.contains_key("resolution_error"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #3941: exact-version probe timeout fallback, probe single-flight,
+    // transient launch failure classification.
+    // ---------------------------------------------------------------------
+
+    fn write_cached_package_json(node_modules: &Path, package: &str, version: &str) -> PathBuf {
+        let package_dir = node_modules.join(package);
+        fs::create_dir_all(&package_dir).expect("cached package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            format!(r#"{{"name":"{package}","version":"{version}"}}"#),
+        )
+        .expect("cached package.json");
+        package_dir
+    }
+
+    fn sample_exact_npx_launch_config(worktree: &Path) -> LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(worktree)
+            .branch("feature/demo")
+            .version("0.153.2")
+            .session_mode(SessionMode::Normal)
+            .build();
+        config.command = "npx".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@openai/codex@0.153.2".to_string(),
+            "--full-auto".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(worktree.to_path_buf());
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
+        config
+    }
+
+    #[test]
+    fn local_exact_package_cache_hit_finds_npx_and_bun_entries() {
+        let temp = tempdir().expect("tempdir");
+        let npm_cache = temp.path().join("npm-cache");
+        let cached = write_cached_package_json(
+            &npm_cache.join("_npx").join("0123abcd").join("node_modules"),
+            "@openai/codex",
+            "0.153.2",
+        );
+        write_cached_package_json(
+            &npm_cache.join("_npx").join("ffff0000").join("node_modules"),
+            "@openai/codex",
+            "0.150.0",
+        );
+        let bun_cache = temp.path().join("bun-cache");
+        let bun_dir = bun_cache
+            .join("@anthropic-ai")
+            .join("claude-code@2.1.210@@@1");
+        fs::create_dir_all(&bun_dir).expect("bun cache dir");
+        fs::write(
+            bun_dir.join("package.json"),
+            r#"{"name":"@anthropic-ai/claude-code","version":"2.1.210"}"#,
+        )
+        .expect("bun package.json");
+        let env_vars = HashMap::from([
+            (
+                "npm_config_cache".to_string(),
+                npm_cache.display().to_string(),
+            ),
+            (
+                "BUN_INSTALL_CACHE_DIR".to_string(),
+                bun_cache.display().to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            local_exact_package_cache_hit("@openai/codex", "0.153.2", &env_vars),
+            Some(cached)
+        );
+        assert_eq!(
+            local_exact_package_cache_hit("@anthropic-ai/claude-code", "2.1.210", &env_vars),
+            Some(bun_dir)
+        );
+        assert_eq!(
+            local_exact_package_cache_hit("@openai/codex", "0.153.3", &env_vars),
+            None
+        );
+        assert_eq!(
+            local_exact_package_cache_hit("@anthropic-ai/claude-code", "2.1.2", &env_vars),
+            None,
+            "a version prefix must not match a longer cached version"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_runner_health_continues_after_npx_timeout_when_exact_version_is_cached() {
+        // Issue #3941 AC-1 (probe timeout fixture): the probe proves version
+        // health, it is not the launch gate. A timed-out probe with the exact
+        // version already in the local npx cache keeps the launch alive.
+        let temp = tempdir().expect("tempdir");
+        let npm_cache = temp.path().join("npm-cache");
+        let cached = write_cached_package_json(
+            &npm_cache.join("_npx").join("abc").join("node_modules"),
+            "@openai/codex",
+            "0.153.2",
+        );
+        let mut config = sample_exact_npx_launch_config(temp.path());
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            npm_cache.display().to_string(),
+        );
+        let mut probe_calls = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Runner);
+                HostRunnerProbeOutcome::timeout()
+            },
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect("a cached exact version survives a probe timeout");
+
+        assert_eq!(probe_calls, 1);
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec!["--yes", "@openai/codex@0.153.2", "--full-auto"]
+        );
+        assert!(
+            report.messages.iter().any(|message| {
+                message.contains("probe timed out")
+                    && message.contains(&cached.display().to_string())
+            }),
+            "{:?}",
+            report.messages
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_runner_health_timeout_without_cache_reports_transient_retry_hint() {
+        // Issue #3941 AC-3: the abort message distinguishes the probe timeout,
+        // the cache miss, and the next action, and classifies as transient so
+        // the Issue Monitor retries without spending an attempt.
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_exact_npx_launch_config(temp.path());
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("empty-npm-cache").display().to_string(),
+        );
+        config.env_vars.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            temp.path().join("empty-bun-cache").display().to_string(),
+        );
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome::timeout(),
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect_err("an uncached exact version cannot be proven after a timeout");
+
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("probe timed out"), "{error}");
+        assert!(error.contains("not in the local package cache"), "{error}");
+        assert!(
+            error.contains("npx --yes @openai/codex@0.153.2 --version"),
+            "{error}"
+        );
+        assert!(is_transient_launch_failure(&error), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exact_probe_timeout_continues_when_version_is_cached() {
+        // Issue #3941 AC-1 on the Windows exact-plan path.
+        let temp = tempdir().expect("tempdir");
+        let npm_cache = temp.path().join("npm-cache");
+        let cached = write_cached_package_json(
+            &npm_cache.join("_npx").join("abc").join("node_modules"),
+            "@anthropic-ai/claude-code",
+            "2.1.210",
+        );
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("2.1.210")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            npm_cache.display().to_string(),
+        );
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                assert_eq!(kind, HostRunnerProbeKind::Package);
+                HostRunnerProbeOutcome::timeout()
+            },
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect("a cached exact version survives a probe timeout");
+
+        assert!(report.resolved_package_plan.is_some());
+        assert!(report
+            .messages
+            .iter()
+            .any(|message| message.contains(&cached.display().to_string())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exact_probe_timeout_without_cache_reports_transient_retry_hint() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("2.1.210")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("empty-npm-cache").display().to_string(),
+        );
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome::timeout(),
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect_err("an uncached exact version cannot be proven after a timeout");
+
+        assert!(error.contains("not in the local package cache"), "{error}");
+        assert!(is_transient_launch_failure(&error), "{error}");
+    }
+
+    #[test]
+    fn transient_launch_failure_classifier_covers_probe_timeout_and_fetch_races() {
+        assert!(is_transient_launch_failure(
+            "failed to prepare origin/develop for Start Work: fetch origin: error: fetching ref refs/remotes/origin/develop failed: incorrect old value provided"
+        ));
+        assert!(is_transient_launch_failure(
+            "failed to fetch origin: fetch origin: error: cannot lock ref 'refs/remotes/origin/develop': is at a but expected b"
+        ));
+        assert!(!is_transient_launch_failure(
+            "exact npx package probe failed for @openai/codex@0.153.2. Probe detail: exit status 1."
+        ));
+        assert!(!is_transient_launch_failure(
+            "failed to prepare origin/develop for Start Work: fatal: could not read Username"
+        ));
+    }
+
+    fn single_flight_key(version: &str) -> ProbeSingleFlightKey {
+        ProbeSingleFlightKey {
+            kind: HostRunnerProbeKind::Package,
+            command: "npx".to_string(),
+            args: vec![
+                "--yes".to_string(),
+                format!("@openai/codex@{version}"),
+                "--version".to_string(),
+            ],
+            path: "/usr/local/bin".to_string(),
+        }
+    }
+
+    #[test]
+    fn probe_single_flight_shares_one_in_flight_probe_across_concurrent_launches() {
+        // Issue #3941 AC-2 (同時 launch fixture): four launches in one scan
+        // probe the same exact package; only the first spawns a process and
+        // the rest join its result.
+        let registry = Arc::new(HostRunnerProbeSingleFlight::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..4)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                let runs = Arc::clone(&runs);
+                let release = Arc::clone(&release);
+                thread::spawn(move || {
+                    registry.run(single_flight_key("0.153.2"), || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        release.wait();
+                        HostRunnerProbeOutcome {
+                            stdout: "0.153.2\n".to_string(),
+                            ..HostRunnerProbeOutcome::success()
+                        }
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        // Let every launch reach the registry while the leader is blocked.
+        thread::sleep(Duration::from_millis(300));
+        release.wait();
+
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("probe thread"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "one probe process for four launches"
+        );
+        assert!(results
+            .iter()
+            .all(|(outcome, _)| outcome.success && outcome.stdout == "0.153.2\n"));
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, share)| *share == ProbeShare::Led)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, share)| *share == ProbeShare::Joined)
+                .count(),
+            3
+        );
+
+        // A later launch inside the reuse window shares the proven result.
+        let (reused, share) = registry.run(single_flight_key("0.153.2"), || {
+            panic!("a fresh successful probe must be reused")
+        });
+        assert!(reused.success);
+        assert_eq!(share, ProbeShare::Reused);
+        // A different package spec is a different probe.
+        let (_, share) = registry.run(single_flight_key("0.150.0"), || {
+            HostRunnerProbeOutcome::success()
+        });
+        assert_eq!(share, ProbeShare::Led);
+    }
+
+    #[test]
+    fn probe_single_flight_never_reuses_a_failed_or_timed_out_probe() {
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, first) = registry.run(
+            single_flight_key("0.153.2"),
+            HostRunnerProbeOutcome::timeout,
+        );
+        assert_eq!(first, ProbeShare::Led);
+        let (_, second) = registry.run(single_flight_key("0.153.2"), || {
+            HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
+        });
+        assert_eq!(
+            second,
+            ProbeShare::Led,
+            "a timeout is re-probed, not replayed"
+        );
+        let (_, third) = registry.run(
+            single_flight_key("0.153.2"),
+            HostRunnerProbeOutcome::success,
+        );
+        assert_eq!(
+            third,
+            ProbeShare::Led,
+            "a failure is re-probed, not replayed"
+        );
     }
 }

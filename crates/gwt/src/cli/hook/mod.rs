@@ -26,7 +26,6 @@ pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
 pub mod forward;
-pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
 pub mod pm_loop_stop_check;
@@ -89,7 +88,6 @@ pub enum HookKind {
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
     SkillRegisterSpecStopCheck,
-    GwtSelfImprovementStop,
 }
 
 impl HookKind {
@@ -112,7 +110,6 @@ impl HookKind {
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
             "skill-register-spec-stop-check" => Some(Self::SkillRegisterSpecStopCheck),
-            "gwt-self-improvement-stop" => Some(Self::GwtSelfImprovementStop),
             _ => None,
         }
     }
@@ -124,8 +121,11 @@ impl HookKind {
 /// `session_id` into a required session id type before using it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookEvent {
+    #[serde(alias = "toolName")]
     pub tool_name: Option<String>,
+    #[serde(alias = "toolInput")]
     pub tool_input: Option<serde_json::Value>,
+    #[serde(alias = "transcriptPath")]
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
 }
@@ -253,9 +253,9 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, gwt_self_improvement_stop, provider_event,
-        skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
-        skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
+        block_bash_policy, event_dispatcher, provider_event, skill_build_spec_stop_check,
+        skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+        workflow_policy, HookKind, HookOutput,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -266,7 +266,23 @@ pub fn run_daemon_hook<E: CliEnv>(
 
     fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
         match output.serialize_to(env.stdout()) {
-            Ok(()) => output.exit_code(),
+            Ok(()) => {
+                if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
+                    // Grok's gate-hook runner uses exit 2 for denial but reads
+                    // the user-visible reason from stderr's first line rather
+                    // than Claude's hookSpecificOutput JSON envelope.
+                    let headline = deny_reason.lines().next().unwrap_or(deny_reason).trim();
+                    // Grok truncates the first stderr line to 256 characters.
+                    // Keep the terminal action in that bounded prefix; the
+                    // full provider-neutral detail remains in stdout for
+                    // adapters that consume the structured envelope.
+                    let grok_reason = format!(
+                        "{headline}. Stop working on this Issue now if human judgment is still required; it is parked in NeedsHuman."
+                    );
+                    let _ = writeln!(env.stderr(), "{grok_reason}");
+                }
+                output.exit_code()
+            }
             Err(err) => {
                 let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
                 1
@@ -274,7 +290,17 @@ pub fn run_daemon_hook<E: CliEnv>(
         }
     }
     fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let _ = writeln!(env.stderr(), "gwtd hook {name}: {err}");
+        let message = format!("{err}");
+        crate::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::HookFailure,
+            format!("{name}: {message}"),
+            gwt_core::error_ledger::ErrorTarget {
+                session_id: std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok(),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        let _ = writeln!(env.stderr(), "gwtd hook {name}: {message}");
         1
     }
 
@@ -423,7 +449,12 @@ pub fn run_daemon_hook<E: CliEnv>(
         }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
-            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_discussion_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
             Ok(emit_hook_output(env, &output))
         }
         HookKind::SkillPlanSpecStopCheck => {
@@ -454,10 +485,6 @@ pub fn run_daemon_hook<E: CliEnv>(
                 &stdin,
                 current_session.as_deref(),
             );
-            Ok(emit_hook_output(env, &output))
-        }
-        HookKind::GwtSelfImprovementStop => {
-            let output = gwt_self_improvement_stop::handle_with_input(env, &stdin);
             Ok(emit_hook_output(env, &output))
         }
     }
@@ -491,6 +518,24 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    #[test]
+    fn invalid_hook_event_is_written_to_the_error_ledger() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let code =
+            run_daemon_hook(&mut env, "event", &["NotARealEvent".to_string()]).expect("run hook");
+        assert_eq!(code, 1);
+        let listed = gwt_core::error_ledger::list_since(None).expect("list");
+        assert!(
+            listed.iter().any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::HookFailure
+                    && row.message.contains("NotARealEvent")
+            }),
+            "hook failure must land in the error ledger: {listed:?}"
+        );
+    }
 
     #[test]
     fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {

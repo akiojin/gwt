@@ -254,7 +254,7 @@ fn resolve_runner_with_effective_env(
         };
     }
 
-    let Some(package) = agent_id.package_name() else {
+    let Some(package) = agent_id.npm_package() else {
         // No npm package — fall back to direct command
         return ResolvedRunner {
             executable: agent_id.command().to_string(),
@@ -401,6 +401,18 @@ fn absolute_launch_cwd(cwd: Option<&Path>) -> PathBuf {
 }
 
 fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -> Option<String> {
+    effective_launch_path_with_host(env, remove_env, host_process_path)
+}
+
+/// [`effective_launch_path`] with the inherited host `PATH` supplied by
+/// `host_path` instead of read from the process. Tests inject a fixture PATH
+/// here rather than swapping the process-global one, which would race every
+/// parallel process spawn (Issue #3895).
+fn effective_launch_path_with_host(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    host_path: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     if let Some((_, value)) = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
         return Some(value.clone());
     }
@@ -410,6 +422,10 @@ fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -
     {
         return None;
     }
+    host_path()
+}
+
+fn host_process_path() -> Option<String> {
     host_process_env()
         .into_iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
@@ -512,8 +528,17 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
     remove_env: &[String],
     cwd: Option<&Path>,
 ) -> String {
+    resolve_host_npx_fallback_executable_with_host_path(env, remove_env, cwd, host_process_path)
+}
+
+fn resolve_host_npx_fallback_executable_with_host_path(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+    host_path: impl FnOnce() -> Option<String>,
+) -> String {
     let cwd = absolute_launch_cwd(cwd);
-    effective_launch_path(env, remove_env)
+    effective_launch_path_with_host(env, remove_env, host_path)
         .as_deref()
         .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
         .map(|(executable, _needs_yes)| executable)
@@ -650,7 +675,7 @@ fn apply_host_bunx_cache_fast_path_from_uid(
         return false;
     }
 
-    let Some(package) = config.agent_id.package_name() else {
+    let Some(package) = config.agent_id.npm_package() else {
         return false;
     };
     let Some(version) = config.tool_version.as_deref() else {
@@ -2891,6 +2916,21 @@ mod tests {
         );
     }
 
+    /// SPEC-3864 FR-009 (AC-8): OpenClaw's distribution route is the vendor's
+    /// own npm package, so a `latest` launch resolves through the bunx/npx
+    /// package runner instead of falling back to a `openclaw` executable that
+    /// is not on PATH.
+    #[test]
+    fn resolve_runner_latest_uses_official_openclaw_package() {
+        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
+        assert_ne!(
+            runner.executable, "openclaw",
+            "a latest launch must not fall back to the direct command"
+        );
+        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
+        assert_eq!(spec_arg.map(String::as_str), Some("openclaw@latest"));
+    }
+
     #[test]
     fn build_grok_build_maps_launch_modes_and_permission_flag() {
         let normal = AgentLaunchBuilder::new(AgentId::GrokBuild).build();
@@ -3008,10 +3048,11 @@ mod tests {
 
     #[test]
     fn resolve_runner_no_npm_package_falls_back_to_direct() {
-        // OpenClaw still has no npm package, so a versioned request must fall
-        // back to the direct command rather than a package runner.
-        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
-        assert_eq!(runner.executable, "openclaw");
+        // SPEC-3864: Antigravity has no runtime package route (installer
+        // only), so a versioned request must fall back to the direct command
+        // rather than a package runner.
+        let runner = resolve_runner(&AgentId::Antigravity, "latest");
+        assert_eq!(runner.executable, "agy");
         assert!(runner.base_args.is_empty());
     }
 
@@ -3825,22 +3866,35 @@ mod tests {
         std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
         write_test_runner(&inherited_bin.join("npx"));
         write_test_runner(&explicit_bin.join("npx"));
-        let _lock = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &inherited_bin);
+        // The inherited host PATH is injected through the seam instead of
+        // swapping the process-global PATH, which would race every parallel
+        // process spawn in this test binary (Issue #3895).
+        let host_path = || Some(inherited_bin.display().to_string());
 
-        let removed = resolve_host_npx_fallback_executable_with_effective_env(
+        let inherited = resolve_host_npx_fallback_executable_with_host_path(
+            &HashMap::new(),
+            &[],
+            Some(temp.path()),
+            host_path,
+        );
+        let removed = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::new(),
             &["PATH".to_string()],
             Some(temp.path()),
+            host_path,
         );
-        let overridden = resolve_host_npx_fallback_executable_with_effective_env(
+        let overridden = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
             &["PATH".to_string()],
             Some(temp.path()),
+            host_path,
         );
 
+        assert_eq!(
+            PathBuf::from(inherited),
+            inherited_bin.join("npx"),
+            "host PATH must be honored when nothing removes it"
+        );
         assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
         assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
     }

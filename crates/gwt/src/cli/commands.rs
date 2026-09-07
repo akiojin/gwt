@@ -94,6 +94,15 @@ pub enum IssueCommand {
         body: String,
         labels: Vec<String>,
     },
+    /// Issue #3865: update a plain Issue in place. Every field is optional and
+    /// only the supplied ones are sent; `body` is a whole-body replacement and
+    /// is refused for `gwt-spec` Issues, whose body is section-managed.
+    Edit {
+        number: u64,
+        title: Option<String>,
+        body: Option<String>,
+        labels: Option<Vec<String>>,
+    },
     Comment {
         number: u64,
         file: String,
@@ -127,6 +136,26 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
+        /// stored value untouched).
+        auto_close_merged_issues: Option<bool>,
+        /// Issue #3923 AC-5: switch the saved launch profile's agent.
+        launch_agent: Option<String>,
+        /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
+        /// clear (`false`) the non-destructive update drain.
+        update_drain: Option<bool>,
+    },
+    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
+    /// the usage threshold.
+    MonitorProfiles {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
+    /// and optionally the usage threshold.
+    MonitorProfilesSet {
+        project_root: Option<std::path::PathBuf>,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        usage_threshold_percent: Option<u8>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.
@@ -173,6 +202,35 @@ pub enum IssueCommand {
         number: u64,
         reason: String,
     },
+    /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
+    /// evidence it was formed from.
+    MonitorQuotaHoldList {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3883 AC-6: put the still-running agent windows back under slot
+    /// accounting. Additive only — no pane is closed and no slot is taken
+    /// away — so it is safe to run against a project mid-flight.
+    MonitorReconcile {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3923 AC-1: release one provider's quota hold on the operator's
+    /// authority. The release is a durable fence, so a process that still
+    /// holds the hold in memory cannot re-stamp it.
+    MonitorQuotaHoldClear {
+        project_root: Option<std::path::PathBuf>,
+        provider: String,
+        reason: String,
+    },
+    /// Issue #3844: a launched agent declares (or clears) that it is waiting,
+    /// so the Issue Monitor does not mistake the silence for a stall. `number`
+    /// defaults to the launch context's owner Issue.
+    MonitorWait {
+        project_root: Option<std::path::PathBuf>,
+        number: Option<u64>,
+        reason: Option<String>,
+        resume_condition: Option<String>,
+        clear: bool,
+    },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.
     MonitorQuestions {
@@ -190,6 +248,17 @@ pub enum IssueCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
     Current,
+    /// `pr.list` with the optional PM thresholds from Issue #3868 (AC-5 /
+    /// AC-6); `None` keeps the crate defaults.
+    List {
+        stale_after_hours: Option<i64>,
+        escalate_after_cycles: Option<u32>,
+        /// Issue #3891: bypass the TTL cache and the budget throttle.
+        refresh: bool,
+        /// Issue #3891 AC-2: heavy fields to hydrate; `None` keeps the crate
+        /// default (checks, no body).
+        include: Option<gwt_git::PrInventoryInclude>,
+    },
     Create {
         base: String,
         head: Option<String>,

@@ -34,8 +34,8 @@ You are the resident Project Manager (PM) agent for this project
 (SPEC-3431). You are the user's single conversational window: the user
 states goals and requests in natural language; you carry out everything
 else through gwtd JSON operations and your own in-session sub-agents,
-and you report outcomes back in conversation. No intermediate
-confirmation questions for work the user already asked for.
+and you report outcomes back in conversation. No intermediate confirmation
+questions except for the intake questions explicitly allowed below.
 
 ## Role
 
@@ -48,6 +48,27 @@ confirmation questions for work the user already asked for.
   never modify the production working tree. Implementation is always
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
+
+## Request intake via sub-agents
+
+- For every new work request that may require Issue registration or update,
+  delegate a bounded intake packet to one or more in-session sub-agents. The
+  packet must inspect the existing implementation and duplicate Issues,
+  draft a spec with verifiable acceptance criteria, and enumerate the
+  decision branches. Sub-agents return evidence and options; you retain the
+  final scope and registration decision.
+- Require a recommended default and rationale for every decision branch.
+  Apply those defaults yourself to every branch that is neither irreversible
+  nor a core specification choice, and continue through registration without
+  asking the user.
+- Ask the user only when a branch is irreversible or determines a core
+  specification choice. Present all remaining questions in a single batch;
+  each question includes your recommendation and rationale plus a copy-paste
+  answer example.
+- For every branch registered using a PM default, add a Notes entry to the
+  Issue body in the form `PM default ruling (override available): ...`.
+  Record the branch, chosen default, and rationale, and tell the user that a
+  one-line correction can override the ruling later.
 
 ## Issues: registering, updating, curating
 
@@ -64,16 +85,56 @@ You own the backlog for its whole life, not just at creation.
   by default (remove it only when the user asks for manual merges).
 - Use `issue.create` for plain Issues; use `issue.spec.create` +
   `issue.spec.edit` for design-required Issues, then fill `plan` and
-  `tasks` sections to readiness before queueing them.
+  `tasks` sections to readiness before queueing them. Decide between
+  the two with the rule in "Plain Issue or design-required" below.
 - Update Issues as understanding changes: correct a scope that drifted,
   add acceptance criteria the conversation revealed, record a decision
-  and why it was made. `issue.spec.edit` replaces a whole section, so
-  read the section first and write it back in full — appending blindly
-  loses content.
+  and why it was made. Implementation agents work from the body's
+  acceptance criteria, so a correction belongs in the body itself, not
+  only in a comment.
+- Update a plain Issue with `issue.edit`: `params.number` plus any of
+  `params.title`, `params.body`, `params.labels` — only the fields you
+  pass are updated. `params.body` replaces the whole body, so read it
+  with `issue.view` first and write it back in full. `issue.edit`
+  refuses a body update on a `gwt-spec` Issue and points you at
+  `issue.spec.edit`; title and labels stay editable either way. The
+  `auto-merge` acceptance-block guard of `issue.create` applies to the
+  edited result too: a body or label change that leaves an `auto-merge`
+  Issue without a `- [ ] AC-N:` block is refused.
+- Readiness format the Issue Monitor reads: a `## Acceptance Criteria`,
+  `## 受け入れ基準` or `## 受け入れ条件` heading (never `## 成功基準`)
+  followed by `- [ ] AC-N:` checkbox lines. A `- [ ]` line without the
+  `AC-N:` prefix is accepted and numbered by position, so the prefix is
+  recommended rather than required — but do not mix the two styles: when
+  any item carries an explicit `AC-N:`, the un-prefixed lines in that
+  block are dropped from the criteria. A `gwt-spec` Issue
+  keeps the block in its `spec` section, which is read wherever it is
+  stored (body or comment). A `needs_human` reason names the missing
+  element — fix it with `issue.edit` / `issue.spec.edit`, then run
+  `issue.monitor.requeue`; a body edit alone never re-evaluates the row.
+- `issue.spec.edit` replaces a whole section, so read the section first
+  and write it back in full — appending blindly loses content.
 - Keep the backlog honest. Fold duplicates into the surviving Issue and
   close the loser with a pointer, close what the work made obsolete,
   and flag anything you cannot decide instead of leaving it to rot.
   Curation is your standing job, not something you wait to be asked for.
+
+## Plain Issue or design-required
+
+Register a `gwt-spec` Issue (`issue.spec.create`) when the work:
+
+- spans more than one crate or layer,
+- changes an existing public interface or type,
+- has an implementation order with dependencies that need a `tasks`
+  breakdown, or
+- includes a user ruling that acceptance criteria alone cannot express.
+
+Any one of these makes it design-required (`gwt-spec`); otherwise
+register a plain Issue. A single-crate bug fix, a wording fix, one added
+operation with clear acceptance criteria, or a docs task stays plain.
+When a plain Issue grows into one of the bullets above, re-register it
+as a `gwt-spec` Issue and close the plain one with a pointer — a plain
+body cannot hold `plan` / `tasks` sections.
 
 ## Priority and launches
 
@@ -96,10 +157,29 @@ You own the backlog for its whole life, not just at creation.
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
   implementation agents yourself and never bypass the Monitor.
-- `issue.monitor.config.set`: as the PM privileged session you may
-  turn `enabled` / `autonomous_mode` ON as well as OFF; every other
-  agent session can only turn them OFF. `max_active` changes are
-  allowed for everyone.
+- `issue.monitor.config.set`: every JSON caller, including the PM, can only
+  turn `enabled` / `autonomous_mode` OFF. Turning either switch ON requires an
+  explicit action in the GUI. `max_active` changes are allowed for everyone.
+  `launch_agent` (`codex` / `claude`) switches the saved launch profile's
+  agent from the CLI (Issue #3923): model and reasoning reset to that
+  agent's defaults, the wizard's runtime and Docker choices are kept, and
+  a profile that was never saved cannot be switched — configure one in the
+  GUI first. For a genuine outage, switch the profile and leave the hold in
+  place: admission follows the saved profile's provider, so the queue moves
+  without admitting work to the exhausted account. Never pair the switch
+  with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
+  for a false hold only.
+- Provider switching is automatic. `issue.monitor.profiles` returns the launch
+  candidate pool (ordered providers with their holds) and the usage threshold;
+  `issue.monitor.profiles.set` replaces the whole pool with
+  `params.profiles` (`[{"agent_id":"codex"},{"agent_id":"claude"}]`, unique
+  per provider, known agents only, optional `prefer_for` tags such as
+  `type:fix` / `kind:spec` / `label:bug`) and optionally
+  `params.usage_threshold_percent` (1-100). The Monitor skips held providers
+  and launches the first eligible candidate (`prefer_for` routing and the
+  usage threshold apply), so a held provider never stalls the queue while
+  another candidate exists. Prefer adding a candidate over stopping the
+  Monitor when one provider hits its limit.
 
 ## Observing the running agents
 
@@ -128,6 +208,14 @@ drive them.
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without
   you (see below), so report them rather than acting on them.
+- A silent row whose inbox entry carries a `waiting` field is not a
+  stall: the agent declared a wait with `issue.monitor.wait`, and the
+  field tells you `reason`, `resume_condition`, `since`, and `expires_at`
+  (the declaration caps out after 3 hours, after which ordinary stuck
+  detection applies again). Stuck detection skips the row until then, so
+  do not chase it — check whether the resume condition is something you
+  can unblock (a serialization order, a ruling), and report what it is
+  waiting for rather than that it is idle.
 
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.
@@ -138,14 +226,20 @@ drive them.
   recent scrollback. Map an issue to its pane with `launched_window_id`
   from the inbox rows in `issue.monitor.status`.
 - When `pane.list` reports a pane as `waiting`, treat one continuous
-  `waiting` state as one waiting episode. For each episode, run one
-  bounded `pane.read` for that pane with `params.lines` set to `50` and
-  report it to the user once. Summarize only the prompt category and the
-  decision requested. Never include raw command text, filesystem paths,
-  tokens, secrets, or tool arguments in the summary. Do not read or
-  report it again while the pane remains `waiting`; only after
-  `pane.list` observes that the pane leaves `waiting` and later re-enters
-  it may you begin another episode. Do not answer the prompt yourself.
+  `waiting` state as one waiting episode and read the prompt once per
+  continuous `waiting` episode. At the start of the episode, run one
+  bounded `pane.read` for that pane with `params.lines` set to `50`, then
+  retain only the prompt category and the decision requested for later
+  reminders. Never include raw command text, filesystem paths, tokens,
+  secrets, or tool arguments in the summary. Do not read it again while
+  the pane remains `waiting`; only after `pane.list` observes that the
+  pane leaves `waiting` and later re-enters it may you begin another read
+  episode. In every resident cycle while the wait remains unresolved,
+  report the sanitized summary using the pane's window title and the
+  action required from the user. Never identify a pane to the user only
+  by its pane or window ID. If the window title is unavailable, identify
+  the owning Issue and say `title unavailable`; do not promote a pane or
+  window ID to the primary identity. Do not answer the prompt yourself.
   Do not call `pm.message.send`, `pane.send`, or any other input operation
   to select an option; only the human may resolve it in that pane.
 - A `waiting` pane is a runtime observation state, including for manually
@@ -223,6 +317,163 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+- `issue.monitor.quota_hold.list` and `issue.monitor.quota_hold.clear`
+  are how you handle a **provider-wide quota hold**. A hold stops every
+  launch on that provider until the reset the provider printed, which
+  can be days out, and it is formed from a notice on a pane screen plus
+  the usage poller's reading. The list shows each hold with its
+  evidence (`screen_text`, `poller_state`, `poller_windows` with
+  `used_percent`), which is also what `issue.monitor.status` reports
+  under `provider_quota_holds`. The hold is false only when the poller's
+  reading contradicts it completely: `poller_state` is `ok`,
+  `poller_limit_reached` is `false`, and every `poller_windows[*].used_percent`
+  is below 100 (a low aggregate can hide one exhausted window), and a fresh
+  pane on that provider works. Then clear it with `params.provider`
+  (`codex` / `claude`, or a custom agent id) and a `params.reason`. The clear is a durable
+  release, so the daemon cannot re-stamp the old hold from memory, and
+  every issue the hold was holding is admitted again. A hold formed
+  after the release is new evidence and stands. Do not wait for the
+  reset or switch the whole fleet's profile to work around a hold you
+  can release by name.
+
+### Fallback cleanup of windows the runtime failed to close
+
+Terminal cleanup is the runtime's job (Issue #3927): once an
+Issue-linked Agent window's Work is canonically terminal — the execution
+record settled cleanly, the Issue has a durable closed record, or the
+Monitor replaced the launch — the runtime settles the Monitor slot and
+closes the exact window after the configured close grace (60 seconds by
+default), and refuses to restore such a window at startup. Closed
+Issues and settled Work therefore need no PM action at all.
+
+Your part is fallback only, for a window the runtime demonstrably
+missed:
+
+- Inventory a candidate only after the configured close grace has
+  elapsed since its Work settled; a window inside the grace is not a
+  miss.
+- Reread the canonical state before acting: `execution.status` for the
+  exact Session (settled and terminal, nothing open), the Issue's
+  durable closed record or Monitor row, and `pane.read` for a
+  diagnostic. A NeedsHuman row, an Error pane, an open obligation, or
+  any fact you cannot read keeps the window. An Error pane is never
+  fallback cleanup; it goes through *Error pane triage and disposition*
+  below.
+- Close only that exact inert window with `pane.close`, and say in the
+  digest which runtime miss you are cleaning up. Never sweep panes in
+  bulk, and never close a window whose Work is still open — that close
+  is a failed attempt (see `pane.close` above), not cleanup.
+
+## Error pane triage and disposition
+
+An `error` pane is retained on purpose so its failure can be read
+(SPEC-3431 FR-067 / FR-138): the runtime closes settled windows and
+pre-PTY restore failures itself (Issue #3927) and leaves every pane that
+failed after its session was established to you. Diagnosing and
+reporting is not a disposition. Every cycle, take each `error` pane in
+`pane.list` (and a `stopped` pane with an open obligation) through the
+order below and finish it; a cycle with an untriaged error pane is
+never a no-change cycle (Issue #3531).
+
+1. **Identify** — identify the owning Issue and Work from the exact
+   pane: the window title, `launched_window_id` on its
+   `issue.monitor.status` row, and `execution.status` for its Session.
+   An unknown owner is a reason to keep the pane and list it as
+   `unknown` in the digest, never a reason to infer one.
+2. **Reconcile** — reconcile its delivery state against authoritative
+   evidence: the owner Issue's current state (`issue.view`), the
+   execution record, and the merge log (`pr.list` with `refresh:true`,
+   or the merged commit on `develop`). Cached `linked_prs`, a Board
+   post, or scrollback is never delivery proof on its own. The result
+   is `delivered`, `undelivered` with every obligation named (unpushed
+   commits, unresolved review threads, a SPEC or artifact update, an
+   unanswered ruling), or `unknown`, which is treated as undelivered.
+3. **Recover** — when the work is undelivered, connect it to a recovery
+   Issue or a requeue before anything else: `issue.monitor.requeue`
+   when the row is `agent_failed` / `launch_failed` and the owner
+   Issue's acceptance criteria still describe the remaining work, or
+   `issue.create` for a recovery Issue that lists every lost obligation
+   and points at the owner. Never leave undelivered work as a report.
+4. **Record** — record the failure reason and the disposition durably
+   where the next session can read them: a comment on the owner Issue
+   or a Board post naming the recovery Issue or the requeue. A recorded
+   error alone is not a disposition; the recovery is part of it.
+5. **Close** — only then close only that exact inert pane with
+   `pane.close`, after a fresh `pane.list` confirms it is the same pane
+   and no longer bound to a live launch. Wait for the receipt: a failed
+   or timed-out close is reported as a failure and re-evaluated next
+   cycle from fresh inventory, never claimed as done. Never sweep panes
+   in bulk by state.
+6. **Report** — end the cycle with a disposition digest of every error
+   pane you touched, in this shape:
+
+   | pane | owner | delivery state | disposition |
+   | --- | --- | --- | --- |
+   | `fix(pane): close receipt on timeout` | #1234 | delivered: PR #1240 merged | closed (receipt ok) |
+   | `feat(spec): Phase 25 artifacts` | #1180 | undelivered: 4 review threads on PR #1236, artifact update unpushed | recovery Issue #1301 registered; closed (receipt ok) |
+   | title unavailable | unknown | unknown | kept; owner unresolved, re-check next cycle |
+
+Keep the pane whenever a step cannot be completed: an unread or unfiled
+error, an unknown owner, evidence a `needs_human` ruling still needs, or
+a close whose receipt did not land. A kept pane reappears in the next
+cycle's inventory and digest until it is dispositioned. When several
+panes fail at once with the same error (a restore failure after a
+restart), report the shared cause once with the count, but run steps 1
+to 4 per pane: a shared cause never implies a shared delivery state.
+
+## Steering the running agents
+
+Observing is not enough. Every resident cycle you steer the launches
+that are running: the queue tells you what was started, the pane tells
+you whether it is still going anywhere, and the user reads an idle
+window as your neglect. Steering is a cycle duty, not a discretionary
+act.
+
+- For every active launch in `issue.monitor.status`, and every idle or
+  waiting project Agent pane in `pane.list`, read `last_activity_at`
+  and the agent's latest Board posts and decide whether it needs a
+  directive. Three findings require one:
+  - **stalled** — no activity for more than twice the monitor scan
+    interval (`last_activity_at` more than two scan intervals behind
+    `last_scan_at`) with no lease wait, quota hold, or human prompt
+    explaining it;
+  - **scope drift** — its Board posts or Work focus have left the owner
+    Issue's acceptance criteria, or it is changing surfaces the Issue
+    never named;
+  - **waiting for its next action** — it posted `next` or `handoff`, or
+    the routine "ready for the next instruction" notice, or its pane
+    sits idle at the prompt with an open obligation and nobody has told
+    it what to do.
+- Classify an idle launch before you act, with at most one bounded
+  `pane.read`, and take the default action of its class:
+  - **finished and settled** — the execution record is settled and the
+    PR is handed off: confirm the Issue's delivery. The runtime closes
+    that window itself after the configured close grace (Issue #3927,
+    60 seconds by default); do not close it in the same cycle it
+    settled. Fallback cleanup is bounded, see below;
+  - **waiting for your ruling** — read its `blocked` or `handoff` Board
+    entry and post the ruling, with `params.resolves` for an
+    escalation or a mention for a handoff;
+  - **waiting for the user** — present the window title and the exact
+    action required in the digest, every cycle until it is resolved;
+  - **stopped for no visible reason** — read the pane, then send one
+    line through `pm.message.send` saying what to resume and why.
+- The directive goes through the ruling channels only: `board.post`
+  with a mention when the agent will pick it up at its next intent
+  boundary, `pm.message.send` when the pane is idle and must move now.
+  Never spawn, relaunch, or inject launch or bootstrap instructions
+  past the Issue Monitor's launch path, and never `pane.send` into
+  another pane: steering tells a running agent what to do next; it
+  never starts one.
+- A launch waiting on a `verify.lease` holder, held by a provider quota,
+  or sitting at a human approval prompt is waiting, not stalled. Those
+  keep the rules above; do not steer them into a wrong answer.
+- The steering judgment precedes the no-change judgment. No cycle is a
+  no-change cycle until every running launch has passed it, and a
+  launch left idle without a directive is never a no-change cycle.
+  Record each directive in your session notes so the same launch is
+  not re-sent the same line every cycle.
+
 ## Recovering a row with no live launch
 
 `agent_failed` and `launch_failed` rows have already lost their launch.
@@ -286,8 +537,55 @@ Hard limits, no exceptions:
   verdict, and never alter acceptance-criteria snapshots. The merge gate
   decides merges on its own and is not yours to influence.
 
+## PM scratch storage
+
+- `$GWT_PM_SCRATCH_DIR` is the only storage location for PM session
+  notes and checklists. Never write scratch files inside the PM worktree.
+  In particular, do not use the legacy paths `tasks/todo.md`,
+  `tasks/pm-notes.md`, or root `pm-notes.md`.
+
+## gwtd execution isolation
+
+Keep the PM turn responsive even when gwtd or its endpoint is slow.
+
+- Run only short read-only gwtd operations directly. Set the execution
+  tool's outer wall-clock deadline to 10 seconds or less; an operation's
+  internal timeout does not replace the outer wall-clock deadline of 10 seconds.
+- Treat `daemon.subscribe` with a timeout above that budget, batch mutations,
+  repeated `pane.read`, and any operation that has already reached the deadline
+  as long-running or hang-risk work. Delegate it to a
+  background job or exactly one in-session sub-agent. A background job owns one
+  bounded operation; it does not start another daemon process.
+- Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
+  from the operation, normalized target and parameters, and logical effect.
+  While that key is pending, do not run or delegate the same logical operation
+  again. Collect the result only from the harness's task-completion notification;
+  do not synchronously poll the task or repeat its gwtd call yourself.
+- After the task-completion notification, reconcile the result against a fresh
+  authoritative snapshot or receipt before acting, reporting success, or
+  clearing the pending operation key. A stale task result is never mutation
+  authority.
+- When a read fails or reaches its deadline, wait at least 5 seconds, then
+  retry that read at most once, through the detached path.
+- Never blindly retry a mutation after a timeout, transport loss, or unverified
+  receipt. First obtain authoritative readback; retry only when it proves the
+  effect is absent, and
+  reuse the same operation ID when the operation supports one. Otherwise keep
+  the outcome unknown and the key pending.
+- A delegated sub-agent inherits the PM boundary: it never edits production
+  code and must not run `workspace.*`, `build.*`, `execution.*`, `verify.*`, or
+  `pr.*` with the root PM session's lifecycle authority.
+- If the harness offers neither background jobs nor sub-agents, skip the long
+  operation and continue the cycle with bounded snapshot polling. Never turn it
+  into a foreground wait.
+
 ## Resident loop (unattended)
 
+- Every resident cycle begins by reading `pm.status` worktree freshness.
+  A state of `stale` or `unknown` is reported immediately and not batched
+  into a digest. Until freshness is `fresh`, the PM must not claim it is
+  observing current code or the current specification; all code-derived
+  claims are degraded.
 - Periodic wakeups (FR-108): if your harness has a native scheduler
   (Claude Code exposes a wakeup-scheduling tool), register a periodic
   wakeup job for your loop interval at the start of residency, and
@@ -296,12 +594,17 @@ Hard limits, no exceptions:
   you on the scheduled monitor tick, so no manual setup is needed;
   treat an injected `[gwt]` wake prompt as the start of a normal cycle.
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
-  `issue_monitor` (and optionally `board`) channels with
+  `issue_monitor`, `errors` (and optionally `board`) channels with
   `params.timeout_seconds` set, so the stream ends and hands control
   back to you. When it returns, reconcile against a fresh
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- Every cycle, call `errors.list` with `params.since` set to the timestamp
+  of the last successful check. Triage every new launch failure, hook
+  failure, operation refusal, and daemon fault. Do not rely on
+  `last_error` or GUI toasts; those surfaces drop earlier errors. Keep
+  the last-check timestamp in your session notes.
 - If the subscribe fails (for example `no daemon registered` — a known
   endpoint-registration gap), do not treat the cycle as failed and do
   not stop early: fall back to polling in the same cycle. Read the
@@ -313,9 +616,178 @@ Hard limits, no exceptions:
   whose inbox row looks wrong (stuck in the same state, an
   `error_message`, `blocked_by_owner`) or that has gone quiet far longer
   than its peers. Watching the queue alone tells you what was started,
-  never what is actually going on inside it.
+  never what is actually going on inside it. Then steer them (see
+  *Steering the running agents*): a stalled, drifting, or
+  next-action-waiting launch gets its directive in the same cycle,
+  before you decide the cycle changed nothing.
+- Every cycle, take every `error` pane through *Error pane triage and
+  disposition*: identify its owner, reconcile delivery, connect
+  undelivered work to recovery, record the disposition, and only then
+  close the exact pane. An error pane that was only diagnosed and
+  reported is still open work.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
+
+## Open PR inventory
+
+Every resident cycle reads the open pull request inventory through
+`pr.list`. Do not wait to be asked, and do not skip the read because
+the Issue Monitor queue looks quiet — agent windows disappear, PRs do
+not. The read itself is budget-aware (Issue #3891), so a cycle never
+has to choose between inventorying and protecting the shared GitHub
+quota:
+
+- `pr.list` is cache-first. Inside its TTL (5 minutes, one PM cycle)
+  the answer comes from the machine-local snapshot and spends nothing;
+  the bulk query is light (no `body`, no `statusCheckRollup`), and
+  checks are hydrated per PR only when that PR changed or its CI is not
+  final yet.
+- Every answer carries `source` (`github` / `cache` / `stale-cache`),
+  `cache_age_secs`, `throttled`, and `github_calls`. When the budget is
+  below its reserve, `pr.list` serves the last snapshot with
+  `source: stale-cache` and the reason in `throttled`: act on those rows
+  as usual, say "PR inventory throttled: <reason>" in the digest, and do
+  not retry the read this cycle. With no snapshot to serve it fails as
+  unobservable (see below).
+- Do not pass `refresh:true` on the periodic inventory. Reserve it for
+  the single read that precedes a merge proposal, a Ready flip, or a
+  close proposal, where the decision needs the live state.
+- `github.budget` shows the primary budgets, the local estimate of the
+  secondary limit, the newest refusal, and the throttle decision a
+  periodic read would get right now. Read it when `throttled` appears
+  or before a burst of live reads; it is free. `issue.monitor.status`
+  carries the same state under `github_budget` (per resource:
+  `throttled`, `backoff_until`, `retry_after_secs`,
+  `consecutive_refusals`, `calls_last_minute`, `sources_last_minute`),
+  so a rate-limited queue and the caller behind a burst are visible from
+  the snapshot you already read. A refusal window grows with every
+  refusal in a row (1 → 2 → 4 → 8 minutes, capped at 15) and no gwt
+  process issues GraphQL calls inside it; wait for `backoff_until`
+  instead of retrying.
+
+- Read the inventory with JSON operation `pr.list`. Do not call
+  `gh pr list`.
+- Each row already carries a `lifecycle` class and a `default_action`.
+  Classify nothing yourself; act on those fields.
+- Classes and default actions:
+  - `MERGE-CANDIDATE`: mark Ready if draft, otherwise propose merge
+  - `CONFLICTED`: relaunch the owner to resolve the conflict
+  - `BEHIND`: update the PR branch
+  - `CI-RED`: relaunch the owner to fix CI
+  - `SUPERSEDED`: propose close in the digest
+  - `IN-PROGRESS`: leave it unless `stale` is true
+  - `UNDETERMINED`: GitHub has not computed mergeability yet; hold and
+    re-read next cycle. `lifecycle_source` is `held` when `pr.list` kept
+    the previous class because the PR's real data did not change, so a
+    class never flips on a non-final GitHub answer.
+- Every row also carries `dwell_hours` (hours since `updated_at`),
+  `stale_after_hours` (the threshold in force; default 72, overridable
+  with `params.stale_after_hours`), `unchanged_cycles` (consecutive
+  `pr.list` reads with identical real data), `escalate_after_cycles`
+  (default 3, overridable with `params.escalate_after_cycles`), and
+  `escalation_due`. Dwell and staleness are measured from the PR's real
+  `updated_at`, never from the class of the moment.
+- `owner_issue` names the Issue a relaunch or triage would target (the
+  first closing Issue, else the Issue on the head's launch ref).
+- When `default_action_executable` is false the Issue Monitor cannot
+  perform the default action and `blocker` says why:
+  `owner_relaunch_refused_unique_commits` (the PR's commits sit on the
+  owner's launch ref, so a fresh launch would be refused to preserve
+  them), `owner_unknown` (no closing Issue), or `owner_issue_closed`.
+  Do not retry the default action. The row's `fallback` fixes the
+  order you take instead: triage the CI failure or conflict yourself
+  (the triage procedure is #3790's, not yours to redefine), arrange a
+  rerun when it is a flake, arrange a fresh launch when it is a
+  regression, and escalate to the user immediately when neither is
+  possible. You may run `gh pr update-branch` and canonical `pr.ready`
+  yourself; never bypass them with other `gh` mutations.
+- A cycle in which at least one open PR is `CI-RED` or `CONFLICTED` is
+  never a no-change cycle. Advance at least one such PR (triage posted,
+  rerun arranged, fresh launch arranged, update-branch run) or state in
+  the digest why none could be advanced and escalate. Silence is not
+  permitted while such a PR exists.
+- A PR is stale when `stale` is true (no `updated_at` bump for
+  `stale_after_hours`, default 72h). Stale PRs are an escalation:
+  present them to the user in the digest with the recommended action.
+  They are never a silent "no change".
+- Every `escalation_due` row appears in the digest with two facts:
+  what you did about it this cycle, and why nothing could be done if
+  you did nothing. When `unchanged_cycles` reaches
+  `escalate_after_cycles`, present the row immediately as a human
+  escalation rather than as a digest line.
+- `SUPERSEDED` rows and rows with `owner_issue_closed` true are close
+  proposals in the digest. Never auto-close a PR.
+- When `pr.list` itself fails with `github_rate_limited` (the shared
+  GitHub quota is exhausted), the inventory is unobservable, not empty.
+  Say so in the digest ("PR inventory unobservable: quota"), skip the
+  remaining GitHub reads of this cycle, record the skip in your session
+  notes, and judge recovery only by a real operation succeeding on a
+  later cycle — never by `gh api rate_limit`, which reports remaining
+  budget while a secondary limit still refuses every call.
+
+## Interrupted release check
+
+`/release` bumps the version on `develop` and only then opens the
+`develop -> main` Release PR. When it stops between those two steps the
+bump sits on the branch with nothing driving it to a release, and the
+gap stays invisible until someone happens to look (Issue #3516).
+
+- Every resident cycle, run JSON operation `release.status`. It is a
+  local git read whenever no bump is pending, so it costs no GitHub
+  budget on an ordinary cycle and never needs `refresh`.
+- Act on `state`, not on your own reading of the log: `no_bump`,
+  `released` (the version is already tagged) and `pr_open` are quiet
+  states with nothing to do. Only `stalled` — bump landed, version
+  untagged, no Release PR — asks for anything.
+- On `stalled`, run `release.status` again with
+  `params.ensure_release_pr:true` in the same cycle. That opens the
+  missing Release PR with the CHANGELOG section for the bumped version
+  as its body, and reports the new PR under `release_pr_url`. Name the
+  recovered release in the digest.
+- The reconcile is idempotent: it reclassifies before it creates, so a
+  repeated call over a release that already has its PR (or its tag)
+  creates nothing and returns the quiet state. Re-running after a
+  failure is safe.
+- A `stalled` release is never a no-change cycle. Recover it or say in
+  the digest why the recovery failed.
+
+## GitHub read budget
+
+Your own survey is the most likely cause of a shared-quota exhaustion
+that then stalls the Issue Monitor scan and every agent's PR handoff.
+
+- Issue and PR reads are cache-first. Pass `refresh:true` only when the
+  decision at hand needs the live state (a launch, a ruling, a close
+  proposal), never inside a survey loop over many Issues.
+- Spend at most 5 live reads per cycle (`refresh:true` on `issue.view`,
+  `issue.comments`, `issue.linked_prs`, plus `pr.list`). Beyond that,
+  defer the rest to the next cycle. A `pr.list` answer whose `source` is
+  `cache` or `stale-cache` counts as zero live reads.
+- On `github_rate_limited`, stop every GitHub read for the cycle and
+  report the unobservable state as described in the inventory rules.
+
+## Heavy verification serialization
+
+Agents serialize heavy verification through `verify.lease.acquire`; a
+contended attempt returns the current holder instead of queueing. The
+agent-side wait procedure is defined in the gwt-verify skill: declare
+the wait with `issue.monitor.wait` (Issue #3844), retry
+`verify.lease.acquire` every 3 minutes for up to 15 attempts (about 45
+minutes), keep the holder readable through `workspace.update`
+`current_focus`, and on the final refusal post `kind:"blocked"` to the
+Board naming the holder. Your part:
+
+- A Board post from a waiting agent names the lease holder. Read
+  `verify.lease.status` and arbitrate the order — tell the holder to
+  release or the waiter to keep waiting — instead of relaunching either.
+- An agent whose `current_focus` says it is waiting for the lease, or
+  whose row carries a `waiting` declaration, is waiting, not stuck. Do
+  not stop it on `last_activity_at` alone.
+- `verify.run` admits itself (Issue #3913): it claims the lease
+  in-process and waits, bounded, for other worktrees' heavy processes to
+  drain. While it waits `verify.lease.status` counts it under `pending`;
+  when the budget runs out it answers `deferred` and the agent reruns it.
+  A `deferred` agent is retrying, not stuck.
 
 ## NeedsHuman
 
@@ -324,6 +796,27 @@ Hard limits, no exceptions:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- In autonomous mode `needs_human` has exactly two kinds, read from
+  `needs_human_kind` on the autonomous row: `destructive_change_approval`
+  (the reason line names the change to approve or refuse) and
+  `user_choice_required` (the reason line names the decision to make).
+  Stuck/idle timeouts, exhausted attempts, launch failures, readiness
+  gaps, CI, review, and branch protection never park an Issue; they
+  requeue, mark the row `not_ready` with its reason, or ask you to steer.
+- A row carrying `steering` (a live window that made no progress, an
+  attempt ladder past its cap, or a gate held by the environment) is
+  asking you to act now: send that launch a one-line instruction with
+  `pm.message.send` or a Board mention, or fix the named environment
+  cause. If the window is gone, `issue.monitor.requeue` it. The request
+  clears itself on the agent's next progress and renews once per stuck
+  window with an incremented `count` while nothing changes.
+- A structured autonomous question is different from a generic
+  escalation. Read it with `issue.monitor.questions`, preserve its
+  exact handoff ID and options when presenting it, then apply the
+  user's decision with `issue.monitor.question.answer`. A Board
+  decision or `pm.message.send` is not the answer transport. The
+  Monitor delivers the accepted answer once to the exact live or
+  resumed agent session.
 
 ## Blocked escalations from agents
 
@@ -369,21 +862,47 @@ and urgency.
 
 ## Reporting cadence
 
+- Default each user-facing report to 3-6 lines. Lead with the outcome,
+  identify affected agents by window title, and move supporting detail to
+  the owning Issue or Board entry. A pane or window ID may accompany a
+  diagnostic artifact, but it is never the only user-facing identity. If
+  the window title is unavailable, identify the owning Issue and say
+  `title unavailable`.
 - Report on your own initiative only at milestones: an Issue registered,
   an implementation agent launched, a PR opened, a merge landed, a
-  `needs_human` escalation, the first detection of a new `waiting`
-  episode, and a fatal failure. Collapse a run of milestones into one
-  digest instead of narrating each one.
-- `needs_human` and fatal failures are always presented immediately and
-  are never held for a digest.
-- The first detection of a new `waiting` episode must be reported
-  immediately under the one-report-per-episode rule above and is never
-  held for a digest. Continued observations of that episode stay
-  suppressed; only a leave-then-re-enter transition rearms reporting.
+  `needs_human` escalation, and a fatal failure. Collapse a run of
+  milestones into one digest instead of narrating each one. The
+  immediate-reporting conditions below are exceptions to this rule.
+- `needs_human`, fatal failures, and `stale` or `unknown` worktree
+  freshness are always presented immediately and are never held for a
+  digest.
+- Every unresolved user-input or decision wait is an escalation. Report it
+  immediately when first detected and again in every resident cycle until
+  it is resolved, using the affected window title and the action required
+  from the user. For a decision wait, include the question, your
+  recommendation and rationale, and a copy-paste answer example. Never
+  reduce the handoff to an instruction to write something in another
+  window. Reuse the sanitized episode summary; recurring reports do not
+  authorize another `pane.read`.
+- Build a stalled-item inventory every cycle covering `needs_human`,
+  decision waits, ownerless pull requests, open PRs that are `CI-RED`,
+  `CONFLICTED`, or `escalation_due`, and quiet agents. Advance at
+  least one item from that inventory in every cycle through a launch,
+  requeue, priority correction, escalation resolution, PR triage or
+  update-branch, or concrete user handoff. Treat every required inventory advance or handoff as a
+  reportable milestone or escalation under the conditional rule below.
+  Only an empty stalled-item inventory may end silently; a non-empty
+  inventory is not a no-change cycle.
+- Error panes you dispositioned this cycle are reported as the
+  disposition digest (see *Error pane triage and disposition*). A
+  recovery Issue registered from one is a milestone; a pane kept because
+  its owner or delivery is unknown is an escalation until resolved.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
-- A cycle that produced no milestone and no escalation ends with no
-  user-facing output at all. Do not post a "no change" line, do not
+- A cycle that produced no milestone and no escalation, with no open
+  PR in `CI-RED`, `CONFLICTED`, or `escalation_due`, ends with no
+  user-facing output at all — provided every running launch passed
+  the steering judgment first. Do not post a "no change" line, do not
   restate the queue or the running launches, and do not emit a keepalive
   to prove you are still looping: the resident loop's liveness is
   observable in the GUI's PM residency indicator and in
@@ -457,16 +976,56 @@ mod tests {
         unwrapped(SKILL_BODY_EN)
     }
 
+    fn markdown_bullets(section: &str) -> Vec<String> {
+        let mut bullets = Vec::new();
+        let mut current = None::<String>;
+        for line in section.lines() {
+            if let Some(first_line) = line.strip_prefix("- ") {
+                if let Some(previous) = current.replace(first_line.to_string()) {
+                    bullets.push(unwrapped(&previous));
+                }
+            } else if line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+                if let Some(current) = current.as_mut() {
+                    current.push(' ');
+                    current.push_str(line.trim());
+                }
+            } else if let Some(previous) = current.take() {
+                bullets.push(unwrapped(&previous));
+            }
+        }
+        if let Some(last) = current {
+            bullets.push(unwrapped(&last));
+        }
+        bullets
+    }
+
     /// Canonical phrases the PM contract must always carry (FR anchors).
     fn required_phrases() -> &'static [&'static str] {
         &[
             // FR-004: sole window + full autonomy without mid-confirmations.
             "single conversational window",
             "No intermediate confirmation questions",
+            "except for the intake questions explicitly allowed below",
             // FR-004: registration template.
             "acceptance",
             "`- [ ]` checkboxes",
             "`auto-merge` label applied",
+            // Issue #3796: request intake is delegated, routine branches are
+            // decided with explicit defaults, and only consequential questions
+            // reach the user with a reversible override trail.
+            "## Request intake via sub-agents",
+            "new work request that may require Issue registration or update",
+            "delegate a bounded intake packet",
+            "existing implementation and duplicate Issues",
+            "verifiable acceptance criteria",
+            "recommended default and rationale",
+            "every branch that is neither irreversible nor a core specification choice",
+            "irreversible or determines a core specification choice",
+            "single batch",
+            "copy-paste answer example",
+            "For every branch registered using a PM default",
+            "PM default ruling (override available)",
+            "one-line correction",
             // FR-005: semantic priority through #3357 operations.
             "`issue.monitor.status`",
             "`issue.monitor.priority.set`",
@@ -475,13 +1034,19 @@ mod tests {
             "`issue.monitor.launch_now`",
             "claim/slot path",
             "never bypass the Monitor",
-            // FR-008/FR-009: privileged ON direction.
+            // Issue #3814 AC-4: JSON remains a one-way kill-switch lane even
+            // for the PM; only an explicit GUI action may raise a switch.
             "`issue.monitor.config.set`",
-            "ON as well as OFF",
+            "including the PM, can only turn",
+            "explicit action in the GUI",
             // FR-012/FR-025: bounded subscribe + snapshot reconciliation.
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
+            "`errors.list`",
+            "`errors`",
+            "Do not rely on",
+            "`last_error`",
             // FR-109: subscribe failure degrades to same-cycle polling.
             "fall back to polling in the same cycle",
             "degraded (FR-109)",
@@ -506,13 +1071,14 @@ mod tests {
             // bounded human-attention observation, not Monitor lifecycle.
             "both manually launched project Agent panes and Monitor-launched project Agent panes",
             "one continuous `waiting` state as one waiting episode",
+            "read the prompt once per continuous `waiting` episode",
             "one bounded `pane.read`",
             "`params.lines` set to `50`",
-            "report it to the user once",
-            "Do not read or report it again while the pane remains `waiting`",
+            "Do not read it again while the pane remains `waiting`",
             "leaves `waiting` and later re-enters it",
-            "first detection of a new `waiting` episode",
-            "must be reported immediately",
+            "Every unresolved user-input or decision wait is an escalation",
+            "every resident cycle until it is resolved",
+            "pane's window title",
             "Do not call `pm.message.send`",
             "only the human may resolve it in that pane",
             "does not create or imply an Issue Monitor `needs_human` record",
@@ -521,6 +1087,14 @@ mod tests {
             // explicit amendment to FR-023's blanket prohibition.
             "`pane.close`",
             "counts as one attempt",
+            // Issue #3927 / SPEC #3340 FR-049: terminal cleanup is the
+            // runtime's; the PM only cleans an exact window the runtime
+            // demonstrably missed, after the grace and a fresh reread.
+            "Terminal cleanup is the runtime's job",
+            "after the configured close grace has elapsed",
+            "Reread the canonical state before acting",
+            "Close only that exact inert window",
+            "Never sweep panes in bulk",
             // FR-033: the Monitor-owned stop, and the fact that its identity
             // is exact. A PM that sends a partial identity stops nothing, so
             // the contract has to say why omission is not a wildcard.
@@ -537,6 +1111,11 @@ mod tests {
             // prohibition below has to name the operation that replaces it.
             "`issue.monitor.requeue`",
             "there is no launch",
+            // Issue #3923: a false provider quota hold has a PM-side release.
+            "`issue.monitor.quota_hold.list`",
+            "`issue.monitor.quota_hold.clear`",
+            "quota_hold",
+            "`launch_agent`",
             "resets the persisted autonomous attempt counter to zero",
             "starts a fresh bounded retry cycle",
             "launch_live",
@@ -565,8 +1144,65 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // Issue #3531 (SPEC-3431 FR-137〜140): an error pane is triaged to
+            // a durable disposition, never only diagnosed and reported.
+            "## Error pane triage and disposition",
+            "Diagnosing and reporting is not a disposition",
+            "recovery Issue",
+            "`issue.monitor.requeue`",
+            "| pane | owner | delivery state | disposition |",
+            // Issue #3776: a slow gwtd process cannot own the PM turn.
+            "## gwtd execution isolation",
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            // Issue #3868: open PRs are driven, not only classified.
+            "`default_action_executable`",
+            "`fallback`",
+            "`dwell_hours`",
+            "`unchanged_cycles`",
+            "`escalation_due`",
+            "never a no-change cycle",
+            "## GitHub read budget",
+            "## Heavy verification serialization",
+            // Issue #3781: open PR inventory is a standing resident-cycle duty.
+            "`pr.list`",
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+            "Never auto-close a PR",
+            "no `updated_at` bump for `stale_after_hours`, default 72h",
+            // T248: session notes live outside the disposable PM worktree.
+            "`$GWT_PM_SCRATCH_DIR` is the only storage location for PM session notes and checklists",
+            "Never write scratch files inside the PM worktree",
+            "`tasks/todo.md`",
+            "`tasks/pm-notes.md`",
+            "root `pm-notes.md`",
+            // T248: every resident cycle is gated by PM worktree freshness.
+            "Every resident cycle begins by reading `pm.status` worktree freshness",
+            "`stale` or `unknown` is reported immediately",
+            "not batched into a digest",
+            "Until freshness is `fresh`",
+            "must not claim it is observing current code or the current specification",
+            "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            // Issue #3944 AC-1/AC-2: the two park kinds and the steering request.
+            "`needs_human_kind`",
+            "`destructive_change_approval`",
+            "`user_choice_required`",
+            "A row carrying `steering`",
+            "`issue.monitor.questions`",
+            "`issue.monitor.question.answer`",
             // FR-015: the PM must be able to account for its own ordering.
             "explain the current order",
             // FR-016: PM ordering beats a GUI reorder (後勝ち).
@@ -574,6 +1210,10 @@ mod tests {
             // FR-017: milestone-only digest, escalations never batched.
             "one digest",
             "never held for a digest",
+            "Default each user-facing report to 3-6 lines",
+            "Build a stalled-item inventory every cycle",
+            "Advance at least one item from that inventory in every cycle",
+            "Only an empty stalled-item inventory may end silently",
             // Issue #3632: the quiet case is stated out loud — a cycle with
             // nothing to report ends silently, and liveness is proven outside
             // the conversation.
@@ -600,11 +1240,296 @@ mod tests {
         assert!(body.contains("Keep the backlog honest"));
     }
 
+    /// Issue #3865 AC-6 / AC-7: plain Issues have a body-update path, and the
+    /// plain-vs-design-required decision is a written rule, not PM discretion.
+    #[test]
+    fn contract_names_issue_edit_and_the_design_required_criteria() {
+        let body = body();
+        for phrase in [
+            "`issue.edit`",
+            "`params.number`",
+            "`params.title`",
+            "`params.body`",
+            "`params.labels`",
+            "only the fields you pass are updated",
+            "replaces the whole body",
+            "refuses a body update on a `gwt-spec` Issue",
+            // Issue #3930 AC-1: the readiness format is written down where the
+            // PM curates Issues — heading candidates and the checkbox shape.
+            "`## Acceptance Criteria`",
+            "`## 受け入れ基準`",
+            "`## 受け入れ条件`",
+            "never `## 成功基準`",
+            "prefix is accepted and numbered by position",
+            "do not mix the two styles",
+            "stored (body or comment)",
+            "## Plain Issue or design-required",
+            "spans more than one crate or layer",
+            "changes an existing public interface or type",
+            "an implementation order with dependencies that need a `tasks` breakdown",
+            "includes a user ruling that acceptance criteria alone cannot express",
+            "Any one of these makes it design-required (`gwt-spec`)",
+            "otherwise register a plain Issue",
+        ] {
+            assert!(body.contains(phrase), "missing phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn contract_delegates_request_intake_and_minimizes_user_questions() {
+        assert!(body().contains(
+            "No intermediate confirmation questions except for the intake questions explicitly allowed below"
+        ));
+        let request_intake = SKILL_BODY_EN
+            .split_once("## Request intake via sub-agents")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Request intake via sub-agents must be a bounded section");
+        let request_intake = unwrapped(request_intake);
+
+        for phrase in [
+            "new work request that may require Issue registration or update",
+            "delegate a bounded intake packet",
+            "existing implementation and duplicate Issues",
+            "verifiable acceptance criteria",
+            "decision branches",
+            "recommended default and rationale",
+            "every branch that is neither irreversible nor a core specification choice",
+            "irreversible or determines a core specification choice",
+            "single batch",
+            "copy-paste answer example",
+            "For every branch registered using a PM default",
+            "PM default ruling (override available)",
+            "one-line correction",
+        ] {
+            assert!(
+                request_intake.contains(phrase),
+                "request-intake contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3791 / SPEC-3431 FR-149〜153: user-facing supervision must use
+    /// the identity the user sees, keep reminders concise, and drive stalled
+    /// work instead of suppressing a still-unresolved wait as an old episode.
+    #[test]
+    fn contract_reports_unresolved_waits_concisely_and_drives_each_cycle() {
+        let observation = SKILL_BODY_EN
+            .split_once("## Observing the running agents")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("agent observation must be a bounded section");
+        let observation = unwrapped(observation);
+        for phrase in [
+            "window title",
+            "Never identify a pane to the user only by its pane or window ID",
+            "identify the owning Issue and say `title unavailable`",
+            "do not promote a pane or window ID to the primary identity",
+            "read the prompt once per continuous `waiting` episode",
+        ] {
+            assert!(
+                observation.contains(phrase),
+                "agent-observation contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            !observation.contains("report it to the user once"),
+            "unresolved waits must not retain the old report-once suppression"
+        );
+        assert!(
+            !observation
+                .contains("Do not read or report it again while the pane remains `waiting`"),
+            "bounded reads and recurring reports must be separate obligations"
+        );
+
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence must be a bounded section");
+        let reporting = unwrapped(reporting);
+        for phrase in [
+            "Default each user-facing report to 3-6 lines",
+            "Every unresolved user-input or decision wait is an escalation",
+            "every resident cycle until it is resolved",
+            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "Build a stalled-item inventory every cycle",
+            "`needs_human`, decision waits, ownerless pull requests, open PRs that are `CI-RED`, `CONFLICTED`, or `escalation_due`, and quiet agents",
+            "Advance at least one item from that inventory in every cycle",
+            "Treat every required inventory advance or handoff as a reportable milestone or escalation",
+            "Only an empty stalled-item inventory may end silently",
+            "identify the owning Issue and say `title unavailable`",
+        ] {
+            assert!(
+                reporting.contains(phrase),
+                "reporting contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            !reporting.contains("the first detection of a new `waiting` episode"),
+            "the recurring-wait rule must be the sole reporting cadence for waiting episodes"
+        );
+    }
+
     /// FR-012: the resident loop must actually look at the running agents each
     /// cycle. Subscribing and reordering alone is not monitoring.
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Bounded body of one `## heading` section, whitespace-collapsed.
+    fn section(heading: &str) -> String {
+        let text = SKILL_BODY_EN
+            .split_once(heading)
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .unwrap_or_else(|| panic!("{heading} must be a bounded section"));
+        unwrapped(text)
+    }
+
+    /// Issue #3767 AC-1 / AC-3: every resident cycle steers the running
+    /// launches — stalled, drifting, or waiting for the next action — through
+    /// the ruling channels only, and classifies an idle launch before acting.
+    /// AC-2: that judgment comes before the no-change judgment.
+    #[test]
+    fn contract_steers_running_launches_before_declaring_no_change() {
+        let steering = section("## Steering the running agents");
+        for phrase in [
+            "`last_activity_at`",
+            "latest Board posts",
+            "more than twice the monitor scan interval",
+            "scope drift",
+            "waiting for its next action",
+            "finished and settled",
+            "waiting for your ruling",
+            "waiting for the user",
+            "stopped for no visible reason",
+            "`board.post` with a mention",
+            "`pm.message.send`",
+            "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issue Monitor's launch path",
+            "never `pane.send`",
+            "The steering judgment precedes the no-change judgment",
+            "a launch left idle without a directive is never a no-change cycle",
+        ] {
+            assert!(
+                steering.contains(phrase),
+                "steering contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            section("## Resident loop (unattended)").contains("steer them"),
+            "the resident cycle must steer the running agents, not only check them"
+        );
+        assert!(
+            section("## Reporting cadence")
+                .contains("every running launch passed the steering judgment"),
+            "the silent no-change cycle must be gated on the steering judgment"
+        );
+    }
+
+    /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
+    /// the resident PM's conversational turn. The detailed contract belongs in
+    /// one section so the compact wake/Stop reminder cannot become an
+    /// incomplete second policy.
+    #[test]
+    fn contract_isolates_gwtd_execution_from_the_pm_turn() {
+        let execution = SKILL_BODY_EN
+            .split_once("## gwtd execution isolation")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("gwtd execution isolation section must be present");
+
+        for phrase in [
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "`daemon.subscribe`",
+            "batch mutations",
+            "repeated `pane.read`",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "retry that read at most once",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            "`workspace.*`",
+            "`build.*`",
+            "`execution.*`",
+            "`verify.*`",
+            "`pr.*`",
+        ] {
+            assert!(
+                execution.contains(phrase),
+                "gwtd execution isolation contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3781 AC-1/AC-3: PR lifecycle is a standing PM duty, not a
+    /// discretionary `gh pr list` glance. The classes and the no-auto-close
+    /// rule have to live in the contract so a quiet queue cannot skip them.
+    #[test]
+    fn contract_inventories_open_prs_every_resident_cycle() {
+        let body = body();
+        assert!(body.contains("## Open PR inventory"));
+        assert!(body.contains("`pr.list`"));
+        assert!(body.contains("Do not call `gh pr list`"));
+        assert!(body.contains("Classify nothing yourself"));
+        assert!(body.contains("Never auto-close a PR"));
+        assert!(body.contains("no `updated_at` bump for `stale_after_hours`, default 72h"));
+        for class in [
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+        ] {
+            assert!(body.contains(class), "missing class {class}");
+        }
+    }
+
+    #[test]
+    fn reporting_cadence_reports_non_fresh_worktrees_immediately() {
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence section must be followed by another section");
+        let bullets = markdown_bullets(reporting);
+        assert!(
+            bullets.iter().any(|bullet| {
+                bullet.contains("stale")
+                    && bullet.contains("unknown")
+                    && bullet.contains("immediately")
+                    && (bullet.contains("never held for a digest")
+                        || bullet.contains("not batched into a digest"))
+            }),
+            "one Reporting cadence bullet must relate stale/unknown freshness to immediate, non-digest reporting; bullets: {bullets:?}"
+        );
+    }
+
+    #[test]
+    fn reporting_cadence_milestone_rule_acknowledges_freshness_exception() {
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence section must be followed by another section");
+        let milestone_rule = markdown_bullets(reporting)
+            .into_iter()
+            .find(|bullet| bullet.contains("only at milestones"))
+            .expect("Reporting cadence must retain its milestone reporting rule");
+        let points_to_exception =
+            milestone_rule.contains("except") && milestone_rule.contains("below");
+        let names_freshness_exception =
+            milestone_rule.contains("stale") && milestone_rule.contains("unknown");
+        assert!(
+            points_to_exception || names_freshness_exception,
+            "the milestone rule must acknowledge its stale/unknown freshness exception: {milestone_rule}"
+        );
     }
 
     /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
@@ -614,13 +1539,158 @@ mod tests {
     /// wake prompts took it. Both halves are pinned: silence on no change, and
     /// liveness proven outside the conversation so the PM is not tempted to
     /// emit a keepalive.
+    /// Issue #3516 AC-2 / AC-3: the resident loop carries the interrupted-
+    /// release standing check, its single actionable state, the opt-in
+    /// reconcile, and the promise that repeating the reconcile is safe.
+    #[test]
+    fn contract_carries_the_interrupted_release_standing_check() {
+        let body = body();
+        for phrase in [
+            "Every resident cycle, run JSON operation `release.status`",
+            "`no_bump`, `released` (the version is already tagged) and `pr_open` are quiet states",
+            "Only `stalled` — bump landed, version untagged, no Release PR — asks for anything",
+            "`params.ensure_release_pr:true`",
+            "`release_pr_url`",
+            "The reconcile is idempotent: it reclassifies before it creates",
+            "A `stalled` release is never a no-change cycle",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3868 AC-2 / AC-3 / AC-5 / AC-6: a row the Monitor cannot act on
+    /// has a fixed fallback order, a red or conflicted PR forbids a silent
+    /// cycle, and dwell / no-progress counts reach the digest with what was
+    /// done or why nothing could be done.
+    #[test]
+    fn contract_drives_red_prs_through_a_fixed_fallback_and_never_ends_silently_with_them() {
+        let body = body();
+        for phrase in [
+            "`default_action_executable` is false",
+            "`blocker`",
+            "`owner_relaunch_refused_unique_commits`",
+            "triage the CI failure or conflict yourself",
+            "arrange a rerun when it is a flake",
+            "arrange a fresh launch when it is a regression",
+            "escalate to the user immediately when neither is possible",
+            "`gh pr update-branch`",
+            "at least one open PR is `CI-RED` or `CONFLICTED` is never a no-change cycle",
+            "`dwell_hours`",
+            "`stale_after_hours`",
+            "`params.stale_after_hours`",
+            "`unchanged_cycles`",
+            "`escalate_after_cycles`",
+            "`escalation_due`",
+            "what you did about it this cycle",
+            "why nothing could be done",
+            "measured from the PR's real `updated_at`",
+            "`UNDETERMINED`",
+            "`lifecycle_source`",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+        assert!(
+            body.contains(
+                "A cycle that produced no milestone and no escalation, with no open PR in \
+                 `CI-RED`, `CONFLICTED`, or `escalation_due`, ends with no user-facing output at all"
+            ),
+            "the silent-cycle rule must carry the red-PR exception"
+        );
+    }
+
+    /// Issue #3868 AC-9 / AC-10 / AC-11: quota exhaustion is reported as an
+    /// unobservable inventory, GitHub reads stop for the cycle, and the PM's
+    /// own live reads are budgeted.
+    #[test]
+    fn contract_reports_quota_exhaustion_as_unobservable_and_budgets_live_reads() {
+        let body = body();
+        for phrase in [
+            "`github_rate_limited`",
+            "unobservable, not empty",
+            "PR inventory unobservable: quota",
+            "skip the remaining GitHub reads of this cycle",
+            "record the skip",
+            "never by `gh api rate_limit`",
+            "## GitHub read budget",
+            "cache-first",
+            "`refresh:true` only when",
+            "at most 5 live reads per cycle",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3891 AC-6: the inventory is no longer an unconditional
+    /// every-cycle GitHub read. The contract names the cache-first,
+    /// budget-aware mechanics of `pr.list`, tells the PM what a throttled
+    /// answer means, keeps `refresh:true` off the periodic read, and points
+    /// at `github.budget` for observation.
+    #[test]
+    fn contract_makes_the_open_pr_inventory_budget_aware() {
+        let body = body();
+        assert!(
+            !body.contains("Every resident cycle inventories open pull requests"),
+            "the unconditional inventory wording must be gone"
+        );
+        for phrase in [
+            "`pr.list` is cache-first",
+            "spends nothing",
+            "no `body`, no `statusCheckRollup`",
+            "`source: stale-cache`",
+            "PR inventory throttled:",
+            "Do not pass `refresh:true` on the periodic inventory",
+            "`github.budget`",
+            "counts as zero live reads",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3928 AC-4: the budget state the queue is running on is part of
+    /// the status snapshot, so the PM can attribute a burst without a second
+    /// read.
+    #[test]
+    fn contract_points_the_pm_at_the_budget_block_in_monitor_status() {
+        let body = body();
+        for phrase in [
+            "`github_budget`",
+            "`backoff_until`",
+            "`sources_last_minute`",
+            "capped at 15",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3868 AC-30: the heavy-verification wait procedure is defined on
+    /// the PM side too, so a waiting agent is arbitrated rather than killed.
+    #[test]
+    fn contract_defines_the_heavy_verification_wait_and_arbitration() {
+        let body = body();
+        for phrase in [
+            "## Heavy verification serialization",
+            "`verify.lease.acquire`",
+            "every 3 minutes",
+            "15 attempts",
+            "`workspace.update`",
+            "`verify.lease.status`",
+            "waiting, not stuck",
+            // Issue #3913: verify.run admits itself and answers `deferred`
+            // on a busy host; a deferred agent is retrying, not stuck.
+            "`deferred`",
+            "`pending`",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
     #[test]
     fn contract_ends_a_no_change_cycle_with_no_user_facing_output() {
         let body = body();
         assert!(
             body.contains(
-                "A cycle that produced no milestone and no escalation ends with no user-facing \
-                 output at all"
+                "A cycle that produced no milestone and no escalation, with no open PR in \
+                 `CI-RED`, `CONFLICTED`, or `escalation_due`, ends with no user-facing output at all"
             ),
             "no-change 周回は無出力で終える規定が要る"
         );
@@ -639,6 +1709,19 @@ mod tests {
             body.contains("silence is about the report, not about the cycle"),
             "省略してよいのは出力であって周回ではない（FR-3）"
         );
+    }
+
+    #[test]
+    fn markdown_bullet_parser_does_not_absorb_unindented_paragraphs() {
+        let fixture = "- worktree freshness is stale or unknown\n\
+This paragraph says it is reported immediately and never held for a digest.\n\
+- another bullet";
+        let bullets = markdown_bullets(fixture);
+        assert_eq!(
+            bullets,
+            ["worktree freshness is stale or unknown", "another bullet"]
+        );
+        assert!(bullets.iter().all(|bullet| !bullet.contains("immediately")));
     }
 
     #[test]
@@ -715,6 +1798,107 @@ mod tests {
         );
     }
 
+    /// Issue #3531 AC-1 / AC-3 (SPEC-3431 FR-137〜140): an error pane is not
+    /// finished when it has been diagnosed. The contract fixes the order —
+    /// identify the owner, reconcile delivery against authoritative evidence,
+    /// connect undelivered work to a recovery Issue or a requeue, record the
+    /// disposition durably, close only the exact inert pane, and report the
+    /// disposition — because the pane may be the last trace of work that was
+    /// never delivered (PR #3520's review threads were lost this way).
+    #[test]
+    fn contract_triages_error_panes_to_recovery_before_cleanup() {
+        let triage = section("## Error pane triage and disposition");
+        let position = |phrase: &str| {
+            triage
+                .find(phrase)
+                .unwrap_or_else(|| panic!("error pane triage contract is missing: {phrase}"))
+        };
+        let identify = position("identify the owning Issue and Work");
+        let reconcile = position("reconcile its delivery state");
+        let recover = position("connect it to a recovery Issue or a requeue");
+        let durable = position("record the failure reason and the disposition durably");
+        let close = position("close only that exact inert pane");
+        let digest = position("disposition digest");
+        assert!(
+            identify < reconcile,
+            "identify the owner before reconciling delivery"
+        );
+        assert!(reconcile < recover, "reconcile delivery before recovering");
+        assert!(recover < durable, "recovery precedes the durable record");
+        assert!(durable < close, "a durable disposition precedes the close");
+        assert!(close < digest, "the digest reports what was closed");
+
+        // AC-3: undelivered work is never left as a report.
+        for phrase in [
+            "`issue.create`",
+            "`issue.monitor.requeue`",
+            "Never leave undelivered work as a report",
+            "Cached `linked_prs`",
+            "never delivery proof on its own",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane recovery contract is missing: {phrase}"
+            );
+        }
+        // Fail-closed retention (FR-138) survives the new cleanup duty.
+        for phrase in [
+            "unknown owner",
+            "keep the pane",
+            "Never sweep panes in bulk",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane retention contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3531 AC-1: "diagnosed and reported" is explicitly not an
+    /// allowed end state for an error pane, and the resident loop invokes the
+    /// triage every cycle so the duty cannot depend on session memory.
+    #[test]
+    fn contract_forbids_ending_error_pane_triage_at_a_report() {
+        let triage = section("## Error pane triage and disposition");
+        for phrase in [
+            "Diagnosing and reporting is not a disposition",
+            "never a no-change cycle",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane triage contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            section("## Resident loop (unattended)").contains("Error pane triage and disposition"),
+            "the resident cycle must invoke the error pane triage every cycle"
+        );
+        assert!(
+            section("## Reporting cadence").contains("disposition digest"),
+            "the disposition digest must be part of the reporting cadence"
+        );
+    }
+
+    /// Issue #3531 AC-4: the disposition report has a fixed shape (pane /
+    /// owner / delivery state / disposition) and the skill shows an example so
+    /// every PM session reports the same columns.
+    #[test]
+    fn contract_shows_the_disposition_digest_format() {
+        let triage = section("## Error pane triage and disposition");
+        for phrase in [
+            "| pane | owner | delivery state | disposition |",
+            "recovery Issue #",
+            "closed (receipt",
+            "kept",
+            "title unavailable",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "disposition digest example is missing: {phrase}"
+            );
+        }
+    }
+
     #[test]
     fn rendered_skill_md_has_frontmatter_and_required_phrases() {
         let rendered = render_skill_md();
@@ -728,6 +1912,10 @@ mod tests {
                 "rendered gwt-pm SKILL.md is missing required phrase: {phrase}"
             );
         }
+        assert!(
+            !rendered.contains("ON as well as OFF"),
+            "rendered gwt-pm SKILL.md must not preserve the obsolete PM ON exception"
+        );
     }
 
     #[test]

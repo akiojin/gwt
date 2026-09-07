@@ -230,12 +230,20 @@ the live endpoint for diagnostics. Without JSON operation `daemon.start`,
 multi-instance fan-out is inactive but local file-based state and
 the file watcher continue to work as before.
 
-Windows currently has no long-running daemon: JSON operation `daemon.start`
-exits with "not yet implemented", and managed hooks fall back to
-synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
-therefore unavailable on Windows pending follow-up work; JSON operation
-`daemon.status` still works there but always reports `stopped` until
-the named-pipe path lands.
+On Windows the daemon runs the same way: the GUI's Issue Monitor starts
+and supervises it as a user-session child process, and JSON operation
+`daemon.start` starts one by hand. The transport is a named pipe
+(`\\.\pipe\gwtd-<scope>-<hash>`, local clients only; the endpoint file
+under `~/.gwt` carries the auth token). `daemon.status`,
+`daemon.subscribe`, Issue Monitor controls, and multi-instance fan-out
+behave as on macOS / Linux. A hand-started daemon stops on Ctrl-C,
+Ctrl-Break, or console close; logoff and shutdown run the same cleanup,
+and a daemon terminated by the GUI is reclaimed by the liveness checks on
+the next start. gwt does not install a Windows Service: the daemon only
+scans and claims — agent panes are still created by the GUI — so a
+service would not enable headless autonomous runs and would fight the
+per-user `~/.gwt` state. Headless autonomous execution is not a goal of
+the daemon.
 
 ## Agent Workflow
 
@@ -269,7 +277,11 @@ Common windows include:
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view.
+  open this same Work Item view. Issue Monitor launches do not open a window on
+  the canvas: the agent is mirrored read-only in the Issue window's right pane,
+  and `Windowize` promotes it to a normal window when you want to type into it.
+  Each row also carries its Work's lifecycle, attention reason, and PR state,
+  with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
 - `File Tree` — live read-only repository tree
@@ -317,7 +329,14 @@ the `gwtd` JSON operations `issue.monitor.status`,
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. All operations accept an optional
+an explicit action in the GUI. `issue.monitor.profiles` reads the launch
+candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidates the Monitor launches each Issue with the first eligible candidate
+(rate-limit holds, the usage threshold, and `prefer_for` routing decide
+eligibility; the exact rules are specified in SPEC
+[#3914](https://github.com/akiojin/gwt/issues/3914)), so one rate-limited
+provider no longer stops the queue. Saving Agent settings for a second provider
+in the GUI appends it to the same pool. All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
@@ -342,6 +361,19 @@ pass first, failures escalate to a visible `NeedsHuman` state, and the
 `Autonomous` toggle is a kill switch that actively cancels any auto-merge the
 monitor armed. The full gate design and threat model live in SPEC
 [#3200](https://github.com/akiojin/gwt/issues/3200).
+
+Once a work branch merges into `develop`, the monitor settles the delivered
+Issue itself (`Closes #N` only fires on the default branch). When every
+acceptance criterion is checked — or the PR body / an Issue comment records
+that the remaining criteria were delegated to another Issue
+(`残 AC は別 Issue に委譲`) — it posts a comment carrying the PR number and
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
+`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+is closed only after every task phase is complete. Auto-close follows the
+`Autonomous` toggle by default; `issue.monitor.config.set` with
+`auto_close_merged_issues=true|false` overrides it, and when it is off the
+monitor only records a `merge 済み・close 待ち` comment. An Issue a human
+reopened is never closed again by the same merge.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
@@ -773,6 +805,10 @@ JSON
 cargo build -p gwt --bin gwt --bin gwtd
 ```
 
+The `browser-check` skill (isolated GUI verification of this checkout) also
+needs `jq` on `PATH` to read `hook.doctor` evidence. It is not required to run
+gwt itself.
+
 ### Run
 
 ```bash
@@ -829,6 +865,33 @@ TTL. The default TTL is 45 minutes; a lease that lapses is released
 automatically, and a holder that is killed releases immediately. Lease
 transitions are recorded in
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
+
+### GitHub API budget
+
+Every `gh` call gwt makes shares one GitHub account budget across all
+machines, worktrees, and agents. The `pr.list` inventory is cache-first: a
+snapshot under `~/.gwt/projects/<hash>/pr-inventory-cache.json` answers
+repeated reads for 5 minutes without touching GitHub, the bulk query stays
+light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
+changed. Pass `params.refresh:true` when a decision needs the live state and
+`params.include` (`["checks","body"]`, default `["checks"]`) to choose the
+heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
+and `github_calls`; when the budget is below its reserve the last snapshot is
+served and `throttled` says why.
+
+Observe the budget with a free endpoint:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+The answer lists the primary windows GitHub reports (`graphql` / `core`),
+a local estimate of the per-minute secondary limit (GitHub does not expose
+it; the estimate comes from this machine's spawn ledger under
+`~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
+decision a periodic read would get right now.
 
 ### Releasing
 

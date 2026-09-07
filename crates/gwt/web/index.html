@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gwt — Operator</title>
+    <link rel="icon" href="data:," />
     <!-- SPEC-2356: theme bootstrap. Runs synchronously before paint to avoid FOUC. -->
     <script>
       (function () {
@@ -143,13 +144,10 @@
                 type="button"
                 id="op-pm-settings-button"
                 aria-label="Project Manager settings"
-                aria-expanded="false"
-                aria-controls="pm-settings-panel"
                 title="Project Manager settings"
               >
                 <span aria-hidden="true">⚙</span>
               </button>
-              <div class="pm-settings-panel" id="pm-settings-panel" hidden></div>
             </div>
             <!-- SPEC-3245 Stage E: the deprecated Intake launch entry is removed;
                  Workspace remains the normal route into existing work. -->
@@ -232,6 +230,25 @@
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
+            <!-- SPEC #3206 v2 (FR-009): notification bell + unread badge. The
+                 drawer itself mounts on <body> (app.js) — never inside the rail,
+                 whose stacking context would clamp it under toasts/modals. -->
+            <button
+              class="op-rail__item op-rail__item--notifications"
+              type="button"
+              id="op-notifications-button"
+              data-cmd="toggle-notifications"
+              aria-label="Notifications"
+              title="Notifications"
+              aria-controls="notification-center"
+              aria-expanded="false"
+            >
+              <span class="op-rail__icon" aria-hidden="true">🔔</span>
+              <span class="op-rail__badge" aria-hidden="true" hidden></span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Notifications</span>
+              </span>
+            </button>
             <button
               class="op-rail__item"
               id="op-palette-button"
@@ -337,6 +354,14 @@
           <div class="op-status-strip__cell op-status-strip__cell--running">
             <span class="op-status-strip__label">RUNNING</span>
             <span class="op-status-strip__value" id="op-strip-running" aria-label="Running agents">0</span>
+            <!-- Issue #3884 AC-3: how many of the running agents live as inline
+                 terminals in the Issue window instead of on the canvas. -->
+            <span
+              class="op-status-strip__sub"
+              id="op-strip-running-inline"
+              aria-label="Running agents shown as inline terminals in the Issue window"
+              hidden
+            >0 inline</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--idle">
             <span class="op-status-strip__label">IDLE</span>
@@ -575,15 +600,8 @@
               <button class="preset-button" data-preset="work" data-category="surface">
                 <span class="preset-button__icon" aria-hidden="true">◆</span>
                 <span class="preset-button__text">
-                  <strong>Workspace</strong>
-                  <span>Open the Workspace overview</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="improvement" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">◇</span>
-                <span class="preset-button__text">
-                  <strong>Improvement Inbox</strong>
-                  <span>Review gwt improvement candidates</span>
+                  <strong>Work</strong>
+                  <span>Open the Work overview</span>
                 </span>
               </button>
             </div>

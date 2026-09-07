@@ -66,6 +66,17 @@ pub(super) fn with_launch_wizard_error_log_capture<T>(operation: impl FnOnce() -
 /// SPEC-3151 FR-003: OpenCode joined the table so a missing `opencode` binary
 /// with no available package runner surfaces install guidance rather than
 /// `No viable candidates found in PATH`.
+/// Recovery route appended to the owner-mismatch binding refusal.
+///
+/// Issue #3489: the refusal fails the launch before the PTY starts, so the pane
+/// shows this one line and nothing else. The refusal itself names the Session
+/// and both owners; this names what to do next so the window is not a dead end.
+const EXECUTION_BINDING_OWNER_MISMATCH_RECOVERY: &str = concat!(
+    ". Run the execution.status JSON operation for the exact recovery route, ",
+    "then use Continue work on the owner's Work to create a successor, ",
+    "or start a fresh launch for that owner."
+);
+
 const MISSING_BINARY_INSTALL_HINTS: &[(&str, &str)] = &[
     (
         "agy",
@@ -146,7 +157,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::SetHermesOption { .. } => "set_hermes_option",
             gwt::LaunchWizardAction::SetHermesSafeMode { .. } => "set_hermes_safe_mode",
-            gwt::LaunchWizardAction::RunOpenCodeSetup => "run_opencode_setup",
+            gwt::LaunchWizardAction::RunAgentSetup => "run_agent_setup",
             gwt::LaunchWizardAction::Submit => "submit",
             gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
         }
@@ -221,6 +232,21 @@ impl AppRuntime {
             error = %sanitized_error,
             "launch wizard action failed"
         );
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            sanitized_error,
+            gwt_core::error_ledger::ErrorTarget {
+                issue: view
+                    .linked_issue_number
+                    .or(session.issue_monitor_launch_issue_number),
+                window_id: Some(session.wizard_id.clone()),
+                session_id: session
+                    .manual_holder_intent
+                    .as_ref()
+                    .map(|intent| intent.predecessor.session_id.clone()),
+                project_root: None,
+            },
+        );
     }
 
     fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
@@ -251,6 +277,22 @@ impl AppRuntime {
             branch = %branch_name,
             error = %sanitized_error,
             "window launch failed"
+        );
+        let project_root = self.window_lookup.get(window_id).and_then(|address| {
+            self.tabs
+                .iter()
+                .find(|tab| tab.id == address.tab_id)
+                .map(|tab| tab.project_root.display().to_string())
+        });
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            sanitized_error,
+            gwt_core::error_ledger::ErrorTarget {
+                window_id: Some(window_id.to_string()),
+                session_id: session.map(|session| session.session_id.clone()),
+                project_root,
+                issue: None,
+            },
         );
     }
 
@@ -335,25 +377,68 @@ impl AppRuntime {
             .as_ref()
             .and_then(|context| context.issue_monitor_session_mode)
             .unwrap_or(gwt_agent::SessionMode::Normal);
+        let issue_monitor_autonomous_handoff = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_autonomous_handoff.clone());
+        let issue_monitor_autonomous_submit_started = launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_autonomous_submit_started);
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
             self.launch_error_terminal_details
                 .insert(window_id.clone(), user_detail.clone());
             let mut events = self.handle_runtime_status(
-                window_id,
+                window_id.clone(),
                 WindowProcessStatus::Error,
                 Some(user_detail),
             );
             events.push(terminal_output);
-            if let Some(issue_number) = issue_monitor_issue_number {
-                events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
+            // Issue #3927 (SPEC #3340 AS-44 / FR-048): a restore carries no
+            // launch context, so a Monitor-owned restored window is
+            // recognised through its Session's Issue link.
+            let monitor_owned_issue = issue_monitor_issue_number.or_else(|| {
+                self.issue_monitor_owned_restore_issue(
+                    &window_id,
                     issue_monitor_project_root.as_deref(),
-                    issue_number,
-                    &detail,
-                    issue_monitor_delivery_id.as_deref(),
-                    issue_monitor_session_mode,
-                ));
+                )
+            });
+            if let Some(issue_number) = monitor_owned_issue {
+                if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
+                    events.extend(self.answered_handoff_launch_failure_events(
+                        issue_monitor_project_root.as_deref(),
+                        issue_number,
+                        issue_monitor_delivery_id.as_deref(),
+                        handoff,
+                        issue_monitor_autonomous_submit_started,
+                        &detail,
+                    ));
+                } else {
+                    let (failure_events, committed) = self
+                        .issue_monitor_launch_failed_delivery_committed_events_with_mode(
+                            issue_monitor_project_root.as_deref(),
+                            issue_number,
+                            &detail,
+                            issue_monitor_delivery_id.as_deref(),
+                            issue_monitor_session_mode,
+                        );
+                    events.extend(failure_events);
+                    // FR-048: the concrete reason is already in gwt.log
+                    // (`log_window_launch_error` above) and now durably in
+                    // the Monitor's `error_message`; only then is the
+                    // pre-PTY pane closed. A failed commit retains it.
+                    if committed {
+                        tracing::info!(
+                            target: "gwt::agent_launch",
+                            window_id = %window_id,
+                            issue_number,
+                            "closing the Issue Monitor-owned window that failed before PTY start"
+                        );
+                        events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
+                }
             }
             return events;
         }
@@ -373,20 +458,107 @@ impl AppRuntime {
             ));
         }
         if let Some(issue_number) = issue_monitor_issue_number {
-            events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
-                issue_monitor_project_root.as_deref(),
-                issue_number,
-                &detail,
-                issue_monitor_delivery_id.as_deref(),
-                issue_monitor_session_mode,
-            ));
+            if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
+                events.extend(self.answered_handoff_launch_failure_events(
+                    issue_monitor_project_root.as_deref(),
+                    issue_number,
+                    issue_monitor_delivery_id.as_deref(),
+                    handoff,
+                    issue_monitor_autonomous_submit_started,
+                    &detail,
+                ));
+            } else {
+                events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
+                    issue_monitor_project_root.as_deref(),
+                    issue_number,
+                    &detail,
+                    issue_monitor_delivery_id.as_deref(),
+                    issue_monitor_session_mode,
+                ));
+            }
         }
         events
     }
 
-    fn user_facing_launch_error_detail(detail: &str) -> String {
+    fn answered_handoff_launch_failure_events(
+        &mut self,
+        project_root: Option<&std::path::Path>,
+        issue_number: u64,
+        delivery_id: Option<&str>,
+        handoff: &gwt::AutonomousHandoffDeliveryAttempt,
+        submit_started: bool,
+        detail: &str,
+    ) -> Vec<OutboundEvent> {
+        let local_delivery_key = delivery_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("handoff:{}", handoff.handoff_id));
+        self.issue_monitor_launch_deliveries
+            .remove(&local_delivery_key);
+        let durable_note = project_root.map_or_else(
+            || "; the owning Project State is unavailable".to_string(),
+            |project_root| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                if submit_started {
+                    match gwt::mark_autonomous_handoff_delivery_ambiguous_from_prefs(
+                        &prefs_path,
+                        &handoff.handoff_id,
+                        &handoff.session_id,
+                        handoff.attempt,
+                        detail,
+                        &now,
+                    ) {
+                        Ok(true) => {
+                            "; the ambiguous attempt was parked for human review".to_string()
+                        }
+                        Ok(false) => "; the durable attempt no longer matched".to_string(),
+                        Err(error) => {
+                            format!("; durable ambiguity could not be recorded: {error}")
+                        }
+                    }
+                } else {
+                    match gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                        &prefs_path,
+                        &handoff.handoff_id,
+                        &handoff.session_id,
+                        handoff.attempt,
+                        detail,
+                        &now,
+                    ) {
+                        Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Retry {
+                            retry_not_before,
+                            ..
+                        }) => format!(
+                            "; the definitely pre-submit attempt will retry after {retry_not_before}"
+                        ),
+                        Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Escalated {
+                            ..
+                        }) => "; the bounded retry ladder was exhausted".to_string(),
+                        Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Rejected) => {
+                            "; the durable attempt no longer matched".to_string()
+                        }
+                        Err(error) => {
+                            format!("; durable pre-submit failure could not be recorded: {error}")
+                        }
+                    }
+                }
+            },
+        );
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message: format!(
+                "Issue Monitor could not confirm the exact answered-session submit{durable_note}: {detail}"
+            ),
+            issue_number: Some(issue_number),
+        })]
+    }
+
+    pub(super) fn user_facing_launch_error_detail(detail: &str) -> String {
         if let Some(hint) = Self::missing_binary_install_hint(detail) {
             return hint.to_string();
+        }
+        if detail.contains(gwt_agent::EXECUTION_BINDING_OWNER_MISMATCH) {
+            return format!("{detail}{EXECUTION_BINDING_OWNER_MISMATCH_RECOVERY}");
         }
         detail.to_string()
     }
@@ -394,8 +566,31 @@ impl AppRuntime {
     fn missing_binary_install_hint(detail: &str) -> Option<&'static str> {
         MISSING_BINARY_INSTALL_HINTS
             .iter()
-            .find(|(command, _)| Self::is_missing_binary_error(detail, command))
+            .find(|(command, _)| {
+                Self::is_missing_binary_error(detail, command)
+                    || Self::is_unresolved_preflight_runner_error(detail, command)
+            })
             .map(|(_, hint)| *hint)
+    }
+
+    /// SPEC-3864 FR-008: the preflight health check
+    /// (`resolve_host_runner_health_checked`) fails before any PTY spawn with
+    /// `<Display name> installed runner failed its health check ... direct
+    /// runner executable not resolved ...`. That is the same "binary is
+    /// missing" condition as `Unable to spawn <command>`, so the install
+    /// guidance must fire for it too — but only when no package fallback
+    /// could stand in (a resolvable-but-broken fallback is a different
+    /// failure whose diagnostic must stay visible).
+    fn is_unresolved_preflight_runner_error(detail: &str, command: &str) -> bool {
+        let Some(descriptor) = gwt_agent::builtin_agent_descriptor_for_command(command) else {
+            return false;
+        };
+        detail.contains(&format!(
+            "{} installed runner failed its health check",
+            descriptor.display_name
+        )) && detail.contains("direct runner executable not resolved")
+            && (detail.contains("No runtime package route is available")
+                || detail.contains("could not be resolved"))
     }
 
     fn is_missing_binary_error(detail: &str, command: &str) -> bool {
@@ -441,5 +636,39 @@ impl AppRuntime {
                 detail,
             }),
         ]
+    }
+}
+
+#[cfg(test)]
+mod install_hint_tests {
+    use super::AppRuntime;
+
+    #[test]
+    fn raw_spawn_failure_still_maps_to_install_hint() {
+        let detail = "Unable to spawn agy: No viable candidates found in PATH";
+        let user = AppRuntime::user_facing_launch_error_detail(detail);
+        assert!(user.contains("antigravity.google/cli/install.sh"), "{user}");
+    }
+
+    /// SPEC-3864 FR-008 (AC-7): the preflight health check fails before any
+    /// PTY spawn, so the install guidance must also fire on that shape.
+    #[test]
+    fn preflight_unresolved_runner_maps_to_install_hint() {
+        let detail = "Antigravity CLI installed runner failed its health check. Probe detail: direct runner executable not resolved. No runtime package route is available. Setup required: install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` and relaunch.";
+        let user = AppRuntime::user_facing_launch_error_detail(detail);
+        assert!(user.contains("antigravity.google/cli/install.sh"), "{user}");
+        assert!(user.contains("not found in PATH"), "{user}");
+
+        let opencode = "OpenCode installed runner failed its health check. Probe detail: direct runner executable not resolved. Latest package fallback 'opencode-ai@latest' could not be resolved.";
+        let user = AppRuntime::user_facing_launch_error_detail(opencode);
+        assert!(user.contains("npm i -g opencode-ai"), "{user}");
+    }
+
+    #[test]
+    fn preflight_failure_with_healthy_fallback_route_keeps_raw_detail() {
+        // A resolvable-but-broken runner is a different failure; the raw
+        // diagnostic must not be replaced by install guidance.
+        let detail = "OpenCode installed runner failed its health check. Probe detail: exit status 1; runner broken. Latest package fallback 'opencode-ai@latest' is also unhealthy: bunx exploded";
+        assert_eq!(AppRuntime::user_facing_launch_error_detail(detail), detail);
     }
 }

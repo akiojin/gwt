@@ -29,8 +29,9 @@ use super::{
     combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
     plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
     workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
-    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession,
+    PreparedProjectWindowRestore, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -48,6 +49,55 @@ pub(super) struct StartupGenerationReaperSummary {
     pub protected: usize,
     pub unchanged: usize,
     pub failures: usize,
+}
+
+pub(super) fn prepare_open_project_window_restores(
+    workspace: &gwt::PersistedWindowCanvasState,
+    sessions_dir: &Path,
+    project_kind: gwt::ProjectKind,
+    migration_pending: bool,
+) -> Vec<PreparedProjectWindowRestore> {
+    if project_kind != gwt::ProjectKind::Git || migration_pending {
+        return Vec::new();
+    }
+
+    workspace
+        .windows
+        .iter()
+        .filter(|window| {
+            window.preset.requires_process() && window.status == WindowProcessStatus::Stopped
+        })
+        .filter_map(|window| {
+            if crate::runtime_support::window_is_agent_pane(window) {
+                let session_id = window.session_id.as_deref()?;
+                let path = sessions_dir.join(format!("{session_id}.toml"));
+                let session = gwt_agent::Session::load_and_migrate(&path).ok()?;
+                if !session.worktree_path.exists() {
+                    return None;
+                }
+                let project_state_root = session
+                    .project_state_root
+                    .as_deref()
+                    .unwrap_or(&session.worktree_path);
+                let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+                    project_state_root,
+                    Some(session.branch.as_str()),
+                    &session.worktree_path,
+                ));
+                Some(PreparedProjectWindowRestore::Agent {
+                    session: Box::new(session),
+                    workspace_resume_context,
+                    fallback_geometry: window.geometry.clone(),
+                })
+            } else {
+                Some(PreparedProjectWindowRestore::Process {
+                    window_id: window.id.clone(),
+                    preset: window.preset,
+                    geometry: window.geometry.clone(),
+                })
+            }
+        })
+        .collect()
 }
 
 pub(super) fn spawn_startup_orphan_intake_prune_with<T, F>(
@@ -205,6 +255,35 @@ fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
     session.status != gwt_agent::AgentStatus::Stopped
 }
 
+/// Issue #3934: read the holder's durable state to decide whether the reaper
+/// is even allowed to consider it. Unreadable and missing records answer
+/// `false` so this can only ever widen what the exact stage revalidates.
+///
+/// Issue #3964 AC-2: a durably `Running` holder is admitted too. A launch that
+/// died before its agent ever ran leaves exactly that record with no runtime
+/// sidecar anywhere, and only the exact stage can tell that apart from a live
+/// agent — it answers `Unchanged` for a live one.
+fn durable_holder_status_admits_exact_stage(sessions_dir: &Path, session_id: &str) -> bool {
+    match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
+        gwt_agent::SessionPathState::Present(session) => {
+            gwt::cli::execution_state::holder_status_permits_generation_reclaim(session.status)
+                || session.status == gwt_agent::AgentStatus::Running
+        }
+        gwt_agent::SessionPathState::Missing | gwt_agent::SessionPathState::Error(_) => false,
+    }
+}
+
+/// How the reaper reports owner ledgers it cannot inspect.
+///
+/// Startup reports each one once at `warn`; the scan cadence would repeat the
+/// same permanent set (owners whose worktree was deleted) every tick, so it
+/// reports them at `debug` and lets the summary count carry the signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GenerationReaperFailureLog {
+    Warn,
+    Debug,
+}
+
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
     let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
         session.update_status(gwt_agent::AgentStatus::Stopped);
@@ -297,6 +376,10 @@ impl AppRuntime {
             .iter()
             .flat_map(|(_, plan)| plan.detached_worktree_paths().iter().cloned())
             .collect::<HashSet<_>>();
+        // Issue #4038 (AC-4 / AC-5): if this launch is the tail of an update
+        // apply, settle the resume marker first so the auto-resume queue below
+        // can bypass the freshness gate for the projects that were open.
+        self.settle_update_resume_marker_at_bootstrap(now);
         self.queue_startup_auto_resume_sessions(&planned_orphan_intake_paths);
         // SPEC-2359 W-37 / Issue #3735: restore selection is the protection
         // producer. Complete it before reaping repository owner ledgers, and
@@ -389,7 +472,14 @@ impl AppRuntime {
                 if !session.exact_auto_resume_candidate() {
                     continue;
                 }
-                if !startup_auto_resume_is_fresh(&session, now) {
+                // Issue #4038 (AC-4): sessions of a project that was open when
+                // the update apply began resume regardless of age — the gap
+                // was the update, not the operator walking away.
+                let resumes_after_update = !self.update_resume_tab_ids.is_empty()
+                    && self
+                        .auto_resume_tab_id_for_session(&session)
+                        .is_some_and(|tab_id| self.update_resume_tab_ids.contains(&tab_id));
+                if !resumes_after_update && !startup_auto_resume_is_fresh(&session, now) {
                     continue;
                 }
             }
@@ -415,6 +505,26 @@ impl AppRuntime {
                 continue;
             };
             if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
+                continue;
+            }
+            // Issue #3927 (SPEC #3340 FR-047): the canonical terminal
+            // predicate fences automatic restore. A settled, closed, or
+            // revoked Issue-linked window is marked restore-disabled and its
+            // placeholder removed instead of respawning.
+            let project_root = tab.project_root.clone();
+            let placeholder_window_id = tab
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
+                .map(|window| combined_window_id(&tab_id, &window.id));
+            if let Some(reason) = self.restore_admission_terminal_reason(
+                &session,
+                &project_root,
+                placeholder_window_id.as_deref(),
+            ) {
+                self.refuse_terminal_session_restore(&tab_id, &session.id, reason);
                 continue;
             }
             let config = launch_config_from_persisted_session(&session);
@@ -447,21 +557,6 @@ impl AppRuntime {
         &self,
         startup_worktrees: &[PathBuf],
     ) -> StartupGenerationReaperSummary {
-        let started_at = std::time::Instant::now();
-        let scan =
-            gwt::cli::execution_state::inspect_startup_active_generation_ledgers(startup_worktrees);
-        let mut summary = StartupGenerationReaperSummary {
-            failures: scan.failures.len(),
-            ..StartupGenerationReaperSummary::default()
-        };
-        for failure in &scan.failures {
-            tracing::warn!(
-                path = %failure.path.display(),
-                error = %failure.message,
-                "startup Active generation owner inspection failed closed"
-            );
-        }
-
         let mut protected_exact_sessions = Vec::new();
         let mut protected_unknown_session_ids = HashSet::new();
         for pending in &self.pending_startup_auto_resume_sessions {
@@ -472,88 +567,70 @@ impl AppRuntime {
                 }
             }
         }
-        let liveness_by_session = self.classify_nonlocal_active_owner_liveness_batch(
-            scan.candidates
-                .iter()
-                .filter(|candidate| candidate.replay_operation_id.is_none())
-                .map(|candidate| candidate.session_id.as_str()),
-        );
+        reap_defunct_active_generations(
+            &self.sessions_dir,
+            startup_worktrees,
+            &protected_exact_sessions,
+            &protected_unknown_session_ids,
+            GenerationReaperFailureLog::Warn,
+        )
+    }
+}
 
-        for candidate in scan.candidates {
-            summary.inspected += 1;
-            if candidate.replay_operation_id.is_some() {
-                match gwt::cli::execution_state::repair_startup_defunct_active_generation(
-                    &candidate,
-                ) {
-                    Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Replayed) => {
-                        summary.replayed += 1;
-                    }
-                    Ok(_) => {
-                        summary.unchanged += 1;
-                    }
-                    Err(error) => {
-                        summary.failures += 1;
-                        tracing::warn!(
-                            owner_kind = candidate.owner.kind.as_str(),
-                            owner_number = candidate.owner.number,
-                            generation_id = %candidate.generation_id,
-                            %error,
-                            "startup Active generation replay failed closed"
-                        );
-                    }
-                }
-                continue;
-            }
-            if protected_unknown_session_ids.contains(&candidate.session_id) {
-                summary.protected += 1;
-                continue;
-            }
-            let liveness = liveness_by_session
-                .get(&candidate.session_id)
-                .copied()
-                .unwrap_or(ActiveOwnerLiveness::Unknown);
-            if !matches!(liveness, ActiveOwnerLiveness::Stale(_)) {
-                summary.unchanged += 1;
-                continue;
-            }
-            let exact_holder = match gwt::cli::execution_state::current_generation_holder_identity(
-                &self.sessions_dir,
-                &candidate.worktree,
-                candidate.owner,
-            ) {
-                Ok(Some(identity)) => identity,
-                Ok(None) => {
-                    summary.unchanged += 1;
-                    continue;
-                }
-                Err(error) => {
-                    summary.failures += 1;
-                    tracing::warn!(
-                        owner_kind = candidate.owner.kind.as_str(),
-                        owner_number = candidate.owner.number,
-                        generation_id = %candidate.generation_id,
-                        %error,
-                        "startup Active generation exact holder inspection failed closed"
-                    );
-                    continue;
-                }
-            };
-            match gwt::cli::execution_state::reap_startup_defunct_active_generation(
-                &candidate,
-                &self.sessions_dir,
-                &exact_holder,
-                &protected_exact_sessions,
-            ) {
-                Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped) => {
-                    summary.reaped += 1;
-                }
+/// Reap every integrity-valid stale Active owner visible in a worktree
+/// inventory. The canonical non-local liveness predicate is a conservative
+/// prefilter; the execution-state coordinator then re-proves the complete
+/// Session/runtime identity under its leases.
+///
+/// Issue #3934: this is a free function so the Issue Monitor scan can run the
+/// same recovery on its own worker thread. A holder that dies mid-execution
+/// used to hold its owner's generation until the next GUI restart, which in
+/// practice meant forever: the queue kept refusing the owner and the only
+/// recovery left was registering the work under a fresh Issue number.
+pub(super) fn reap_defunct_active_generations(
+    sessions_dir: &Path,
+    worktrees: &[PathBuf],
+    protected_exact_sessions: &[gwt_agent::SessionExecutionIdentity],
+    protected_unknown_session_ids: &HashSet<String>,
+    failure_log: GenerationReaperFailureLog,
+) -> StartupGenerationReaperSummary {
+    let started_at = std::time::Instant::now();
+    let scan = gwt::cli::execution_state::inspect_startup_active_generation_ledgers(worktrees);
+    let mut summary = StartupGenerationReaperSummary {
+        failures: scan.failures.len(),
+        ..StartupGenerationReaperSummary::default()
+    };
+    for failure in &scan.failures {
+        match failure_log {
+            GenerationReaperFailureLog::Warn => tracing::warn!(
+                path = %failure.path.display(),
+                error = %failure.message,
+                "startup Active generation owner inspection failed closed"
+            ),
+            GenerationReaperFailureLog::Debug => tracing::debug!(
+                path = %failure.path.display(),
+                error = %failure.message,
+                "scan Active generation owner inspection failed closed"
+            ),
+        }
+    }
+
+    let liveness_by_session = super::continuation::classify_nonlocal_active_owner_liveness_batch_at(
+        sessions_dir,
+        scan.candidates
+            .iter()
+            .filter(|candidate| candidate.replay_operation_id.is_none())
+            .map(|candidate| candidate.session_id.as_str()),
+    );
+
+    for candidate in scan.candidates {
+        summary.inspected += 1;
+        if candidate.replay_operation_id.is_some() {
+            match gwt::cli::execution_state::repair_startup_defunct_active_generation(&candidate) {
                 Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Replayed) => {
                     summary.replayed += 1;
                 }
-                Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Protected) => {
-                    summary.protected += 1;
-                }
-                Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Unchanged) => {
+                Ok(_) => {
                     summary.unchanged += 1;
                 }
                 Err(error) => {
@@ -563,37 +640,114 @@ impl AppRuntime {
                         owner_number = candidate.owner.number,
                         generation_id = %candidate.generation_id,
                         %error,
-                        "startup Active generation reap failed closed"
+                        "startup Active generation replay failed closed"
                     );
                 }
             }
+            continue;
         }
-        tracing::info!(
-            inspected = summary.inspected,
-            reaped = summary.reaped,
-            replayed = summary.replayed,
-            protected = summary.protected,
-            unchanged = summary.unchanged,
-            failures = summary.failures,
-            roots_scanned = scan.roots_scanned,
-            owners_inspected = scan.owners_inspected,
-            duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "startup Active generation reaper completed"
-        );
-        summary
+        if protected_unknown_session_ids.contains(&candidate.session_id) {
+            summary.protected += 1;
+            continue;
+        }
+        let liveness = liveness_by_session
+            .get(&candidate.session_id)
+            .copied()
+            .unwrap_or(ActiveOwnerLiveness::Unknown);
+        // Issue #3934: the coarse prefilter only decides what is worth the
+        // exact revalidation below; it must not be the reason a holder is
+        // never looked at. It reports `Unknown` for a durably Idle Session,
+        // which is exactly the state a closed agent window leaves behind,
+        // so admit every durable state the exact stage is allowed to
+        // reclaim and let that stage make the decision.
+        if !matches!(liveness, ActiveOwnerLiveness::Stale(_))
+            && !durable_holder_status_admits_exact_stage(sessions_dir, &candidate.session_id)
+        {
+            summary.unchanged += 1;
+            continue;
+        }
+        let exact_holder = match gwt::cli::execution_state::startup_candidate_holder_identity(
+            sessions_dir,
+            &candidate,
+        ) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                summary.unchanged += 1;
+                continue;
+            }
+            Err(error) => {
+                summary.failures += 1;
+                tracing::warn!(
+                    owner_kind = candidate.owner.kind.as_str(),
+                    owner_number = candidate.owner.number,
+                    generation_id = %candidate.generation_id,
+                    %error,
+                    "startup Active generation exact holder inspection failed closed"
+                );
+                continue;
+            }
+        };
+        match gwt::cli::execution_state::reap_startup_defunct_active_generation(
+            &candidate,
+            sessions_dir,
+            &exact_holder,
+            protected_exact_sessions,
+        ) {
+            Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped) => {
+                summary.reaped += 1;
+            }
+            Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Replayed) => {
+                summary.replayed += 1;
+            }
+            Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Protected) => {
+                summary.protected += 1;
+            }
+            Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Unchanged) => {
+                summary.unchanged += 1;
+            }
+            Err(error) => {
+                summary.failures += 1;
+                tracing::warn!(
+                    owner_kind = candidate.owner.kind.as_str(),
+                    owner_number = candidate.owner.number,
+                    generation_id = %candidate.generation_id,
+                    %error,
+                    "startup Active generation reap failed closed"
+                );
+            }
+        }
     }
+    tracing::info!(
+        inspected = summary.inspected,
+        reaped = summary.reaped,
+        replayed = summary.replayed,
+        protected = summary.protected,
+        unchanged = summary.unchanged,
+        failures = summary.failures,
+        roots_scanned = scan.roots_scanned,
+        owners_inspected = scan.owners_inspected,
+        duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "startup Active generation reaper completed"
+    );
+    summary
+}
 
+impl AppRuntime {
     pub(super) fn startup_auto_resume_ready_events(
         &mut self,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        // Issue #4038 (AC-4 / AC-5): the notification center is a frontend
+        // sink, so the bootstrap-time settle is recorded here, on the first
+        // canvas-ready round trip, where a client is guaranteed to listen.
+        let mut events = self.update_resume_notice_events();
         if self.pending_startup_auto_resume_sessions.is_empty() {
-            return self.startup_pm_ensure_ready_events();
+            events.extend(self.startup_pm_ensure_ready_events());
+            return events;
         }
 
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
         let total = pending.len();
-        let mut events = Vec::new();
         for (index, pending_session) in pending.into_iter().enumerate() {
             let fallback_geometry =
                 startup_auto_resume_window_geometry(index, total, bounds.clone());
@@ -644,6 +798,19 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
             return Vec::new();
+        }
+        if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
+            if let Err(error) =
+                gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&session.worktree_path)
+            {
+                tracing::warn!(
+                    session_id = %session.id,
+                    worktree = %session.worktree_path.display(),
+                    %error,
+                    "failed to refresh the resident PM before resume"
+                );
+                return Vec::new();
+            }
         }
         let config = launch_config_from_persisted_session(&session);
         let geometry = self
@@ -768,7 +935,7 @@ impl AppRuntime {
     }
 
     /// Restore every process window the user did not explicitly close in a
-    /// freshly opened/restored project tab (Issue #2942). Closing a window
+    /// freshly opened/restored project tab in focused tests (Issue #2942). Closing a window
     /// removes it from the persisted workspace, so the persisted process
     /// windows are exactly the set to restart: agents resume via their native
     /// session id (or launch fresh when none exists), and non-agent process
@@ -777,25 +944,43 @@ impl AppRuntime {
     /// round-trip is required. The startup `bootstrap` queue only covers tabs
     /// open at launch, so projects opened via Open Project / Reopen Recent were
     /// never restored before this path existed.
+    #[cfg(test)]
     pub(super) fn restore_open_project_windows(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let windows = match self.tab(tab_id) {
-            Some(tab) if tab.kind == gwt::ProjectKind::Git && !tab.migration_pending => tab
-                .workspace
-                .persisted()
-                .windows
-                .iter()
-                .filter(|window| {
-                    window.preset.requires_process()
-                        && window.status == WindowProcessStatus::Stopped
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
+        let restores = match self.tab(tab_id) {
+            Some(tab) => prepare_open_project_window_restores(
+                tab.workspace.persisted(),
+                &self.sessions_dir,
+                tab.kind,
+                tab.migration_pending,
+            ),
             _ => return Vec::new(),
         };
 
+        self.restore_prepared_open_project_windows(tab_id, restores)
+    }
+
+    pub(super) fn restore_prepared_open_project_windows(
+        &mut self,
+        tab_id: &str,
+        restores: Vec<PreparedProjectWindowRestore>,
+    ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
-        for window in windows {
-            let combined = combined_window_id(tab_id, &window.id);
+        for restore in restores {
+            let window_id = match &restore {
+                PreparedProjectWindowRestore::Agent { session, .. } => {
+                    self.tab(tab_id).and_then(|tab| {
+                        tab.workspace.persisted().windows.iter().find_map(|window| {
+                            (window.session_id.as_deref() == Some(session.id.as_str()))
+                                .then(|| window.id.clone())
+                        })
+                    })
+                }
+                PreparedProjectWindowRestore::Process { window_id, .. } => Some(window_id.clone()),
+            };
+            let Some(window_id) = window_id else {
+                continue;
+            };
+            let combined = combined_window_id(tab_id, &window_id);
             // A window with a live PTY/runtime is already running (e.g. when an
             // already-open project tab is re-selected); only paused placeholders
             // should be restarted. `window_lookup` is the registry of known
@@ -803,48 +988,47 @@ impl AppRuntime {
             if self.runtimes.contains_key(&combined) {
                 continue;
             }
-            if crate::runtime_support::window_is_agent_pane(&window) {
-                let Some(session_id) = window.session_id.clone() else {
-                    continue;
-                };
-                let path = self.sessions_dir.join(format!("{session_id}.toml"));
-                let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
-                    continue;
-                };
-                if !session.worktree_path.exists() {
-                    continue;
-                }
-                if self
-                    .active_agent_sessions
-                    .values()
-                    .any(|active| active.session_id == session.id)
-                {
-                    continue;
-                }
-                let project_state_root = session
-                    .project_state_root
-                    .as_deref()
-                    .unwrap_or(&session.worktree_path);
-                let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                    project_state_root,
-                    Some(session.branch.as_str()),
-                    &session.worktree_path,
-                ));
-                let fallback_geometry = window.geometry.clone();
-                let mut spawned = self.spawn_restored_agent_session(
-                    tab_id,
+            match restore {
+                PreparedProjectWindowRestore::Agent {
                     session,
                     workspace_resume_context,
                     fallback_geometry,
-                );
-                events.append(&mut spawned);
-            } else {
-                events.extend(self.start_window(
-                    tab_id,
-                    &window.id,
-                    window.preset,
-                    window.geometry.clone(),
-                ));
+                } => {
+                    if self
+                        .active_agent_sessions
+                        .values()
+                        .any(|active| active.session_id == session.id)
+                    {
+                        continue;
+                    }
+                    // Issue #3927 (SPEC #3340 FR-047): same restore fence as
+                    // startup auto-resume.
+                    let project_root = self
+                        .tab(tab_id)
+                        .map(|tab| tab.project_root.clone())
+                        .unwrap_or_default();
+                    if let Some(reason) = self.restore_admission_terminal_reason(
+                        &session,
+                        &project_root,
+                        Some(&combined),
+                    ) {
+                        self.refuse_terminal_session_restore(tab_id, &session.id, reason);
+                        events.push(self.workspace_state_broadcast());
+                        continue;
+                    }
+                    let mut spawned = self.spawn_restored_agent_session(
+                        tab_id,
+                        *session,
+                        workspace_resume_context,
+                        fallback_geometry,
+                    );
+                    events.append(&mut spawned);
+                }
+                PreparedProjectWindowRestore::Process {
+                    window_id,
+                    preset,
+                    geometry,
+                } => events.extend(self.start_window(tab_id, &window_id, preset, geometry)),
             }
         }
         events
@@ -868,7 +1052,7 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
-    fn remove_stale_paused_agent_window(
+    pub(super) fn remove_stale_paused_agent_window(
         &mut self,
         tab_id: &str,
         session_id: &str,
@@ -933,6 +1117,135 @@ impl AppRuntime {
                         == session_scope
             })
             .map(|tab| tab.id.clone())
+    }
+
+    /// Issue #4038 (AC-3): the projects to record in the resume marker when an
+    /// update apply begins. `update_drain` reports whether the Issue Monitor
+    /// of that project holds new launches (#4037), read from the disk-owned
+    /// prefs so the settling bootstrap releases exactly the holds that were
+    /// raised.
+    pub(crate) fn update_resume_projects(&self) -> Vec<gwt_core::update::UpdateResumeProject> {
+        let mut seen = HashSet::new();
+        self.tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+            .filter_map(|tab| {
+                let hash = gwt_core::paths::project_scope_hash(&tab.project_root).to_string();
+                let update_drain = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root),
+                )
+                .map(|prefs| prefs.update_drain.is_some())
+                .unwrap_or(false);
+                seen.insert(hash.clone())
+                    .then_some(gwt_core::update::UpdateResumeProject { hash, update_drain })
+            })
+            .collect()
+    }
+
+    /// Issue #4038 (AC-4 / AC-5): clear the `update_drain` hold (#4037) of
+    /// every marker project that raised one, through the same disk-owned
+    /// prefs transaction the monitor controls use, so the Issue Monitor
+    /// admits launches again whether or not the update actually applied.
+    /// Returns the hashes whose hold was released.
+    fn release_update_drain_holds(
+        &self,
+        projects: &[gwt_core::update::UpdateResumeProject],
+    ) -> Vec<String> {
+        let recovery_baseline = gwt::IssueMonitorPrefs::recovery_default();
+        let mut released = Vec::new();
+        for project in projects.iter().filter(|project| project.update_drain) {
+            let Some(tab) = self.tabs.iter().find(|tab| {
+                tab.kind == gwt::ProjectKind::Git
+                    && gwt_core::paths::project_scope_hash(&tab.project_root).as_str()
+                        == project.hash
+            }) else {
+                tracing::warn!(
+                    target: "gwt::startup",
+                    project_hash = %project.hash,
+                    "update resume marker names a drained project that is no longer open; \
+                     its update_drain hold is left for issue.monitor.config.set"
+                );
+                continue;
+            };
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+            match gwt::mutate_issue_monitor_prefs_recovering(
+                &prefs_path,
+                &recovery_baseline,
+                |prefs| prefs.update_drain = None,
+            ) {
+                Ok(_) => released.push(project.hash.clone()),
+                Err(error) => tracing::warn!(
+                    target: "gwt::startup",
+                    project_hash = %project.hash,
+                    %error,
+                    "failed to release the update_drain hold after the update restart"
+                ),
+            }
+        }
+        released
+    }
+
+    /// Issue #4038 (AC-4 / AC-5): consume `~/.gwt/update-resume/marker.json`.
+    /// Success (running `to_version`) and version mismatch (#3807) both
+    /// release the projects' `update_drain` holds and queue a notice; only
+    /// success bypasses the auto-resume freshness gate. Idempotent: a settled
+    /// marker is gone, a mismatched one is re-read with `attempt` bumped.
+    fn settle_update_resume_marker_at_bootstrap(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        let Some(settlement) =
+            gwt_core::update::settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now)
+        else {
+            return;
+        };
+        let marker_projects = settlement
+            .marker
+            .projects
+            .iter()
+            .map(|project| project.hash.clone())
+            .collect::<HashSet<_>>();
+        self.update_drain_released_projects =
+            self.release_update_drain_holds(&settlement.marker.projects);
+        let applied = matches!(
+            settlement.outcome,
+            gwt_core::update::UpdateResumeOutcome::Applied
+        );
+        self.update_resume_tab_ids = if applied {
+            self.tabs
+                .iter()
+                .filter(|tab| {
+                    marker_projects
+                        .contains(gwt_core::paths::project_scope_hash(&tab.project_root).as_str())
+                })
+                .map(|tab| tab.id.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let level = if applied { "info" } else { "error" };
+        tracing::info!(
+            target: "gwt::startup",
+            outcome = ?settlement.outcome,
+            to_version = %settlement.marker.to_version,
+            attempt = settlement.marker.attempt,
+            released_projects = self.update_drain_released_projects.len(),
+            resumed_tabs = self.update_resume_tab_ids.len(),
+            "settled update resume marker"
+        );
+        self.pending_update_resume_notice = Some((level.to_string(), settlement.notice()));
+    }
+
+    fn update_resume_notice_events(&mut self) -> Vec<OutboundEvent> {
+        self.pending_update_resume_notice
+            .take()
+            .map(|(level, message)| {
+                vec![OutboundEvent::broadcast(
+                    gwt::BackendEvent::IssueMonitorToast {
+                        level,
+                        message,
+                        issue_number: None,
+                    },
+                )]
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {

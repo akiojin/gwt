@@ -15,6 +15,27 @@
 //! front door's endpoint-slot handling entirely rather than by giving it a
 //! second liveness definition.
 
+fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
+    whoami_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_value.map(str::trim).filter(|value| !value.is_empty()))
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Return the current username, falling back to the platform environment.
+pub fn current_username() -> String {
+    let whoami_value = whoami::username().ok();
+    let env_var = if cfg!(target_os = "windows") {
+        "USERNAME"
+    } else {
+        "USER"
+    };
+    let env_value = std::env::var(env_var).ok();
+    resolve_username(whoami_value.as_deref(), env_value.as_deref())
+}
+
 /// Return `true` when `pid` refers to a live process visible to the
 /// current user on a Unix host.
 ///
@@ -42,18 +63,18 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Windows named-pipe support for the daemon is a follow-up.
-        // When that lands, this branch should switch to a real
-        // liveness probe (e.g. `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
-        // ...)`).
-        false
+        // Issue #3526: the Windows daemon (named-pipe transport) persists
+        // real endpoint / authority-fence PIDs, so bootstrap resolution
+        // needs a truthful liveness answer here. A permanent `false` would
+        // make every consumer delete a live daemon's endpoint file on each
+        // bootstrap call and let the GUI tick double-drive the scan.
+        is_host_process_alive(pid)
     }
 }
 
-/// Return whether a GUI materializer process is alive on every supported host.
-/// This is intentionally separate from [`is_process_alive`]: the latter keeps
-/// Windows daemon-bootstrap compatibility semantics while launch-delivery
-/// leases need a real cross-platform owner probe.
+/// Return whether a process is alive on every supported host using the
+/// `sysinfo` process table. [`is_process_alive`] delegates here on Windows;
+/// Unix keeps the cheaper `kill(pid, 0)` probe.
 pub fn is_host_process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -141,6 +162,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn username_resolution_prefers_whoami_then_env_then_unknown() {
+        assert_eq!(
+            resolve_username(Some("  whoami-user  "), Some("  env-user  ")),
+            "whoami-user"
+        );
+        assert_eq!(
+            resolve_username(Some("  "), Some("  env-user  ")),
+            "env-user"
+        );
+        assert_eq!(resolve_username(None, Some(" runner ")), "runner");
+        assert_eq!(resolve_username(None, None), "unknown");
+    }
+
+    #[test]
     fn pid_zero_is_never_alive() {
         assert!(!is_process_alive(0));
         assert!(!is_host_process_alive(0));
@@ -168,7 +203,6 @@ mod tests {
         assert_eq!(host_process_start_time(i32::MAX as u32), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn current_process_is_alive() {
         assert!(is_process_alive(std::process::id()));

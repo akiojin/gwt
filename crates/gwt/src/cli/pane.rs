@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -220,6 +220,23 @@ pub(super) fn run<E: CliEnv>(
         .map_err(config_error)?;
     out.push_str(&output);
     Ok(0)
+}
+
+/// Issue #3883 AC-6: the ids of the agent windows this project currently has on
+/// the canvas, read from the same live source `pane.list` reads.
+///
+/// `issue.monitor.reconcile` needs the canvas, not the durable snapshot: the
+/// whole failure it recovers from is a durable snapshot that disagrees with the
+/// windows that are actually running.
+pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(default_project_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create pane runtime: {err}"))?;
+    let windows = runtime.block_on(request_window_list(&ws_url, &project_root))?;
+    Ok(windows.into_iter().map(|window| window.id).collect())
 }
 
 async fn run_async(
@@ -1116,7 +1133,7 @@ fn ensure_no_args(args: &[String]) -> Result<(), CliParseError> {
 }
 
 fn pane_websocket_url_from_env() -> Result<String, String> {
-    std::env::var(GWT_PANE_WS_URL_ENV)
+    let url = std::env::var(GWT_PANE_WS_URL_ENV)
         .ok()
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
@@ -1124,7 +1141,109 @@ fn pane_websocket_url_from_env() -> Result<String, String> {
             format!(
                 "{GWT_PANE_WS_URL_ENV} is not set; relaunch the Session from gwt before using pane.*"
             )
-        })
+        })?;
+    validate_pane_endpoint_home_scope(&url)?;
+    Ok(url)
+}
+
+fn validate_pane_endpoint_home_scope(url: &str) -> Result<(), String> {
+    let endpoint = reqwest::Url::parse(url)
+        .map_err(|error| format!("{GWT_PANE_WS_URL_ENV} is invalid: {error}"))?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| format!("{GWT_PANE_WS_URL_ENV} is missing a host"))?;
+    if is_reserved_container_bridge(host) {
+        return Ok(());
+    }
+    let normalized_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if !is_loopback_host(normalized_host) {
+        return Err(format!(
+            "{GWT_PANE_WS_URL_ENV} uses unsupported host '{host}'; relaunch the Session from gwt"
+        ));
+    }
+
+    let runtime_path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            format!(
+                "{} is not set; relaunch the Session from gwt before using pane.*",
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+            )
+        })?;
+    let canonical_runtime_path = dunce::canonicalize(&runtime_path).map_err(|error| {
+        format!(
+            "pane launch runtime path {} is unavailable: {error}; relaunch the Session from gwt",
+            runtime_path.display()
+        )
+    })?;
+    let malformed_runtime_error = || {
+        format!(
+            "pane launch runtime path {} is malformed; relaunch the Session from gwt",
+            runtime_path.display()
+        )
+    };
+    if !std::fs::metadata(&canonical_runtime_path)
+        .map_err(|error| {
+            format!(
+                "pane launch runtime path {} is unavailable: {error}; relaunch the Session from gwt",
+                runtime_path.display()
+            )
+        })?
+        .is_file()
+    {
+        return Err(malformed_runtime_error());
+    }
+    let runtime_sessions =
+        pane_runtime_sessions_dir(&canonical_runtime_path).ok_or_else(malformed_runtime_error)?;
+    let expected_sessions = gwt_core::paths::gwt_sessions_dir();
+    if !same_pane_scope_path(runtime_sessions, &expected_sessions) {
+        return Err(format!(
+            "pane endpoint belongs to a different GWT home (launch sessions: {}; current sessions: {}); relaunch the Session from the current gwt instance",
+            runtime_sessions.display(),
+            expected_sessions.display()
+        ));
+    }
+    Ok(())
+}
+
+fn pane_runtime_sessions_dir(runtime_path: &Path) -> Option<&Path> {
+    let file_name = runtime_path.file_name()?.to_str()?;
+    let session_id = file_name.strip_suffix(".json")?;
+    gwt_agent::validate_session_id_path_component(session_id).ok()?;
+
+    let pid_dir = runtime_path.parent()?;
+    pid_dir.file_name()?.to_str()?.parse::<u32>().ok()?;
+    let runtime_dir = pid_dir.parent()?;
+    if runtime_dir.file_name()?.to_str()? != "runtime" {
+        return None;
+    }
+    runtime_dir.parent()
+}
+
+fn is_reserved_container_bridge(host: &str) -> bool {
+    host.eq_ignore_ascii_case("host.docker.internal")
+        || host.eq_ignore_ascii_case("host.containers.internal")
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn same_pane_scope_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn project_root_for_pane(default: &Path) -> String {
@@ -1409,6 +1528,7 @@ fn config_error(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::TestEnv;
     use crate::persistence::WindowGeometry;
     use gwt_core::test_support::ScopedEnvVar;
 
@@ -1416,6 +1536,13 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    fn persist_runtime_evidence(home: &Path) -> std::path::PathBuf {
+        let path = home.join(".gwt/sessions/runtime/123/session.json");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("runtime directory");
+        std::fs::write(&path, "{}").expect("runtime evidence");
+        path
     }
 
     fn window(id: &str, preset: WindowPreset, agent_id: Option<&str>) -> PersistedWindowState {
@@ -1443,6 +1570,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
             is_pm: false,
         }
     }
@@ -1681,6 +1809,11 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let runtime_path = persist_runtime_evidence(home.path());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/ws");
         let _hook_url = ScopedEnvVar::set(
             gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
@@ -1691,6 +1824,167 @@ mod tests {
             pane_websocket_url_from_env().expect("dedicated pane endpoint"),
             "ws://127.0.0.1:46234/ws"
         );
+
+        let ipv6_url = "ws://[::1]:46234/internal/pane-ws";
+        let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, ipv6_url);
+        assert_eq!(
+            pane_websocket_url_from_env().expect("IPv6 loopback pane endpoint"),
+            ipv6_url
+        );
+    }
+
+    #[test]
+    fn pane_websocket_env_rejects_foreign_home_host_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let isolated_home = tempfile::tempdir().expect("isolated home");
+        let production_home = tempfile::tempdir().expect("production home");
+        let production_runtime = persist_runtime_evidence(production_home.path());
+        let _home = ScopedEnvVar::set("HOME", isolated_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", isolated_home.path());
+        let _runtime =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &production_runtime);
+        let _pane_url =
+            ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/internal/pane-ws");
+
+        let error = pane_websocket_url_from_env()
+            .expect_err("foreign-HOME Host pane authority must fail closed");
+
+        assert!(error.contains("different GWT home"), "{error}");
+        let normalized_error = if cfg!(windows) {
+            error.to_lowercase()
+        } else {
+            error.clone()
+        };
+        let normalized_path = |path: &Path| {
+            let rendered = path.display().to_string();
+            if cfg!(windows) {
+                rendered.replace('/', "\\").to_lowercase()
+            } else {
+                rendered
+            }
+        };
+        let production_sessions = dunce::canonicalize(production_home.path())
+            .expect("canonical production home")
+            .join(".gwt/sessions");
+        assert!(
+            normalized_error.contains(&normalized_path(&production_sessions)),
+            "{error}"
+        );
+        assert!(
+            normalized_error.contains(&normalized_path(
+                &isolated_home.path().join(".gwt/sessions")
+            )),
+            "{error}"
+        );
+        assert!(error.contains("relaunch the Session"), "{error}");
+    }
+
+    #[test]
+    fn pane_websocket_env_requires_well_formed_runtime_evidence_for_host() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _pane_url =
+            ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/internal/pane-ws");
+
+        let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let missing = pane_websocket_url_from_env()
+            .expect_err("Host pane authority without runtime evidence must fail closed");
+        assert!(missing.contains(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV));
+        drop(_runtime);
+
+        let malformed_runtime = home
+            .path()
+            .join(".gwt/sessions/not-runtime/123/session.json");
+        std::fs::create_dir_all(malformed_runtime.parent().unwrap())
+            .expect("malformed runtime directory");
+        std::fs::write(&malformed_runtime, "{}").expect("malformed runtime evidence");
+        let _runtime =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &malformed_runtime);
+        let malformed = pane_websocket_url_from_env()
+            .expect_err("malformed Host runtime evidence must fail closed");
+        assert!(malformed.contains("malformed"), "{malformed}");
+        drop(_runtime);
+
+        let runtime_directory = home.path().join(".gwt/sessions/runtime/123/session.json");
+        std::fs::create_dir_all(&runtime_directory).expect("runtime path directory");
+        let _runtime =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_directory);
+        let non_file = pane_websocket_url_from_env()
+            .expect_err("Host runtime evidence must be a regular file");
+        assert!(non_file.contains("malformed"), "{non_file}");
+    }
+
+    #[test]
+    fn pane_websocket_env_preserves_reserved_container_bridge_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("container home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            "/Users/host/.gwt/sessions/runtime/123/session.json",
+        );
+
+        for bridge in ["host.docker.internal", "host.containers.internal"] {
+            let url = format!("ws://{bridge}:46234/internal/pane-ws");
+            let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, &url);
+            assert_eq!(pane_websocket_url_from_env().unwrap(), url);
+        }
+
+        let _pane_url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            "ws://example.test:46234/internal/pane-ws",
+        );
+        let error = pane_websocket_url_from_env()
+            .expect_err("only managed Host and reserved bridge endpoints are valid");
+        assert!(error.contains("unsupported host"), "{error}");
+    }
+
+    #[test]
+    fn every_public_pane_command_rejects_foreign_home_before_connecting() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let isolated_home = tempfile::tempdir().expect("isolated home");
+        let production_home = tempfile::tempdir().expect("production home");
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedEnvVar::set("HOME", isolated_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", isolated_home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            persist_runtime_evidence(production_home.path()),
+        );
+        let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:9/internal/pane-ws");
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "foreign-capability");
+        let commands = [
+            PaneCommand::List,
+            PaneCommand::Read {
+                id: "agent-1".to_string(),
+                lines: 1,
+            },
+            PaneCommand::Close {
+                id: "agent-1".to_string(),
+            },
+            PaneCommand::Send {
+                id: Some("agent-1".to_string()),
+                text: "status".to_string(),
+            },
+        ];
+
+        for command in commands {
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            let error = run(&mut env, command, &mut String::new())
+                .expect_err("foreign-HOME command must fail before WebSocket connection");
+            assert!(error.to_string().contains("different GWT home"), "{error}");
+        }
     }
 
     #[test]
@@ -1783,6 +2077,44 @@ mod tests {
         let rendered = render_pane_list(&windows);
 
         assert!(rendered.contains("tab-1::agent-1\twaiting\tcodex"));
+    }
+
+    // SPEC-3671 FR-005 / T-012: PM observability must never depend on placement. An
+    // Issue-preview window is listed, resolvable, and addressable exactly like a canvas
+    // window — losing this is what would take down autonomous operation.
+    #[test]
+    fn pm_operations_treat_issue_preview_windows_like_canvas_windows() {
+        let mut canvas = window("tab-1::agent-1", WindowPreset::Agent, Some("codex"));
+        canvas.session_id = Some("01JCANVASSESSION0000000000".to_string());
+        let mut preview = window("tab-1::agent-2", WindowPreset::Agent, Some("codex"));
+        preview.session_id = Some("01JPREVIEWSESSION0000000000".to_string());
+        preview.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "tab-1::issue-1".to_string(),
+            issue_number: 3671,
+        };
+        let windows = vec![canvas, preview];
+
+        // pane.list
+        let rendered = render_pane_list(&windows);
+        assert!(rendered.contains("tab-1::agent-1\trunning\tcodex"));
+        assert!(
+            rendered.contains("tab-1::agent-2\trunning\tcodex"),
+            "issue_preview panes must stay visible to pane.list: {rendered}"
+        );
+
+        // pane.read / pane.close target resolution
+        assert_eq!(
+            resolve_window_id(&windows, "agent-2"),
+            Some("tab-1::agent-2")
+        );
+
+        // pm.message.send target arbitration
+        assert_eq!(
+            resolve_pm_send_target(&windows, "tab-1::agent-2")
+                .expect("issue_preview pane must accept PM messages")
+                .id,
+            "tab-1::agent-2"
+        );
     }
 
     #[test]

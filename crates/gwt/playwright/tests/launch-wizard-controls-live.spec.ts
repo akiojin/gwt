@@ -168,8 +168,17 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    const panel = page.locator("#pm-settings-panel");
+    const settingsWindow = page.locator(
+      '.workspace-window[data-preset="settings"]',
+    );
+    const panel = settingsWindow.locator(
+      '[data-settings-panel="project-manager"]',
+    );
     await page.getByRole("button", { name: "Project Manager settings" }).click();
+    await expect(settingsWindow).toBeVisible();
+    await expect(
+      settingsWindow.locator('[data-settings-tab="project-manager"]'),
+    ).toHaveAttribute("aria-selected", "true");
     await expect(panel).toBeVisible();
 
     const agent = panel.locator('[data-role="pm-agent-select"]');

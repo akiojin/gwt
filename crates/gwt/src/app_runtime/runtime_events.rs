@@ -7,13 +7,10 @@
 
 use base64::Engine as _;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc as std_mpsc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-
-#[cfg(unix)]
-use std::sync::mpsc as std_mpsc;
-#[cfg(unix)]
-use std::sync::Mutex;
 
 use super::{
     close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
@@ -116,7 +113,7 @@ pub(super) fn classify_issue_monitor_failure(
 /// only anchor available.
 pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
     let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
-    Some(provider_usage_limit_failure(&notice, None))
+    Some(provider_usage_limit_failure(&notice, None, None))
 }
 
 /// `pane_agent_id` is the agent the pane is actually running, and it wins over
@@ -126,12 +123,14 @@ pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMo
 pub(super) fn provider_usage_limit_failure(
     notice: &gwt_core::usage::ProviderLimitNotice,
     pane_agent_id: Option<&str>,
+    evidence: Option<gwt::IssueMonitorProviderQuotaHoldEvidence>,
 ) -> gwt::IssueMonitorFailure {
     gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider: provider_label(notice, pane_agent_id),
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        evidence,
     }
 }
 
@@ -195,6 +194,16 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     let Some(tail) = tail else {
         return base;
     };
+    // Issue #3490: several Codex agents initializing the shared `~/.codex`
+    // state directory at once lose the SQLite race, and the provider's answer
+    // is a nested stack trace that tells the operator nothing actionable.
+    // Checked before truncation because the lock refusal is the tail of a long
+    // path-heavy message and would be cut off. The replacement carries the
+    // transient-retry hint, so the Issue Monitor requeues without spending an
+    // attempt on host contention.
+    if gwt_agent::is_codex_shared_state_lock_failure(tail) {
+        return Some(gwt_agent::codex_shared_state_lock_detail());
+    }
     let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
         let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
         truncated.push('…');
@@ -599,7 +608,7 @@ impl AppRuntime {
         // Display and transport errors are not child-exit receipts. Callers
         // that observed `try_wait == Some` use `handle_runtime_status_event`
         // with the exact local incarnation and `exit_confirmed = true`.
-        self.handle_runtime_status_inner(id, status, detail, true, false)
+        self.handle_runtime_status_inner(id, status, detail, true, false, false)
     }
 
     #[cfg(test)]
@@ -614,7 +623,7 @@ impl AppRuntime {
         // live PTY incarnation. Production callers must use
         // `handle_runtime_status_event`, which also applies the incarnation
         // fence before accepting an exit receipt.
-        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, false)
     }
 
     pub(crate) fn handle_runtime_status_event(
@@ -628,7 +637,7 @@ impl AppRuntime {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, true)
     }
 
     fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
@@ -646,7 +655,7 @@ impl AppRuntime {
         // The daemon wire format has no exact local PTY incarnation or child
         // exit receipt. It may update diagnostics, but never terminalize a
         // producing Session in this process.
-        self.handle_runtime_status_inner(id, status, detail, false, false)
+        self.handle_runtime_status_inner(id, status, detail, false, false, false)
     }
 
     fn handle_runtime_status_inner(
@@ -656,6 +665,7 @@ impl AppRuntime {
         detail: Option<String>,
         publish_to_daemon: bool,
         exit_confirmed: bool,
+        exact_runtime_incarnation: bool,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             if !exit_confirmed {
@@ -737,14 +747,30 @@ impl AppRuntime {
         // torn down. A clean exit discards the screen entirely (the branch
         // below only composes a detail for `Error`), which is exactly why a
         // quota-dead Codex pane looked like finished work.
-        let quota_notice =
-            self.provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail);
         let quota_agent_id = self.pane_agent_id(&id);
+        // Issue #3923 AC-3: a notice left on the final screen is not a block
+        // while the poller reads the account as usable — the pane exited for
+        // some other reason and the text is stale.
+        let quota_notice = self
+            .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
         match quota_notice.as_ref() {
             Some(notice) => {
+                let recorded_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let screen_text = self
+                    .screen_tail(&id, QUOTA_NOTICE_TAIL_LINES, "\n")
+                    .or_else(|| detail.clone())
+                    .unwrap_or_default();
+                let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    &recorded_at,
+                    &id,
+                    &screen_text,
+                )
+                .with_poller(quota_agent_id.as_deref(), &self.provider_usage_accounts);
                 self.provider_quota_holds.insert(
                     id.clone(),
-                    provider_usage_limit_failure(notice, quota_agent_id.as_deref()),
+                    provider_usage_limit_failure(notice, quota_agent_id.as_deref(), Some(evidence)),
                 );
             }
             None => {
@@ -790,19 +816,15 @@ impl AppRuntime {
         ) {
             self.clear_runtime_approval_latch_without_status(&id, publish_to_daemon);
         }
-        // The `window_hook_states == Some(Stopped)` condition is unreachable
-        // (`window_state_for_hook_event` only returns `Idle` / `Running`), so
-        // in practice an exiting agent window is never auto-closed. That is
-        // deliberate for the pane itself — a stopped agent window stays on the
-        // canvas so its final output remains readable
-        // (`app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics`,
-        // #3274). SPEC-3431 FR-067 keeps that behaviour and fixes the separate
-        // bug it was masking: the Issue Monitor was never told either, so the
-        // launch's slot stayed held. Visibility and accounting are decided
-        // independently below.
+        // Structural auto-close belongs to the exact local PTY receipt. Hook
+        // Stop and daemon status events have no process-local incarnation and
+        // can arrive after a same-address, same-Session successor exists.
+        // Reader/display errors also lack a confirmed child exit. Only
+        // `handle_runtime_status_event`, after its current-incarnation fence,
+        // sets both authority bits below.
         let should_auto_close = exit_confirmed
-            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
-            && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
+            && exact_runtime_incarnation
+            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
@@ -812,22 +834,22 @@ impl AppRuntime {
             }
         }
         if should_auto_close {
-            self.clear_agent_window_startup_restore(&id);
-            self.stop_window_runtime(&id);
-            self.remove_window_state_tracking(&id);
-            // SPEC-3214 FR-002: `stop_window_runtime` above killed and joined
-            // the PTY, so a pending intake worktree can be destroyed now.
-            let cleanup_events = self.take_ephemeral_worktree_cleanup_events();
             if !close_window_from_workspace(
                 &mut self.tabs,
                 &mut self.window_lookup,
                 &mut self.window_details,
                 &id,
             ) {
-                return cleanup_events;
+                return Vec::new();
             }
+            self.queue_accepted_window_close_finalizer(
+                &id,
+                issue_monitor_project_root.clone(),
+                false,
+                None,
+            );
             let _ = self.persist();
-            let mut events = cleanup_events;
+            let mut events = Vec::new();
             // SPEC-3431 FR-067: auto-close reaps the window itself instead of
             // going through `close_window_events`, so it also owes the Issue
             // Monitor the notification that path would have sent. Without it
@@ -846,7 +868,10 @@ impl AppRuntime {
                     ));
                 }
             }
-            self.push_workspace_and_active_work_projection_broadcasts(&mut events);
+            events.push(self.workspace_state_broadcast());
+            if let Some(event) = self.in_memory_active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
+            }
             return events;
         }
         if keep_active_agent_session_for_recovery {
@@ -1064,6 +1089,13 @@ impl AppRuntime {
             .entry(window_id.to_string())
             .or_insert_with(|| super::ProviderQuotaCandidate { first_seen: now })
             .first_seen;
+        // Issue #3923 AC-3: the poller reading the account as usable
+        // contradicts the screen, so the settle window alone must not promote
+        // the notice. The candidate stays pending: a later poller reading can
+        // still corroborate it, and the notice leaving the screen abandons it.
+        if self.provider_reports_healthy_for_pane(agent_id.as_deref(), window_id) {
+            return Vec::new();
+        }
         let corroborated = agent_id.as_deref().is_some_and(|agent_id| {
             gwt::issue_monitor::provider_limit_reached_for_agent(
                 agent_id,
@@ -1078,7 +1110,35 @@ impl AppRuntime {
             return Vec::new();
         }
         self.provider_quota_candidates.remove(window_id);
-        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref())
+        // Millisecond precision so a hold formed right after an operator's
+        // clear is ordered after that release instead of sharing its second.
+        let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+            &now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            window_id,
+            screen.unwrap_or_default(),
+        )
+        .with_poller(agent_id.as_deref(), &self.provider_usage_accounts);
+        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref(), evidence)
+    }
+
+    /// Issue #3923 AC-3: whether the usage poller currently contradicts a
+    /// quota notice on `window_id`'s screen. Logged when it does, because the
+    /// suppressed hold is itself the diagnosis of a stale notice.
+    fn provider_reports_healthy_for_pane(&self, agent_id: Option<&str>, window_id: &str) -> bool {
+        let healthy = agent_id.is_some_and(|agent_id| {
+            gwt::issue_monitor::provider_reports_healthy_for_agent(
+                agent_id,
+                &self.provider_usage_accounts,
+            )
+        });
+        if healthy {
+            tracing::info!(
+                window_id = %window_id,
+                agent_id = ?agent_id,
+                "provider limit notice on screen but the usage poller reads the account as usable; not holding (Issue #3923)"
+            );
+        }
+        healthy
     }
 
     /// Latch the block, project the pane as waiting, and tell the Monitor the
@@ -1094,8 +1154,18 @@ impl AppRuntime {
         window_id: &str,
         notice: &gwt_core::usage::ProviderLimitNotice,
         agent_id: Option<&str>,
+        evidence: gwt::IssueMonitorProviderQuotaHoldEvidence,
     ) -> Vec<OutboundEvent> {
-        let failure = provider_usage_limit_failure(notice, agent_id);
+        tracing::warn!(
+            window_id = %window_id,
+            agent_id = ?agent_id,
+            screen_text = ?evidence.screen_text,
+            poller_state = ?evidence.poller_state,
+            poller_limit_reached = ?evidence.poller_limit_reached,
+            poller_windows = ?evidence.poller_windows,
+            "provider quota hold committed from the pane screen (Issue #3923)"
+        );
+        let failure = provider_usage_limit_failure(notice, agent_id, Some(evidence));
         let detail = gwt_core::usage::describe_provider_limit_notice(
             notice,
             Some(provider_label(notice, agent_id).as_str()),
@@ -1332,29 +1402,11 @@ impl AppRuntime {
             .map(str::trim)
             .filter(|message| !message.is_empty())
             .map(str::to_string);
-        let should_auto_close = should_auto_close_agent_window(
-            &self.active_agent_sessions,
-            &window_id,
-            &composed_state,
-        );
-        if should_auto_close {
-            self.clear_agent_window_startup_restore(&window_id);
-            self.stop_window_runtime(&window_id);
-            self.remove_window_state_tracking(&window_id);
-            // SPEC-3214 FR-002: PTY killed and joined above — safe to destroy
-            // a pending intake worktree.
-            events.extend(self.take_ephemeral_worktree_cleanup_events());
-            if close_window_from_workspace(
-                &mut self.tabs,
-                &mut self.window_lookup,
-                &mut self.window_details,
-                &window_id,
-            ) {
-                let _ = self.persist();
-                self.push_workspace_and_active_work_projection_broadcasts(&mut events);
-            }
-            return events;
-        }
+        // RuntimeHook events may carry a Host-issued Session id, but no exact
+        // process-local window lifecycle generation. A late predecessor Stop
+        // can therefore name a same-address, same-Session successor. Surface
+        // the terminal state, but leave destructive close to an
+        // incarnation-fenced PTY status or an explicit Host close.
         if gwt::window_state::is_live_agent_hook_state(hook_state) {
             self.window_details.remove(&window_id);
         } else if let Some(detail) = hook_detail.as_ref() {
@@ -1412,11 +1464,7 @@ impl AppRuntime {
         event.kind != gwt::RuntimeHookEventKind::RuntimeState
     }
 }
-
-#[cfg(unix)]
 const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
-
-#[cfg(unix)]
 enum RuntimeDaemonPublish {
     Output {
         project_root: PathBuf,
@@ -1434,33 +1482,23 @@ enum RuntimeDaemonPublish {
         event: gwt::RuntimeHookEvent,
     },
 }
-
-#[cfg(unix)]
 #[derive(Debug)]
 struct RuntimeDaemonApprovalPublish {
     project_root: PathBuf,
     id: String,
     waiting: bool,
 }
-
-#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeDaemonPublishEnqueueError {
     Full,
     Disconnected,
 }
-
-#[cfg(unix)]
 static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
     Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
 > = std::sync::OnceLock::new();
-
-#[cfg(unix)]
 static RUNTIME_DAEMON_APPROVAL_PUBLISH_QUEUE: std::sync::OnceLock<
     Mutex<Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>>,
 > = std::sync::OnceLock::new();
-
-#[cfg(unix)]
 fn runtime_daemon_publish_sender() -> Option<std_mpsc::SyncSender<RuntimeDaemonPublish>> {
     let queue = RUNTIME_DAEMON_PUBLISH_QUEUE.get_or_init(|| Mutex::new(None));
     runtime_daemon_publish_sender_from(queue, |receiver| {
@@ -1470,8 +1508,6 @@ fn runtime_daemon_publish_sender() -> Option<std_mpsc::SyncSender<RuntimeDaemonP
             .map(|_handle| ())
     })
 }
-
-#[cfg(unix)]
 fn runtime_daemon_publish_sender_from(
     queue: &Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
     spawn_worker: impl FnOnce(std_mpsc::Receiver<RuntimeDaemonPublish>) -> std::io::Result<()>,
@@ -1496,15 +1532,11 @@ fn runtime_daemon_publish_sender_from(
         }
     }
 }
-
-#[cfg(unix)]
 fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
     for publish in receiver {
         publish_runtime_daemon_event(publish);
     }
 }
-
-#[cfg(unix)]
 fn runtime_daemon_approval_publish_sender() -> Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>
 {
     let queue = RUNTIME_DAEMON_APPROVAL_PUBLISH_QUEUE.get_or_init(|| Mutex::new(None));
@@ -1515,8 +1547,6 @@ fn runtime_daemon_approval_publish_sender() -> Option<std_mpsc::Sender<RuntimeDa
             .map(|_handle| ())
     })
 }
-
-#[cfg(unix)]
 fn runtime_daemon_approval_publish_sender_from(
     queue: &Mutex<Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>>,
     spawn_worker: impl FnOnce(std_mpsc::Receiver<RuntimeDaemonApprovalPublish>) -> std::io::Result<()>,
@@ -1540,8 +1570,6 @@ fn runtime_daemon_approval_publish_sender_from(
         }
     }
 }
-
-#[cfg(unix)]
 fn run_runtime_daemon_approval_publish_worker(
     receiver: std_mpsc::Receiver<RuntimeDaemonApprovalPublish>,
 ) {
@@ -1549,8 +1577,6 @@ fn run_runtime_daemon_approval_publish_worker(
         publish_runtime_daemon_approval_event(publish);
     }
 }
-
-#[cfg(unix)]
 fn try_enqueue_runtime_daemon_publish(
     sender: &std_mpsc::SyncSender<RuntimeDaemonPublish>,
     publish: RuntimeDaemonPublish,
@@ -1560,8 +1586,6 @@ fn try_enqueue_runtime_daemon_publish(
         std_mpsc::TrySendError::Disconnected(_) => RuntimeDaemonPublishEnqueueError::Disconnected,
     })
 }
-
-#[cfg(unix)]
 fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
     let Some(sender) = runtime_daemon_publish_sender() else {
         return;
@@ -1573,8 +1597,6 @@ fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
         );
     }
 }
-
-#[cfg(unix)]
 fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
     match publish {
         RuntimeDaemonPublish::Output {
@@ -1645,8 +1667,6 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
         }
     }
 }
-
-#[cfg(unix)]
 fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) {
     let payload = gwt::runtime_daemon_events::runtime_approval_overlay_payload(
         &publish.id,
@@ -1668,8 +1688,6 @@ fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) 
         );
     }
 }
-
-#[cfg(unix)]
 fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
     enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
         project_root: project_root.to_path_buf(),
@@ -1677,11 +1695,6 @@ fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
         data: data.to_vec(),
     });
 }
-
-#[cfg(not(unix))]
-fn publish_runtime_output_change(_project_root: &Path, _id: &str, _data: &[u8]) {}
-
-#[cfg(unix)]
 fn publish_runtime_status_change(
     project_root: &Path,
     id: &str,
@@ -1695,28 +1708,12 @@ fn publish_runtime_status_change(
         detail,
     });
 }
-
-#[cfg(not(unix))]
-fn publish_runtime_status_change(
-    _project_root: &Path,
-    _id: &str,
-    _status: WindowProcessStatus,
-    _detail: Option<String>,
-) {
-}
-
-#[cfg(unix)]
 fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
     enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Hook {
         project_root: project_root.to_path_buf(),
         event: event.clone(),
     });
 }
-
-#[cfg(not(unix))]
-fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
-
-#[cfg(unix)]
 fn publish_runtime_approval_overlay_change(project_root: &Path, id: &str, waiting: bool) {
     let Some(sender) = runtime_daemon_approval_publish_sender() else {
         return;
@@ -1733,25 +1730,52 @@ fn publish_runtime_approval_overlay_change(project_root: &Path, id: &str, waitin
     }
 }
 
-#[cfg(not(unix))]
-fn publish_runtime_approval_overlay_change(_project_root: &Path, _id: &str, _waiting: bool) {}
-
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::path::PathBuf;
-
-    #[cfg(unix)]
-    use std::sync::{mpsc, Mutex};
-
-    #[cfg(unix)]
     use super::{
         runtime_daemon_approval_publish_sender_from, runtime_daemon_publish_sender_from,
         try_enqueue_runtime_daemon_publish, RuntimeDaemonApprovalPublish, RuntimeDaemonPublish,
         RuntimeDaemonPublishEnqueueError,
     };
-    #[cfg(unix)]
     use crate::WindowProcessStatus;
+    use std::path::PathBuf;
+    use std::sync::{mpsc, Mutex};
+
+    /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
+    /// SQLite race must not show the raw provider stack. The same string is the
+    /// message the Issue Monitor receives, so it also has to classify as a
+    /// transient launch failure — the contention is about the host, not the
+    /// work.
+    #[test]
+    fn codex_shared_state_lock_replaces_the_raw_stack_in_the_pane_detail() {
+        let observed_stack = "/Users/akiojin/.codex/state_5.sqlite: failed to initialize state \
+             runtime at /Users/akiojin/.codex: failed to open log DB at \
+             /Users/akiojin/.codex/logs_2.sqlite: error returned from database: (code: 5) \
+             database is locked";
+
+        let detail = super::compose_agent_error_detail(
+            Some("Agent exited with status 1".to_string()),
+            Some(observed_stack),
+        )
+        .expect("an errored agent pane always carries a detail");
+
+        assert!(
+            !detail.contains("state_5.sqlite"),
+            "the raw Codex stack must not reach the pane: {detail}"
+        );
+        assert!(
+            detail.contains("~/.codex"),
+            "the pane must name the shared state directory as the cause: {detail}"
+        );
+        assert!(
+            detail.contains("max_active"),
+            "the pane must name what the operator can do about it: {detail}"
+        );
+        assert!(
+            gwt_agent::is_transient_launch_failure(&detail),
+            "the Issue Monitor must requeue this without spending an attempt: {detail}"
+        );
+    }
 
     #[test]
     fn late_provider_active_writer_error_is_classified_as_resume_writer_conflict() {
@@ -1897,8 +1921,6 @@ mod tests {
             })
         );
     }
-
-    #[cfg(unix)]
     #[test]
     fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
         let (sender, _receiver) = mpsc::sync_channel(1);
@@ -1926,8 +1948,6 @@ mod tests {
             Err(RuntimeDaemonPublishEnqueueError::Full)
         ));
     }
-
-    #[cfg(unix)]
     #[test]
     fn runtime_approval_overlay_lane_survives_output_queue_saturation_in_order() {
         let (output_sender, _output_receiver) = mpsc::sync_channel(1);
@@ -1972,8 +1992,6 @@ mod tests {
         assert!(captured_rx.recv().expect("true").waiting);
         assert!(!captured_rx.recv().expect("false").waiting);
     }
-
-    #[cfg(unix)]
     #[test]
     fn runtime_daemon_publish_sender_retries_after_spawn_failure() {
         let queue = Mutex::new(None);
