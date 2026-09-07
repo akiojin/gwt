@@ -770,12 +770,78 @@ pub fn is_execution_generation_conflict(message: &str) -> bool {
 /// generation refused. Once the generation is Blocked or Completed the hold
 /// protects nothing — a fresh launch takes the successor route — so the row
 /// can return to the queue without an operator.
+///
+/// Issue #4042 AC-1: this is the single projection of a held generation. The
+/// Issue Monitor's reclaim probe and the launch refusal both read the holder
+/// through it, so the two can never describe one holder differently, and the
+/// generation id lets the Monitor tell a repeated refusal on the generation it
+/// just released from a refusal on a successor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerGenerationHold {
     pub status: ExecutionControlStatus,
+    /// The current generation's id.
+    pub generation_id: String,
+    /// The Session that holds the generation.
+    pub holder_session_id: String,
     /// Durable holder state (`Interrupted`, `Running`, ...), or `missing` /
     /// `unreadable` when the holder Session cannot be read.
     pub holder_session_state: String,
+}
+
+/// Project the current generation of `ledger` and its holder Session, read
+/// from `sessions_dir`, into [`OwnerGenerationHold`]. `None` when the ledger
+/// has no current generation.
+#[must_use]
+pub fn owner_generation_hold_from_ledger(
+    sessions_dir: &Path,
+    ledger: &ExecutionGenerationLedger,
+) -> Option<OwnerGenerationHold> {
+    let current = ledger.current_generation()?;
+    let status = ledger.effective_status_for(current);
+    let holder_session_id = current.identity.initial_session_id.clone();
+    let holder_path = sessions_dir.join(format!("{holder_session_id}.toml"));
+    let holder_session_state = match gwt_agent::inspect_session_path(&holder_path) {
+        gwt_agent::SessionPathState::Present(holder) => format!("{:?}", holder.status),
+        gwt_agent::SessionPathState::Missing => "missing".to_string(),
+        gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
+    };
+    Some(OwnerGenerationHold {
+        status,
+        generation_id: current.identity.generation_id.clone(),
+        holder_session_id,
+        holder_session_state,
+    })
+}
+
+/// The refusal a fresh launch produces while `owner`'s generation is held
+/// (Issue #3426 / #3964). Formatted from the same [`OwnerGenerationHold`] the
+/// Issue Monitor reclaim reads, so the text names the generation and the
+/// holder state the reclaim will see; `None` describes a ledger without a
+/// current generation.
+#[must_use]
+pub fn execution_generation_conflict_refusal(
+    owner: ExecutionOwnerKey,
+    hold: Option<&OwnerGenerationHold>,
+) -> String {
+    let detail = hold.map_or_else(
+        || "unknown generation".to_string(),
+        |hold| {
+            let status = match hold.status {
+                ExecutionControlStatus::Active => "active",
+                ExecutionControlStatus::Completed => "completed",
+                ExecutionControlStatus::Blocked => "blocked",
+            };
+            format!(
+                "{status} generation {} held by Session {} ({})",
+                hold.generation_id, hold.holder_session_id, hold.holder_session_state
+            )
+        },
+    );
+    format!(
+        "{EXECUTION_GENERATION_CONFLICT_PREFIX} {} #{} ({detail}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        owner.kind.as_str(),
+        owner.number,
+    )
 }
 
 /// Read [`OwnerGenerationHold`] for `owner_number` from the repository's
@@ -800,21 +866,10 @@ pub fn owner_generation_hold_for_project(
     let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
         invalid_generation_data(format!("malformed generation ledger: {error}"))
     })?;
-    let Some(current) = ledger.current_generation() else {
-        return Ok(None);
-    };
-    let status = ledger.effective_status_for(current);
-    let holder_path = gwt_core::paths::gwt_sessions_dir()
-        .join(format!("{}.toml", current.identity.initial_session_id));
-    let holder_session_state = match gwt_agent::inspect_session_path(&holder_path) {
-        gwt_agent::SessionPathState::Present(holder) => format!("{:?}", holder.status),
-        gwt_agent::SessionPathState::Missing => "missing".to_string(),
-        gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
-    };
-    Ok(Some(OwnerGenerationHold {
-        status,
-        holder_session_state,
-    }))
+    Ok(owner_generation_hold_from_ledger(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &ledger,
+    ))
 }
 
 /// Issue #3964: a sidecar's PID namespace names the Host that wrote it only
@@ -15812,6 +15867,82 @@ mod tests {
         );
     }
 
+    /// Issue #4042 AC-1: the Issue Monitor's reclaim probe and the launch
+    /// refusal used to read the holder Session through two separate code
+    /// paths and describe it in two vocabularies (`unreadable` versus
+    /// `durable Session unreadable`), which is how production ended up with a
+    /// reclaim saying `Idle` and a refusal saying `Running` for one holder.
+    /// Both now consume one [`OwnerGenerationHold`] projection, and the
+    /// refusal text names the generation the probe will read back.
+    #[test]
+    fn launch_refusal_and_reclaim_probe_share_one_holder_projection() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "shared-projection-running-holder";
+        let (candidate, _identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+        let probed = owner_generation_hold_for_project(worktree.path(), owner.number)
+            .unwrap()
+            .expect("the owner ledger holds a generation");
+        assert_eq!(probed.generation_id, candidate.generation_id);
+        assert_eq!(probed.holder_session_id, session_id);
+        assert_eq!(probed.holder_session_state, "Running");
+
+        let ledger = load_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .expect("the launch path reads the same ledger");
+        assert_eq!(
+            owner_generation_hold_from_ledger(&sessions_dir, &ledger),
+            Some(probed.clone()),
+            "the launch path must read the holder through the reclaim's projection"
+        );
+
+        let refusal = execution_generation_conflict_refusal(owner, Some(&probed));
+        assert!(is_execution_generation_conflict(&refusal));
+        assert!(
+            refusal.contains(&format!(
+                "active generation {} held by Session {session_id} (Running)",
+                candidate.generation_id
+            )),
+            "unexpected refusal text: {refusal}"
+        );
+        assert!(refusal.contains("use Continue work to create a successor"));
+
+        // A holder whose durable Session is gone is described the same way on
+        // both sides, so a reader can match the two.
+        fs::remove_file(sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let missing = owner_generation_hold_for_project(worktree.path(), owner.number)
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing.holder_session_state, "missing");
+        assert_eq!(
+            owner_generation_hold_from_ledger(&sessions_dir, &ledger),
+            Some(missing.clone())
+        );
+        assert!(execution_generation_conflict_refusal(owner, Some(&missing))
+            .contains(&format!("held by Session {session_id} (missing)")));
+
+        // No current generation: the refusal still carries the prefix the
+        // monitor keys on, with no holder detail to invent.
+        let bare = execution_generation_conflict_refusal(owner, None);
+        assert!(is_execution_generation_conflict(&bare));
+        assert!(bare.contains("(unknown generation)"), "unexpected: {bare}");
+    }
+
     /// Issue #3964 AC-1 / AC-4: the Issue Monitor releases a stranded
     /// `agent_failed` row by asking whether the owner's generation is still
     /// Active. That question has to be answerable from a project root and
@@ -15842,6 +15973,8 @@ mod tests {
             owner_generation_hold_for_project(worktree.path(), owner.number).unwrap(),
             Some(OwnerGenerationHold {
                 status: ExecutionControlStatus::Active,
+                generation_id: candidate.generation_id.clone(),
+                holder_session_id: session_id.to_string(),
                 holder_session_state: "Interrupted".to_string(),
             }),
         );
