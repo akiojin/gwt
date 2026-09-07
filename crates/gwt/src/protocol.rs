@@ -794,6 +794,12 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
+    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
+    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
+    /// the setting follows `autonomous_mode`.
+    SetIssueMonitorAutoApplyUpdates {
+        enabled: bool,
+    },
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },
@@ -839,6 +845,11 @@ pub enum FrontendEvent {
     /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
     /// the prepared binary via the helper subprocess and exits the parent.
     ApplyUpdateRestartNow,
+    /// Issue #3906 AC-7 / #4076 AC-2: the user cancelled the automatic apply
+    /// during its grace. The `update_drain` hold is released, the staged
+    /// update stays on disk for the manual button, and the tick never
+    /// reschedules that version.
+    CancelUpdateAutoApply,
     /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
     /// modal. Backend opens the log file in the OS default application.
     OpenUpdateLog {
@@ -1675,6 +1686,17 @@ pub struct PmAgentOption {
     pub name: String,
 }
 
+/// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
+/// [`BackendEvent::UpdateAutoApply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateAutoApplyPhase {
+    Scheduled,
+    Postponed,
+    Cancelled,
+    Applying,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -2182,6 +2204,17 @@ pub enum BackendEvent {
     /// the bootstrap path lands in T-133). Frontend morphs the CTA to ready.
     UpdateApplyPendingPersisted {
         version: String,
+    },
+    /// Issue #3906 AC-7 / AC-12 (#4076 AC-2 / AC-5): the automatic apply of
+    /// a staged update moved phase. `Scheduled` carries the cancel grace the
+    /// CTA offers to cancel; `Postponed` withdraws it because a blocker
+    /// reappeared; `Cancelled` follows [`FrontendEvent::CancelUpdateAutoApply`]
+    /// or a lost payload; `Applying` precedes the graceful restart.
+    UpdateAutoApply {
+        version: String,
+        phase: UpdateAutoApplyPhase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grace_secs: Option<u64>,
     },
     UpdateApplyError {
         /// Phase 14 free-form message. Still emitted for backward compat.
@@ -2839,6 +2872,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "update_auto_apply",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "update_apply_pending_persisted",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3063,6 +3101,7 @@ impl BackendEvent {
             BackendEvent::UpdateState(_) => "update_state",
             BackendEvent::UpdateProgress { .. } => "update_progress",
             BackendEvent::UpdateReady { .. } => "update_ready",
+            BackendEvent::UpdateAutoApply { .. } => "update_auto_apply",
             BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
