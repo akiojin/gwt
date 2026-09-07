@@ -130,6 +130,7 @@ test("Surface Deck — no forbidden presets leak into the modal", () => {
     "branches",
     "agent_kanban",
     "issue_monitor",
+    "intake",
     "spec",
   ]) {
     assert.equal(
