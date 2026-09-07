@@ -1189,6 +1189,17 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #4038 (AC-4): tab ids whose project was open when the update
+    /// apply began. Their sessions bypass the 24h startup auto-resume
+    /// freshness gate on the launch that settles the resume marker.
+    pub(crate) update_resume_tab_ids: HashSet<String>,
+    /// Issue #4038 (AC-4 / AC-5): project hashes whose `update_drain` hold
+    /// (#4037) the settling bootstrap released. The Issue Monitor hold itself
+    /// lands with #4037; this is the seam it reads.
+    pub(crate) update_drain_released_projects: Vec<String>,
+    /// Issue #4038 (AC-4 / AC-5): `(level, message)` recorded into the
+    /// notification center once the frontend canvas is ready.
+    pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     /// Legacy official-provider provenance is staged during preparation and
     /// committed only after the exact launched Session emits authenticated
@@ -2546,6 +2557,9 @@ impl AppRuntime {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            update_resume_tab_ids: HashSet::new(),
+            update_drain_released_projects: Vec::new(),
+            pending_update_resume_notice: None,
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
