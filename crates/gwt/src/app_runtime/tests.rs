@@ -65856,3 +65856,80 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
         toasts[0].1
     );
 }
+
+// Issue #4075 AC-1: startup writes the managed key into the profile-derived
+// `~/.codex/config.toml` when it is absent.
+#[test]
+fn codex_managed_config_startup_writes_experimental_mode_into_home_codex_config() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = super::startup::codex_home_for_startup(None).join("config.toml");
+    assert_eq!(config_path, home.path().join(".codex/config.toml"));
+
+    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+
+    let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        config
+            .get("features")
+            .and_then(|f| f.get("context_management"))
+            .and_then(|c| c.get("experimental_mode")),
+        Some(&toml::Value::Boolean(true))
+    );
+    assert!(
+        gwt_core::error_ledger::list_since(None).unwrap().is_empty(),
+        "a successful managed config write must not touch the error ledger"
+    );
+}
+
+// Issue #4075: `CODEX_HOME` wins over the profile-derived home.
+#[test]
+fn codex_managed_config_startup_prefers_codex_home_env() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = tempdir().expect("codex home");
+
+    let resolved = super::startup::codex_home_for_startup(Some(codex_home.path().into()));
+
+    assert_eq!(resolved, codex_home.path());
+    assert_eq!(
+        super::startup::codex_home_for_startup(Some(std::ffi::OsString::new())),
+        home.path().join(".codex"),
+        "an empty CODEX_HOME must fall back to the profile home"
+    );
+}
+
+// Issue #4075 AC-5: an unparseable config never blocks startup and lands in
+// `errors.list` with the path and cause.
+#[test]
+fn codex_managed_config_startup_records_operation_refusal_on_unparseable_config() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = home.path().join(".codex/config.toml");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let broken = "[features
+not toml";
+    fs::write(&config_path, broken).unwrap();
+
+    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
+    let rows = gwt_core::error_ledger::list_since(None).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one ledger row, got {rows:?}"
+    );
+    assert_eq!(
+        rows[0].kind,
+        gwt_core::error_ledger::ErrorKind::OperationRefusal
+    );
+    assert!(
+        rows[0]
+            .message
+            .contains("features.context_management.experimental_mode")
+            && rows[0].message.contains("parse failed"),
+        "ledger row must carry the key and the cause, got: {}",
+        rows[0].message
+    );
+}
