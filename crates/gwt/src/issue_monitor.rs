@@ -2288,6 +2288,13 @@ pub struct IssueMonitorAgentStatus {
     /// Issue #3964 AC-4: the last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
+    /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
+    /// completed and how far past its TTL it is — so a stopped refresh is
+    /// read from the same snapshot as `scan_stall` instead of inferred from
+    /// Issues that never arrive. Filled in by the `issue.monitor.status`
+    /// surface from the cache on disk; `None` in daemon projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_cache: Option<crate::issue_cache::IssueCacheRefreshStatus>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -8129,6 +8136,7 @@ impl IssueMonitorState {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: self.generation_reclaim.clone(),
+            issue_cache: None,
         }
     }
 
@@ -12551,6 +12559,7 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                issue_cache: None,
             }
         );
     }

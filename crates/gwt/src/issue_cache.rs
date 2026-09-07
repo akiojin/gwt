@@ -56,6 +56,23 @@ pub struct IssueCacheSyncOutcome {
     pub after: Option<IssueCacheSourceFingerprint>,
 }
 
+/// Issue #4087 AC-1: the full-refresh cadence of one Issue cache, projected
+/// for `issue.monitor.status`. A stopped refresh used to be visible only as
+/// Issues that never arrived; this states it directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueCacheRefreshStatus {
+    /// `refresh-meta.json`'s stamp, or `None` when no full refresh completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_full_refresh: Option<String>,
+    pub ttl_minutes: u64,
+    /// True when the next consumer would run a full refresh.
+    pub stale: bool,
+    /// Seconds elapsed past the TTL deadline; `None` when not stale or when
+    /// no refresh ever completed (there is no deadline to measure from).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_by_secs: Option<u64>,
+}
+
 #[derive(Debug)]
 struct IssueCacheSourceDocument {
     number: u64,
@@ -269,7 +286,22 @@ pub fn sync_issue_cache_from_remote_with_fingerprint(
 }
 
 pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Result<(), String> {
-    sync_issue_cache_from_remote_with_wait(repo_path, cache_root, &mut std::thread::sleep)
+    sync_issue_cache_from_remote_with_wait(repo_path, cache_root, &mut std::thread::sleep).map_err(
+        |error| {
+            // Issue #4087 AC-2: every full-refresh caller used to downgrade this
+            // to a log line, so a refresh that had stopped for hours was only
+            // discoverable through the Issues it failed to deliver.
+            gwt_core::error_ledger::record_fail_open(
+                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+                format!("issue cache full refresh: {error}"),
+                gwt_core::error_ledger::ErrorTarget {
+                    project_root: Some(repo_path.display().to_string()),
+                    ..gwt_core::error_ledger::ErrorTarget::default()
+                },
+            );
+            error
+        },
+    )
 }
 
 /// [`sync_issue_cache_from_remote`] with the pacing wait injected.
@@ -409,19 +441,41 @@ fn write_issue_cache_refresh_meta(cache_root: &Path, ttl: Duration) -> Result<()
 }
 
 fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
-    if !issue_cache_has_entries(cache_root) {
-        return true;
+    issue_cache_refresh_status(cache_root, ttl, Utc::now()).stale
+}
+
+/// Issue #4087 AC-1: the full-refresh cadence of `cache_root` at `now`. The
+/// staleness decision every refresh caller makes and the projection the PM
+/// reads are the same computation, so they cannot disagree.
+pub fn issue_cache_refresh_status(
+    cache_root: &Path,
+    ttl: Duration,
+    now: DateTime<Utc>,
+) -> IssueCacheRefreshStatus {
+    let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
+    let meta = read_issue_cache_refresh_meta(cache_root);
+    let last_full_refresh = meta.as_ref().map(|meta| meta.last_full_refresh.clone());
+    let deadline = meta
+        .as_ref()
+        .and_then(|meta| DateTime::parse_from_rfc3339(&meta.last_full_refresh).ok())
+        .map(|last| {
+            last.with_timezone(&Utc)
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::zero())
+        });
+    let stale_by_secs = deadline.and_then(|deadline| {
+        now.signed_duration_since(deadline)
+            .to_std()
+            .ok()
+            .map(|overrun| overrun.as_secs())
+    });
+    let stale =
+        !issue_cache_has_entries(cache_root) || deadline.is_none() || stale_by_secs.is_some();
+    IssueCacheRefreshStatus {
+        last_full_refresh,
+        ttl_minutes,
+        stale,
+        stale_by_secs,
     }
-    let Some(meta) = read_issue_cache_refresh_meta(cache_root) else {
-        return true;
-    };
-    let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
-        return true;
-    };
-    Utc::now()
-        .signed_duration_since(last.with_timezone(&Utc))
-        .to_std()
-        .map_or(true, |age| age >= ttl)
 }
 
 /// SPEC-2017 US-8 — Apply label add / remove operations to a GitHub
@@ -1391,6 +1445,92 @@ exit 1\n",
         assert!(
             issue_cache_refresh_is_stale(&cache_root, ISSUE_CACHE_TTL),
             "expired refresh metadata should mark cache stale",
+        );
+    }
+
+    /// Issue #4087 AC-1: the PM reads, from one projection, whether the full
+    /// refresh has run and how far past its TTL it is.
+    #[test]
+    fn issue_cache_refresh_status_reports_ttl_overrun() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(cache_root.join("7")).expect("create issue cache entry");
+        let now = Utc::now();
+
+        let missing = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, now);
+        assert!(
+            missing.stale,
+            "a cache that never completed a full refresh is stale"
+        );
+        assert_eq!(missing.last_full_refresh, None);
+        assert_eq!(missing.stale_by_secs, None);
+        assert_eq!(missing.ttl_minutes, 15);
+
+        let stale_meta = IssueCacheRefreshMeta {
+            last_full_refresh: (now - chrono::Duration::minutes(65)).to_rfc3339(),
+            ttl_minutes: 15,
+        };
+        let bytes = serde_json::to_vec_pretty(&stale_meta).expect("serialize stale meta");
+        write_atomic(&issue_cache_refresh_meta_path(&cache_root), &bytes)
+            .expect("write stale refresh meta");
+        let stale = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, now);
+        assert!(stale.stale);
+        assert_eq!(
+            stale.last_full_refresh.as_deref(),
+            Some(stale_meta.last_full_refresh.as_str())
+        );
+        assert_eq!(stale.stale_by_secs, Some(50 * 60));
+
+        write_issue_cache_refresh_meta(&cache_root, ISSUE_CACHE_TTL).expect("write fresh meta");
+        let fresh = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now());
+        assert!(!fresh.stale);
+        assert_eq!(fresh.stale_by_secs, None);
+        assert!(fresh.last_full_refresh.is_some());
+    }
+
+    /// Issue #4087 AC-2: a failed full refresh used to be a `tracing::warn`
+    /// nobody reads. It is now a ledger row `errors.list` returns, carrying the
+    /// refusal text and the project it was refreshing.
+    #[test]
+    fn full_refresh_failure_is_recorded_in_the_error_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _markers = clear_gh_sandbox_markers();
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let error = sync_issue_cache_from_remote(&repo_path, &cache_root)
+            .expect_err("the unsandboxed gh guard refuses the list call");
+
+        let rows = gwt_core::error_ledger::list_since(None).expect("read ledger");
+        assert_eq!(rows.len(), 1, "one full refresh failure, one row: {rows:?}");
+        assert_eq!(
+            rows[0].kind,
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+        );
+        assert!(
+            rows[0].message.contains("issue cache full refresh")
+                && rows[0].message.contains("gh issue list"),
+            "the row names the stage and carries the refusal: {}",
+            rows[0].message
+        );
+        assert!(
+            error.contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE)
+                && rows[0]
+                    .message
+                    .contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE),
+            "the ledger row carries the same cause the caller saw"
+        );
+        assert_eq!(
+            rows[0].target.project_root.as_deref(),
+            Some(repo_path.display().to_string().as_str())
         );
     }
 

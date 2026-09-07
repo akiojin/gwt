@@ -646,6 +646,18 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         Ok(raw_issues) => {
             let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
                 .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
+            // Issue #4087: the cache fallback below and the offline
+            // `issue.monitor.status` projection are only as fresh as the last
+            // full refresh, and nothing else runs one on a schedule. GitHub just
+            // answered the list, so the scan owns the TTL here; a refusal is
+            // already a `cache_refresh_failure` ledger row and the pass goes on.
+            if let Err(error) = refresh_issue_cache_for_scan_if_stale(repo_path, &cache_root) {
+                tracing::warn!(
+                    cache_root = %cache_root.display(),
+                    %error,
+                    "issue cache full refresh failed; scanning with the live list"
+                );
+            }
             let (issues, readiness_errors) =
                 issue_monitor_candidates_with_readiness(raw_issues, &cache_root, |number| {
                     crate::issue_cache::refresh_issue_cache_entry_from_remote(
@@ -680,6 +692,28 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         result
     });
     resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)
+}
+
+/// Issue #4087 AC-4: run the Issue cache full refresh when its TTL has
+/// expired. Returns whether a refresh ran. The scan is the one consumer that
+/// is always present while the Monitor is enabled, so it is the one that keeps
+/// `refresh-meta.json` moving; Issues created on GitHub reach the cache (and
+/// the cache-fallback inbox) within one TTL.
+pub fn refresh_issue_cache_for_scan_if_stale(
+    repo_path: &Path,
+    cache_root: &Path,
+) -> Result<bool, String> {
+    if !crate::issue_cache::issue_cache_refresh_status(
+        cache_root,
+        crate::issue_cache::ISSUE_CACHE_TTL,
+        chrono::Utc::now(),
+    )
+    .stale
+    {
+        return Ok(false);
+    }
+    crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)?;
+    Ok(true)
 }
 
 fn resolve_loaded_issue_monitor_candidates<I>(
@@ -3066,6 +3100,106 @@ mod tests {
             candidate.body
         );
         assert_eq!(criteria.ids, want);
+    }
+
+    /// Fake `gh` whose `issue list` answers with the given plain Issues. The
+    /// scan-owned full refresh only lists (no SPEC views), so nothing else is
+    /// needed.
+    fn write_fake_gh_listing(dir: &Path, numbers: &[u64]) -> PathBuf {
+        let rows = numbers
+            .iter()
+            .map(|number| {
+                format!(
+                    r#"{{"number":{number},"title":"Issue {number}","body":"Body {number}","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/{number}","updatedAt":"2026-09-07T03:34:02Z"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        #[cfg(windows)]
+        {
+            let fake_gh = dir.join("gh.cmd");
+            std::fs::write(
+                &fake_gh,
+                format!("@echo off\r\necho [{rows}]\r\nexit /b 0\r\n"),
+            )
+            .expect("write fake gh");
+            fake_gh
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let fake_gh = dir.join("gh");
+            std::fs::write(
+                &fake_gh,
+                format!("#!/bin/sh\nprintf '%s\\n' '[{rows}]'\nexit 0\n"),
+            )
+            .expect("write fake gh");
+            std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+            fake_gh
+        }
+    }
+
+    /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches
+    /// the cache and the inbox through the scan-owned full refresh once the
+    /// cache TTL has expired; a second pass inside the TTL costs no list call.
+    #[test]
+    fn externally_created_issue_reaches_cache_and_inbox_through_the_scan_full_refresh() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 4080]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        // The cache knows only #7 and its last full refresh is 50 minutes past
+        // the 15-minute TTL — the production state on 2026-09-07.
+        Cache::new(cache_root.clone())
+            .write_snapshot(&github_issue(7))
+            .expect("seed cached issue");
+        std::fs::write(
+            cache_root.join("refresh-meta.json"),
+            serde_json::json!({
+                "last_full_refresh":
+                    (chrono::Utc::now() - chrono::Duration::minutes(65)).to_rfc3339(),
+                "ttl_minutes": 15,
+            })
+            .to_string(),
+        )
+        .expect("write stale refresh meta");
+
+        let refreshed = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
+            .expect("stale cache is fully refreshed");
+        assert!(refreshed, "an expired TTL triggers the full refresh");
+
+        let candidates =
+            load_cached_issue_monitor_candidates(&cache_root).expect("cached candidates");
+        assert!(
+            candidates.iter().any(|candidate| candidate.number == 4080),
+            "the externally created Issue is in the cache: {candidates:?}"
+        );
+        let mut monitor = crate::IssueMonitorState::new(IssueMonitorConfig::default());
+        crate::issue_monitor::scan_issue_monitor_candidates(
+            &mut monitor,
+            &candidates,
+            "2026-09-07T04:00:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(4080).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the externally created Issue has an inbox row"
+        );
+
+        let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
+            .expect("fresh cache is left alone");
+        assert!(!within_ttl, "a fresh cache does not spend a list call");
     }
 
     #[test]
