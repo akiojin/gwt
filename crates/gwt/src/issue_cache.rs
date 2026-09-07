@@ -301,7 +301,7 @@ pub fn sync_issue_cache_from_remote_with_wait(
 
     let cache = Cache::new(cache_root.to_path_buf());
     let ledger = BudgetLedger::global();
-    let policy = ThrottlePolicy::default();
+    let policy = ThrottlePolicy::current();
     for listed_snapshot in &snapshots {
         let snapshot = if is_spec_issue(listed_snapshot) {
             if cache

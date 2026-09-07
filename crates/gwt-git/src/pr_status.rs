@@ -5,7 +5,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
-use gwt_core::github_quota::GitHubQuota;
+use gwt_core::github_quota::{GitHubQuota, RATE_LIMITED_ERROR_CODE};
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -77,17 +77,22 @@ arrange a rerun → regression: arrange a fresh launch → neither possible: esc
 
 /// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6) and the
 /// budget behaviour of the read itself (Issue #3891).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInventoryOptions {
     /// Hours without an `updated_at` bump before a row is `stale`.
     pub stale_after_hours: i64,
     /// Unchanged consecutive observations before a row is `escalation_due`.
     pub escalate_after_cycles: u32,
-    /// Bypass the TTL cache and the budget throttle: the caller needs the live
-    /// state for a decision. Default `false` (periodic, non-essential read).
+    /// Bypass the TTL cache: the caller needs the live state for a decision.
+    /// Default `false` (periodic, non-essential read). SPEC #4093 FR-008: a
+    /// refresh still honors the GitHub budget (refusal window, reserve, burst)
+    /// and answers from the stale cache when throttled.
     pub refresh: bool,
     /// Heavy per-PR fields to hydrate on top of the light list query.
     pub include: PrInventoryInclude,
+    /// One-step override of the reserve / burst throttle, with the reason the
+    /// decision cannot wait. Never bypasses an open refusal window.
+    pub force_reason: Option<String>,
 }
 
 impl Default for PrInventoryOptions {
@@ -97,6 +102,7 @@ impl Default for PrInventoryOptions {
             escalate_after_cycles: PR_ESCALATE_AFTER_UNCHANGED_CYCLES,
             refresh: false,
             include: PrInventoryInclude::default(),
+            force_reason: None,
         }
     }
 }
@@ -883,23 +889,29 @@ where
                 });
             }
         }
-        if let Some(reason) = periodic_read_throttle(repo_path, ledger, now, &mut run_gh) {
-            if cache.fetched_at.is_some() {
-                return Ok(PrInventoryRead {
-                    items: cache.items(now, options)?,
-                    source: "stale-cache",
-                    fetched_at: cache.fetched_at,
-                    cache_age_secs: cache_age,
-                    throttled: Some(reason),
-                    github_calls: 0,
-                });
-            }
-            return Err(GwtError::Git(format!(
-                "pr inventory unobservable: the GitHub budget throttled this read and no \
-                 cached snapshot exists ({reason}); pass refresh:true only if the decision \
-                 at hand needs the live inventory"
-            )));
+    }
+    // SPEC #4093 FR-008 / AC-10: an explicit refresh skips the TTL cache but
+    // still honors the budget. An open refusal window is never bypassed; the
+    // reserve / burst guards yield to a one-step override that names its reason.
+    let throttle = periodic_read_throttle(repo_path, ledger, now, &mut run_gh).filter(|reason| {
+        options.force_reason.is_none() || reason.starts_with(RATE_LIMITED_ERROR_CODE)
+    });
+    if let Some(reason) = throttle {
+        if cache.fetched_at.is_some() {
+            return Ok(PrInventoryRead {
+                items: cache.items(now, options)?,
+                source: "stale-cache",
+                fetched_at: cache.fetched_at,
+                cache_age_secs: cache_age,
+                throttled: Some(reason),
+                github_calls: 0,
+            });
         }
+        return Err(GwtError::Git(format!(
+            "pr inventory unobservable: the GitHub budget throttled this read and no \
+             cached snapshot exists ({reason}); a refresh honors the reserve too — pass \
+             force_reason:<why> to override it outside a refusal window"
+        )));
     }
 
     let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
@@ -970,7 +982,7 @@ fn periodic_read_throttle<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let policy = ThrottlePolicy::default();
+    let policy = ThrottlePolicy::current();
     let mut snapshot = ledger.snapshot(now);
     if github_budget::probe_is_stale(&snapshot, &policy) {
         if let Ok(output) = run_gh(repo_path, &["api", "rate_limit"]) {
@@ -4552,26 +4564,78 @@ mod tests {
         assert_eq!(gh.calls, vec!["api rate_limit".to_string()]);
     }
 
+    /// SPEC #4093 AC-10: `refresh:true` skips the TTL cache but not the
+    /// budget. Below the reserve it answers from the stale cache; a one-step
+    /// override with a reason reads live; an open refusal window is never
+    /// bypassed (the 2026-09-06 refusals were exactly such reads).
     #[test]
-    fn inventory_refresh_bypasses_cache_and_throttle() {
+    fn inventory_refresh_skips_the_cache_but_honors_reserve_and_window() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let ledger = BudgetLedger::at(&tmp.path().join("budget"));
         let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891(),
+            &PrInventoryOptions::default(),
+        )
+        .expect("warm");
+        gh.calls.clear();
         gh.probe_remaining = 50;
-        let options = PrInventoryOptions {
+        // Past the probe's max age, so the refresh re-probes (free) and sees
+        // the exhausted window before spending.
+        let later = now_3891()
+            + chrono::Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1);
+        let refresh = PrInventoryOptions {
             refresh: true,
             ..PrInventoryOptions::default()
         };
-        let read = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("read");
-        assert_eq!(read.source, "github");
+
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &refresh).expect("read");
+        assert_eq!(read.source, "stale-cache");
+        let reason = read.throttled.expect("throttle reason");
+        assert!(reason.contains("budget_reserve"), "{reason}");
+        assert_eq!(
+            gh.calls,
+            vec!["api rate_limit".to_string()],
+            "below the reserve a refresh probes (free) and spends nothing"
+        );
+
+        gh.calls.clear();
+        let forced = PrInventoryOptions {
+            refresh: true,
+            force_reason: Some("PM merge decision needs live checks".to_string()),
+            ..PrInventoryOptions::default()
+        };
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
+        assert_eq!(read.source, "github", "the override reads live");
         assert!(
             gh.calls.iter().any(|call| call.starts_with("pr list")),
             "{:?}",
             gh.calls
         );
+
+        gh.calls.clear();
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: later + chrono::Duration::seconds(300),
+            },
+            later,
+        );
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
+        assert_eq!(
+            read.source, "stale-cache",
+            "an open window beats the override"
+        );
+        let reason = read.throttled.expect("window reason");
+        assert!(reason.starts_with(RATE_LIMITED_ERROR_CODE), "{reason}");
         assert!(
-            !gh.calls.iter().any(|call| call == "api rate_limit"),
-            "an explicit refresh is essential and never probes to throttle itself: {:?}",
+            !gh.calls.iter().any(|call| call.starts_with("pr list")),
+            "no GraphQL spawn inside the window: {:?}",
             gh.calls
         );
     }

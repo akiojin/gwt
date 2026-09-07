@@ -381,7 +381,7 @@ fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
     let ledger = gwt_core::github_budget::BudgetLedger::global();
     status.github_budget = Some(gwt_core::github_budget::status_by_resource(
         &ledger.snapshot(now),
-        &gwt_core::github_budget::ThrottlePolicy::default(),
+        &gwt_core::github_budget::ThrottlePolicy::current(),
         now,
     ));
 }
@@ -2513,6 +2513,25 @@ where
     F: FnMut(&std::path::Path) -> Result<(), String>,
 {
     if refresh {
+        // SPEC #4093 FR-008 / AC-10: an explicit refresh skips the TTL but
+        // not the GitHub budget. Inside a refusal window or below the reserve
+        // the cached snapshot answers instead of spending the live read.
+        let now = chrono::Utc::now();
+        if let Some(reason) = gwt_core::github_budget::throttle_reason(
+            &gwt_core::github_budget::BudgetLedger::global().snapshot(now),
+            gwt_core::github_quota::GitHubQuota::GraphQl,
+            &gwt_core::github_budget::ThrottlePolicy::current(),
+            now,
+        ) {
+            if let Some(entry) = Cache::new(env.cache_root()).load_entry(number) {
+                tracing::warn!(
+                    issue = number.0,
+                    reason = %reason,
+                    "issue refresh throttled by the GitHub budget; answering from cache"
+                );
+                return Ok(entry);
+            }
+        }
         let generation = Cache::new(env.cache_root()).current_generation(number)?;
         return refresh_issue_cache_with_index_rebuild_since(
             env,
@@ -2691,6 +2710,7 @@ pub(crate) fn fetch_linked_prs_via_gh(
 ) -> io::Result<Vec<LinkedPrSummary>> {
     let query = r#"
 query($owner: String!, $repo: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt nodeCount }
   repository(owner: $owner, name: $repo) {
     issue(number: $number) {
       timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
@@ -2759,6 +2779,15 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
     let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    // SPEC #4093 FR-001: settle the points this query cost and refresh the
+    // window from the same response.
+    if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
+        gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
+            &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
+            &rate_limit,
+            chrono::Utc::now(),
+        );
+    }
     Ok(parse_linked_pr_nodes(&value, number.0))
 }
 
@@ -5917,6 +5946,43 @@ mod tests {
 
         assert!(error.to_string().contains("not found"));
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    /// SPEC #4093 AC-10: `issue.view refresh:true` inside a persisted GitHub
+    /// refusal window answers from the cache instead of spending GraphQL.
+    #[test]
+    fn explicit_issue_refresh_answers_from_cache_inside_a_refusal_window() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+        let mut remote = cached.clone();
+        remote.title = "explicitly refreshed".to_string();
+        remote.updated_at = UpdatedAt::new("2026-08-13T04:00:00Z");
+        env.client.seed(remote);
+        let now = chrono::Utc::now();
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(300),
+            },
+            now,
+        );
+
+        let loaded = load_or_refresh_issue(&mut env, cached.number, true)
+            .expect("the cached snapshot answers");
+
+        assert_eq!(loaded.snapshot.title, cached.title);
+        assert!(
+            env.client.call_log().is_empty(),
+            "no live read inside the window: {:?}",
+            env.client.call_log()
+        );
     }
 
     #[test]

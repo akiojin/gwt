@@ -434,6 +434,7 @@ pub(super) fn run<E: CliEnv>(
             escalate_after_cycles,
             refresh,
             include,
+            force_reason,
         } => {
             let defaults = gwt_git::PrInventoryOptions::default();
             let options = gwt_git::PrInventoryOptions {
@@ -442,6 +443,7 @@ pub(super) fn run<E: CliEnv>(
                     .unwrap_or(defaults.escalate_after_cycles),
                 refresh,
                 include: include.unwrap_or(defaults.include),
+                force_reason,
             };
             let read = env
                 .list_open_prs(&options)
@@ -822,10 +824,18 @@ fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let mut escalate_after_cycles: Option<u32> = None;
     let mut refresh = false;
     let mut include: Option<gwt_git::PrInventoryInclude> = None;
+    let mut force_reason: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--refresh" => refresh = true,
+            "--force-reason" => {
+                i += 1;
+                let reason = args
+                    .get(i)
+                    .ok_or(CliParseError::MissingFlag("--force-reason"))?;
+                force_reason = Some(reason.to_string());
+            }
             "--include" => {
                 i += 1;
                 let raw = args.get(i).ok_or(CliParseError::MissingFlag("--include"))?;
@@ -880,6 +890,7 @@ fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
         escalate_after_cycles,
         refresh,
         include,
+        force_reason,
     })
 }
 
@@ -2302,6 +2313,7 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
+                force_reason: None,
             },
             &mut out,
         )
@@ -2369,6 +2381,7 @@ mod tests {
                 escalate_after_cycles: Some(2),
                 refresh: false,
                 include: None,
+                force_reason: None,
             }
         );
         let bare: Vec<String> = vec!["list".to_string()];
@@ -2379,6 +2392,7 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
+                force_reason: None,
             }
         );
         let budgeted: Vec<String> = ["list", "--refresh", "--include", "checks,body"]
@@ -2395,6 +2409,7 @@ mod tests {
                     checks: true,
                     body: true
                 }),
+                force_reason: None,
             }
         );
     }
@@ -2412,6 +2427,7 @@ mod tests {
                 escalate_after_cycles: Some(2),
                 refresh: false,
                 include: None,
+                force_reason: None,
             },
             &mut out,
         )

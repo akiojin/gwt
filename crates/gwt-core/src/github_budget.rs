@@ -143,6 +143,50 @@ pub struct LocalConsumption {
     /// [`spawn_source`] (`<process> gh <command> <verb>`).
     #[serde(default)]
     pub sources_last_minute: BTreeMap<String, u64>,
+    /// SPEC #4093 FR-001: points spent in the last minute. GraphQL charges
+    /// points, not calls; a call whose response reported its cost counts that
+    /// cost, every other call counts one.
+    #[serde(default)]
+    pub points_last_minute: u64,
+    /// SPEC #4093 FR-001: points spent in the last hour.
+    #[serde(default)]
+    pub points_last_hour: u64,
+    /// SPEC #4093 FR-007: `points_last_hour` broken down by [`spawn_source`].
+    #[serde(default)]
+    pub points_last_hour_by_source: BTreeMap<String, u64>,
+}
+
+/// The `rateLimit { cost remaining resetAt nodeCount }` block gwt asks every
+/// GraphQL query to return (SPEC #4093 FR-001).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphQlRateLimit {
+    pub cost: u64,
+    pub remaining: u64,
+    pub reset_at: DateTime<Utc>,
+    pub node_count: u64,
+}
+
+/// The selection every gwt GraphQL query appends at top level.
+pub const GRAPHQL_RATE_LIMIT_SELECTION: &str = "rateLimit { cost remaining resetAt nodeCount }";
+
+/// Read the `data.rateLimit` block out of a GraphQL response, if the query
+/// carried [`GRAPHQL_RATE_LIMIT_SELECTION`].
+pub fn parse_graphql_rate_limit(response: &serde_json::Value) -> Option<GraphQlRateLimit> {
+    let block = response.get("data")?.get("rateLimit")?;
+    let reset_at = block
+        .get("resetAt")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|stamp| stamp.with_timezone(&Utc))?;
+    Some(GraphQlRateLimit {
+        cost: block.get("cost").and_then(serde_json::Value::as_u64)?,
+        remaining: block.get("remaining").and_then(serde_json::Value::as_u64)?,
+        reset_at,
+        node_count: block
+            .get("nodeCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    })
 }
 
 /// The newest observed rate-limit refusal.
@@ -191,12 +235,23 @@ pub struct BudgetSnapshot {
     pub secondary_note: &'static str,
 }
 
+/// One ledger line: a spawn counts one call and one point; a cost settlement
+/// (SPEC #4093 FR-001) counts no call and the points a GraphQL response
+/// reported beyond the one already charged at spawn.
 #[derive(Debug, Serialize, Deserialize)]
 struct SpawnRecord {
     at: DateTime<Utc>,
     resource: String,
     #[serde(default)]
     source: String,
+    #[serde(default = "one")]
+    calls: u64,
+    #[serde(default = "one")]
+    cost: u64,
+}
+
+fn one() -> u64 {
+    1
 }
 
 /// Issue #3928 AC-4: the source label recorded for a `gh` spawn — the process
@@ -243,6 +298,9 @@ fn process_origin() -> &'static str {
     })
 }
 
+/// GitHub's GraphQL hourly point limit, used when no probe has reported one.
+const DEFAULT_GRAPHQL_POINT_LIMIT: u64 = 5_000;
+
 /// Handle on the machine-local budget directory.
 #[derive(Debug, Clone)]
 pub struct BudgetLedger {
@@ -278,11 +336,63 @@ impl BudgetLedger {
         let Some(resource) = quota.resource_name() else {
             return;
         };
-        let record = SpawnRecord {
+        self.append_record(SpawnRecord {
             at: now,
             resource: resource.to_string(),
             source: source.to_string(),
+            calls: 1,
+            cost: 1,
+        });
+    }
+
+    /// SPEC #4093 FR-001: settle the points a GraphQL response reported for a
+    /// call already recorded by [`Self::record_spawn_from`] (which charged
+    /// one point), and refresh the primary window from the same block so the
+    /// reserve is judged against GitHub's current `remaining`. Free calls are
+    /// not recorded.
+    pub fn record_graphql_response(
+        &self,
+        source: &str,
+        rate_limit: &GraphQlRateLimit,
+        now: DateTime<Utc>,
+    ) {
+        let Some(resource) = GitHubQuota::GraphQl.resource_name() else {
+            return;
         };
+        if rate_limit.cost > 1 {
+            self.append_record(SpawnRecord {
+                at: now,
+                resource: resource.to_string(),
+                source: source.to_string(),
+                calls: 0,
+                cost: rate_limit.cost - 1,
+            });
+        }
+        let mut probe: ProbeSnapshot =
+            read_json(&self.dir.join(PROBE_FILE)).unwrap_or(ProbeSnapshot {
+                probed_at: now,
+                resources: BTreeMap::new(),
+            });
+        let limit = probe
+            .resources
+            .get(resource)
+            .map(|window| window.limit)
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_GRAPHQL_POINT_LIMIT);
+        probe.resources.insert(
+            resource.to_string(),
+            ResourceWindow {
+                limit,
+                remaining: rate_limit.remaining,
+                reset_at: rate_limit.reset_at,
+            },
+        );
+        probe.probed_at = now;
+        self.record_probe(&probe);
+    }
+
+    fn append_record(&self, record: SpawnRecord) {
+        let now = record.at;
         let Ok(mut line) = serde_json::to_string(&record) else {
             return;
         };
@@ -446,15 +556,23 @@ impl BudgetLedger {
             let Some(entry) = local.get_mut(&record.resource) else {
                 continue;
             };
-            entry.calls_last_hour += 1;
+            let source = if record.source.is_empty() {
+                UNKNOWN_SPAWN_SOURCE.to_string()
+            } else {
+                record.source
+            };
+            entry.calls_last_hour += record.calls;
+            entry.points_last_hour += record.cost;
+            *entry
+                .points_last_hour_by_source
+                .entry(source.clone())
+                .or_default() += record.cost;
             if record.at > minute_start {
-                entry.calls_last_minute += 1;
-                let source = if record.source.is_empty() {
-                    UNKNOWN_SPAWN_SOURCE.to_string()
-                } else {
-                    record.source
-                };
-                *entry.sources_last_minute.entry(source).or_default() += 1;
+                entry.calls_last_minute += record.calls;
+                entry.points_last_minute += record.cost;
+                if record.calls > 0 {
+                    *entry.sources_last_minute.entry(source).or_default() += record.calls;
+                }
             }
         }
         let blocks = self.read_blocks();
@@ -558,6 +676,37 @@ impl ThrottlePolicy {
     /// The reserve, in calls, for a window of `limit`.
     pub fn reserve_for(&self, limit: u64) -> u64 {
         (limit as f64 * self.reserve_fraction).ceil() as u64
+    }
+
+    /// The policy the operator configured under `[github_budget]` in
+    /// `~/.gwt/config.toml` (SPEC #4093 FR-007 / AC-9), or the default when
+    /// no settings file exists. Read on every call, so an edit takes effect
+    /// on the next throttle decision — the next spawn — without a restart.
+    pub fn current() -> Self {
+        let path = crate::paths::gwt_home().join("config.toml");
+        if !path.is_file() {
+            return Self::default();
+        }
+        gwt_config::Settings::load_from_path(&path)
+            .map(|settings| Self::from(&settings.github_budget))
+            .unwrap_or_default()
+    }
+}
+
+impl From<&gwt_config::GitHubBudgetConfig> for ThrottlePolicy {
+    /// Out-of-range knobs are clamped rather than refused: a typo in the
+    /// settings file must not turn the throttle off or make it refuse
+    /// everything.
+    fn from(config: &gwt_config::GitHubBudgetConfig) -> Self {
+        Self {
+            reserve_fraction: if config.reserve_fraction.is_finite() {
+                config.reserve_fraction.clamp(0.0, 1.0)
+            } else {
+                Self::default().reserve_fraction
+            },
+            burst_calls_per_minute: config.burst_calls_per_minute.max(1),
+            probe_max_age_secs: config.probe_max_age_secs.max(0),
+        }
     }
 }
 
@@ -691,6 +840,15 @@ pub struct ResourceBudgetStatus {
     pub burst_limit: u64,
     /// `calls_last_minute` broken down by [`spawn_source`].
     pub sources_last_minute: BTreeMap<String, u64>,
+    /// SPEC #4093 FR-001: points this machine spent in the last hour.
+    #[serde(default)]
+    pub points_last_hour: u64,
+    /// SPEC #4093 FR-001: points this machine spent in the last minute.
+    #[serde(default)]
+    pub points_last_minute: u64,
+    /// SPEC #4093 FR-007: `points_last_hour` broken down by [`spawn_source`].
+    #[serde(default)]
+    pub cost_last_hour_by_source: BTreeMap<String, u64>,
 }
 
 /// Issue #3928 AC-4: the budget state per reported resource (`graphql`,
@@ -724,8 +882,117 @@ pub fn status_by_resource(
                     calls_last_minute: local.calls_last_minute,
                     burst_limit: policy.burst_calls_per_minute,
                     sources_last_minute: local.sources_last_minute,
+                    points_last_hour: local.points_last_hour,
+                    points_last_minute: local.points_last_minute,
+                    cost_last_hour_by_source: local.points_last_hour_by_source,
                 },
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    /// SPEC #4093 AC-1: a 500-point query settles its cost on the ledger and
+    /// moves the reserve decision to points: the window it reports drops
+    /// below the reserve, so the next non-essential read is skipped.
+    #[test]
+    fn a_graphql_response_settles_its_points_and_drives_the_reserve() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(temp.path());
+        let now = Utc::now();
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "graphql".to_string(),
+            ResourceWindow {
+                limit: 5000,
+                remaining: 1400,
+                reset_at: now + Duration::minutes(30),
+            },
+        );
+        ledger.record_probe(&ProbeSnapshot {
+            probed_at: now,
+            resources,
+        });
+        let policy = ThrottlePolicy::default();
+        assert!(
+            throttle_reason(&ledger.snapshot(now), GitHubQuota::GraphQl, &policy, now).is_none(),
+            "1400 remaining is above the 1000-point reserve"
+        );
+
+        ledger.record_spawn_from(GitHubQuota::GraphQl, "gwtd gh api graphql", now);
+        ledger.record_graphql_response(
+            "gwtd gh api graphql",
+            &GraphQlRateLimit {
+                cost: 500,
+                remaining: 900,
+                reset_at: now + Duration::minutes(30),
+                node_count: 4_900,
+            },
+            now,
+        );
+
+        let snapshot = ledger.snapshot(now);
+        let graphql = &snapshot.local["graphql"];
+        assert_eq!(graphql.calls_last_hour, 1, "one call");
+        assert_eq!(graphql.points_last_hour, 500, "five hundred points");
+        assert_eq!(
+            graphql.points_last_hour_by_source["gwtd gh api graphql"],
+            500
+        );
+        let reason = throttle_reason(&snapshot, GitHubQuota::GraphQl, &policy, now)
+            .expect("the reported window is below the reserve");
+        assert!(reason.contains("budget_reserve"), "{reason}");
+        assert!(reason.contains("remaining=900"), "{reason}");
+        let status = status_by_resource(&snapshot, &policy, now);
+        assert_eq!(status["graphql"].points_last_hour, 500);
+        assert_eq!(
+            status["graphql"].cost_last_hour_by_source["gwtd gh api graphql"],
+            500
+        );
+    }
+
+    #[test]
+    fn graphql_rate_limit_block_is_read_from_the_response() {
+        let response: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"repository":{},"rateLimit":{"cost":12,"remaining":4988,"resetAt":"2026-09-07T10:00:00Z","nodeCount":300}}}"#,
+        )
+        .unwrap();
+        let block = parse_graphql_rate_limit(&response).expect("rate limit block");
+        assert_eq!(block.cost, 12);
+        assert_eq!(block.remaining, 4988);
+        assert_eq!(block.node_count, 300);
+        assert_eq!(
+            block.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            "2026-09-07T10:00:00Z"
+        );
+        assert!(parse_graphql_rate_limit(&serde_json::json!({"data": {}})).is_none());
+    }
+
+    /// SPEC #4093 AC-9: the three throttle knobs come from settings and are
+    /// clamped into a sane range.
+    #[test]
+    fn throttle_policy_reads_settings_knobs_and_clamps_them() {
+        let config = gwt_config::GitHubBudgetConfig {
+            reserve_fraction: 0.35,
+            burst_calls_per_minute: 20,
+            probe_max_age_secs: 120,
+        };
+        let policy = ThrottlePolicy::from(&config);
+        assert_eq!(policy.reserve_fraction, 0.35);
+        assert_eq!(policy.reserve_for(5000), 1750);
+        assert_eq!(policy.burst_calls_per_minute, 20);
+        assert_eq!(policy.probe_max_age_secs, 120);
+
+        let clamped = ThrottlePolicy::from(&gwt_config::GitHubBudgetConfig {
+            reserve_fraction: 7.0,
+            burst_calls_per_minute: 0,
+            probe_max_age_secs: -5,
+        });
+        assert_eq!(clamped.reserve_fraction, 1.0);
+        assert_eq!(clamped.burst_calls_per_minute, 1);
+        assert_eq!(clamped.probe_max_age_secs, 0);
+    }
 }

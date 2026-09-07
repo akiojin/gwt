@@ -5428,8 +5428,10 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   if [ -n "$GWT_FAKE_GH_CALL_LOG" ]; then
     printf '%s\n' "$*" >> "$GWT_FAKE_GH_CALL_LOG"
   fi
+  # The REST list is paged: only the first page carries rows, like GitHub
+  # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
-    *"issue list"* | *"/issues?"*)
+    *"issue list"* | *"/issues?"*"&page=1")
       cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
       exit 0
       ;;
