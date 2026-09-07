@@ -7063,6 +7063,12 @@
             return;
           }
           event.preventDefault();
+          // Issue #4069: this listener runs in the capture phase, but xterm.js
+          // still receives the chord on its textarea and translates
+          // Ctrl+Shift+Arrow into CSI input for the focused terminal
+          // (Meta+Arrow is dropped by xterm, which is why macOS never showed
+          // it). Focus cycling is navigation-only, so stop the event here.
+          event.stopPropagation();
           cycleFocus(event.key === "ArrowRight" ? "forward" : "backward");
         },
         true,

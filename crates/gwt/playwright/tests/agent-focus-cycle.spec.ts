@@ -161,8 +161,12 @@ async function pressFocusCycle(
   page: Page,
   key: "ArrowRight" | "ArrowLeft",
 ): Promise<void> {
-  const modifier = process.platform === "darwin" ? "Meta" : "Control";
-  await page.keyboard.press(`${modifier}+Shift+${key}`);
+  // Control is accepted on every platform (`event.metaKey || event.ctrlKey`)
+  // and, unlike Meta+Arrow which xterm.js drops everywhere, Ctrl+Shift+Arrow
+  // is exactly the chord xterm.js would translate into CSI input if the
+  // shortcut ever reached the focused terminal (Issue #4069 CI failure on
+  // Linux). Pressing it on macOS too keeps that leak path covered locally.
+  await page.keyboard.press(`Control+Shift+${key}`);
 }
 
 async function sentMessages(page: Page): Promise<SentMessage[]> {
