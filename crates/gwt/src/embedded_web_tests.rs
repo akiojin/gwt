@@ -3165,16 +3165,16 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
-// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
-// global entry that drives the shared wizard renderer.
+// SPEC-3245 Stage E: the Intake-only command route is retired while the shared
+// Launch Wizard renderer and its generic controls remain available.
 #[test]
-fn embedded_web_intake_session_uses_shared_wizard_renderer() {
+fn embedded_web_has_no_legacy_intake_route_and_keeps_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"case "intake-session":"#)
-            && html.contains(r#"kind: "open_intake_session""#),
-        "expected Intake session to use a global command instead of a Branches window action",
+        !html.contains(r#"case "intake-session":"#)
+            && !html.contains(r#"kind: "open_intake_session""#),
+        "legacy Intake-only command and event routes must be absent from the embedded bundle",
     );
     assert!(
         !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
