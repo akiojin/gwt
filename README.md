@@ -351,6 +351,21 @@ in the GUI appends it to the same pool. All operations accept an optional
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
 
+Host free space is part of the same snapshot: `disk_space` in
+`issue.monitor.status` lists the volumes the worktrees and the verification
+coordinator live on and carries a `warning` once one of them falls below
+20 GiB or 5% free, so a filling host is visible before `verify.run` fails with
+`No space left on device`. The `worktree.gc_build_artifacts` operation
+reclaims the space: it removes the `target/` build cache of every worktree
+whose HEAD is merged into `origin/<base>` (`base` defaults to `develop`) and
+that has neither a running process nor a live gwt launch. An unqualified call
+is a dry run that lists the candidates with their sizes and every kept
+worktree with its reason (`active process …`, `tracked launch …`, `not
+merged …`); pass `dry_run: false` to delete, and `include_unmerged: true` to
+also reclaim idle unmerged worktrees. Running worktrees, the main worktree,
+the calling worktree, and the worktree hosting the running `gwtd` are never
+touched.
+
 ### Autonomous mode (opt-in)
 
 Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →

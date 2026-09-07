@@ -224,6 +224,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 branches: optional_string_vec(params, "branches")?,
             })
         }
+        "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "include_unmerged"],
+                "worktree.gc_build_artifacts",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                // Removing a build cache is recoverable but slow to undo, so
+                // an unqualified call only reports (Issue #4009 AC-1).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                include_unmerged: optional_bool(params, "include_unmerged")?.unwrap_or(false),
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
@@ -1918,6 +1932,49 @@ mod tests {
     fn branch_prune_merged_rejects_an_unknown_param() {
         let error = err("branch.prune_merged", json!({ "dryrun": false }));
         assert!(format!("{error}").contains("dryrun"), "{error}");
+    }
+
+    /// Issue #4009 AC-1 / AC-3: an unqualified `worktree.gc_build_artifacts`
+    /// is a dry run that keeps unmerged worktrees.
+    #[test]
+    fn worktree_gc_build_artifacts_defaults_to_a_dry_run_that_keeps_unmerged() {
+        match ok("worktree.gc_build_artifacts", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(!include_unmerged);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_accepts_apply_base_and_include_unmerged() {
+        match ok(
+            "worktree.gc-build-artifacts",
+            json!({ "dry_run": false, "base": "main", "include_unmerged": true }),
+        ) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("main"));
+                assert!(include_unmerged);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_rejects_an_unknown_param() {
+        let error = err("worktree.gc_build_artifacts", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
     }
 
     #[test]

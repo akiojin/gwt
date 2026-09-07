@@ -49,6 +49,7 @@ pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
+pub(crate) mod worktree_gc;
 
 use std::{io, path::PathBuf};
 
@@ -165,6 +166,8 @@ pub enum CliCommand {
     Board(BoardCommand),
     /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
     Branch(branch::BranchCommand),
+    /// Issue #4009: `worktree.gc_build_artifacts` build-cache reclaim.
+    Worktree(worktree_gc::WorktreeCommand),
     Hook(HookCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
@@ -642,6 +645,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
         CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
+        CliCommand::Worktree(inner) => worktree_gc::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,

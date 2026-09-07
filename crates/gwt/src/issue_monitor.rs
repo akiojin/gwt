@@ -2429,6 +2429,12 @@ pub struct IssueMonitorAgentStatus {
     /// Issue #3964 AC-4: the last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
+    /// Issue #4009 AC-4: free space on the volumes the worktrees and the
+    /// verification coordinator live on, with a warning once either is low.
+    /// Filled in by the `issue.monitor.status` surface at read time; `None`
+    /// in daemon projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_space: Option<crate::disk_space::DiskSpaceStatus>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -8329,6 +8335,7 @@ impl IssueMonitorState {
             generation_reclaim: self.generation_reclaim.clone(),
             idle_windows: self.idle_windows(),
             idle_window_counts: self.idle_window_counts(),
+            disk_space: None,
         }
     }
 
@@ -13162,6 +13169,7 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                disk_space: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: BTreeMap::new(),
             }

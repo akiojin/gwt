@@ -386,6 +386,17 @@ fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
     ));
 }
 
+/// Issue #4009 AC-4: free space where the worktrees live and where the
+/// verification coordinator writes its lease, so a filling host warns here
+/// before `verify.run` fails with `No space left on device`.
+fn attach_disk_space(project_root: &std::path::Path, status: &mut crate::IssueMonitorAgentStatus) {
+    let coordinator_root = gwt_core::index_coordinator::coordinator_root();
+    status.disk_space = Some(crate::disk_space::probe(&[
+        project_root,
+        coordinator_root.as_path(),
+    ]));
+}
+
 fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
@@ -496,6 +507,7 @@ fn run_monitor_status<E: CliEnv>(
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
         merge_board_escalations_into_needs_human(&project_root, &mut status);
         attach_github_budget(&mut status);
+        attach_disk_space(&project_root, &mut status);
         out.push_str(
             &serde_json::to_string(&status)
                 .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -528,6 +540,7 @@ fn run_monitor_status<E: CliEnv>(
     let mut status = monitor.agent_status_at(&now);
     merge_board_escalations_into_needs_human(&project_root, &mut status);
     attach_github_budget(&mut status);
+    attach_disk_space(&project_root, &mut status);
     out.push_str(
         &serde_json::to_string(&status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -3770,6 +3783,45 @@ mod tests {
         );
     }
 
+    /// Issue #4009 AC-4: free space is observable from the status the PM
+    /// already reads, with the thresholds that would raise a warning.
+    #[test]
+    fn issue_monitor_status_reports_disk_space_for_the_project_volume() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("status json: {out}");
+        let disk_space = &status["disk_space"];
+        assert!(
+            disk_space["volumes"]
+                .as_array()
+                .is_some_and(|volumes| !volumes.is_empty()),
+            "status must carry the probed volumes: {out}"
+        );
+        assert_eq!(
+            disk_space["warn_below_bytes"],
+            serde_json::json!(crate::disk_space::WARN_BELOW_BYTES),
+            "{out}"
+        );
+        assert_eq!(
+            disk_space["warn_below_percent"],
+            serde_json::json!(crate::disk_space::WARN_BELOW_PERCENT),
+            "{out}"
+        );
+    }
+
     #[test]
     fn issue_monitor_status_excludes_only_cache_proven_closed_board_owners() {
         let tmp = TempDir::new().expect("tempdir");
@@ -3822,6 +3874,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            disk_space: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -3871,6 +3924,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            disk_space: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -3971,6 +4025,7 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                disk_space: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -4025,6 +4080,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            disk_space: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
