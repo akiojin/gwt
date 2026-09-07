@@ -4,8 +4,12 @@
 // "Issue", so an open window's title could not tell the user which face it was.
 // FR-015: ADD WINDOW called the Work surface "Workspace" while its window title
 // said "Work"; the surface lists Works (launches), so "Work" is the实体 name.
-// FR-016 / 受け入れシナリオ 10: the Work window stays selectable while any Work
-// information is still only available there.
+// FR-016 / 受け入れシナリオ 10: the Work window stayed selectable while any Work
+// information was still only available there. T-023 / T-024 moved every item
+// (lifecycle, needs-attention reason, PR number / state, Continue / Resume /
+// cleanup) to the Issue row, and the PM ruled the CI summary out of scope
+// (2026-09-02), so the Work card now leaves ADD WINDOW. Windows that are already
+// open keep working: the `work` preset still resolves to the Work surface.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -49,32 +53,42 @@ test("the three Issue-family presets carry distinguishable role labels", () => {
 });
 
 // FR-015.
-test("the Work surface is named Work in ADD WINDOW and in its role label", () => {
+test("the Work surface is named Work in its role label", () => {
   const labels = presetRoleLabels();
   assert.equal(labels.work, "Work", "the wire preset is `work`, so that key must be labelled");
-
-  const workCard = modal.querySelector('.preset-button[data-preset="work"]');
-  assert.ok(workCard, "the Work surface stays selectable in ADD WINDOW");
-  assert.equal(workCard.querySelector("strong")?.textContent.trim(), "Work");
-  assert.match(
-    workCard.querySelector(".preset-button__text span")?.textContent ?? "",
-    /Work overview/,
-    "the ADD WINDOW description must describe the Work surface, not a Workspace",
-  );
   assert.doesNotMatch(
-    workCard.textContent,
+    appSource.slice(
+      appSource.indexOf("function presetRoleLabel("),
+      appSource.indexOf("}", appSource.indexOf("const labels =")),
+    ),
     /Workspace/,
-    "the card must not keep the old Workspace naming",
+    "the role label must not keep the old Workspace naming",
   );
 });
 
-// FR-016 / 受け入れシナリオ 10: the Work window is only removed from ADD WINDOW once
-// every Work information item has moved to the Issue row. The CI check rollup is
-// not carried by the active Work projection, so the migration is incomplete and
-// this card must stay.
-test("the Work window remains selectable while Work information migration is incomplete", () => {
-  assert.ok(
+// FR-016: ADD WINDOW no longer lists the Work window once every Work information
+// item lives on the Issue row (T-023 / T-024 done, CI summary ruled out of scope).
+test("the Work window is no longer offered in ADD WINDOW", () => {
+  assert.equal(
     modal.querySelector('.preset-button[data-preset="work"]'),
-    "removing the Work card before the migration completes would delete the only home of that information",
+    null,
+    "FR-016: the Work card must leave ADD WINDOW after the migration completed",
+  );
+  assert.doesNotMatch(modal.textContent, /Work overview/);
+});
+
+// FR-016: windows that are already open keep working — the `work` preset (and
+// its legacy `workspace` / `branches` spellings) must still resolve to the Work
+// surface so persisted windows render and reopen as before.
+test("already-open Work windows keep resolving to the Work surface", () => {
+  assert.match(
+    appSource,
+    /function presetSurface\(preset\)[\s\S]+?preset\s*===\s*"work"\s*\|\|\s*preset\s*===\s*"workspace"[\s\S]+?return\s+"work"/,
+    "presetSurface must keep mapping work/workspace to the Work surface",
+  );
+  assert.match(
+    appSource,
+    /function normalizeSurfacePreset\(preset\)[\s\S]+?preset\s*===\s*"branches"\s*\|\|\s*preset\s*===\s*"workspace"[\s\S]+?return\s+"work"/,
+    "normalizeSurfacePreset must keep folding legacy spellings onto work",
   );
 });
