@@ -1,6 +1,7 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
 use std::{
+    cell::RefCell,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
@@ -317,19 +318,15 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
     )))
 }
 
+/// Publish a fully written staging file as `destination` in one step.
+///
+/// `fs::rename` replaces an existing destination atomically on every
+/// supported platform (Windows uses `MOVEFILE_REPLACE_EXISTING` /
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`), so the destination is never
+/// missing between two writes. A former Windows-only remove-then-rename left
+/// exactly that window, and the in-process lock that guarded it could not see
+/// writers in other processes (PR #3520 review).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    let _replace_guard = {
-        static WINDOWS_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = WINDOWS_REPLACE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if destination.exists() {
-            fs::remove_file(destination)?;
-        }
-        guard
-    };
-
     fs::rename(staging_path, destination)
 }
 
@@ -609,14 +606,58 @@ pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+thread_local! {
+    static HOOK_BIN_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The hook binary pinned for the current thread by [`ScopedHookBin`], if any.
+///
+/// #4057: this is the per-thread seam that lets in-process tests choose the
+/// binary generated hook commands embed without touching the process-global
+/// `GWT_HOOK_BIN`. Production never sets it, so the answer there is `None`.
+pub fn hook_bin_override() -> Option<String> {
+    HOOK_BIN_OVERRIDE.with(|value| value.borrow().clone())
+}
+
+/// RAII guard that pins the hook binary for the current thread only.
+///
+/// Prefer this over setting `GWT_HOOK_BIN` in in-process tests. Environment
+/// variables are process-global, so one parallel test's pin leaks into every
+/// materialization running at the same time — and outlives the tempdir it
+/// pointed at (#4057). Mirrors `gwt_core::test_support::ScopedGwtHome`.
+pub struct ScopedHookBin {
+    previous: Option<String>,
+}
+
+impl ScopedHookBin {
+    pub fn set(bin: impl AsRef<std::ffi::OsStr>) -> Self {
+        let next = bin.as_ref().to_string_lossy().into_owned();
+        let previous = HOOK_BIN_OVERRIDE.with(|value| value.replace(Some(next)));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedHookBin {
+    fn drop(&mut self) {
+        HOOK_BIN_OVERRIDE.with(|value| {
+            value.replace(self.previous.take());
+        });
+    }
+}
+
 /// Return the stable fallback used by every generated runtime selector.
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
 /// the launch did not provide an explicit runtime binary.
 ///
-/// Public materialization sets `GWT_HOOK_BIN` from the stable managed-assets
-/// resolver. The `current_exe` / PATH fallback remains for direct library use
-/// and tests that do not enter through that materialization boundary.
+/// Resolution order: the thread-local [`ScopedHookBin`] override (tests only),
+/// then `GWT_HOOK_BIN`, which public materialization sets from the stable
+/// managed-assets resolver. The `current_exe` / PATH fallback remains for
+/// direct library use and tests that do not enter through that
+/// materialization boundary.
 pub(crate) fn gwt_hook_bin_path() -> String {
+    if let Some(bin) = hook_bin_override() {
+        return bin;
+    }
     if let Ok(v) = std::env::var(GWT_HOOK_BIN_ENV) {
         if !v.is_empty() {
             return v;
@@ -914,6 +955,93 @@ mod tests {
         let hooks_path = worktree.join(CODEX_HOOKS_PATH);
         let rendered = fs::read_to_string(&hooks_path).expect("final hooks");
         serde_json::from_str::<Value>(&rendered).expect("valid final hooks JSON");
+        let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
+            .expect("hooks directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hooks.json.tmp-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(
+            staging_files.is_empty(),
+            "atomic staging files leaked: {staging_files:?}"
+        );
+    }
+
+    /// PR #3520 review (PRRT_kwDOPLof2M6YcffP): the in-process mutex cannot
+    /// protect writers running in independent processes, and a Windows-only
+    /// remove-then-rename left a window in which the destination did not
+    /// exist. `fs::rename` replaces an existing destination atomically on
+    /// every supported platform, so concurrent processes must never observe a
+    /// missing or partially written file.
+    #[test]
+    fn concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination() {
+        const CHILD_ENV: &str = "GWT_SETTINGS_LOCAL_CHILD_WORKTREE";
+        const TEST_NAME: &str = "settings_local::tests::concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination";
+        const CHILDREN: usize = 6;
+        const WRITES_PER_CHILD: usize = 24;
+
+        if let Some(worktree) = std::env::var_os(CHILD_ENV) {
+            let worktree = PathBuf::from(worktree);
+            for _ in 0..WRITES_PER_CHILD {
+                generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal)
+                    .expect("child hook write");
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("worktree");
+        let hooks_path = dir.path().join(CODEX_HOOKS_PATH);
+        generate_codex_hooks_for_mode(dir.path(), CodexHookDiscoveryMode::WorktreeLocal)
+            .expect("seed hooks");
+        let test_binary = std::env::current_exe().expect("current test binary");
+        let mut children = (0..CHILDREN)
+            .map(|_| {
+                hidden_command(&test_binary)
+                    .args(["--exact", TEST_NAME])
+                    .env(CHILD_ENV, dir.path())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("spawn independent writer process")
+            })
+            .collect::<Vec<_>>();
+
+        let mut observations = 0usize;
+        loop {
+            let all_done = children
+                .iter_mut()
+                .all(|child| child.try_wait().expect("poll child").is_some());
+            match fs::read_to_string(&hooks_path) {
+                Ok(rendered) => {
+                    serde_json::from_str::<Value>(&rendered)
+                        .expect("destination must always hold a complete hooks.json");
+                    observations += 1;
+                }
+                Err(err) => panic!(
+                    "destination vanished while independent processes regenerated it \
+                     (after {observations} good reads): {err}"
+                ),
+            }
+            if all_done {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        for mut child in children {
+            let status = child.wait().expect("wait child");
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                std::io::Read::read_to_string(&mut pipe, &mut stderr).ok();
+            }
+            assert!(status.success(), "child writer failed: {status}\n{stderr}");
+        }
+
         let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
             .expect("hooks directory")
             .filter_map(Result::ok)
@@ -2643,6 +2771,37 @@ mod tests {
                 "gwt_hook_bin_path must return an absolute path or the literal gwtd fallback, got: {path}"
             );
         }
+    }
+
+    /// #4057: a thread-local override outranks the process-global
+    /// `GWT_HOOK_BIN` so parallel tests can each pin their own binary without
+    /// mutating (and leaking) process state.
+    #[test]
+    fn gwt_hook_bin_path_prefers_thread_local_override_over_process_env() {
+        let override_bin = "/isolated/thread/bin/gwtd";
+        {
+            let _override = ScopedHookBin::set(override_bin);
+            assert_eq!(gwt_hook_bin_path(), override_bin);
+            assert_eq!(hook_bin_override().as_deref(), Some(override_bin));
+        }
+        assert_eq!(
+            hook_bin_override(),
+            None,
+            "dropping the guard must restore the previous (absent) override"
+        );
+        assert_ne!(gwt_hook_bin_path(), override_bin);
+    }
+
+    /// #4057: overrides are per thread, so one thread's pin never reaches a
+    /// concurrently running test on another thread.
+    #[test]
+    fn hook_bin_override_is_thread_local() {
+        let _override = ScopedHookBin::set("/main/thread/gwtd");
+        let seen_on_other_thread = std::thread::spawn(hook_bin_override)
+            .join()
+            .expect("join override probe thread");
+        assert_eq!(seen_on_other_thread, None);
+        assert_eq!(hook_bin_override().as_deref(), Some("/main/thread/gwtd"));
     }
 
     #[test]
