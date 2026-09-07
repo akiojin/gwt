@@ -3,6 +3,7 @@
 pub mod assets;
 pub mod codex_home;
 pub mod codex_hook_trust;
+pub mod codex_managed_config;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
@@ -22,6 +23,10 @@ pub use codex_hook_trust::{
     collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
     register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
     CodexHookTrustEntry, CodexHookTrustExpectation, CodexHookTrustReport,
+};
+pub use codex_managed_config::{
+    ensure_codex_context_management_experimental_mode, CodexManagedConfigOutcome,
+    CodexManagedConfigReport, CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
