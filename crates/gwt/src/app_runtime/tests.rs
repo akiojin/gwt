@@ -43532,12 +43532,15 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             latest, &loaded, &repo, now,
         );
         latest.set_gui_connected(true);
+        // Issue #3528: an outcome is bound to the Issue it was observed for,
+        // and a candidate without one is deferred — so the fixture states that
+        // #42 was probed this tick and is still open.
         prepare_local_issue_monitor_claim_proposals(
             latest,
             &loaded,
             "windows-host/session",
             now,
-            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeMap::from([(42, false)]),
         );
     })
     .expect("latest-state transaction commits the prepared claim proposal");
@@ -62598,12 +62601,14 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
     let candidates = (1..=50).collect::<Vec<u64>>();
     let probed = std::cell::RefCell::new(Vec::new());
 
-    let completed = super::completed_claim_candidates(1, candidates.clone(), |issue_number| {
-        probed.borrow_mut().push(issue_number);
-        false
-    });
+    let observed =
+        super::claim_candidate_completion_observations(1, candidates.clone(), |issue_number| {
+            probed.borrow_mut().push(issue_number);
+            Ok::<_, std::convert::Infallible>(false)
+        })
+        .expect("infallible probe");
 
-    assert!(completed.is_empty());
+    assert_eq!(observed, std::collections::BTreeMap::from([(1, false)]));
     assert_eq!(
         probed.into_inner(),
         vec![1],
@@ -62611,15 +62616,220 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
     );
 
     // A completed candidate frees no slot, so the walk continues past it
-    // exactly like the claim planner does.
+    // exactly like the claim planner does. Every answer is kept by identity.
     let probed = std::cell::RefCell::new(Vec::new());
-    let completed = super::completed_claim_candidates(1, candidates, |issue_number| {
+    let observed = super::claim_candidate_completion_observations(1, candidates, |issue_number| {
         probed.borrow_mut().push(issue_number);
-        issue_number <= 2
+        Ok::<_, std::convert::Infallible>(issue_number <= 2)
+    })
+    .expect("infallible probe");
+
+    assert_eq!(
+        observed,
+        std::collections::BTreeMap::from([(1, true), (2, true), (3, false)])
+    );
+    assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+}
+
+/// Issue #3528 driver fixture: an enabled autonomous monitor whose live issue
+/// list (fake `gh`) carries one claimable candidate, #43.
+fn seed_scheduled_scan_claim_fixture(
+    temp: &tempfile::TempDir,
+    launch_profile: Option<gwt::IssueMonitorLaunchProfile>,
+) -> (PathBuf, PathBuf) {
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    (repo, prefs_path)
+}
+
+fn pending_claim_issue_numbers(prefs: &gwt::IssueMonitorPrefs) -> Vec<u64> {
+    prefs
+        .pending_effects
+        .iter()
+        .filter_map(|effect| match effect.payload {
+            gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Issue #3528 (SPEC #3200 FR-057): without a saved launch profile the scan
+/// can never claim, so it must not spend a single `gh` probe on the frontier.
+#[test]
+fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, _prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |issue_number| {
+            probed.lock().expect("probe log").push(issue_number);
+            Ok(false)
+        }
     });
 
-    assert_eq!(completed, std::collections::BTreeSet::from([1, 2]));
-    assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        None,
+        "2026-09-07T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan");
+    assert!(matches!(
+        outcome,
+        ScheduledIssueMonitorScanOutcome::Applied(_)
+    ));
+    assert!(
+        probed.lock().expect("probe log").is_empty(),
+        "no launch profile means no claim, so no completion probe"
+    );
+}
+
+/// Issue #3528 (SPEC #3200 FR-059 / FR-060, #3165 FR-098): a completion probe
+/// that hits the observation deadline is fail-closed for the claim proposal —
+/// no candidate is claimed on a partial answer — while the read model and the
+/// typed stage error still commit under the fresh commit budget.
+#[test]
+fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, prefs_path) =
+        seed_scheduled_scan_claim_fixture(&temp, Some(sample_issue_monitor_launch_profile()));
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |issue_number| {
+            probed.lock().expect("probe log").push(issue_number);
+            Err(
+                gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Deadline(
+                    gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                        gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                        "operation deadline expired during claim-completion-readback",
+                    ),
+                ),
+            )
+        }
+    });
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        None,
+        "2026-09-07T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("an expired probe must not fail the commit");
+
+    let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
+        panic!("the scan holds authority, so it must commit its own findings");
+    };
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[43]);
+    let status = state.status_view();
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("claim-completion-readback")),
+        "the expired probe must be reported as its stage: {:?}",
+        status.last_error
+    );
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-09-07T07:00:00Z"));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        pending_claim_issue_numbers(&persisted).is_empty(),
+        "an expired observation must not turn into a claim: {:?}",
+        persisted.pending_effects
+    );
+}
+
+/// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): an ordinary readback error
+/// while the deadline is still valid keeps the #3165 fail-open contract, so a
+/// transient `gh` failure never blocks real work.
+#[test]
+fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, prefs_path) =
+        seed_scheduled_scan_claim_fixture(&temp, Some(sample_issue_monitor_launch_profile()));
+    let _hook = super::set_local_completion_probe_test_hook(|_| {
+        Err(
+            gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Operation(
+                gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                    gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                    "gh merged query failed",
+                ),
+            ),
+        )
+    });
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        None,
+        "2026-09-07T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan");
+    assert!(matches!(
+        outcome,
+        ScheduledIssueMonitorScanOutcome::Applied(_)
+    ));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        pending_claim_issue_numbers(&persisted),
+        vec![43],
+        "an ordinary probe error within budget stays fail-open"
+    );
 }
 
 /// Issue #3528: the read/probe phase and the commit phase shared one deadline,
