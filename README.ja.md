@@ -863,6 +863,13 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
 
+Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
+closing keyword は書きません。`main` は default branch なので、そこに
+`Closes #N` があると受け入れ基準が未消化の Issue まで閉じてしまうためです。
+Issue の決着は work ブランチが `develop` に merge された時点で行われます
+（前述）。merge 後は `release.yml` が `scripts/release_close_guard.py` を実行し、
+Release PR の merge 自体が閉じた Issue を reopen してマーカー付きコメントを残します。
+
 ### Release Asset Contract
 
 ```bash

@@ -901,6 +901,14 @@ merging to `main` then runs the release pipeline (tag, GitHub Release,
 cross‑platform binaries). The manual fallback procedure lives in
 `.claude/commands/release.md`.
 
+The Release PR body is reference-only: it lists delivered Issues as bare
+`#N` references and never carries a closing keyword, because `main` is the
+default branch and `Closes #N` there would close an Issue whose acceptance
+criteria are still open. Issues are settled when their work merges into
+`develop` (see above). After the merge, `release.yml` runs
+`scripts/release_close_guard.py`, which reopens any Issue the Release PR
+merge itself closed and leaves a marker comment.
+
 ### Release Asset Contract
 
 ```bash
