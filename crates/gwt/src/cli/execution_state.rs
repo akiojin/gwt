@@ -10456,6 +10456,11 @@ pub struct ExecutionDiagnosisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_probes: Vec<crate::cli::governance::RecoveryProbe>,
     pub available_recoveries: Vec<String>,
+    /// Machine-readable guidance when `available_recoveries` cannot help this
+    /// Session: [`RECOVERY_HINT_FRESH_LAUNCH_REQUIRED`] for a terminal record
+    /// that only a fresh linked-owner launch can proceed from (Issue #4029).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -10611,16 +10616,39 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "workspace.ensure",
 ];
 
+/// Verification recoveries that `verify.*` accepts only from the Session
+/// holding current verification authority (Issue #4029).
+///
+/// They stay visible to GUI projections, but `execution.status` advertises
+/// them only after the same authority gate `verify.plan` / `verify.run`
+/// enforce has accepted the caller.
+const VERIFICATION_RECOVERY_OPERATIONS: [&str; 2] = ["verify.plan", "verify.run"];
+
+/// Recoveries that act on the execution record itself. When none of them is
+/// advertised for a terminal record, this Session cannot recover the record
+/// and `recovery_hint` names the fresh linked-owner launch instead.
+const EXECUTION_RECORD_RECOVERY_OPERATIONS: [&str; 6] = [
+    "execution.continue",
+    "execution.repair",
+    "execution.adopt",
+    "execution.reopen",
+    "verify.plan",
+    "verify.run",
+];
+
+/// `recovery_hint` value: the record is terminal and no operation-local
+/// recovery is available to this Session; only a fresh linked-owner launch
+/// can proceed (Issue #4029 AC-2).
+pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
+
 /// Recoveries that need no session identity or execution authority, so naming
 /// one is always truthful (Issue #4074 AC-3).
 ///
 /// `gwt-execute` and `relaunch` are instructions to the human or the Monitor
-/// rather than gwtd operations; `verify.plan` / `verify.run` are accepted from
-/// any session in the worktree. Everything else must be probe-gated — see
-/// [`PROTECTED_RECOVERY_OPERATIONS`].
+/// rather than gwtd operations. Everything else must be probe-gated — see
+/// [`PROTECTED_RECOVERY_OPERATIONS`] and [`VERIFICATION_RECOVERY_OPERATIONS`].
 #[cfg(test)]
-const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 4] =
-    ["gwt-execute", "relaunch", "verify.plan", "verify.run"];
+const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 2] = ["gwt-execute", "relaunch"];
 
 /// The recoveries a diagnosis names before the probes decide which of them the
 /// caller would actually be allowed to run.
@@ -10737,6 +10765,7 @@ fn diagnose_with_mode(
         open_obligations: Vec::new(),
         recovery_probes: Vec::new(),
         available_recoveries: vec!["gwt-execute".to_string()],
+        recovery_hint: None,
         warnings: Vec::new(),
     };
 
@@ -11266,6 +11295,14 @@ fn finalize_recovery_probes(
         .map(invalid_execution_recovery_scope_probe)
         .collect()
     };
+    let probes = probes
+        .into_iter()
+        .chain(verification_recovery_probes(
+            worktree,
+            session_id,
+            snapshot.ecr_status,
+        ))
+        .collect::<Vec<_>>();
     for probe in &probes {
         snapshot
             .available_recoveries
@@ -11277,7 +11314,70 @@ fn finalize_recovery_probes(
     snapshot.available_recoveries.sort();
     snapshot.available_recoveries.dedup();
     snapshot.recovery_probes = probes;
+    snapshot.recovery_hint = execution_recovery_hint(&snapshot);
     snapshot
+}
+
+/// Probe `verify.plan` / `verify.run` through the exact authority gate the
+/// operations enforce, so `execution.status` never advertises them to a
+/// Session that `verify.*` would refuse (Issue #4029 AC-1).
+///
+/// The verification lane only recovers a Blocked record (fresh derived
+/// evidence feeds `execution.reopen`); every other record state refuses it
+/// as not applicable before any authority lookup runs.
+fn verification_recovery_probes(
+    worktree: &Path,
+    session_id: Option<&str>,
+    ecr_status: ExecutionDiagnosisState,
+) -> Vec<crate::cli::governance::RecoveryProbe> {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let metadata = |cause| GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        cause,
+        retryable: Some(false),
+        ..GovernanceMetadata::default()
+    };
+    let refusal = match session_id {
+        _ if ecr_status != ExecutionDiagnosisState::Blocked => Some((
+            GovernanceCause::DomainInvalid,
+            "verify_recovery_requires_blocked",
+        )),
+        None => Some((GovernanceCause::ManagedIdentity, "session_id_unavailable")),
+        Some(session_id)
+            if !crate::cli::verification_record::caller_has_verification_authority(
+                worktree, session_id,
+            ) =>
+        {
+            Some((
+                GovernanceCause::Authority,
+                "verify.* requires current verification authority",
+            ))
+        }
+        Some(_) => None,
+    };
+    VERIFICATION_RECOVERY_OPERATIONS
+        .into_iter()
+        .map(|operation| match refusal {
+            Some((cause, reason)) => {
+                RecoveryProbe::unavailable(operation, metadata(Some(cause)), reason)
+            }
+            None => RecoveryProbe::available(operation, metadata(None)),
+        })
+        .collect()
+}
+
+/// A terminal record that advertises no execution-record recovery cannot be
+/// continued from this Session; only a fresh linked-owner launch proceeds
+/// (Issue #4029 AC-2).
+fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<String> {
+    let recoverable = snapshot
+        .available_recoveries
+        .iter()
+        .any(|operation| EXECUTION_RECORD_RECOVERY_OPERATIONS.contains(&operation.as_str()));
+    (snapshot.binding_state == ExecutionBindingState::Terminal && !recoverable)
+        .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
 }
 
 /// Replace an operation-specific terminal refusal with guidance derived from
@@ -11306,8 +11406,13 @@ pub(crate) fn terminal_recovery_refusal(
         .and_then(|probe| probe.reason.as_deref())
         .map(|reason| format!("; recovery_probes[execution.reopen]={reason}"))
         .unwrap_or_default();
+    let hint = diagnosis
+        .recovery_hint
+        .as_deref()
+        .map(|hint| format!("; recovery_hint={hint}"))
+        .unwrap_or_default();
     format!(
-        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}",
+        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}{hint}",
         ecr_status = match diagnosis.ecr_status {
             ExecutionDiagnosisState::Active => "active",
             ExecutionDiagnosisState::Completed => "completed",
@@ -13815,6 +13920,7 @@ mod tests {
                     for operation in base_execution_recoveries(binding, state, applicable, reason) {
                         assert!(
                             PROTECTED_RECOVERY_OPERATIONS.contains(&operation.as_str())
+                                || VERIFICATION_RECOVERY_OPERATIONS.contains(&operation.as_str())
                                 || SESSION_INDEPENDENT_RECOVERY_OPERATIONS
                                     .contains(&operation.as_str()),
                             "{state:?}/{binding:?} names `{operation}`, which is neither \
@@ -20991,10 +21097,15 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 7);
+            assert_eq!(probes.len(), 9);
             assert!(probes.iter().all(|probe| {
-                probe["state"] == "unavailable"
-                    && probe["reason"] == "execution_recovery_scope_invalid"
+                let operation = probe["operation"].as_str().unwrap_or_default();
+                let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
+                    "verify_recovery_requires_blocked"
+                } else {
+                    "execution_recovery_scope_invalid"
+                };
+                probe["state"] == "unavailable" && probe["reason"] == expected_reason
             }));
         }
 
@@ -21304,6 +21415,8 @@ exit 1
                     "execution.continue",
                     "execution.reopen",
                     "execution.repair",
+                    "verify.plan",
+                    "verify.run",
                     "workspace.ensure",
                     "workspace.update",
                 ],
@@ -22788,10 +22901,19 @@ exit 1
             );
             assert_eq!(snapshot.verification_state, "missing_record");
             assert_eq!(snapshot.open_obligations, vec!["issue_update"]);
-            assert_eq!(
-                snapshot.available_recoveries,
-                vec!["verify.plan", "verify.run"]
+            // Issue #4029: `sess-status` has no durable Session binding, so
+            // `verify.*` would refuse it and must not be advertised; the
+            // terminal record then points at a fresh launch instead.
+            assert!(
+                snapshot.available_recoveries.is_empty(),
+                "{:?}",
+                snapshot.available_recoveries
             );
+            assert_eq!(
+                snapshot.recovery_hint.as_deref(),
+                Some(RECOVERY_HINT_FRESH_LAUNCH_REQUIRED)
+            );
+            assert_all_operation_local_recovery_probes(&snapshot);
             assert_eq!(
                 snapshot
                     .recovery_probes

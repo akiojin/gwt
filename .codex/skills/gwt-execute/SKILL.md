@@ -93,8 +93,11 @@ integrity-failed record is repaired in place with JSON operation
 `execution.repair`: it quarantines the corrupt record under a unique
 `.corrupt-*` path with a trusted audit entry and atomically materializes a
 fresh Active record, so the same execution lifetime can continue. Diagnose
-first with `execution.status` — its `available_recoveries` names the exact
-operation to run.
+first with `execution.status` — its `available_recoveries` names only the
+operations the current session can actually run (`verify.plan` / `verify.run`
+are listed only when this session holds verification authority). When the
+record is terminal and `recovery_hint` is `fresh_launch_required`, nothing in
+this session can recover it: stop and use a fresh linked-owner launch.
 
 ## Mode detection
 
