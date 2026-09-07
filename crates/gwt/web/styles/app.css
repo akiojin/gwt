@@ -2660,6 +2660,70 @@ body {
   text-align: center;
 }
 
+/* Issue #3561: the Autonomous control is a state switch (role="switch"), not an
+   action button. The label names the setting, the track/knob and the state
+   word show the current value, and only the server status moves it. */
+.knowledge-monitor-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.knowledge-monitor-switch:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.knowledge-monitor-switch__track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: var(--color-border-strong);
+  transition: background var(--motion-fast) var(--motion-curve);
+}
+
+.knowledge-monitor-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  transition: transform var(--motion-fast) var(--motion-curve);
+}
+
+.knowledge-monitor-switch__state {
+  min-width: 3ch;
+  color: var(--color-text-muted);
+}
+
+.knowledge-monitor-switch[aria-checked="true"] .knowledge-monitor-switch__track {
+  background: var(--color-state-active);
+}
+
+.knowledge-monitor-switch[aria-checked="true"] .knowledge-monitor-switch__knob {
+  transform: translateX(16px);
+}
+
+.knowledge-monitor-switch[aria-checked="true"] .knowledge-monitor-switch__state {
+  color: var(--color-text-strong);
+}
+
 .knowledge-monitor-quick {
   min-width: 0;
 }
@@ -3113,6 +3177,79 @@ body {
   font-family: var(--font-body);
   font-size: var(--type-xs);
   color: var(--color-text-muted);
+}
+
+/* SPEC #3885 Phase 2b (T-015 / FR-011): the Issue header of a Windowized agent.
+ * It is the top band of the agent window's own body, so the window reads as one
+ * piece — Issue identity and state above, the interactive terminal below — and a
+ * session with no Issue behind it keeps the bare terminal body (FR-013). */
+.issue-window-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.issue-window-header-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.issue-window-header-number {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.issue-window-header-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.issue-window-header-badge {
+  flex-shrink: 0;
+}
+
+.issue-window-header-secondary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  flex-shrink: 1;
+}
+
+.issue-window-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* The terminal keeps its own absolute fill; the header claims the band above it
+ * so the two never overlap. */
+.workspace-window.surface-terminal.has-issue-header .terminal-root {
+  top: 44px;
 }
 
 .knowledge-detail-header {
@@ -6260,6 +6397,26 @@ body {
 
 .launch-pending-note {
   color: var(--color-text-strong);
+}
+
+/* SPEC-3864 — agent-independent setup affordance (install / configure). */
+.launch-agent-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-raised, var(--color-surface));
+}
+
+.launch-agent-setup__title {
+  color: var(--color-text-strong);
+}
+
+.launch-agent-setup__action {
+  align-self: flex-start;
 }
 
 /* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */

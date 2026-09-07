@@ -164,6 +164,15 @@ pub struct AutonomousTuning {
     /// launch profile's model (still a fresh, adversarial session).
     #[serde(default)]
     pub review_model: Option<String>,
+    /// Issue #3906 AC-9: how long an update drain may last before the
+    /// "still draining" warning fires (and re-fires at the same cadence).
+    /// Elapsing never kills an agent; the drain keeps waiting.
+    #[serde(default = "default_update_drain_notify_after_secs")]
+    pub update_drain_notify_after_secs: u64,
+}
+
+fn default_update_drain_notify_after_secs() -> u64 {
+    crate::update_drain::DEFAULT_UPDATE_DRAIN_NOTIFY_AFTER_SECS
 }
 
 impl Default for AutonomousTuning {
@@ -177,6 +186,7 @@ impl Default for AutonomousTuning {
             retry_backoff_base_secs: 60,
             retry_backoff_cap_secs: 1800,
             review_model: None,
+            update_drain_notify_after_secs: default_update_drain_notify_after_secs(),
         }
     }
 }
@@ -863,6 +873,9 @@ pub struct IssueMonitorPrefs {
     /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #4037 AC-4: the update drain, if raised. Absent in pre-#4037 prefs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_drain: Option<IssueMonitorUpdateDrain>,
     /// Issue #3964 AC-4: the last stranded-generation reclaim result, kept
     /// durable so a reader that rebuilds the monitor from prefs (no live
     /// daemon) still sees it.
@@ -964,6 +977,11 @@ pub struct IssueMonitorPrefs {
     /// `None` follows `autonomous_mode`; `Some` is an explicit override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: apply a staged gwt update automatically once the
+    /// host is quiescent. `None` follows `autonomous_mode` (ON while
+    /// unattended, OFF otherwise); `Some` is an explicit override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: deliveries already settled (closed / annotated), so
     /// the same merge is never settled twice after a human reopen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1021,6 +1039,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            update_drain: None,
             generation_reclaim: None,
             launched_issues: Vec::new(),
             last_scan_driver: None,
@@ -1040,6 +1059,7 @@ impl Default for IssueMonitorPrefs {
             closure_records: Vec::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
@@ -1908,6 +1928,52 @@ pub struct IssueMonitorProviderQuotaHold {
     pub evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
 }
 
+/// Issue #4037: who raised the update drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorUpdateDrainReason {
+    /// Raised by the update mechanism itself (#3906 drain-and-apply).
+    Auto,
+    /// Raised by an operator through `issue.monitor.config.set`.
+    Manual,
+}
+
+/// Issue #4037: a non-destructive admission pause for a pending gwt update.
+///
+/// While raised, the monitor hands out no new launch and prepares no
+/// `AcquireClaim` effect, exactly like a provider quota hold — but unlike
+/// `enabled:false` it never touches the launches already in flight, so the
+/// agents being drained stay attributable and are never relaunched after the
+/// restart. `version` is the gwt version the drain is about — the staged
+/// update version for an `Auto` drain (#3906 AC-3), the running gwt version
+/// for a `Manual` one — and `since` the RFC3339 instant it was raised;
+/// re-raising keeps the original instant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorUpdateDrain {
+    pub version: String,
+    pub since: String,
+    pub reason: IssueMonitorUpdateDrainReason,
+    /// Issue #3906 AC-12: what still keeps the host from being quiescent.
+    /// Filled by the GUI process on the status view only (it is the one that
+    /// sees the panes); the persisted prefs copy stays empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<crate::update_drain::UpdateBlocker>,
+}
+
+/// Issue #3906 AC-3: how a `config_set` control asks for the drain.
+/// `true` / `false` (the #4037 operator form) raise a `Manual` drain stamped
+/// with the running gwt version or clear it; the object form lets the update
+/// mechanism raise an `Auto` drain for the staged update version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IssueMonitorUpdateDrainControl {
+    Toggle(bool),
+    Raise {
+        reason: IssueMonitorUpdateDrainReason,
+        version: String,
+    },
+}
+
 /// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorProviderQuotaPollerWindow {
@@ -2085,8 +2151,15 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
     #[serde(default)]
     pub autonomous_mode: bool,
+    /// Issue #3906 AC-1: effective auto-apply setting (override or
+    /// `autonomous_mode`), so the GUI toggle shows what will happen.
+    #[serde(default)]
+    pub auto_apply_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// Issue #4037 AC-6: the update drain, if raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_drain: Option<IssueMonitorUpdateDrain>,
     /// SPEC #3200 T-048/FR-033: per-issue autonomous lifecycle summary, so every
     /// decision boundary (phase, attempts, needs-human) is observable.
     #[serde(default)]
@@ -2158,6 +2231,9 @@ pub struct IssueMonitorAgentStatus {
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// Issue #4037 AC-6: the update drain, if raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_drain: Option<IssueMonitorUpdateDrain>,
     /// SPEC #3914 FR-009: pool summary (`auto (N): …` for two or more).
     #[serde(default)]
     pub launch_profile_summary: String,
@@ -2689,6 +2765,10 @@ pub struct IssueMonitorState {
     /// Issue #3923 AC-1: release fences per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #4037 AC-1: the update drain, held next to the provider holds it
+    /// shares its admission gate with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update_drain: Option<IssueMonitorUpdateDrain>,
     /// Issue #3964 AC-4: last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
@@ -2727,6 +2807,9 @@ pub struct IssueMonitorState {
     /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
     #[serde(default)]
     auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: auto-apply override; `None` follows `autonomous_mode`.
+    #[serde(default)]
+    auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: settled deliveries keyed by Issue number.
     #[serde(default)]
     merged_issue_settlements: BTreeMap<u64, MergedIssueSettlement>,
@@ -4436,6 +4519,7 @@ impl IssueMonitorState {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            update_drain: None,
             generation_reclaim: None,
             launched_windows: BTreeMap::new(),
             last_scan_driver: None,
@@ -4450,6 +4534,7 @@ impl IssueMonitorState {
             closure_reopen_tombstones: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
@@ -4488,6 +4573,7 @@ impl IssueMonitorState {
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
         state.enforce_provider_quota_hold_releases();
+        state.update_drain = prefs.update_drain.clone();
         state.generation_reclaim = prefs.generation_reclaim;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
@@ -4635,6 +4721,7 @@ impl IssueMonitorState {
         }
         state.autonomous_mode = prefs.autonomous_mode;
         state.auto_close_merged_issues = prefs.auto_close_merged_issues;
+        state.auto_apply_updates = prefs.auto_apply_updates;
         for settlement in prefs.merged_issue_settlements {
             state
                 .merged_issue_settlements
@@ -4679,6 +4766,7 @@ impl IssueMonitorState {
             provider_quota_holds: self.provider_quota_holds.clone(),
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
+            update_drain: self.update_drain.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
             launched_issues: self
                 .launched_windows
@@ -4721,6 +4809,7 @@ impl IssueMonitorState {
             closure_records: self.closure_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
             auto_close_merged_issues: self.auto_close_merged_issues,
+            auto_apply_updates: self.auto_apply_updates,
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
@@ -6771,7 +6860,11 @@ impl IssueMonitorState {
         self.launch_profiles = disk.launch_profile_pool();
         self.launch_usage_threshold_percent = disk.launch_usage_threshold_percent;
         self.autonomous_mode = disk.autonomous_mode;
+        // Issue #4037: the drain is raised and cleared through controls that
+        // commit to disk, so disk owns it like the other config switches.
+        self.update_drain = disk.update_drain.clone();
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
+        self.auto_apply_updates = disk.auto_apply_updates;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
@@ -7755,6 +7848,44 @@ impl IssueMonitorState {
         self.provider_quota_hold_at(now).is_some()
     }
 
+    /// Issue #4037 AC-2: the one admission gate every launch path consults.
+    /// A raised update drain holds admission exactly like a provider hold.
+    fn launch_admission_is_held_at(&self, now: &str) -> bool {
+        self.update_drain.is_some() || self.saved_profile_provider_is_held_at(now)
+    }
+
+    /// Issue #4037 AC-1: the update drain, if raised.
+    pub fn update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
+        self.update_drain.as_ref()
+    }
+
+    /// Issue #4037 AC-1 / AC-3: raise the update drain. Only admission changes;
+    /// every launch ledger and pending effect stays exactly as it is. An
+    /// already raised drain keeps its original `since`, `version`, and
+    /// `reason` so the drain duration stays observable across re-requests.
+    pub fn set_update_drain(
+        &mut self,
+        reason: IssueMonitorUpdateDrainReason,
+        version: &str,
+        now: &str,
+    ) {
+        if self.update_drain.is_some() {
+            return;
+        }
+        self.update_drain = Some(IssueMonitorUpdateDrain {
+            version: version.to_string(),
+            since: now.to_string(),
+            reason,
+            blocking: Vec::new(),
+        });
+    }
+
+    /// Issue #4037 AC-3: clear the update drain and resume admission. Nothing
+    /// else changes: launches that were in flight stay in flight.
+    pub fn clear_update_drain(&mut self) {
+        self.update_drain = None;
+    }
+
     pub fn status_view(&self) -> IssueMonitorStatusView {
         let now = format_rfc3339_utc(chrono::Utc::now());
         self.status_view_with_quota_hold(&now, self.provider_quota_hold_at(&now))
@@ -7798,6 +7929,8 @@ impl IssueMonitorState {
                 "auth_required".to_string()
             } else if quota_hold.is_some() {
                 "quota_hold".to_string()
+            } else if self.update_drain.is_some() {
+                "update_drain".to_string()
             } else if !self.active_launches.is_empty() {
                 if self
                     .active_launches
@@ -7832,7 +7965,9 @@ impl IssueMonitorState {
                 &self.launch_profiles,
             ),
             autonomous_mode: self.autonomous_mode,
+            auto_apply_updates: self.auto_apply_updates_enabled(),
             quota_hold,
+            update_drain: self.update_drain.clone(),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
@@ -7915,6 +8050,7 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
+            update_drain: status.update_drain.clone(),
             launch_profile_summary: status.launch_profile_summary.clone(),
             launch_profile_candidates: status.launch_profile_candidates.clone(),
             usage_threshold_percent: status.usage_threshold_percent,
@@ -8085,6 +8221,25 @@ impl IssueMonitorState {
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
         self.auto_close_merged_issues = value;
         Some(next_epoch)
+    }
+
+    /// Issue #3906 AC-1: the explicit auto-apply override, if any.
+    pub fn auto_apply_updates(&self) -> Option<bool> {
+        self.auto_apply_updates
+    }
+
+    /// Issue #3906 AC-1: whether a staged gwt update is applied by gwt itself
+    /// once the host is quiescent. Without an override this follows
+    /// `autonomous_mode`, so unattended operation defaults to ON and attended
+    /// operation keeps the manual update button.
+    pub fn auto_apply_updates_enabled(&self) -> bool {
+        self.auto_apply_updates.unwrap_or(self.autonomous_mode)
+    }
+
+    /// Change the auto-apply override. Unlike the auto-close override this
+    /// authorizes no remote effect, so no authority epoch advances.
+    pub fn set_auto_apply_updates(&mut self, value: Option<bool>) {
+        self.auto_apply_updates = value;
     }
 
     /// Issue #3917: the settlement recorded for `issue_number`, if any.
@@ -8274,7 +8429,7 @@ impl IssueMonitorState {
         matches!(
             payload,
             IssueMonitorEffectPayload::AcquireClaim { heartbeat_at, .. }
-                if self.saved_profile_provider_is_held_at(heartbeat_at)
+                if self.launch_admission_is_held_at(heartbeat_at)
         )
     }
 
@@ -8949,7 +9104,6 @@ impl IssueMonitorState {
     /// that snapshot, however, so its `FreshRequired` decision must survive.
     /// Newer terminal/disabled disk state remains authoritative and prevents a
     /// stale scan from reviving the marker.
-    #[cfg(unix)]
     pub(crate) fn restore_scanned_launch_session_strategies(
         &mut self,
         proposed: &BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
@@ -8976,7 +9130,7 @@ impl IssueMonitorState {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected
             || self.active_launches.len() >= max_active
-            || self.saved_profile_provider_is_held_at(now)
+            || self.launch_admission_is_held_at(now)
         {
             return None;
         }
@@ -9034,6 +9188,36 @@ impl IssueMonitorState {
         match self.try_prepare_claim_effects_with_probe(owner, now, active_cap, |issue_number| {
             Ok::<bool, std::convert::Infallible>(completed_probe(issue_number))
         }) {
+            Ok(prepared) => prepared,
+            Err(never) => match never {},
+        }
+    }
+
+    /// Issue #3528 (SPEC #3200 FR-058 / #3165 FR-099): plan claim proposals
+    /// from the completion outcomes this tick observed, each bound to the
+    /// Issue it was observed for. The commit-time rebase may have reordered
+    /// the frontier since the observation, so a candidate with no outcome of
+    /// its own is deferred to the next tick's observation rather than read as
+    /// "not completed" and claimed on a missing answer.
+    pub fn prepare_claim_effects_with_observations(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        observations: &std::collections::BTreeMap<u64, bool>,
+    ) -> usize {
+        match self.try_prepare_claim_effects_with_probe_confirmed(
+            owner,
+            now,
+            active_cap,
+            None,
+            |issue_number| {
+                Ok::<_, std::convert::Infallible>(match observations.get(&issue_number) {
+                    Some(&completed) => ClaimProbeOutcome::from_completed(completed),
+                    None => ClaimProbeOutcome::Deferred,
+                })
+            },
+        ) {
             Ok(prepared) => prepared,
             Err(never) => match never {},
         }
@@ -9135,7 +9319,7 @@ impl IssueMonitorState {
         // Issue #3683: expired claim blocks re-enter the queue before slots
         // are planned, so a lapsed claim can never starve its issue.
         self.requeue_expired_claim_blocks(now);
-        if !self.gui_connected || self.saved_profile_provider_is_held_at(now) {
+        if !self.gui_connected || self.launch_admission_is_held_at(now) {
             return Ok(0);
         }
         let (mut available, candidates) = self.claim_probe_plan(active_cap);
@@ -9221,7 +9405,7 @@ impl IssueMonitorState {
         self.requeue_expired_claim_blocks(now);
         let mut launches = Vec::new();
         let max_active = self.config.max_active.max(1).min(active_cap);
-        if max_active == 0 || self.saved_profile_provider_is_held_at(now) {
+        if max_active == 0 || self.launch_admission_is_held_at(now) {
             return launches;
         }
         while self.config.enabled && self.gui_connected && self.active_launches.len() < max_active {
@@ -9670,6 +9854,18 @@ impl IssueMonitorState {
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
+        // Issue #4041 AC-3: replacing a different bound window is an ownership
+        // hand-off the operator must be able to trace (the #4037 / #4033
+        // review windows took the implementation binding silently). Record
+        // it before the binding moves; never replace a binding in silence.
+        if let Some(previous_window_id) = self
+            .launched_windows
+            .get(&issue_number)
+            .filter(|previous| !issue_monitor_window_ids_match(previous, &window_id))
+            .cloned()
+        {
+            self.record_launch_binding_replacement(issue_number, &previous_window_id, &window_id);
+        }
         self.launched_windows
             .insert(issue_number, window_id.clone());
         // Issue #3883: the one place a launch is confirmed is the one place the
@@ -10005,6 +10201,39 @@ impl IssueMonitorState {
             );
         }
         readopted
+    }
+
+    /// Issue #4041 AC-3: durable, reasoned evidence that a launch ACK moved an
+    /// Issue's binding from one window to another. Shares the operator reset
+    /// audit (`requeue_audit`) so the PM reads every binding change in one
+    /// place; it is not a failure release and leaves `released_failures`
+    /// alone.
+    fn record_launch_binding_replacement(
+        &mut self,
+        issue_number: u64,
+        previous_window_id: &str,
+        window_id: &str,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let attempts = self.attempt_count(issue_number);
+        self.failure_release_version += 1;
+        let reason = format!(
+            "launch binding replaced: window {previous_window_id} -> {window_id} (Issue #4041)"
+        );
+        tracing::warn!(
+            issue_number,
+            previous_window_id,
+            window_id,
+            "issue monitor launch binding replaced by a new launch ACK"
+        );
+        self.merge_requeue_audit(std::iter::once(IssueMonitorReleasedFailure {
+            issue_number,
+            release_version: self.failure_release_version,
+            released_at: now,
+            reason,
+            attempts_before: attempts,
+            attempts_after: attempts,
+        }));
     }
 
     /// Put one still-running agent window back under slot accounting.
@@ -12204,6 +12433,7 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
                 quota_hold: None,
+                update_drain: None,
                 launch_profile_summary: "configure before auto start".to_string(),
                 launch_profile_candidates: Vec::new(),
                 usage_threshold_percent: 80,
@@ -12877,6 +13107,104 @@ mod tests {
             .launched_issues
             .iter()
             .any(|entry| entry.issue_number == 43));
+    }
+
+    #[test]
+    fn running_binding_without_claim_is_never_relaunched_by_a_scan() {
+        // Issue #4041 AC-1 / AC-4 / AC-5: the local Running binding outranks
+        // the GitHub claim. A window that kept running while its claim lapsed
+        // (rate limit, TTL) must stay Launched, hold its slot, and never
+        // re-enter the queue or the claim plan.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                max_active: 3,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-impl".to_string(),
+                }],
+                // No `launched_claims` row: the claim is gone, the window is not.
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        assert_eq!(monitor.live_claim_id(42), None);
+
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-06T16:41:34Z");
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launched)
+        );
+        let (_, claimable) = monitor.claim_probe_plan(3);
+        assert!(
+            claimable.is_empty(),
+            "a bound Issue is never a claim candidate"
+        );
+        assert!(
+            monitor
+                .next_launch_request("2026-09-06T16:41:34Z")
+                .is_none(),
+            "a bound Issue is never relaunched"
+        );
+        let status = monitor.status_view();
+        assert_eq!(status.queue_len, 0);
+        assert_eq!(status.active_count, 1);
+        assert_eq!(status.active_issue_number, Some(42));
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-impl"), Some(42));
+    }
+
+    #[test]
+    fn replacing_a_bound_launch_window_is_recorded_in_requeue_audit() {
+        // Issue #4041 AC-3: a launch ACK that replaces a different bound
+        // window is an ownership hand-off (the #4037 / #4033 review windows
+        // took over the implementation binding silently). It must leave a
+        // reasoned audit entry naming both windows.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-impl".to_string(),
+                }],
+                launched_claims: BTreeMap::from([(42, "claim-impl".to_string())]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(monitor.prefs().requeue_audit.is_empty());
+
+        monitor.complete_active_launch(42, "tab-1::agent-review");
+
+        let audit = monitor.prefs().requeue_audit;
+        assert_eq!(
+            audit.len(),
+            1,
+            "a binding replacement is audited: {audit:?}"
+        );
+        assert_eq!(audit[0].issue_number, 42);
+        assert!(
+            audit[0].reason.contains("tab-1::agent-impl")
+                && audit[0].reason.contains("tab-1::agent-review"),
+            "the audit names the replaced and the replacing window: {}",
+            audit[0].reason
+        );
+        assert!(
+            monitor.prefs().released_failures.is_empty(),
+            "a binding replacement is not a failure release"
+        );
+
+        // Re-acking the same window is idempotent, not a replacement.
+        monitor.complete_active_launch(42, "tab-1::agent-review");
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+
+        // A first binding is not a replacement either.
+        let mut fresh = IssueMonitorState::new(IssueMonitorConfig::default());
+        fresh.complete_active_launch(43, "tab-1::agent-43");
+        assert!(fresh.prefs().requeue_audit.is_empty());
     }
 
     #[test]
@@ -14223,6 +14551,237 @@ mod tests {
         assert!(all_held
             .next_launch_request("2026-08-22T04:00:01Z")
             .is_some());
+    }
+
+    /// Issue #4037 AC-1 / AC-3 / AC-4: `update_drain` is a non-destructive
+    /// admission pause. Raising and clearing it leaves every launch ledger
+    /// byte-identical (unlike `enabled:false`), it survives a prefs
+    /// round-trip, and pre-#4037 prefs without the field still load.
+    #[test]
+    fn update_drain_persists_without_touching_launch_state() {
+        let now = "2026-09-07T00:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 3,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 3,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42), issue(43), issue(44)], now);
+        let bound = monitor
+            .next_launch_request(now)
+            .expect("first launch is claimed");
+        monitor.complete_active_launch(bound.issue_number, "tab-1::agent-1");
+        let launching = monitor
+            .next_launch_request(now)
+            .expect("second launch stays Launching");
+        assert_ne!(bound.issue_number, launching.issue_number);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 3, |_| false),
+            1,
+            "the third slot holds a prepared AcquireClaim effect"
+        );
+        let before = monitor.prefs();
+        assert_eq!(before.launched_issues.len(), 1);
+        assert_eq!(before.launching_issues.len(), 1);
+        assert_eq!(before.pending_effects.len(), 1);
+        assert!(before.update_drain.is_none());
+
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.91.0", now);
+        assert_eq!(
+            monitor.update_drain(),
+            Some(&IssueMonitorUpdateDrain {
+                version: "9.91.0".to_string(),
+                since: now.to_string(),
+                reason: IssueMonitorUpdateDrainReason::Manual,
+                blocking: Vec::new(),
+            })
+        );
+        // Re-raising an already raised drain keeps the original instant.
+        monitor.set_update_drain(
+            IssueMonitorUpdateDrainReason::Auto,
+            "9.92.0",
+            "2026-09-07T00:10:00Z",
+        );
+        assert_eq!(
+            monitor.update_drain().map(|drain| drain.since.as_str()),
+            Some(now)
+        );
+        let mut held = monitor.prefs();
+        assert!(held.update_drain.is_some());
+        held.update_drain = None;
+        assert_eq!(
+            held, before,
+            "raising the drain must not change any other durable field"
+        );
+
+        let json = serde_json::to_string(&monitor.prefs()).expect("serialize prefs");
+        let restored: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload prefs");
+        assert_eq!(restored.update_drain, monitor.prefs().update_drain);
+        let reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
+        assert_eq!(reloaded.update_drain(), monitor.update_drain());
+        assert_eq!(
+            reloaded.active_issue_numbers(),
+            monitor.active_issue_numbers()
+        );
+
+        monitor.clear_update_drain();
+        assert!(monitor.update_drain().is_none());
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "clearing the drain must restore the exact pre-drain prefs"
+        );
+
+        let legacy: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":true,"max_active_agents":2,"priority_order":[]}"#)
+                .expect("pre-#4037 prefs load");
+        assert!(legacy.update_drain.is_none());
+    }
+
+    /// Issue #4037 AC-2: while the drain is raised, no launch is handed out
+    /// and no `AcquireClaim` effect is prepared or admitted — the queue is
+    /// preserved, and clearing the drain resumes admission.
+    #[test]
+    fn update_drain_stops_new_launches_and_claims_until_cleared() {
+        let now = "2026-09-07T00:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.91.0", now);
+
+        assert_eq!(monitor.next_launch_request(now), None);
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            0
+        );
+        assert_eq!(
+            monitor.try_prepare_claim_effects_with_probe_confirmed(
+                "host/session",
+                now,
+                1,
+                None,
+                |_| Ok::<ClaimProbeOutcome, std::convert::Infallible>(ClaimProbeOutcome::Claimable),
+            ),
+            Ok(0)
+        );
+        assert!(!monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            "drained-scan-proposal",
+            monitor.effect_authority_epoch(),
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: now.to_string(),
+                expires_at: "2026-09-07T00:30:00Z".to_string(),
+                launched_work_id: None,
+            },
+        )));
+        assert!(monitor.pending_effects().is_empty());
+        assert!(monitor.active_issue_numbers().is_empty());
+
+        monitor.clear_update_drain();
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1,
+            "clearing the drain resumes claim admission"
+        );
+    }
+
+    /// Issue #4037 AC-6: the drain is one structured projection in both the
+    /// agent and GUI status, and `state` reads `update_drain` after
+    /// `quota_hold` and before `active`.
+    #[test]
+    fn update_drain_is_projected_in_agent_and_gui_status() {
+        let now = "2026-09-07T00:00:00Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        let request = monitor.next_launch_request(now).expect("launch");
+        monitor.complete_active_launch(request.issue_number, "tab-1::agent-1");
+        assert_eq!(monitor.status_view_at(now).state, "active");
+
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.91.0", now);
+        let expected = serde_json::json!({
+            "version": "9.91.0",
+            "since": now,
+            "reason": "manual",
+        });
+        let agent_status =
+            serde_json::to_value(monitor.agent_status_at(now)).expect("serialize agent status");
+        let gui_status =
+            serde_json::to_value(monitor.status_view_at(now)).expect("serialize GUI status");
+        assert_eq!(agent_status.get("update_drain"), Some(&expected));
+        assert_eq!(gui_status.get("update_drain"), Some(&expected));
+        assert_eq!(
+            gui_status.get("state").and_then(serde_json::Value::as_str),
+            Some("update_drain"),
+            "the drain outranks the active launch in the state summary"
+        );
+
+        monitor.clear_update_drain();
+        let cleared =
+            serde_json::to_value(monitor.status_view_at(now)).expect("serialize GUI status");
+        assert!(cleared.get("update_drain").is_none());
+        assert_eq!(
+            cleared.get("state").and_then(serde_json::Value::as_str),
+            Some("active")
+        );
+
+        let mut held = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-08T00:00:00Z".to_string(),
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        held.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.92.0", now);
+        assert_eq!(
+            held.status_view_at(now).state,
+            "quota_hold",
+            "a provider hold still outranks the drain"
+        );
+        assert_eq!(
+            serde_json::to_value(held.status_view_at(now))
+                .expect("serialize")
+                .get("update_drain")
+                .and_then(|drain| drain.get("reason"))
+                .and_then(serde_json::Value::as_str),
+            Some("auto")
+        );
     }
 
     #[test]
@@ -19250,6 +19809,76 @@ mod tests {
         assert_eq!(error, "merged-pr readback failed");
     }
 
+    /// Issue #3528 (SPEC #3200 FR-058 / #3165 FR-099): a completion outcome
+    /// applies to the Issue it was observed for and to no other. A candidate
+    /// the scan never probed — one that became claimable only after the
+    /// commit-time rebase — is deferred to the next tick, never claimed on a
+    /// missing answer.
+    #[test]
+    fn claim_observations_apply_only_to_their_own_issue_and_defer_the_unprobed() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 3,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[
+                spec_issue(
+                    41,
+                    IssueMonitorReadiness::ReadyWithCompletedTasks,
+                    "2026-09-06T00:00:00Z",
+                ),
+                issue(42),
+                issue(43),
+            ],
+            "2026-09-07T00:00:00Z",
+        );
+        for issue_number in [41, 42, 43] {
+            assert_eq!(
+                monitor.inbox_item(issue_number).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "fixture: #{issue_number} starts queued"
+            );
+        }
+        // #41 was probed and found delivered, #42 probed and still open; #43
+        // was never probed because it entered the frontier after the
+        // observation.
+        let observations = std::collections::BTreeMap::from([(41, true), (42, false)]);
+
+        let prepared = monitor.prepare_claim_effects_with_observations(
+            "host/session",
+            "2026-09-07T00:00:01Z",
+            3,
+            &observations,
+        );
+
+        assert_eq!(
+            prepared, 1,
+            "only the candidate observed as open is claimable"
+        );
+        let claimed = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(claimed, vec![42]);
+        assert_ne!(
+            monitor.inbox_item(41).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "a candidate observed as delivered leaves the queue"
+        );
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "an unobserved candidate stays queued for the next tick"
+        );
+    }
+
     #[test]
     fn confirmed_claim_persists_and_replays_one_stable_launch_delivery() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
@@ -21085,6 +21714,33 @@ mod tests {
         );
     }
 
+    /// Issue #3490 AC-2: several Codex agents racing for the shared `~/.codex`
+    /// state directory is a property of the host, exactly like the transient
+    /// infrastructure aborts of Issue #3941. It must requeue the Issue without
+    /// spending an attempt, so a fan-out that collides never walks a healthy
+    /// Issue up the retry ladder.
+    #[test]
+    fn codex_shared_state_lock_requeues_without_spending_an_attempt() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.set_active_launch_id(42, Some("tab-1::agent-1".to_string()));
+
+        monitor.record_agent_issue_failed(42, gwt_agent::codex_shared_state_lock_detail());
+
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "shared Codex state contention must not consume the Issue's retry budget"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the Issue returns to the queue instead of becoming a terminal agent failure"
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot is released for reuse");
+    }
+
     #[test]
     fn transient_failure_under_cap_retries_and_counts() {
         // SPEC #3200 T-042/FR-026: a transient failure below max_attempts
@@ -22915,6 +23571,87 @@ mod tests {
                 )
             })
             .cloned()
+    }
+
+    #[test]
+    fn update_drain_blocking_defaults_empty_and_control_accepts_both_shapes() {
+        // Issue #3906 AC-3 / AC-12: a #4037-era drain without `blocking`
+        // still loads, and the control accepts the operator bool as well as
+        // the auto-drain object.
+        let legacy = r#"{"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}"#;
+        let drain: IssueMonitorUpdateDrain = serde_json::from_str(legacy).expect("legacy drain");
+        assert!(drain.blocking.is_empty());
+        assert_eq!(
+            serde_json::to_value(&drain).expect("serialize"),
+            serde_json::json!({"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}),
+            "an empty blocking list is not persisted"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(serde_json::json!(true))
+                .expect("bool control"),
+            IssueMonitorUpdateDrainControl::Toggle(true)
+        );
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+                serde_json::json!({"reason":"auto","version":"9.99.0"})
+            )
+            .expect("object control"),
+            IssueMonitorUpdateDrainControl::Raise {
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                version: "9.99.0".to_string(),
+            }
+        );
+        assert!(serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+            serde_json::json!({"reason":"auto"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auto_apply_updates_defaults_to_autonomous_mode_and_round_trips() {
+        // Issue #3906 AC-1: no override follows autonomous_mode (ON while
+        // unattended, OFF otherwise); an override persists and the effective
+        // value is what the status view reports.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(monitor.auto_apply_updates(), None);
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert!(!monitor.status_view().auto_apply_updates);
+        assert!(monitor
+            .set_autonomous_mode_with_effect_revocation(true)
+            .is_some());
+        assert!(
+            monitor.auto_apply_updates_enabled(),
+            "autonomous mode turns auto-apply on by default"
+        );
+        assert!(monitor.status_view().auto_apply_updates);
+
+        let epoch = monitor.effect_authority_epoch();
+        monitor.set_auto_apply_updates(Some(false));
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert_eq!(
+            monitor.effect_authority_epoch(),
+            epoch,
+            "the override authorizes no remote effect, so no grant is revoked"
+        );
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.auto_apply_updates, Some(false));
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.auto_apply_updates(), Some(false));
+        assert!(restored.autonomous_mode());
+        assert!(!restored.auto_apply_updates_enabled());
+        assert!(!restored.status_view().auto_apply_updates);
+    }
+
+    #[test]
+    fn autonomous_tuning_without_update_drain_notify_after_secs_uses_1800() {
+        // Issue #3906 AC-9: pre-#3906 tuning objects (every other field
+        // present, this one absent) deserialize with the documented default.
+        let legacy = r#"{"max_attempts":3,"stuck_timeout_secs":1800,"heartbeat_interval_secs":120,"merge_watch_timeout_secs":3600,"deliver_fix_loop_cap":5,"retry_backoff_base_secs":60,"retry_backoff_cap_secs":1800}"#;
+        let tuning: AutonomousTuning = serde_json::from_str(legacy).expect("legacy tuning");
+        assert_eq!(tuning.update_drain_notify_after_secs, 1800);
+        assert_eq!(tuning, AutonomousTuning::default());
     }
 
     #[test]

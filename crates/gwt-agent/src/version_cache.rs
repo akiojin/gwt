@@ -28,19 +28,26 @@ pub struct VersionOption {
 
 /// Build the list of version options for the wizard VersionSelect step.
 ///
-/// - Always prepends "Installed" as direct-command mode.
-/// - Appends "latest" if the agent has an npm package.
+/// - Prepends "Installed" (direct-command mode) only when install detection
+///   resolved the agent executable (SPEC-3864 FR-003).
+/// - Appends "latest" if the agent has a runtime package route.
 /// - Appends each cached version from `cached_versions`.
+///
+/// An empty result means neither `Installed` nor `latest` can launch; the
+/// wizard then surfaces the agent's setup affordance instead (FR-013).
 pub fn build_version_options(
-    _is_installed: bool,
+    is_installed: bool,
     _installed_version: Option<&str>,
     has_npm_package: bool,
     cached_versions: &[String],
 ) -> Vec<VersionOption> {
-    let mut options = vec![VersionOption {
-        label: "Installed".to_string(),
-        value: "installed".to_string(),
-    }];
+    let mut options = Vec::new();
+    if is_installed {
+        options.push(VersionOption {
+            label: "Installed".to_string(),
+            value: "installed".to_string(),
+        });
+    }
 
     if has_npm_package {
         options.push(VersionOption {
@@ -204,7 +211,7 @@ impl VersionCache {
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = Result<String, VersionCacheError>>,
     {
-        let Some(package) = agent_id.package_name() else {
+        let Some(package) = agent_id.npm_package() else {
             return Ok(None);
         };
         let url = npm_registry_url(package);
@@ -453,14 +460,18 @@ mod tests {
 
     #[test]
     fn build_version_options_not_installed_with_npm() {
+        // SPEC-3864 FR-003: an agent whose executable is not resolvable must
+        // not be offered as `Installed`; only the package routes remain.
         let opts = build_version_options(false, None, true, &["3.0.0".to_string()]);
-        assert_eq!(opts.len(), 3); // Installed + latest + 1 cached
-        assert_eq!(opts[0].label, "Installed");
-        assert_eq!(opts[0].value, "installed");
-        assert_eq!(opts[1].label, "latest");
-        assert_eq!(opts[1].value, "latest");
-        assert_eq!(opts[2].label, "3.0.0");
-        assert_eq!(opts[2].value, "3.0.0");
+        assert_eq!(opts.len(), 2); // latest + 1 cached
+        assert_eq!(opts[0].label, "latest");
+        assert_eq!(opts[0].value, "latest");
+        assert_eq!(opts[1].label, "3.0.0");
+        assert_eq!(opts[1].value, "3.0.0");
+        assert!(
+            opts.iter().all(|option| option.value != "installed"),
+            "Installed must be derived from detection, not offered unconditionally"
+        );
     }
 
     #[test]
@@ -482,10 +493,11 @@ mod tests {
 
     #[test]
     fn build_version_options_nothing_available() {
+        // SPEC-3864 FR-003 / FR-013: not installed and no runtime `latest`
+        // route means there is nothing to launch; the wizard surfaces the
+        // setup affordance instead of a phantom `Installed` entry.
         let opts = build_version_options(false, None, false, &[]);
-        assert_eq!(opts.len(), 1);
-        assert_eq!(opts[0].label, "Installed");
-        assert_eq!(opts[0].value, "installed");
+        assert!(opts.is_empty(), "got {opts:?}");
     }
 
     #[test]

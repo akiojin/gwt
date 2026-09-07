@@ -344,6 +344,13 @@ test("Issue rows render monitor projections and send controls from the full cano
     kind: "set_issue_monitor_autonomous_mode",
     enabled: true,
   });
+  // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
+  // toggle and flips the effective value the backend reported.
+  body.querySelector('[data-action="monitor-auto-apply"]').click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_auto_apply_updates",
+    enabled: true,
+  });
   body.querySelector('[data-action="monitor-settings"]').click();
   assert.deepEqual(sent.at(-1), { kind: "issue_monitor_configure_profile" });
 
@@ -361,11 +368,111 @@ test("Issue rows render monitor projections and send controls from the full cano
     /Stopped.*Queue 3.*Active 1\/2/,
   );
   assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  // Issue #3561: the click above only sent the request; the switch still shows
+  // the server state (Off) until a status confirms the change.
   assert.equal(
-    body.querySelector('[data-action="monitor-autonomous"]').textContent,
-    "Autonomous: OFF",
+    body.querySelector('[data-action="monitor-autonomous"]').getAttribute("aria-checked"),
+    "false",
   );
+  assert.equal(
+    body.querySelector('[data-action="monitor-auto-apply"]').textContent,
+    "Auto-apply updates: OFF",
+  );
+  surface.applyIssueMonitorStatus({ autonomous_mode: true, auto_apply_updates: true });
+  const autoApply = body.querySelector('[data-action="monitor-auto-apply"]');
+  assert.equal(autoApply.textContent, "Auto-apply updates: ON");
+  assert.equal(autoApply.dataset.enabled, "true");
+  autoApply.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_auto_apply_updates",
+    enabled: false,
+  });
   assert.equal(document.querySelector(".issue-monitor-card"), null);
+});
+
+// --- Issue #3561: the Autonomous toggle is a state switch, never an action ---
+// The label names the setting, the state word + aria-checked carry the value,
+// and the server status is the only thing that ever moves the display.
+
+test("Issue #3561: Autonomous switch exposes aria-checked and shows server state only", async (t) => {
+  const spies = errorSpies();
+  const { body, sent, surface } = await makeFixture(spies.options);
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const status = (autonomous, extra = {}) => ({
+    enabled: false,
+    state: "disabled",
+    queue_len: 0,
+    active_count: 0,
+    max_active_agents: 1,
+    total_candidates: 0,
+    autonomous_mode: autonomous,
+    ...extra,
+  });
+  const toggle = body.querySelector('[data-action="monitor-autonomous"]');
+  const stateWord = () =>
+    toggle.querySelector(".knowledge-monitor-switch__state").textContent;
+
+  // AC-1 / AC-2: a WAI-ARIA switch with a fixed accessible name.
+  assert.equal(toggle.tagName, "BUTTON");
+  assert.equal(toggle.getAttribute("role"), "switch");
+  assert.equal(toggle.getAttribute("aria-label"), "Autonomous mode");
+  assert.equal(
+    toggle.querySelector(".knowledge-monitor-switch__label").textContent,
+    "Autonomous",
+  );
+  assert.ok(toggle.querySelector(".knowledge-monitor-switch__track .knowledge-monitor-switch__knob"));
+
+  surface.applyIssueMonitorStatus(status(false));
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
+  assert.equal(toggle.dataset.enabled, "false");
+  assert.equal(stateWord(), "Off");
+
+  // AC-3 / AC-4: a click sends the request and nothing else. No optimistic
+  // value is rendered before the server confirms.
+  toggle.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_autonomous_mode",
+    enabled: true,
+  });
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
+  assert.equal(stateWord(), "Off");
+
+  // Send failure: the backend answers a rejected control with a status
+  // snapshot carrying last_error and the real (unchanged) value.
+  surface.applyIssueMonitorStatus(
+    status(false, { state: "error", last_error: "autonomous-mode: control rejected" }),
+  );
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
+  assert.equal(stateWord(), "Off");
+  assert.equal(spies.reported.length, 1);
+
+  // Success: only the server status flips the switch.
+  surface.applyIssueMonitorStatus(status(true));
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  assert.equal(toggle.dataset.enabled, "true");
+  assert.equal(stateWord(), "On");
+
+  // Server truth wins over the local expectation: a click toward Off followed
+  // by a status that still says On keeps On.
+  toggle.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_autonomous_mode",
+    enabled: false,
+  });
+  surface.applyIssueMonitorStatus(status(true));
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  assert.equal(stateWord(), "On");
+
+  // AC-5: Start/Stop is an action button (label = what the press does, state
+  // lives in the summary line) and it does not move on click either.
+  const startStop = body.querySelector('[data-action="monitor-toggle"]');
+  assert.equal(startStop.textContent, "Start");
+  startStop.click();
+  assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_enabled", enabled: true });
+  assert.equal(startStop.textContent, "Start");
+  surface.applyIssueMonitorStatus(status(true, { enabled: true, state: "idle" }));
+  assert.equal(startStop.textContent, "Stop");
+  assert.match(body.querySelector(".knowledge-monitor-summary").textContent, /^Idle/);
 });
 
 // --- SPEC #3206 FR-017: errors are read in ONE place (notification center) ---

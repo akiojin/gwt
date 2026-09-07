@@ -13,10 +13,8 @@ pub mod branch_list;
 pub mod cli;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
-#[cfg(unix)]
 pub mod daemon_publisher;
 pub mod daemon_runtime;
-#[cfg(unix)]
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
@@ -53,6 +51,7 @@ pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_drain;
 pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
@@ -161,7 +160,8 @@ pub use issue_monitor::{
     IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver,
     IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
     IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
-    IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary, LaunchProfileSelection,
+    IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
+    IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, LaunchProfileSelection,
     LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement, MergedIssueSettlementAction,
     MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
@@ -174,9 +174,10 @@ pub use knowledge_bridge::{
     KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{
-    build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
-    has_gwt_spec_label, knowledge_launch_target_branch_name, load_agent_options, AgentOption,
-    DockerWizardContext, LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
+    default_wizard_version_cache_path, has_gwt_spec_label, knowledge_launch_target_branch_name,
+    load_agent_options, AgentOption, AgentSetupAffordance, AgentSetupKind, DockerWizardContext,
+    LaunchTargetKind, LaunchWizardAction, LaunchWizardAgentSetupView, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
     LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardLiveSessionView,
     LaunchWizardMode, LaunchWizardOptionView, LaunchWizardPreviousProfile,

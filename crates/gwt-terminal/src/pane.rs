@@ -16,7 +16,12 @@ pub enum PaneStatus {
     Error(String),
 }
 
-const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+/// Scrollback rows a pane keeps and replays into `snapshot_bytes`.
+///
+/// This is the hard bound on how much work one snapshot can cost no matter how
+/// much the agent printed, so regression tests assert against this constant
+/// instead of a wall-clock budget (Issue #3988).
+pub const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
 
 /// Trailing screen rows folded into the logged PTY exit record, and the
 /// character budget that keeps one log line readable (Issue #3341).

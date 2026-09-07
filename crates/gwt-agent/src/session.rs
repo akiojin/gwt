@@ -115,6 +115,14 @@ pub struct DockerRuntimeBinding {
     pub project_state_scope_hash: String,
 }
 
+/// Stable prefix of the owner-mismatch binding refusal.
+///
+/// Issue #3489: the refusal fires before the PTY starts, so the launch layer
+/// recognises it through this prefix to attach the recovery route the pane
+/// otherwise never shows.
+pub const EXECUTION_BINDING_OWNER_MISMATCH: &str =
+    "execution binding owner does not match the linked Session owner";
+
 /// Non-secret identity of one owner-scoped Execution generation.
 ///
 /// The owner ledger remains authoritative. This value is only a durable
@@ -317,7 +325,7 @@ pub fn durable_session_launch_command(config: &LaunchConfig) -> String {
     let Some(provenance) = config.tool_runtime_provenance.as_ref() else {
         return config.command.clone();
     };
-    if config.agent_id.package_name() != Some(provenance.official_package.as_str()) {
+    if config.agent_id.npm_package() != Some(provenance.official_package.as_str()) {
         return config.command.clone();
     }
 
@@ -1003,7 +1011,17 @@ fn validate_session_execution_binding(
         return Err("execution binding owner kind must be `spec` or `issue`".to_string());
     }
     if session.linked_issue_number != Some(binding.owner_number) {
-        return Err("execution binding owner does not match the linked Session owner".to_string());
+        // Issue #3489: this refusal fires before the PTY starts, so its text is
+        // the only thing the pane ever shows. Name both sides of the mismatch so
+        // the operator can tell which Session and which owner disagree.
+        let linked = session.linked_issue_number.map_or_else(
+            || "no linked owner".to_string(),
+            |number| format!("issue #{number}"),
+        );
+        return Err(format!(
+            "{EXECUTION_BINDING_OWNER_MISMATCH}: Session {} is linked to {linked}, but the binding owns {} #{}",
+            session.id, binding.owner_kind, binding.owner_number
+        ));
     }
     if binding.identity.generation_id.trim().is_empty() {
         return Err("execution binding generation id must be non-empty".to_string());

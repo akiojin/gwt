@@ -35,6 +35,7 @@ mod plan;
 mod pm;
 mod pr;
 pub(crate) mod register;
+mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
 #[cfg(test)]
@@ -193,6 +194,8 @@ pub enum CliCommand {
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
     GithubBudget(github_budget::GithubBudgetCommand),
+    /// Issue #3516: `release.*` interrupted-release standing check.
+    Release(release::ReleaseCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -648,6 +651,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
         CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
+        CliCommand::Release(inner) => release::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
