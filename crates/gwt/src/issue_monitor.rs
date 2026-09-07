@@ -164,6 +164,15 @@ pub struct AutonomousTuning {
     /// launch profile's model (still a fresh, adversarial session).
     #[serde(default)]
     pub review_model: Option<String>,
+    /// Issue #3906 AC-9: how long an update drain may last before the
+    /// "still draining" warning fires (and re-fires at the same cadence).
+    /// Elapsing never kills an agent; the drain keeps waiting.
+    #[serde(default = "default_update_drain_notify_after_secs")]
+    pub update_drain_notify_after_secs: u64,
+}
+
+fn default_update_drain_notify_after_secs() -> u64 {
+    crate::update_drain::DEFAULT_UPDATE_DRAIN_NOTIFY_AFTER_SECS
 }
 
 impl Default for AutonomousTuning {
@@ -177,6 +186,7 @@ impl Default for AutonomousTuning {
             retry_backoff_base_secs: 60,
             retry_backoff_cap_secs: 1800,
             review_model: None,
+            update_drain_notify_after_secs: default_update_drain_notify_after_secs(),
         }
     }
 }
@@ -967,6 +977,11 @@ pub struct IssueMonitorPrefs {
     /// `None` follows `autonomous_mode`; `Some` is an explicit override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: apply a staged gwt update automatically once the
+    /// host is quiescent. `None` follows `autonomous_mode` (ON while
+    /// unattended, OFF otherwise); `Some` is an explicit override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: deliveries already settled (closed / annotated), so
     /// the same merge is never settled twice after a human reopen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1044,6 +1059,7 @@ impl Default for IssueMonitorPrefs {
             closure_records: Vec::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
@@ -1928,13 +1944,34 @@ pub enum IssueMonitorUpdateDrainReason {
 /// `AcquireClaim` effect, exactly like a provider quota hold — but unlike
 /// `enabled:false` it never touches the launches already in flight, so the
 /// agents being drained stay attributable and are never relaunched after the
-/// restart. `version` is the gwt version that raised the drain and `since`
-/// the RFC3339 instant it was raised; re-raising keeps the original instant.
+/// restart. `version` is the gwt version the drain is about — the staged
+/// update version for an `Auto` drain (#3906 AC-3), the running gwt version
+/// for a `Manual` one — and `since` the RFC3339 instant it was raised;
+/// re-raising keeps the original instant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorUpdateDrain {
     pub version: String,
     pub since: String,
     pub reason: IssueMonitorUpdateDrainReason,
+    /// Issue #3906 AC-12: what still keeps the host from being quiescent.
+    /// Filled by the GUI process on the status view only (it is the one that
+    /// sees the panes); the persisted prefs copy stays empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<crate::update_drain::UpdateBlocker>,
+}
+
+/// Issue #3906 AC-3: how a `config_set` control asks for the drain.
+/// `true` / `false` (the #4037 operator form) raise a `Manual` drain stamped
+/// with the running gwt version or clear it; the object form lets the update
+/// mechanism raise an `Auto` drain for the staged update version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IssueMonitorUpdateDrainControl {
+    Toggle(bool),
+    Raise {
+        reason: IssueMonitorUpdateDrainReason,
+        version: String,
+    },
 }
 
 /// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
@@ -2114,6 +2151,10 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
     #[serde(default)]
     pub autonomous_mode: bool,
+    /// Issue #3906 AC-1: effective auto-apply setting (override or
+    /// `autonomous_mode`), so the GUI toggle shows what will happen.
+    #[serde(default)]
+    pub auto_apply_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
     /// Issue #4037 AC-6: the update drain, if raised.
@@ -2766,6 +2807,9 @@ pub struct IssueMonitorState {
     /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
     #[serde(default)]
     auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: auto-apply override; `None` follows `autonomous_mode`.
+    #[serde(default)]
+    auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: settled deliveries keyed by Issue number.
     #[serde(default)]
     merged_issue_settlements: BTreeMap<u64, MergedIssueSettlement>,
@@ -4490,6 +4534,7 @@ impl IssueMonitorState {
             closure_reopen_tombstones: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
@@ -4676,6 +4721,7 @@ impl IssueMonitorState {
         }
         state.autonomous_mode = prefs.autonomous_mode;
         state.auto_close_merged_issues = prefs.auto_close_merged_issues;
+        state.auto_apply_updates = prefs.auto_apply_updates;
         for settlement in prefs.merged_issue_settlements {
             state
                 .merged_issue_settlements
@@ -4763,6 +4809,7 @@ impl IssueMonitorState {
             closure_records: self.closure_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
             auto_close_merged_issues: self.auto_close_merged_issues,
+            auto_apply_updates: self.auto_apply_updates,
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
@@ -6817,6 +6864,7 @@ impl IssueMonitorState {
         // commit to disk, so disk owns it like the other config switches.
         self.update_drain = disk.update_drain.clone();
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
+        self.auto_apply_updates = disk.auto_apply_updates;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
@@ -7828,6 +7876,7 @@ impl IssueMonitorState {
             version: version.to_string(),
             since: now.to_string(),
             reason,
+            blocking: Vec::new(),
         });
     }
 
@@ -7916,6 +7965,7 @@ impl IssueMonitorState {
                 &self.launch_profiles,
             ),
             autonomous_mode: self.autonomous_mode,
+            auto_apply_updates: self.auto_apply_updates_enabled(),
             quota_hold,
             update_drain: self.update_drain.clone(),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
@@ -8171,6 +8221,25 @@ impl IssueMonitorState {
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
         self.auto_close_merged_issues = value;
         Some(next_epoch)
+    }
+
+    /// Issue #3906 AC-1: the explicit auto-apply override, if any.
+    pub fn auto_apply_updates(&self) -> Option<bool> {
+        self.auto_apply_updates
+    }
+
+    /// Issue #3906 AC-1: whether a staged gwt update is applied by gwt itself
+    /// once the host is quiescent. Without an override this follows
+    /// `autonomous_mode`, so unattended operation defaults to ON and attended
+    /// operation keeps the manual update button.
+    pub fn auto_apply_updates_enabled(&self) -> bool {
+        self.auto_apply_updates.unwrap_or(self.autonomous_mode)
+    }
+
+    /// Change the auto-apply override. Unlike the auto-close override this
+    /// authorizes no remote effect, so no authority epoch advances.
+    pub fn set_auto_apply_updates(&mut self, value: Option<bool>) {
+        self.auto_apply_updates = value;
     }
 
     /// Issue #3917: the settlement recorded for `issue_number`, if any.
@@ -14532,6 +14601,7 @@ mod tests {
                 version: "9.91.0".to_string(),
                 since: now.to_string(),
                 reason: IssueMonitorUpdateDrainReason::Manual,
+                blocking: Vec::new(),
             })
         );
         // Re-raising an already raised drain keeps the original instant.
@@ -23501,6 +23571,87 @@ mod tests {
                 )
             })
             .cloned()
+    }
+
+    #[test]
+    fn update_drain_blocking_defaults_empty_and_control_accepts_both_shapes() {
+        // Issue #3906 AC-3 / AC-12: a #4037-era drain without `blocking`
+        // still loads, and the control accepts the operator bool as well as
+        // the auto-drain object.
+        let legacy = r#"{"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}"#;
+        let drain: IssueMonitorUpdateDrain = serde_json::from_str(legacy).expect("legacy drain");
+        assert!(drain.blocking.is_empty());
+        assert_eq!(
+            serde_json::to_value(&drain).expect("serialize"),
+            serde_json::json!({"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}),
+            "an empty blocking list is not persisted"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(serde_json::json!(true))
+                .expect("bool control"),
+            IssueMonitorUpdateDrainControl::Toggle(true)
+        );
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+                serde_json::json!({"reason":"auto","version":"9.99.0"})
+            )
+            .expect("object control"),
+            IssueMonitorUpdateDrainControl::Raise {
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                version: "9.99.0".to_string(),
+            }
+        );
+        assert!(serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+            serde_json::json!({"reason":"auto"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auto_apply_updates_defaults_to_autonomous_mode_and_round_trips() {
+        // Issue #3906 AC-1: no override follows autonomous_mode (ON while
+        // unattended, OFF otherwise); an override persists and the effective
+        // value is what the status view reports.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(monitor.auto_apply_updates(), None);
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert!(!monitor.status_view().auto_apply_updates);
+        assert!(monitor
+            .set_autonomous_mode_with_effect_revocation(true)
+            .is_some());
+        assert!(
+            monitor.auto_apply_updates_enabled(),
+            "autonomous mode turns auto-apply on by default"
+        );
+        assert!(monitor.status_view().auto_apply_updates);
+
+        let epoch = monitor.effect_authority_epoch();
+        monitor.set_auto_apply_updates(Some(false));
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert_eq!(
+            monitor.effect_authority_epoch(),
+            epoch,
+            "the override authorizes no remote effect, so no grant is revoked"
+        );
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.auto_apply_updates, Some(false));
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.auto_apply_updates(), Some(false));
+        assert!(restored.autonomous_mode());
+        assert!(!restored.auto_apply_updates_enabled());
+        assert!(!restored.status_view().auto_apply_updates);
+    }
+
+    #[test]
+    fn autonomous_tuning_without_update_drain_notify_after_secs_uses_1800() {
+        // Issue #3906 AC-9: pre-#3906 tuning objects (every other field
+        // present, this one absent) deserialize with the documented default.
+        let legacy = r#"{"max_attempts":3,"stuck_timeout_secs":1800,"heartbeat_interval_secs":120,"merge_watch_timeout_secs":3600,"deliver_fix_loop_cap":5,"retry_backoff_base_secs":60,"retry_backoff_cap_secs":1800}"#;
+        let tuning: AutonomousTuning = serde_json::from_str(legacy).expect("legacy tuning");
+        assert_eq!(tuning.update_drain_notify_after_secs, 1800);
+        assert_eq!(tuning, AutonomousTuning::default());
     }
 
     #[test]
