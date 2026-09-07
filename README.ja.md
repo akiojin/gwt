@@ -438,6 +438,26 @@ Board reminders、discussion/plan/build Stop checks、coordination-event summari
   コピー）所有します。hook health の報告と self-heal は常に同じファイル集合を
   対象にします。
 
+### Codex 推奨設定
+
+gwt は GUI 起動のたびに、ホストの Codex 設定（`$CODEX_HOME/config.toml`、
+既定は `~/.codex/config.toml`）に gwt 推奨の
+`features.context_management.experimental_mode = true` が入っていることを
+保証します。この設定は、コンテキストを単一の要約へ繰り返し圧縮する代わりに、
+メモと検索可能な履歴として蓄積された詳細を保持します。gwt が書き込むのは
+キーが未設定の場合だけで、ファイル内の他の table はすべて保持され、既に
+キーを持つ config は書き換えられません。無効化したい場合は `config.toml` に
+明示的に記述してください:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt は明示された値（`true` / `false` を問わず）を尊重し、変更しません。
+config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
+error ledger（`errors.list`）に記録されます。
+
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に
 gwt が注入した loopback endpoint と bearer token だけへ hook event を POST し、
