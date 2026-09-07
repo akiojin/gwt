@@ -313,6 +313,20 @@ body::after {
   color: var(--color-state-active, var(--color-text-primary));
 }
 
+/* Issue #3906 AC-12: staged update waiting for the host to drain. */
+.update-cta.is-draining {
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
+  cursor: default;
+}
+
+/* Issue #3906 AC-7: the apply is scheduled; the CTA is the cancel control. */
+.update-cta.is-scheduled {
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
+  cursor: pointer;
+}
+
 .update-cta:focus-visible,
 .update-cta__dismiss:focus-visible {
   outline: 2px solid var(--color-focus-ring);

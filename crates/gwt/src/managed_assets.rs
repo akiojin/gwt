@@ -846,6 +846,12 @@ fn push_existing_target(
 }
 
 fn install_hook_bin_override() -> io::Result<EnvVarGuard> {
+    // #4057: a thread-local test pin already answers the generator, so leave
+    // the process environment alone — mutating it here would leak this
+    // thread's binary into every other materialization in the process.
+    if gwt_skills::settings_local::hook_bin_override().is_some() {
+        return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
+    }
     if std::env::var_os("GWT_HOOK_BIN").is_some_and(|value| !value.is_empty()) {
         return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
     }

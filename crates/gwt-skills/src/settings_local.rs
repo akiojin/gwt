@@ -1,6 +1,7 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
 use std::{
+    cell::RefCell,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
@@ -605,14 +606,58 @@ pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+thread_local! {
+    static HOOK_BIN_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The hook binary pinned for the current thread by [`ScopedHookBin`], if any.
+///
+/// #4057: this is the per-thread seam that lets in-process tests choose the
+/// binary generated hook commands embed without touching the process-global
+/// `GWT_HOOK_BIN`. Production never sets it, so the answer there is `None`.
+pub fn hook_bin_override() -> Option<String> {
+    HOOK_BIN_OVERRIDE.with(|value| value.borrow().clone())
+}
+
+/// RAII guard that pins the hook binary for the current thread only.
+///
+/// Prefer this over setting `GWT_HOOK_BIN` in in-process tests. Environment
+/// variables are process-global, so one parallel test's pin leaks into every
+/// materialization running at the same time — and outlives the tempdir it
+/// pointed at (#4057). Mirrors `gwt_core::test_support::ScopedGwtHome`.
+pub struct ScopedHookBin {
+    previous: Option<String>,
+}
+
+impl ScopedHookBin {
+    pub fn set(bin: impl AsRef<std::ffi::OsStr>) -> Self {
+        let next = bin.as_ref().to_string_lossy().into_owned();
+        let previous = HOOK_BIN_OVERRIDE.with(|value| value.replace(Some(next)));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedHookBin {
+    fn drop(&mut self) {
+        HOOK_BIN_OVERRIDE.with(|value| {
+            value.replace(self.previous.take());
+        });
+    }
+}
+
 /// Return the stable fallback used by every generated runtime selector.
 /// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
 /// the launch did not provide an explicit runtime binary.
 ///
-/// Public materialization sets `GWT_HOOK_BIN` from the stable managed-assets
-/// resolver. The `current_exe` / PATH fallback remains for direct library use
-/// and tests that do not enter through that materialization boundary.
+/// Resolution order: the thread-local [`ScopedHookBin`] override (tests only),
+/// then `GWT_HOOK_BIN`, which public materialization sets from the stable
+/// managed-assets resolver. The `current_exe` / PATH fallback remains for
+/// direct library use and tests that do not enter through that
+/// materialization boundary.
 pub(crate) fn gwt_hook_bin_path() -> String {
+    if let Some(bin) = hook_bin_override() {
+        return bin;
+    }
     if let Ok(v) = std::env::var(GWT_HOOK_BIN_ENV) {
         if !v.is_empty() {
             return v;
@@ -2726,6 +2771,37 @@ mod tests {
                 "gwt_hook_bin_path must return an absolute path or the literal gwtd fallback, got: {path}"
             );
         }
+    }
+
+    /// #4057: a thread-local override outranks the process-global
+    /// `GWT_HOOK_BIN` so parallel tests can each pin their own binary without
+    /// mutating (and leaking) process state.
+    #[test]
+    fn gwt_hook_bin_path_prefers_thread_local_override_over_process_env() {
+        let override_bin = "/isolated/thread/bin/gwtd";
+        {
+            let _override = ScopedHookBin::set(override_bin);
+            assert_eq!(gwt_hook_bin_path(), override_bin);
+            assert_eq!(hook_bin_override().as_deref(), Some(override_bin));
+        }
+        assert_eq!(
+            hook_bin_override(),
+            None,
+            "dropping the guard must restore the previous (absent) override"
+        );
+        assert_ne!(gwt_hook_bin_path(), override_bin);
+    }
+
+    /// #4057: overrides are per thread, so one thread's pin never reaches a
+    /// concurrently running test on another thread.
+    #[test]
+    fn hook_bin_override_is_thread_local() {
+        let _override = ScopedHookBin::set("/main/thread/gwtd");
+        let seen_on_other_thread = std::thread::spawn(hook_bin_override)
+            .join()
+            .expect("join override probe thread");
+        assert_eq!(seen_on_other_thread, None);
+        assert_eq!(hook_bin_override().as_deref(), Some("/main/thread/gwtd"));
     }
 
     #[test]
