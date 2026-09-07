@@ -8,6 +8,7 @@ pub mod branch;
 pub mod branch_protection;
 pub mod commit;
 pub mod diff;
+pub mod gh_rest;
 pub mod issue;
 pub mod merged_branch_prune;
 pub mod merged_pr_sync;

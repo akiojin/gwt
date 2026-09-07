@@ -1049,13 +1049,14 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh refresh failed\r\n\
   exit /b 1\r\n\
 )\r\n\
-set \"gwt_gh_endpoint=%~2\"\r\n\
-if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" if /I \"%gwt_gh_endpoint:~0,39%\"==\"repos/{owner}/{repo}/pulls?state=closed\" (\r\n\
-  echo []\r\n\
-  exit /b 0\r\n\
-)\r\n\
+set \"gwt_arg1=%~1\"\r\n\
+set \"gwt_arg2=%~2\"\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
-  if /I \"%1 %2\"==\"pr list\" (\r\n\
+  if /I \"%gwt_arg2:~0,26%\"==\"repos/{owner}/{repo}/pulls\" (\r\n\
+    echo []\r\n\
+    exit /b 0\r\n\
+  )\r\n\
+  if /I \"%gwt_arg1% %gwt_arg2%\"==\"pr list\" (\r\n\
     echo []\r\n\
     exit /b 0\r\n\
   )\r\n\

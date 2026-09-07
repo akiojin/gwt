@@ -1941,40 +1941,38 @@ fn try_fetch_open_pr_numbers_by_branch_with<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--json",
-            "number,headRefName",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list open inventory: {}",
-            output.stderr.trim()
-        )));
-    }
-    parse_open_pr_numbers_by_branch(&output.stdout)
+    // SPEC #4093 FR-002: the inventory is a paged REST read (`core` budget,
+    // one request per 100 rows), never `gh pr list` (GraphQL).
+    let pages = crate::gh_rest::read_pages_with("repos/{owner}/{repo}/pulls?state=open", |path| {
+        let output = run_gh(repo_path, &["api", path]).map_err(|error| error.to_string())?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            Err(output.stderr.trim().to_string())
+        }
+    })
+    .map_err(|error| GwtError::Git(format!("gh api pulls open inventory: {error}")))?;
+    Ok(open_pr_numbers_by_branch(&pages.rows))
 }
 
-/// Parse `gh pr list --json number,headRefName` into `branch -> open PR
-/// number`. Rows without a head ref are dropped; the highest number per branch
-/// wins.
+/// Parse an open-PR list (REST `head.ref` / `number`, or the GraphQL
+/// `headRefName` spelling) into `branch -> open PR number`. Rows without a
+/// head ref are dropped; the highest number per branch wins.
 pub fn parse_open_pr_numbers_by_branch(
     json: &str,
 ) -> Result<std::collections::HashMap<String, u64>> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json)
         .map_err(|error| GwtError::Other(format!("gh pr list open inventory JSON: {error}")))?;
+    Ok(open_pr_numbers_by_branch(&arr))
+}
+
+fn open_pr_numbers_by_branch(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
     let mut index = std::collections::HashMap::new();
-    for value in &arr {
+    for value in rows {
         let Some(branch) = value
-            .get("headRefName")
+            .get("head")
+            .and_then(|head| head.get("ref"))
+            .or_else(|| value.get("headRefName"))
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -1989,7 +1987,7 @@ pub fn parse_open_pr_numbers_by_branch(
             *best = number;
         }
     }
-    Ok(index)
+    index
 }
 
 #[cfg(test)]
@@ -2471,9 +2469,10 @@ where
 mod tests {
     use super::*;
 
-    /// Issue #3963 AC-2: the scan reads every open PR in ONE `gh pr list` call
+    /// Issue #3963 AC-2: the scan reads every open PR in one inventory read
     /// and resolves each candidate branch from that index, so the number of
-    /// GitHub calls no longer grows with the queue.
+    /// GitHub calls no longer grows with the queue. SPEC #4093 AC-3: that read
+    /// is the paged REST endpoint, never `gh pr list` (GraphQL).
     #[test]
     fn open_pr_numbers_by_branch_are_read_in_one_call_and_keep_the_highest_number() {
         let mut calls: Vec<Vec<String>> = Vec::new();
@@ -2481,7 +2480,7 @@ mod tests {
             calls.push(args.iter().map(|arg| arg.to_string()).collect());
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"[{"number":7,"headRefName":"work/issue-43"},{"number":9,"headRefName":"work/issue-43"},{"number":8,"headRefName":"work/issue-44"},{"number":10,"headRefName":""}]"#.to_string(),
+                stdout: r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#.to_string(),
                 stderr: String::new(),
             })
         })
@@ -2491,14 +2490,8 @@ mod tests {
         assert_eq!(
             calls[0],
             [
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "number,headRefName",
-                "--limit",
-                "999"
+                "api",
+                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"
             ]
         );
         assert_eq!(
