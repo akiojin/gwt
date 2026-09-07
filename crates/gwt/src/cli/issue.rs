@@ -2099,7 +2099,8 @@ fn run_monitor_wait<E: CliEnv>(
     });
     if !clear {
         response["reason"] = serde_json::Value::from(reason.unwrap_or_default());
-        response["resume_condition"] = serde_json::Value::from(resume_condition.unwrap_or_default());
+        response["resume_condition"] =
+            serde_json::Value::from(resume_condition.unwrap_or_default());
         response["max_wait_secs"] = serde_json::Value::from(crate::AUTONOMOUS_WAIT_MAX_SECS);
         response["detail"] = serde_json::Value::from(
             "stuck detection is suspended for this launch until the wait is cleared or max_wait_secs elapses; clear it with params.clear:true when you resume",
@@ -5283,7 +5284,10 @@ mod tests {
             .iter()
             .find(|row| row["issue_number"] == 42)
             .expect("inbox row 42");
-        assert_eq!(row["waiting"]["reason"], "host 排他の順番待ち", "{status_out}");
+        assert_eq!(
+            row["waiting"]["reason"], "host 排他の順番待ち",
+            "{status_out}"
+        );
         assert_eq!(
             row["waiting"]["resume_condition"], "verify lease の解放",
             "{status_out}"

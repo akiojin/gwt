@@ -3333,7 +3333,10 @@ pub fn declare_wait_on_record(
 
 /// Issue #3844 / #4078 AC-2: drop `record`'s wait declaration, counting the
 /// resumption itself as liveness. Same shared path as [`declare_wait_on_record`].
-pub fn clear_wait_on_record(record: &mut AutonomousIssueRecord, now: &str) -> AutonomousWaitOutcome {
+pub fn clear_wait_on_record(
+    record: &mut AutonomousIssueRecord,
+    now: &str,
+) -> AutonomousWaitOutcome {
     if record.wait.take().is_none() {
         return AutonomousWaitOutcome::NotWaiting;
     }
