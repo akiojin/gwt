@@ -9124,6 +9124,36 @@ impl IssueMonitorState {
         }
     }
 
+    /// Issue #3528 (SPEC #3200 FR-058 / #3165 FR-099): plan claim proposals
+    /// from the completion outcomes this tick observed, each bound to the
+    /// Issue it was observed for. The commit-time rebase may have reordered
+    /// the frontier since the observation, so a candidate with no outcome of
+    /// its own is deferred to the next tick's observation rather than read as
+    /// "not completed" and claimed on a missing answer.
+    pub fn prepare_claim_effects_with_observations(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        observations: &std::collections::BTreeMap<u64, bool>,
+    ) -> usize {
+        match self.try_prepare_claim_effects_with_probe_confirmed(
+            owner,
+            now,
+            active_cap,
+            None,
+            |issue_number| {
+                Ok::<_, std::convert::Infallible>(match observations.get(&issue_number) {
+                    Some(&completed) => ClaimProbeOutcome::from_completed(completed),
+                    None => ClaimProbeOutcome::Deferred,
+                })
+            },
+        ) {
+            Ok(prepared) => prepared,
+            Err(never) => match never {},
+        }
+    }
+
     /// The claim slots still open, paired with the ordered queue entries a
     /// proposal may consult to fill them.
     ///
@@ -19707,6 +19737,76 @@ mod tests {
             .expect_err("completion probe failure must not become false");
 
         assert_eq!(error, "merged-pr readback failed");
+    }
+
+    /// Issue #3528 (SPEC #3200 FR-058 / #3165 FR-099): a completion outcome
+    /// applies to the Issue it was observed for and to no other. A candidate
+    /// the scan never probed — one that became claimable only after the
+    /// commit-time rebase — is deferred to the next tick, never claimed on a
+    /// missing answer.
+    #[test]
+    fn claim_observations_apply_only_to_their_own_issue_and_defer_the_unprobed() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 3,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[
+                spec_issue(
+                    41,
+                    IssueMonitorReadiness::ReadyWithCompletedTasks,
+                    "2026-09-06T00:00:00Z",
+                ),
+                issue(42),
+                issue(43),
+            ],
+            "2026-09-07T00:00:00Z",
+        );
+        for issue_number in [41, 42, 43] {
+            assert_eq!(
+                monitor.inbox_item(issue_number).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "fixture: #{issue_number} starts queued"
+            );
+        }
+        // #41 was probed and found delivered, #42 probed and still open; #43
+        // was never probed because it entered the frontier after the
+        // observation.
+        let observations = std::collections::BTreeMap::from([(41, true), (42, false)]);
+
+        let prepared = monitor.prepare_claim_effects_with_observations(
+            "host/session",
+            "2026-09-07T00:00:01Z",
+            3,
+            &observations,
+        );
+
+        assert_eq!(
+            prepared, 1,
+            "only the candidate observed as open is claimable"
+        );
+        let claimed = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(claimed, vec![42]);
+        assert_ne!(
+            monitor.inbox_item(41).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "a candidate observed as delivered leaves the queue"
+        );
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "an unobserved candidate stays queued for the next tick"
+        );
     }
 
     #[test]
