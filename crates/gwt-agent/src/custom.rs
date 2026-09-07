@@ -63,7 +63,7 @@ pub fn impersonated_builtin(command: &str) -> Option<String> {
         return None;
     }
     for descriptor in crate::types::builtin_agent_descriptors() {
-        if let Some(pkg) = descriptor.package_name {
+        if let Some(pkg) = descriptor.distribution.npm_package() {
             if pkg.to_ascii_lowercase() == normalized {
                 return Some(descriptor.display_name.to_string());
             }

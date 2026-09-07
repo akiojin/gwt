@@ -202,6 +202,7 @@ struct PreparedOutbound {
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
 
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
+    gwt::error_report::record_backend_event(event);
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id) = match event {
         gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone())),
@@ -504,9 +505,14 @@ pub struct ClientHubHealthStats {
     pub dead_clients: usize,
 }
 
+#[cfg(test)]
+type ClientHubDispatchHook = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+    #[cfg(test)]
+    before_dispatch_enqueue: Arc<Mutex<Option<ClientHubDispatchHook>>>,
 }
 
 #[derive(Clone)]
@@ -516,6 +522,14 @@ struct ClientRegistration {
 }
 
 impl ClientHub {
+    #[cfg(test)]
+    fn set_before_dispatch_enqueue_hook(&self, hook: ClientHubDispatchHook) {
+        *self
+            .before_dispatch_enqueue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
         self.register_with_broadcasts(client_id, true)
     }
@@ -622,6 +636,20 @@ impl ClientHub {
                 })
                 .collect()
         };
+
+        // The test barrier intentionally sits after the registry snapshot
+        // guard is dropped and before serialization or per-client enqueue.
+        // This makes the lock boundary observable without relying on a
+        // scheduler-sensitive latency assertion.
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_dispatch_enqueue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
@@ -1081,6 +1109,7 @@ struct AgentCapabilityRegistryState {
 struct ManualExecutionHandoffState {
     binding: gwt_agent::SessionExecutionBinding,
     suspended: Option<SuspendedManualExecutionCapability>,
+    restore_suspended_on_rollback: bool,
 }
 
 struct SuspendedManualExecutionCapability {
@@ -1490,6 +1519,7 @@ impl AgentCapabilityRegistry {
             ManualExecutionHandoffState {
                 binding: expected_binding.clone(),
                 suspended: None,
+                restore_suspended_on_rollback: false,
             },
         );
         Ok(ManualExecutionHandoffReservation {
@@ -1556,6 +1586,106 @@ impl AgentCapabilityRegistry {
                     principal,
                     principal_key,
                 }),
+                restore_suspended_on_rollback: true,
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn active_execution_binding_for_token(
+        &self,
+        token: &str,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.authenticate(token)?
+            .active_execution_binding()
+            .cloned()
+    }
+
+    fn self_close_active_execution_binding(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing_by_ticket
+            .get(ticket.id())
+            .filter(|closing| !closing.revoked)
+            .and_then(|closing| closing.principal.active_execution_binding().cloned())
+    }
+
+    /// Transfer one already-accepted correlated self-close into the same
+    /// exact-generation handoff used by a manual close. This is deliberately
+    /// one registry transaction: the direct ACK has already moved the bearer
+    /// out of `principals_by_token`, so trying to begin a token handoff would
+    /// always fail and leave the durable Session running.
+    fn begin_self_close_manual_execution_handoff(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("manual execution handoff is already reserved".to_string());
+        }
+        let closing = state
+            .closing_by_ticket
+            .get(ticket.id())
+            .ok_or_else(|| "self-close capability is missing or no longer current".to_string())?;
+        if closing.revoked {
+            return Err("self-close capability was revoked".to_string());
+        }
+        if closing.principal.active_execution_binding() != Some(expected_binding) {
+            return Err("self-close capability binding changed".to_string());
+        }
+
+        let closing = state
+            .closing_by_ticket
+            .remove(ticket.id())
+            .expect("validated self-close ticket remains present");
+        let principal_key = (
+            closing.principal.canonical_project_root().to_path_buf(),
+            closing.principal.session_id().to_string(),
+        );
+        if state
+            .closing_ticket_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| current == ticket.id())
+        {
+            state
+                .closing_ticket_by_project_session
+                .remove(&principal_key);
+        }
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: Some(SuspendedManualExecutionCapability {
+                    token: closing.token,
+                    principal: closing.principal,
+                    principal_key,
+                }),
+                // The direct self-close ACK is the bearer revocation commit
+                // point. Later PTY, persistence, or scheduling failures may
+                // release this fence, but must never authenticate the closed
+                // origin socket again.
+                restore_suspended_on_rollback: false,
             },
         );
         Ok(ManualExecutionHandoffReservation {
@@ -1596,6 +1726,9 @@ impl AgentCapabilityRegistry {
         let Some(suspended) = handoff.suspended.take() else {
             return true;
         };
+        if !handoff.restore_suspended_on_rollback {
+            return true;
+        }
         if state.principals_by_token.contains_key(&suspended.token)
             || state
                 .token_by_project_session
@@ -1931,6 +2064,25 @@ impl AgentCapabilityRegistry {
         Self::grant_is_current_in_state(&state, grant)
     }
 
+    /// Accept an operation from the exact current grant and return its
+    /// authenticated principal without carrying the registry lock into the
+    /// operation itself.
+    ///
+    /// This is the linearization boundary for an operation that may mutate a
+    /// different capability while it runs. Rotation before this snapshot is
+    /// rejected; rotation after it does not cancel the accepted operation.
+    fn accept_current_grant(&self, grant: &AgentCapabilityGrant) -> Option<AgentSessionPrincipal> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return None;
+        }
+
+        Some(grant.principal().clone())
+    }
+
     fn grant_is_current_in_state(
         state: &AgentCapabilityRegistryState,
         grant: &AgentCapabilityGrant,
@@ -2153,6 +2305,29 @@ impl AgentCapabilityIssuer {
             .begin_manual_execution_handoff(token, expected_binding)
     }
 
+    pub(crate) fn active_execution_binding_for_token(
+        &self,
+        token: &str,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.registry.active_execution_binding_for_token(token)
+    }
+
+    pub(crate) fn self_close_active_execution_binding(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.registry.self_close_active_execution_binding(ticket)
+    }
+
+    pub(crate) fn begin_self_close_manual_execution_handoff(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .begin_self_close_manual_execution_handoff(ticket, expected_binding)
+    }
+
     pub(crate) fn release_manual_execution_handoff(
         &self,
         reservation: &ManualExecutionHandoffReservation,
@@ -2180,6 +2355,13 @@ impl AgentCapabilityIssuer {
 
     pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         self.registry.grant_is_current(grant)
+    }
+
+    pub(crate) fn accept_current_grant(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentSessionPrincipal> {
+        self.registry.accept_current_grant(grant)
     }
 
     /// Linearize one operation commit against capability rotation/revocation
@@ -3355,6 +3537,20 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
+            "pane_sync_complete" => {
+                for field in [
+                    "empty_window_ids",
+                    "busy_window_ids",
+                    "unavailable_window_ids",
+                    "failed_window_ids",
+                ] {
+                    value.get_mut(field)?.as_array_mut()?.retain(|id| {
+                        id.as_str()
+                            .is_some_and(|id| self.allowed_window_ids.contains(id))
+                    });
+                }
+                serde_json::to_string(&value).ok()
+            }
             "pane_send_result" if self.grant.principal().authorizes_producing_mutation() => value
                 .get("window_id")
                 .and_then(serde_json::Value::as_str)
@@ -4045,6 +4241,7 @@ fn handle_frontend_message(
                 .send(UserEvent::RuntimeApprovalResolutionStarted { id: id.clone() });
             resolution_marked = true;
         }
+        let had_unsent = pty.has_unsent_user_input();
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
@@ -4057,6 +4254,11 @@ fn handle_frontend_message(
                     write_us = write_started.elapsed().as_micros() as u64,
                     "terminal_input written to PTY via WS fast-path"
                 );
+                if had_unsent && !pty.has_unsent_user_input() {
+                    state
+                        .proxy
+                        .send(UserEvent::FlushPendingPmWake { id: id.clone() });
+                }
                 return;
             }
             Err(_error) => {
@@ -4675,6 +4877,63 @@ mod tests {
     }
 
     #[test]
+    fn accepted_self_close_handoff_rollback_releases_fence_without_restoring_bearer() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-self-close-handoff".to_string(),
+            repo_hash: "repo-self-close-handoff".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3783,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-self-close-handoff".to_string(),
+                binding_id: "binding-self-close-handoff".to_string(),
+                ledger_head_hash: "head-self-close-handoff".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let active = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("issue exact active holder");
+        let grant = issuer
+            .grant_for_test(&active.token)
+            .expect("current capability grant");
+        let ticket = issuer
+            .begin_self_close_if_current(&grant)
+            .expect("accept correlated self-close");
+        let reservation = issuer
+            .begin_self_close_manual_execution_handoff(&ticket, &binding)
+            .expect("transfer accepted self-close into exact handoff");
+
+        assert!(!issuer.authenticates_token(&active.token));
+        assert!(
+            issuer
+                .issue_bound(project.path(), &binding.session_id, binding.clone())
+                .is_err(),
+            "the in-flight finalizer fence must block replacement capability issuance"
+        );
+
+        assert!(issuer.rollback_manual_execution_handoff(&reservation));
+        assert!(
+            !issuer.authenticates_token(&active.token),
+            "an accepted self-close bearer must stay revoked when finalization fails"
+        );
+        assert!(!issuer.grant_is_current(&grant));
+        let replacement = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("rollback releases only the finalizer fence");
+        assert_ne!(replacement.token, active.token);
+        assert!(issuer.active_token_is_current(&replacement.token, &binding));
+        assert!(!issuer.rollback_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
     fn agent_capability_registry_promotes_legacy_inspection_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
@@ -5228,6 +5487,30 @@ mod tests {
                 .to_string()
             )
             .is_none());
+        let completion = scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "pane_sync_complete",
+                    "empty_window_ids": ["tab-owned::agent-1", "tab-foreign::agent-2"],
+                    "busy_window_ids": ["tab-foreign::agent-2"],
+                    "unavailable_window_ids": ["tab-owned::agent-1"],
+                    "failed_window_ids": ["tab-foreign::agent-2"]
+                })
+                .to_string(),
+            )
+            .expect("pane completion reaches its origin client");
+        let completion: serde_json::Value =
+            serde_json::from_str(&completion).expect("filtered pane completion");
+        assert_eq!(
+            completion["empty_window_ids"],
+            serde_json::json!(["tab-owned::agent-1"])
+        );
+        assert_eq!(completion["busy_window_ids"], serde_json::json!([]));
+        assert_eq!(
+            completion["unavailable_window_ids"],
+            serde_json::json!(["tab-owned::agent-1"])
+        );
+        assert_eq!(completion["failed_window_ids"], serde_json::json!([]));
         assert!(
             scope
                 .filter_inbound(FrontendEvent::CloseWindow {
@@ -6917,6 +7200,7 @@ mod tests {
                 missing_verification: None,
                 launched_at: completed_at,
                 settled_at: Some(completed_at),
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
@@ -7908,6 +8192,59 @@ mod tests {
         drop(pane);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "test-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running test pane");
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::pm-window".to_string(), pane.shared_pty());
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::pm-window".to_string(),
+                data: "実行されてい".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(1),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::pm-window".to_string(),
+                data: "ますか？\r".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            recorded.iter().any(|event| matches!(
+                event,
+                UserEvent::FlushPendingPmWake { id } if id == "tab-1::pm-window"
+            )),
+            "submitting unsent composer text must ask the event loop to flush a held PM wake: {recorded:?}"
+        );
+        drop(recorded);
+        drop(pane);
+    }
+
     fn terminal_output(pane: &str, data: &str) -> BackendEvent {
         BackendEvent::TerminalOutput {
             id: pane.to_string(),
@@ -7932,10 +8269,10 @@ mod tests {
     fn index_status(message: &str) -> BackendEvent {
         BackendEvent::ProjectIndexStatus {
             project_root: "/tmp/project".to_string(),
-            status: gwt::ProjectIndexStatusView::new(
+            status: Box::new(gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 message,
-            ),
+            )),
         }
     }
 
@@ -8429,6 +8766,65 @@ mod tests {
         assert!(payloads.iter().any(|payload| payload.contains("window-2")));
     }
 
+    /// Issue #3755 AC-2: pane hydration finishes with one lossless receipt.
+    /// Queue pressure may drop terminal output, but it must preserve both the
+    /// latest snapshot and the completion ordering observed by pane.read.
+    #[test]
+    fn client_queue_preserves_pane_snapshot_before_completion_under_pressure() {
+        let queue = ClientQueue::default();
+        let pane_id = "tab-1::agent-7";
+        for index in 0..(LOSSY_HIGH_WATER + 10) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                pane_id,
+                &format!("chunk-{index}"),
+            )));
+        }
+
+        assert!(
+            !queue.enqueue(&prepare_outbound(&BackendEvent::TerminalSnapshot {
+                id: pane_id.to_string(),
+                data_base64: "c25hcHNob3QK".to_string(),
+            }))
+        );
+        assert!(
+            !queue.enqueue(&prepare_outbound(&BackendEvent::PaneSyncComplete {
+                empty_window_ids: Vec::new(),
+                busy_window_ids: Vec::new(),
+                unavailable_window_ids: Vec::new(),
+                failed_window_ids: Vec::new(),
+            }))
+        );
+
+        let (payloads, _) = drain_all(&queue);
+        let kinds = payloads
+            .iter()
+            .map(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .expect("queued backend event json")
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("queued backend event kind")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let snapshot_index = kinds
+            .iter()
+            .position(|kind| kind == "terminal_snapshot")
+            .expect("terminal snapshot survives pressure");
+        let completion_index = kinds
+            .iter()
+            .position(|kind| kind == "pane_sync_complete")
+            .expect("pane completion survives pressure");
+        assert!(snapshot_index < completion_index);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| kind.as_str() == "pane_sync_complete")
+                .count(),
+            1
+        );
+    }
+
     // Issue #3315: under a terminal-output flood that saturates the lossy
     // queue, a full attachment operation must still coalesce to a single
     // latest-state entry and preserve the terminal `Attached` phase. The old
@@ -8707,41 +9103,50 @@ mod tests {
     #[test]
     fn client_hub_dispatch_releases_lock_before_serializing_and_sending() {
         let hub = ClientHub::default();
-        let _receivers: Vec<_> = (0..200)
-            .map(|i| hub.register(format!("client-{i}")))
-            .collect();
-
-        let events: Vec<OutboundEvent> = (0..1000)
-            .map(|i| {
-                OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                    message: format!("event-{i}"),
-                })
-            })
-            .collect();
-
+        let _receiver = hub.register("busy-client".to_string());
+        let (dispatch_paused_tx, dispatch_paused_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_dispatch_tx, release_dispatch_rx) = std::sync::mpsc::sync_channel(1);
+        let release_dispatch_rx = Arc::new(Mutex::new(release_dispatch_rx));
+        hub.set_before_dispatch_enqueue_hook(Arc::new(move || {
+            dispatch_paused_tx
+                .send(())
+                .expect("report dispatch enqueue phase");
+            release_dispatch_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv()
+                .expect("release dispatch enqueue phase");
+        }));
         let dispatch_hub = hub.clone();
-        let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let started_flag_for_thread = started_flag.clone();
         let dispatch_handle = std::thread::spawn(move || {
-            started_flag_for_thread.store(true, std::sync::atomic::Ordering::Release);
-            dispatch_hub.dispatch(events);
+            dispatch_hub.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::ProjectOpenError {
+                    message: "blocked enqueue".to_string(),
+                },
+            )]);
         });
 
-        while !started_flag.load(std::sync::atomic::Ordering::Acquire) {
-            std::thread::yield_now();
+        let dispatch_paused = dispatch_paused_rx.recv_timeout(Duration::from_secs(5));
+        if dispatch_paused.is_err() {
+            let _ = release_dispatch_tx.send(());
         }
-        std::thread::sleep(std::time::Duration::from_micros(200));
+        dispatch_paused.expect("dispatch should pause after releasing the client registry lock");
 
-        let register_start = std::time::Instant::now();
-        let _intruder_rx = hub.register("intruder".to_string());
-        let register_elapsed = register_start.elapsed();
+        let register_hub = hub.clone();
+        let (register_done_tx, register_done_rx) = std::sync::mpsc::sync_channel(1);
+        let register_handle = std::thread::spawn(move || {
+            let queue = register_hub.register("intruder".to_string());
+            register_done_tx
+                .send(queue)
+                .expect("report concurrent registration");
+        });
 
+        let registered = register_done_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_dispatch_tx.send(());
+        let _intruder_rx =
+            registered.expect("register must complete while dispatch enqueue work is paused");
+        register_handle.join().expect("register thread joins");
         dispatch_handle.join().expect("dispatch thread joins");
-
-        assert!(
-            register_elapsed < std::time::Duration::from_millis(20),
-            "register must not wait for dispatch's serialize+send loop; waited {register_elapsed:?}"
-        );
     }
 
     #[test]

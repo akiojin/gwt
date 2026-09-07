@@ -28,6 +28,9 @@ async function importSurfaceModule() {
   ).replace(
     'from "/focus-trap.js"',
     'from "data:text/javascript,export function createFocusTrap(){return()=>{}}"',
+  ).replace(
+    'from "./launch-pending-controller.js"',
+    'from "data:text/javascript,export function createLaunchOperationId(){return%20%22work-row-test%22}"',
   );
   return import(
     `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
@@ -188,18 +191,21 @@ test("the Issue row shows Work lifecycle, attention reason, and PR state", async
     knowledgeEntry(3671, [{ id: "work-3671", branch: "work/issue-3671" }]),
   ]);
 
+  // SPEC #3885 T-004: the Work state is folded into the row's single primary
+  // badge and its (at most two) secondary items.
   const row = fixture.body.querySelector('[data-issue-number="3671"]');
-  const work = row.querySelector(".knowledge-row-work");
-  assert.ok(work, "the row carries a Work summary block");
-  assert.equal(work.querySelector(".knowledge-work-lifecycle").textContent, "Active");
-  assert.equal(
-    work.querySelector(".knowledge-work-lifecycle").dataset.lifecycle,
-    "active",
-  );
-  assert.equal(work.querySelector(".knowledge-work-attention").textContent, "Waiting on review");
-  const pr = work.querySelector(".knowledge-work-pr");
+  const badge = row.querySelector(".knowledge-row-badge");
+  // The fixture rows are Monitor-launched, so the Monitor state is the badge and
+  // the Work attention reason is the secondary line.
+  assert.equal(badge.textContent, "Launched");
+  assert.equal(badge.dataset.tone, "active");
+  assert.equal(badge.dataset.stateKey, "monitor:launched");
+  assert.equal(row.querySelector(".knowledge-row-work"), null, "no separate Work band");
+  const reason = row.querySelector('.knowledge-row-secondary-item[data-kind="reason"]');
+  assert.equal(reason.textContent, "Waiting on review");
+  const pr = row.querySelector('.knowledge-row-secondary-item[data-key="pr"]');
   assert.equal(pr.textContent, "PR #3699 · open");
-  assert.equal(pr.dataset.prState, "open");
+  assert.equal(pr.title, "https://github.com/akiojin/gwt/pull/3699");
 });
 
 test("an Issue with no correlated Work renders no Work block", async (t) => {
@@ -208,7 +214,9 @@ test("an Issue with no correlated Work renders no Work block", async (t) => {
   applyEntries(fixture.surface, fixture.load, [knowledgeEntry(9999, [])]);
 
   const row = fixture.body.querySelector('[data-issue-number="9999"]');
-  assert.equal(row.querySelector(".knowledge-row-work"), null);
+  assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Launched");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="pr"]'), null);
+  assert.equal(row.querySelector('[data-action="continue-work"]'), null);
 });
 
 // FR-013.
@@ -237,6 +245,7 @@ test("Continue work, Resume, and Clean Up are reachable from the Issue row", asy
   ]);
 
   const row = fixture.body.querySelector('[data-issue-number="3671"]');
+  assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Launched");
   row.querySelector('[data-action="continue-work"]').click();
   assert.deepEqual(fixture.continued, [
     { workId: "work-3671", bounds: { x: 0, y: 0, width: 1280, height: 800 } },
@@ -245,7 +254,10 @@ test("Continue work, Resume, and Clean Up are reachable from the Issue row", asy
   row.querySelector('[data-action="resume-work"]').click();
   assert.deepEqual(fixture.resumed, ["work-3671"]);
 
-  row.querySelector('[data-action="cleanup-work"]').click();
+  // Clean Up is the third action, so it lives in the row's overflow menu.
+  const cleanup = row.querySelector('.knowledge-row-menu [data-action="cleanup-work"]');
+  assert.ok(cleanup, "Clean Up is reachable from the overflow menu");
+  cleanup.click();
   assert.equal(fixture.cleaned.length, 1);
   assert.equal(fixture.cleaned[0].candidate.branch, "work/issue-3671");
   assert.equal(fixture.cleaned[0].windowId, "win-1");

@@ -222,12 +222,19 @@ JSON operation `daemon.start` を実行していない場合は multi-instance f
 無効ですが、ローカルのファイルベース state とファイル watcher は
 従来どおり動作します。
 
-Windows では現状 long-running daemon は提供されておらず、
-JSON operation `daemon.start` は "not yet implemented" で終了します。managed
-hook は同期的な `gwt hook ...` dispatch にフォールバックし、複数
-インスタンス間のイベント fan-out は Windows 対応 (named-pipe 経路)
-が完了するまで利用できません。JSON operation `daemon.status` 自体は Windows
-でも実行可能ですが、daemon が動かないため常に `stopped` を表示します。
+Windows でも daemon は同じ形で動きます。GUI の Issue Monitor がユーザー
+セッションの子プロセスとして起動・監視し、JSON operation `daemon.start` で
+手動起動もできます。通信は named pipe（`\\.\pipe\gwtd-<scope>-<hash>`、
+ローカルクライアントのみ。auth token は `~/.gwt` 配下の endpoint file が
+持つ）です。`daemon.status` / `daemon.subscribe` / Issue Monitor control /
+複数インスタンス間の fan-out は macOS / Linux と同じように動作します。
+手動起動した daemon は Ctrl-C、Ctrl-Break、コンソールを閉じることで停止し、
+ログオフとシャットダウンでも同じ cleanup が走ります。GUI が終了させた
+daemon は次回起動時の liveness 判定で回収されます。gwt は Windows Service を
+インストールしません。daemon が行うのは scan と claim までで、エージェント
+pane の生成は GUI 側が担うため、Service 化してもヘッドレス自律実行には
+ならず、ユーザー単位の `~/.gwt` state とも噛み合わないためです。ヘッドレス
+自律実行は daemon の目標には含めていません。
 
 ## Agent Workflow
 
@@ -303,7 +310,13 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 `issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
-`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。各 operation
+`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+`issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
+プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
+詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
+ため、1 つの provider が rate limit に入ってもキューは止まりません。GUI の Agent
+settings で別 provider を保存すると同じプールに追加されます。各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
@@ -327,6 +340,18 @@ opt-in** が必要です:
 エスカレーションし、`Autonomous` トグルは monitor が arm した auto-merge を
 能動的に解除する kill switch として機能します。ゲート設計と脅威モデルの全体は
 SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。
+
+work ブランチが `develop` に merge されると、monitor は delivered な Issue を
+自分で決着させます（`Closes #N` は default branch でしか発火しません）。
+受け入れ基準がすべてチェック済みか、PR 本文 / Issue コメントに残りの基準を
+別 Issue に委譲した記録（`残 AC は別 Issue に委譲`）があれば、PR 番号と merge
+SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
+`merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
+全 Phase の tasks が完了したときだけ close します。auto-close は既定で
+`Autonomous` トグルに連動し、`issue.monitor.config.set` の
+`auto_close_merged_issues=true|false` で上書きできます（off のときは
+`merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
+merge で再度 close することはありません。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
@@ -746,6 +771,9 @@ JSON
 cargo build -p gwt --bin gwt --bin gwtd
 ```
 
+`browser-check` スキル（この checkout の隔離 GUI 検証）は `hook.doctor` の証跡を
+読むために `jq` が `PATH` 上に必要です。gwt 自体の実行には不要です。
+
 ### 実行
 
 ```bash
@@ -801,6 +829,31 @@ TTL より実行が長引く場合は、同じ `lease_id` で `verify.lease.exte
 使います。既定 TTL は 45 分で、満了した lease は自動的に解放され、保持者が
 kill された場合も即座に解放されます。lease の遷移は
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
+
+### GitHub API 予算
+
+gwt が発行する `gh` 呼び出しは、全マシン・全 worktree・全エージェントで
+1 つの GitHub アカウント予算を共有します。`pr.list` の inventory は
+cache-first で、`~/.gwt/projects/<hash>/pr-inventory-cache.json` の
+スナップショットが 5 分間は GitHub に触れずに応答します。一括クエリは軽量で、
+`statusCheckRollup` / `body` は変更のあった PR だけ個別に取得します。判断に
+ライブ状態が必要なときだけ `params.refresh:true` を渡し、重いフィールドは
+`params.include`（`["checks","body"]`、既定は `["checks"]`）で選びます。応答には
+`source` / `cache_age_secs` / `throttled` / `github_calls` が含まれ、予算が
+予備域を下回ると最後のスナップショットが返り `throttled` に理由が入ります。
+
+予算の観測は無料エンドポイントで行います:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+応答には GitHub が報告する primary window（`graphql` / `core`）、分あたりの
+secondary limit のローカル推定（GitHub は公開しないため、このマシンの
+`~/.gwt/github-budget/` の spawn ledger から近似）、最新の rate-limit 拒否、
+そして定期読み取りが今受ける間引き判定が含まれます。
 
 ### リリース手順
 

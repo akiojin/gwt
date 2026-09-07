@@ -7,7 +7,8 @@ use std::{
 };
 
 use super::{
-    quick_start, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, QuickStartEntry,
+    quick_start, HermesLaunchPreferences, LaunchWizardPreviousProfile,
+    LaunchWizardPreviousProfiles, QuickStartEntry,
 };
 
 pub fn load_previous_launch_profile(
@@ -126,6 +127,7 @@ pub fn quick_start_entries_from_sessions(
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
     let fast_mode = session.fast_mode_enabled();
+    let hermes = hermes_preferences_from_session(&session);
     LaunchWizardPreviousProfile {
         agent_id: session.agent_id.command().to_string(),
         model: session.model,
@@ -133,7 +135,7 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         version: session.tool_version.or_else(|| {
             session
                 .agent_id
-                .package_name()
+                .npm_package()
                 .map(|_| "installed".to_string())
         }),
         session_mode: session.session_mode,
@@ -143,6 +145,31 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         docker_service: session.docker_service,
         docker_lifecycle_intent: session.docker_lifecycle_intent,
         windows_shell: session.windows_shell,
+        hermes,
+    }
+}
+
+/// Issue #3863 AC-7: Hermes-specific launch values are persisted only as the
+/// session's `launch_args` (see `AgentLaunchBuilder::build_hermes_args`), so
+/// read them back from the flag pairs. Non-Hermes sessions yield defaults.
+fn hermes_preferences_from_session(session: &gwt_agent::Session) -> HermesLaunchPreferences {
+    if session.agent_id != gwt_agent::AgentId::Hermes {
+        return HermesLaunchPreferences::default();
+    }
+    let flag_value = |flag: &str| {
+        session
+            .launch_args
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .filter(|value| !value.trim().is_empty())
+    };
+    HermesLaunchPreferences {
+        provider: flag_value("--provider"),
+        profile: flag_value("--profile"),
+        toolsets: flag_value("--toolsets"),
+        skills: flag_value("--skills"),
+        max_turns: flag_value("--max-turns"),
     }
 }
 
@@ -338,6 +365,65 @@ mod tests {
         assert_eq!(profile.docker_service.as_deref(), Some("gwt"));
     }
 
+    // Issue #3863 AC-7: Hermes-specific values are persisted only as
+    // `launch_args`; the previous profile reads them back so the wizard can
+    // restore provider / profile / toolsets / skills / max turns.
+    #[test]
+    fn previous_profile_restores_hermes_options_from_launch_args() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let mut hermes = sample_session_record(
+            "feature/hermes",
+            &worktree,
+            gwt_agent::AgentId::Hermes,
+            Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
+            None,
+        );
+        hermes.launch_args = [
+            "chat",
+            "--accept-hooks",
+            "--pass-session-id",
+            "--provider",
+            "ollama-launch",
+            "--model",
+            "qwen3.5",
+            "--profile",
+            "concise",
+            "--toolsets",
+            "terminal,web",
+            "--skills",
+            "github",
+            "--max-turns",
+            "40",
+            "--safe-mode",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let profiles = previous_launch_profiles_from_sessions(std::slice::from_ref(&hermes));
+        let profile = profiles.profile_for("hermes").expect("hermes profile");
+        assert_eq!(profile.hermes.provider.as_deref(), Some("ollama-launch"));
+        assert_eq!(profile.hermes.profile.as_deref(), Some("concise"));
+        assert_eq!(profile.hermes.toolsets.as_deref(), Some("terminal,web"));
+        assert_eq!(profile.hermes.skills.as_deref(), Some("github"));
+        assert_eq!(profile.hermes.max_turns.as_deref(), Some("40"));
+
+        // Non-Hermes sessions never carry Hermes values, even with look-alike args.
+        let mut codex = sample_session_record(
+            "feature/codex",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 9, 1, 11, 0, 0).unwrap(),
+            None,
+        );
+        codex.launch_args = vec!["--profile".to_string(), "work".to_string()];
+        let profiles = previous_launch_profiles_from_sessions(std::slice::from_ref(&codex));
+        let profile = profiles.profile_for("codex").expect("codex profile");
+        assert_eq!(profile.hermes, HermesLaunchPreferences::default());
+    }
+
     #[test]
     fn previous_launch_profile_tie_breaks_equal_timestamps_by_session_id() {
         let dir = tempdir().expect("tempdir");
@@ -352,7 +438,7 @@ mod tests {
             None,
         );
         lower_id.id = "session-a".to_string();
-        lower_id.model = Some("gpt-5.4".to_string());
+        lower_id.model = Some("gpt-5.6-luna".to_string());
         let mut higher_id = sample_session_record(
             "feature/higher",
             &worktree,
@@ -387,7 +473,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.4".to_string());
+        codex.model = Some("gpt-5.5".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -426,7 +512,7 @@ mod tests {
 
         assert_eq!(view.branch_name, "feature/current");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
@@ -469,7 +555,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
-        codex.model = Some("gpt-5.4".to_string());
+        codex.model = Some("gpt-5.5".to_string());
         codex.reasoning_level = Some("xhigh".to_string());
         codex.tool_version = Some("0.110.0".to_string());
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -489,7 +575,7 @@ mod tests {
         let view = state.view();
 
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
         // Issue #3462: the restored preference is advertised on Continue.

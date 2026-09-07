@@ -28,10 +28,11 @@ use sha2::{Digest, Sha256};
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
-    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
-    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
-    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 
 /// HTTP method.
@@ -541,8 +542,15 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         check_status(&resp)?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
-        if let Some(errs) = value.get("errors") {
-            return Err(ApiError::Unexpected(format!("graphql errors: {errs}")));
+        if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
+            // and a `RATE_LIMIT` entry in the response body, so a status-only
+            // check sees a healthy call. Classifying it here — the way the
+            // owner-request path above already does — is what turns it into
+            // `RateLimited` instead of an opaque `Unexpected`, which is what a
+            // caller needs to back off instead of retrying straight into the
+            // same limit.
+            return Err(classify_graphql_errors(errs, "graphql query"));
         }
         Ok(value)
     }
@@ -1611,6 +1619,14 @@ query($owner:String!,$repo:String!,$number:Int!){
 }
 "#;
 
+const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner, name:$repo){
+    issue(number:$number){ updatedAt }
+  }
+}
+"#;
+
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
   repository(owner:$owner, name:$repo){
@@ -1665,6 +1681,32 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError> {
+        if let Some(previous) = since {
+            let value = self.graphql(
+                FETCH_ISSUE_UPDATED_AT_QUERY,
+                json!({
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "number": number.0,
+                }),
+            )?;
+            let issue = value
+                .get("data")
+                .and_then(|data| data.get("repository"))
+                .and_then(|repository| repository.get("issue"))
+                .ok_or(ApiError::NotFound(number))?;
+            if issue.is_null() {
+                return Err(ApiError::NotFound(number));
+            }
+            let updated_at = issue
+                .get("updatedAt")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::Unexpected("issue.updatedAt missing".to_string()))?;
+            if *previous == UpdatedAt::new(updated_at) {
+                return Ok(FetchResult::NotModified);
+            }
+        }
+
         let value = self.graphql(
             FETCH_ISSUE_QUERY,
             json!({
@@ -1682,11 +1724,6 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             return Err(ApiError::NotFound(number));
         }
         let snapshot = parse_graphql_issue(issue)?;
-        if let Some(prev) = since {
-            if *prev == snapshot.updated_at {
-                return Ok(FetchResult::NotModified);
-            }
-        }
         Ok(FetchResult::Updated(snapshot))
     }
 
@@ -1703,6 +1740,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let resp = self.rest_patch(&path, json!({ "title": new_title }))?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("patch_title json: {e}")))?;
+        parse_rest_issue(&value)
+    }
+
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut payload = serde_json::Map::new();
+        if let Some(title) = &fields.title {
+            payload.insert("title".to_string(), json!(title));
+        }
+        if let Some(body) = &fields.body {
+            payload.insert("body".to_string(), json!(body));
+        }
+        if let Some(labels) = &fields.labels {
+            payload.insert("labels".to_string(), json!(labels));
+        }
+        let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
+        let resp = self.rest_patch(&path, Value::Object(payload))?;
+        let value: Value = serde_json::from_str(&resp.body)
+            .map_err(|e| ApiError::Unexpected(format!("patch_issue_fields json: {e}")))?;
         parse_rest_issue(&value)
     }
 
@@ -2394,8 +2453,11 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
-    use super::{check_status, classify_graphql_errors, HttpResponse};
-    use crate::client::ApiError;
+    use super::{
+        check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
+        HttpResponse, HttpTransport, ResolutionDeadline,
+    };
+    use crate::client::{ApiError, IssueClient, SpecListFilter};
 
     /// SPEC-3214 T-016 / FR-011: a non-rate-limit 403 must surface the
     /// GitHub-provided reason (e.g. personal repo restrictions) instead of
@@ -2448,6 +2510,50 @@ mod check_status_tests {
                 retry_after: Some(17)
             }
         ));
+    }
+
+    /// Issue #3928: the plain GraphQL path must classify a rate-limit body the
+    /// same way the owner-request path does. GitHub answers a secondary limit
+    /// with HTTP 200 and a `RATE_LIMIT` entry in the body, so this path used to
+    /// report it as an opaque `Unexpected` and its callers — the Issue cache
+    /// reads a PM surface runs on — retried straight back into the limit
+    /// instead of backing off.
+    #[test]
+    fn a_rate_limited_graphql_body_is_typed_even_on_the_plain_query_path() {
+        struct RateLimitedBody;
+        impl RateLimitedBody {
+            fn response() -> HttpResponse {
+                HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: r#"{"errors":[{"type":"RATE_LIMIT","message":"API rate limit already exceeded for user ID 965624."}]}"#
+                        .to_string(),
+                }
+            }
+        }
+        impl HttpTransport for RateLimitedBody {
+            fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+
+            fn execute_with_deadline(
+                &self,
+                _request: HttpRequest,
+                _deadline: &ResolutionDeadline,
+            ) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+        }
+
+        let client =
+            HttpIssueClient::with_transport(RateLimitedBody, "token".to_string(), "octo", "gwt");
+        let error = client
+            .list_spec_issues(&SpecListFilter::default())
+            .expect_err("a rate-limited body must not read as success");
+        assert!(
+            matches!(error, ApiError::RateLimited { .. }),
+            "expected RateLimited, got {error:?}"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Read-only endpoint selection for Unix daemon subscriptions.
+//! Read-only endpoint selection for daemon subscriptions.
 //!
 //! Exact caller scope always wins. A same-repository sibling is eligible only
 //! when exact evidence is absent or definitely dead, and only one compatible
@@ -7,7 +7,6 @@
 use std::{
     collections::BTreeMap,
     fmt, fs,
-    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,7 +14,9 @@ use std::{
 use gwt_core::daemon::{
     validate_handshake, DaemonEndpoint, IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope,
 };
-use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::UnixStream, time::timeout};
+use tokio::{io::AsyncReadExt, io::AsyncWriteExt, time::timeout};
+
+use super::transport::{bind_rejection, check_server_identity, IpcStream};
 
 const SIBLING_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_HANDSHAKE_RESPONSE_BYTES: usize = 16 * 1024;
@@ -172,7 +173,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn resolve_with_probe<F, P>(
     gwt_home: &Path,
     requested_scope: &RuntimeScope,
@@ -265,7 +266,7 @@ fn validate_exact(
             "protocol_mismatch(expected={expected_protocol_version},actual={})",
             endpoint.protocol_version
         ))
-    } else if let Some(reason) = unix_socket_rejection(&endpoint.bind) {
+    } else if let Some(reason) = bind_rejection(&endpoint.bind) {
         Some(reason.to_string())
     } else if endpoint.auth_token.trim().is_empty() {
         Some("missing_auth_token".to_string())
@@ -459,7 +460,7 @@ where
         Some("protocol_mismatch")
     } else if !is_live_pid(endpoint.pid, is_process_alive) {
         Some("dead")
-    } else if let Some(reason) = unix_socket_rejection(&endpoint.bind) {
+    } else if let Some(reason) = bind_rejection(&endpoint.bind) {
         Some(reason)
     } else if endpoint.auth_token.trim().is_empty() {
         Some("missing_auth_token")
@@ -492,24 +493,24 @@ fn failure(
     })
 }
 
-fn unix_socket_rejection(bind: &str) -> Option<&'static str> {
-    let bind = bind.trim();
-    if bind.is_empty() || !Path::new(bind).is_absolute() {
-        return Some("unsupported_transport");
-    }
-    match fs::metadata(bind) {
-        Ok(metadata) if metadata.file_type().is_socket() => None,
-        Ok(_) => Some("not_socket"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some("socket_missing"),
-        Err(_) => Some("socket_unreadable"),
-    }
-}
-
 fn is_live_pid<F>(pid: u32, is_process_alive: &F) -> bool
 where
     F: Fn(u32) -> bool,
 {
-    pid > 0 && libc::pid_t::try_from(pid).is_ok() && is_process_alive(pid)
+    pid > 0 && pid_fits_platform(pid) && is_process_alive(pid)
+}
+
+/// Unix `kill(2)` takes a signed `pid_t`; a value above `i32::MAX` would
+/// wrap negative and probe a process *group* instead. Windows pids are
+/// unsigned DWORDs and need no such bound.
+#[cfg(unix)]
+fn pid_fits_platform(pid: u32) -> bool {
+    i32::try_from(pid).is_ok()
+}
+
+#[cfg(windows)]
+fn pid_fits_platform(_pid: u32) -> bool {
+    true
 }
 
 async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
@@ -519,9 +520,10 @@ async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
     }
 
     let attempt = timeout(SIBLING_HANDSHAKE_TIMEOUT, async {
-        let mut stream = UnixStream::connect(&endpoint.bind)
+        let mut stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(ProbeError::Connect)?;
+        check_server_identity(&stream, endpoint.pid).map_err(|_| ProbeError::Handshake)?;
         let request = IpcHandshakeRequest {
             protocol_version: endpoint.protocol_version,
             auth_token: endpoint.auth_token.clone(),
@@ -558,7 +560,7 @@ async fn authenticated_probe(endpoint: &DaemonEndpoint) -> ProbeOutcome {
     }
 }
 
-async fn read_bounded_handshake_response(stream: &mut UnixStream) -> Result<Vec<u8>, ()> {
+async fn read_bounded_handshake_response(stream: &mut IpcStream) -> Result<Vec<u8>, ()> {
     let mut response = Vec::with_capacity(512);
     let mut chunk = [0_u8; 512];
     loop {
@@ -581,13 +583,15 @@ async fn read_bounded_handshake_response(stream: &mut UnixStream) -> Result<Vec<
     }
 }
 
-#[cfg(test)]
+// Fixtures below bind raw `std` Unix listeners and socket pairs.
+#[cfg(all(test, unix))]
 mod tests {
     use gwt_core::daemon::{
         persist_endpoint, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
     };
     use std::os::unix::net::UnixListener;
     use tempfile::TempDir;
+    use tokio::net::UnixStream;
 
     use super::*;
 
@@ -1153,7 +1157,8 @@ mod tests {
     async fn handshake_response_reader_rejects_oversized_frame() {
         use tokio::io::AsyncWriteExt;
 
-        let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        let mut reader = IpcStream::Unix(reader);
         let oversized = vec![b'x'; MAX_HANDSHAKE_RESPONSE_BYTES + 1];
         let server = tokio::spawn(async move {
             let _ = writer.write_all(&oversized).await;

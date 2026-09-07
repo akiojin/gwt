@@ -22,8 +22,8 @@
         attentionForWorkspace,
         createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
         formatLifecycleStateLabel,
+        mergeActiveWorkProjectionPatch,
       } from "/workspace-kanban-surface.js";
-      import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
         createAgentKanbanSurface,
@@ -76,11 +76,11 @@
       // launch-controls / interaction-guard imports) moved to
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
-      // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
-      // Settings window — the PM is configured where it is seen.
+      // SPEC-3431 FR-026 / FR-132: one shared PM settings controller feeds
+      // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
-      import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
+      import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -92,7 +92,14 @@
       import { createBoardLogsSurface } from "/board-logs-surface.js";
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window surface
       // moved to /knowledge-kanban-surface.js.
-      import { createKnowledgeKanbanSurface } from "/knowledge-kanban-surface.js";
+      import {
+        createKnowledgeKanbanSurface,
+        // SPEC #3885 FR-011: the canvas face of a Windowized agent is an Issue
+        // header above the interactive terminal, built from the Issue surface's
+        // own badge/action vocabulary so both faces read identically.
+        issueWindowHeaderModel,
+        renderIssueWindowHeader,
+      } from "/knowledge-kanban-surface.js";
       // SPEC-3064 Phase 3 (E6e): the Profile window surface moved to
       // /profile-window-surface.js.
       import { createProfileWindowSurface } from "/profile-window-surface.js";
@@ -248,6 +255,9 @@
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
+      // Issue #3884: when each window's runtime state was last observed to change
+      // (ms epoch). Feeds the Issue row status row's elapsed-time label.
+      const windowRuntimeStateSinceMap = new Map();
       const terminalMap = new Map();
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
@@ -282,6 +292,7 @@
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
       const renderedIssuePreviewBodyKeys = new Map();
+      const renderedIssueWindowHeaderKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
       // window-cleanup call site keeps its text).
@@ -469,9 +480,6 @@
         active_tab_id: null,
         recent_projects: [],
       };
-      let improvementCandidates = [];
-      let improvementCandidatesRevision = 0;
-      let improvementCandidatesProjectRoot = null;
       let renderedProjectTabsKey = "";
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
@@ -538,10 +546,6 @@
         }
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
-        if (windows.some((windowData) => presetSurface(windowData?.preset) === "improvement")) {
-          appendRenderKeyPart(parts, "improvement_candidates_revision");
-          appendRenderKeyPart(parts, improvementCandidatesRevision);
-        }
         for (const windowData of windows) {
           const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
@@ -722,6 +726,15 @@
           appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+          // Issue #3884: the status row shows the activity line and elapsed time.
+          appendRenderKeyPart(parts, "activity");
+          appendRenderKeyPart(parts, windowActivityDetail(windowData));
+          appendRenderKeyPart(parts, "since_minute");
+          const since = windowRuntimeStateSinceMap.get(windowData.id);
+          appendRenderKeyPart(
+            parts,
+            Number.isFinite(since) ? Math.floor((Date.now() - since) / 60000) : "",
+          );
         }
         return parts.join("");
       }
@@ -880,9 +893,6 @@
         }
         if (preset === "work" || preset === "workspace") {
           return "work";
-        }
-        if (preset === "improvement" || preset === "improvements") {
-          return "improvement";
         }
         if (preset === "console") {
           return "console";
@@ -1339,14 +1349,6 @@
         );
       }
 
-      function improvementEventMatchesActiveProject(event) {
-        const eventProjectRoot = event?.project_root;
-        if (!eventProjectRoot) {
-          return true;
-        }
-        return eventProjectRoot === activeProjectTab()?.project_root;
-      }
-
       function activeWorkspace() {
         return activeProjectTab()?.workspace || emptyWorkspace();
       }
@@ -1681,6 +1683,15 @@
       // (dynamic_title_detail) so glanceable surfaces (Fleet Minimap cells,
       // switcher rows) read like "title · detail". Collapses to just the
       // title when there is no distinct detail.
+      // Issue #3884: the one-line "what is it doing now" for an agent window — the
+      // runtime status detail when the backend reported one (error / stopped),
+      // otherwise the live dynamic title detail.
+      function windowActivityDetail(windowData) {
+        const statusDetail = String(detailMap.get(windowData?.id) || "").trim();
+        if (statusDetail) return statusDetail;
+        return String(windowData?.dynamic_title_detail || "").trim();
+      }
+
       function windowActivityLabel(windowData) {
         const title = windowDisplayTitle(windowData);
         const detail = String(windowData?.dynamic_title_detail || "").trim();
@@ -1726,15 +1737,6 @@
               active_tab_id: null,
               recent_projects: [],
             };
-            const activeProjectRoot = activeProjectTab()?.project_root || null;
-            if (
-              improvementCandidatesProjectRoot &&
-              improvementCandidatesProjectRoot !== activeProjectRoot
-            ) {
-              improvementCandidates = [];
-              improvementCandidatesRevision += 1;
-              improvementCandidatesProjectRoot = null;
-            }
             setVersionState(appState.app_version, versionState.latest);
             const nextProjectTabsKey = projectTabsRenderKey(appState);
             if (renderedProjectTabsKey !== nextProjectTabsKey) {
@@ -3160,6 +3162,9 @@
         const parts = [];
         appendRenderKeyPart(parts, "running");
         appendRenderKeyPart(parts, counts?.running ?? null);
+        // Issue #3884 AC-3: the inline-terminal breakdown of RUNNING.
+        appendRenderKeyPart(parts, "running_inline");
+        appendRenderKeyPart(parts, counts?.running_inline ?? null);
         appendRenderKeyPart(parts, "idle");
         appendRenderKeyPart(parts, counts?.idle ?? null);
         // FR-039 (anshin): the WAITING cell refreshes when the waiting count
@@ -3289,6 +3294,9 @@
         // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           running: 0,
+          // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
+          // them off the canvas — they live inside the Issue window.
+          running_inline: 0,
           idle: 0,
           // FR-039 (anshin): waiting is its own LOUD telemetry state for
           // agents waiting on the operator. It used to collapse into idle;
@@ -3309,6 +3317,9 @@
           const windowData = workspaceWindowById(windowId);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
           if (state in counts) counts[state] += 1;
+          if (state === "running" && windowData.placement?.kind === "issue_preview") {
+            counts.running_inline += 1;
+          }
           counts.agents += 1;
         }
         if (activeWorkProjection) {
@@ -3350,6 +3361,15 @@
       const { applyProviderUsageUi, renderUsagePanel } = createProviderUsageSurface({
         send,
         renderWorkspaceWindows: () => workspaceOverviewSurface.renderWindows(),
+        // Issue #3862 — name popover session rows by their window title.
+        sessionLabel: (sessionId) => {
+          for (const tab of appState?.tabs || []) {
+            for (const windowData of tab.workspace?.windows || []) {
+              if (windowData?.session_id === sessionId) return windowDisplayTitle(windowData);
+            }
+          }
+          return null;
+        },
       });
 
       function activeWorkFocusableAgents(work) {
@@ -3431,6 +3451,9 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
+            if (windowRuntimeStateMap.get(windowId) !== runtimeState) {
+              windowRuntimeStateSinceMap.set(windowId, Date.now());
+            }
             windowRuntimeStateMap.set(windowId, runtimeState);
             if (detail) {
               detailMap.set(windowId, detail);
@@ -3443,16 +3466,21 @@
               detailMap.delete(windowId);
             }
             const effectiveDetail = detailMap.get(windowId) || "";
-            agentCompletionNotifier.handleRuntimeState({
-              windowId,
-              runtimeState,
-              windowData,
-              projectTab: windowContext?.tab || activeProjectTab(),
-              statusDetail: effectiveDetail,
-            });
             // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
             // that carry a waiting state) raise in-app attention toasts.
+            // SPEC #3206 v2 (user ruling 2026-09-04): completion notices take
+            // the same gate. The controller has no preset check of its own, so
+            // ungated it publishes "Agent stopped" for Settings / Board / Logs
+            // windows using that window's own title — noise that v2 would then
+            // persist into the history instead of letting it pass as a toast.
             if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+              agentCompletionNotifier.handleRuntimeState({
+                windowId,
+                runtimeState,
+                windowData,
+                projectTab: windowContext?.tab || activeProjectTab(),
+                statusDetail: effectiveDetail,
+              });
               agentAttentionToaster.handleRuntimeState({
                 windowId,
                 runtimeState,
@@ -4463,6 +4491,11 @@
           } catch {
             // Picker may not be mounted yet during bootstrap.
           }
+          try {
+            renderAllKnowledgeBridgeWindows();
+          } catch {
+            // Knowledge surfaces may not be mounted yet during bootstrap.
+          }
           const notice = launchPending.consumeTimeoutNotice();
           if (notice) {
             console.warn("[launch-pending]", notice);
@@ -4513,6 +4546,7 @@
       // entries, the drawer chrome wiring, and the window-cleanup call
       // sites, wired through this factory.
       const {
+        issueContextForNumber,
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -4521,6 +4555,7 @@
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         closeKanbanDrawer,
         mountKnowledgeWindow,
@@ -4561,6 +4596,11 @@
           focusWindowLocally(id);
           socketTransport.send({ kind: "focus_window", id });
         },
+        // Issue #3884: the Issue row status row (agent name / state / last
+        // activity line / elapsed time) reads the same live-activity sources the
+        // minimap tooltip and the runtime-state cache already use.
+        windowActivityDetail,
+        windowRuntimeStateSince: (id) => windowRuntimeStateSinceMap.get(id) ?? null,
         // SPEC-3671 FR-012 / FR-013: the Issue row reads the active Work
         // projection that is already broadcast, and reuses the Work surface's own
         // derivations and action paths rather than re-deriving them.
@@ -4573,6 +4613,11 @@
         openWorkspaceCleanup: (candidate, sourceWindowId) =>
           openWorkspaceCleanup(candidate, sourceWindowId),
         getResumeBounds: () => visibleBounds(),
+        // SPEC #3206 FR-017: surface errors become notification-center error
+        // rows (dedup by key, occurrence count, auto-read on resolve). Lazy:
+        // the center is constructed after this factory.
+        reportSurfaceError: (error) => notificationCenter.recordError(error),
+        resolveSurfaceError: (key) => notificationCenter.resolveError(key),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
@@ -4612,8 +4657,12 @@
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
-        // stack. The arrow defers to the alertsToasts binding (created below).
-        pushAlertToast: (notice) => alertsToasts.push(notice),
+        // stack and are recorded into the notification center history
+        // (FR-011). Both bindings are created below; the arrow defers to them.
+        pushAlertToast: (notice) => {
+          notificationCenter.record({ kind: "board-mention", ...notice });
+          alertsToasts.push(notice);
+        },
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         activeWorkspace,
@@ -4677,7 +4726,7 @@
       // createAgentCompletionNotifier; this only renders. Singleton via id; the
       // whole card jumps to the project tab.
       function showAgentCompletionToast(notice) {
-        alertsToasts.push({
+        const alert = {
           id: "agent-completion",
           level: "neutral",
           title: notice.title || "Agent notification",
@@ -4690,7 +4739,11 @@
               send({ kind: "select_project_tab", tab_id: notice.projectId });
             }
           },
-        });
+        };
+        // FR-011: the history record is independent of the transient toast
+        // (the center drops id / timeoutMs, so singletons never collapse).
+        notificationCenter.record({ kind: "agent-completion", ...alert });
+        alertsToasts.push(alert);
       }
 
       // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
@@ -4702,7 +4755,7 @@
         const flavor = notice.flavor || "needs_input";
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
-        alertsToasts.push({
+        const alert = {
           id: `attention-${notice.windowId}`,
           level,
           title: notice.title || "Agent attention",
@@ -4710,7 +4763,11 @@
           dismissible: true,
           timeoutMs,
           onActivate: () => frameWindow(notice.windowId),
-        });
+        };
+        // FR-011: recorded regardless of the toast; the history row keeps the
+        // jump-to (Sc 7) and survives the window's toast being dismissed.
+        notificationCenter.record({ kind: "attention", ...alert });
+        alertsToasts.push(alert);
       }
 
       function handleContinueWorkOutcome(event) {
@@ -4819,11 +4876,6 @@
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
       });
-      const improvementInboxSurface = createImprovementInboxSurface({
-        createNode,
-        send,
-      });
-
       // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (wizard state,
       // interaction guard, field builders, state transitions,
       // renderLaunchWizard, chrome listeners, Esc-close path) moved to
@@ -4849,22 +4901,42 @@
         requestWorkAdvisory,
       });
 
-      // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
-      // `pm_status` hydration that arrives with the initial sync has somewhere
-      // to land.
+      // The controller is created before Settings so pm_status may hydrate its
+      // shared snapshot before the first Settings window is mounted.
       const pmSettingsPanel = createPmSettingsPanel({
         document,
         send,
         confirm: (message) => window.confirm(message),
       });
-      pmSettingsPanel.mount();
+      pmSettingsPanel.bindEntryPoints({ document });
 
-      // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
-      // scrollable side-toast stack so nothing is missed while the operator is
-      // away. Mounted to the body so it is visible regardless of which window
-      // or surface is focused.
-      const autonomousNotifications = createAutonomousNotifications({ document });
-      autonomousNotifications.mount(document.body);
+      // SPEC #3206 v2 — notification center: bell (rail System group) + unread
+      // badge + history drawer. The drawer mounts on <body>, never inside
+      // .op-rail (its stacking context would clamp the drawer under toasts and
+      // modals). It is a pure sink; firing/dedup/gating stay in the controllers.
+      const notificationCenter = createNotificationCenter({ document });
+      notificationCenter.mount(document.body);
+      const notificationBellButton = document.getElementById("op-notifications-button");
+      const notificationBellBadge =
+        notificationBellButton?.querySelector(".op-rail__badge") ?? null;
+      notificationCenter.onUnreadChange((count, hasError) => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count,
+          hasError,
+          open: notificationCenter.isOpen(),
+        });
+      });
+      notificationCenter.onOpenChange(() => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count: notificationCenter.unreadCount(),
+          hasError: notificationCenter.unreadHasError(),
+          open: notificationCenter.isOpen(),
+        });
+      });
 
       // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
       // notifications that used to be three hand-offset systems (agent
@@ -4982,6 +5054,79 @@
           branchCleanupModal?.classList.contains("open"),
       });
 
+      // SPEC #3885 FR-011 / AC-11: a Windowized agent is an Issue window — Issue
+      // header above an interactive terminal — not a bare terminal. FR-013 keeps a
+      // session with no Issue behind it exactly as it was.
+      function issueWindowHeaderModelFor(windowData) {
+        if (presetSurface(windowData?.preset) !== "terminal") return null;
+        const issueNumber = Number(windowData?.linked_issue_number);
+        if (!Number.isFinite(issueNumber)) return null;
+        const context = issueContextForNumber(issueNumber) || {};
+        return issueWindowHeaderModel({ windowData, ...context });
+      }
+
+      function runIssueWindowHeaderAction(action, windowData) {
+        const issueNumber = Number(windowData?.linked_issue_number);
+        if (action === "return-to-list") {
+          // FR-012: the inverse of Windowize. The window already carries its Issue,
+          // so the frontend only names the window it wants folded back into the row;
+          // the shared terminal runtime is reparented into the row's status row by
+          // the same path the Issue Monitor auto-launch already uses.
+          send({ kind: "dock_agent_window_to_issue", id: windowData.id });
+          return;
+        }
+        if (action === "open-issue" && Number.isFinite(issueNumber)) {
+          const preset = "issue";
+          const windowId = focusOrSpawnPreset(preset);
+          const knowledgeKind = knowledgeKindForPreset(preset);
+          if (windowId) {
+            requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
+            return;
+          }
+          pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number: issueNumber });
+        }
+      }
+
+      function syncIssueWindowHeader(windowData, element) {
+        const body = element.querySelector(".window-body");
+        if (!body) return;
+        const model = issueWindowHeaderModelFor(windowData);
+        const existing = body.querySelector(".issue-window-header");
+        // The terminal fills the body absolutely; the class tells the stylesheet to
+        // leave the header's band free rather than letting the two overlap.
+        element.classList.toggle("has-issue-header", Boolean(model));
+        if (!model) {
+          existing?.remove();
+          return;
+        }
+        const header = renderIssueWindowHeader(document, model, (action) =>
+          runIssueWindowHeaderAction(action, windowData),
+        );
+        if (existing) {
+          existing.replaceWith(header);
+        } else {
+          body.insertBefore(header, body.firstChild);
+        }
+      }
+
+      function issueWindowHeaderRenderKey(windowData) {
+        const model = issueWindowHeaderModelFor(windowData);
+        if (!model) return "";
+        const parts = [];
+        appendRenderKeyPart(parts, "issue");
+        appendRenderKeyPart(parts, model.issueNumber);
+        appendRenderKeyPart(parts, "title");
+        appendRenderKeyPart(parts, model.title);
+        appendRenderKeyPart(parts, "badge");
+        appendRenderKeyPart(parts, model.primary.key);
+        appendRenderKeyPart(parts, model.primary.label);
+        for (const item of model.secondary) {
+          appendRenderKeyPart(parts, "secondary");
+          appendRenderKeyPart(parts, `${item.key}:${item.label}`);
+        }
+        return parts.join("");
+      }
+
       function mountWindowBody(windowData, element) {
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
@@ -4996,7 +5141,6 @@
           "surface-knowledge",
           "surface-index",
           "surface-work",
-          "surface-improvement",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -5056,6 +5200,9 @@
           if (!isOffCanvasPlacement(windowData)) {
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
+          // SPEC #3885 FR-011: an Issue-bound agent gets its Issue header above the
+          // terminal it already owns; the terminal itself stays interactive.
+          syncIssueWindowHeader(windowData, element);
           return;
         }
 
@@ -5105,14 +5252,6 @@
           // the surface stays a pure renderer and its unit tests keep their
           // exact-message contracts.
           send({ kind: "request_remote_start_work_branches", id: windowData.id });
-          return;
-        }
-
-        if (surface === "improvement") {
-          improvementInboxSurface.mount(body, {
-            ...windowData,
-            improvement_candidates: improvementCandidates,
-          });
           return;
         }
 
@@ -5180,18 +5319,6 @@
         }
       }
 
-      function refreshMountedImprovementInboxWindows() {
-        for (const element of document.querySelectorAll(
-          '.workspace-window[data-preset="improvement"]',
-        )) {
-          const body = element.querySelector(".window-body");
-          if (!body) continue;
-          improvementInboxSurface.mount(body, {
-            improvement_candidates: improvementCandidates,
-          });
-        }
-      }
-
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
       // Settings body, customAgentsState / agentBackendsState /
       // systemSettingsState, Teams channel converters, add-from-preset
@@ -5205,6 +5332,7 @@
         agentBackendsState,
         systemSettingsState,
         systemSettingsInteractionGuard,
+        applyAgentResourceSnapshot,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,
@@ -5226,6 +5354,7 @@
         focusOrSpawnPreset,
         renderUsagePanel,
         indexStatusByProjectRoot,
+        pmSettingsPanel,
       });
 
       function ensureWindow(windowData) {
@@ -5458,6 +5587,16 @@
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
         }
+        // SPEC #3885 FR-011: the Issue header follows the same live state the row's
+        // badge does (agent status, Issue title, Work/PR context), so it is keyed
+        // rather than remounted with the body.
+        if (surface === "terminal") {
+          const nextIssueWindowHeaderKey = issueWindowHeaderRenderKey(windowData);
+          if (renderedIssueWindowHeaderKeys.get(windowData.id) !== nextIssueWindowHeaderKey) {
+            renderedIssueWindowHeaderKeys.set(windowData.id, nextIssueWindowHeaderKey);
+            syncIssueWindowHeader(windowData, element);
+          }
+        }
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
@@ -5614,6 +5753,7 @@
                   decoderMap.delete(windowId);
                   detailMap.delete(windowId);
                   windowRuntimeStateMap.delete(windowId);
+                  windowRuntimeStateSinceMap.delete(windowId);
                   agentCompletionNotifier.forgetWindow(windowId);
                   agentAttentionToaster.forgetWindow(windowId);
                   // SPEC #3206: dismiss this window's attention toast from the shared
@@ -5623,6 +5763,7 @@
                   renderedRuntimeStatusKeys.delete(windowId);
                   renderedAgentKanbanBodyKeys.delete(windowId);
                   renderedIssuePreviewBodyKeys.delete(windowId);
+                  renderedIssueWindowHeaderKeys.delete(windowId);
                   pendingOutputMap.delete(windowId);
                   pendingSnapshotMap.delete(windowId);
                   terminalOutputBatcher.clear(windowId);
@@ -5839,7 +5980,6 @@
         logsSurface,
         agentKanbanSurface,
         pmSettingsPanel,
-        autonomousNotifications,
         knowledgeSettingsSurface,
       });
 
@@ -5908,30 +6048,28 @@
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
+          case "active_work_projection_patch":
+            activeWorkProjection = mergeActiveWorkProjectionPatch(
+              activeWorkProjection,
+              event.projection || null,
+            );
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+            );
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
+            workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
+            recomputeOperatorTelemetry();
+            break;
           // SPEC-3064 Phase 3 (E7): window list entries and rendering live
           // in the project shell surface.
           case "window_list":
             applyWindowListEvent(event);
-            break;
-          case "improvement_candidates":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
-            improvementCandidatesProjectRoot = event.project_root || null;
-            improvementCandidatesRevision += 1;
-            {
-              const workspace = activeWorkspace() || emptyWorkspace();
-              renderWorkspace(workspace);
-              refreshMountedImprovementInboxWindows();
-            }
-            break;
-          case "improvement_action_result":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            // Candidate list refresh is delivered as a separate
-            // improvement_candidates snapshot; no extra UI state is needed here.
-            break;
-          case "improvement_action_error":
-            if (!improvementEventMatchesActiveProject(event)) break;
-            window.alert(`Improvement action error: ${event.message}`);
             break;
           case "provider_usage":
             applyProviderUsageUi({
@@ -5958,12 +6096,16 @@
             scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_toast":
-            // SPEC #3200 FR-034: also surface as a persistent, scrollable side
-            // toast so unattended autonomous events accumulate where the
-            // operator can review them later.
-            frontendUnits.autonomousNotifications.push({
+            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+            // into the notification center history FIRST and independently of
+            // any display path, so events that fire while no Issue window is
+            // open (or while the operator is away) are never lost. The backend
+            // IssueMonitorToast carries {level, message, issue_number} only —
+            // the title is a literal.
+            notificationCenter.record({
+              kind: "issue-monitor",
               level: event?.level,
-              title: event?.title || "Issue Monitor",
+              title: "Issue Monitor",
               message: event?.message,
               issueNumber: event?.issue_number,
             });
@@ -6151,7 +6293,20 @@
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);
-            launchPending.settleAck(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh();
+              }
+            }
             break;
           // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
           // accepted — settle pending UI and dismiss the picker.
@@ -6306,6 +6461,7 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource: event.agent_resource,
               })
             ) {
               break;
@@ -6315,6 +6471,7 @@
               event.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(event.agent_resource);
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -6332,6 +6489,7 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource: event.agent_resource,
               })
             ) {
               break;
@@ -6341,6 +6499,7 @@
               event.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(event.agent_resource);
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
@@ -6960,6 +7119,19 @@
           systemSettingsInteractionGuard.activate();
         }
       });
+      // SPEC #1921 Phase 86 (#3813): numeric / text `.settings-input`
+      // fields get the same protection — a backend echo arriving while the
+      // user is typing a CPU limit would otherwise rebuild the panel and
+      // discard the half-typed value.
+      const isSettingsInput = (target) =>
+        Boolean(target)
+        && target.tagName === "INPUT"
+        && target.classList.contains("settings-input");
+      document.addEventListener("focusin", (event) => {
+        if (isSettingsInput(event.target)) {
+          systemSettingsInteractionGuard.activate();
+        }
+      });
       document.addEventListener("change", (event) => {
         const target = event.target;
         if (
@@ -6973,9 +7145,10 @@
       document.addEventListener("focusout", (event) => {
         const target = event.target;
         if (
-          target
-          && target.tagName === "SELECT"
-          && target.classList.contains("settings-select")
+          (target
+            && target.tagName === "SELECT"
+            && target.classList.contains("settings-select"))
+          || isSettingsInput(target)
         ) {
           systemSettingsInteractionGuard.release();
         }
@@ -7057,6 +7230,13 @@
         // preventDefaults and returns true when the modal consumed the
         // event.
         if (handleMigrationModalEscape(event)) {
+          return;
+        }
+        // SPEC #3206 v2 — Esc closes the notification center drawer through
+        // the same chain as the other modal surfaces.
+        if (notificationCenter.isOpen()) {
+          notificationCenter.close();
+          event.preventDefault();
           return;
         }
         // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
@@ -7187,6 +7367,11 @@
         const id = event.detail?.id;
         if (!id) return;
         switch (id) {
+          case "pm-settings":
+            // The shared PM settings controller owns this route. Keeping an
+            // explicit arm prevents an "unknown" diagnostic without stopping
+            // other command-bus observers.
+            return;
           case "open-board":
             focusOrSpawnPreset("board");
             return;
@@ -7221,10 +7406,8 @@
           case "stop-all-windows":
             requestStopAllWindows();
             return;
-          case "pm-settings":
-            // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
-            // is the keyboard-only path to the same panel.
-            frontendUnits.pmSettingsPanel.open();
+          case "toggle-notifications":
+            notificationCenter.toggle();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
@@ -7271,6 +7454,11 @@
           }
           send(detail);
         });
+        window.__gwtPmSettingsTestApi = Object.freeze({
+          mount(container) {
+            pmSettingsPanel.mount(container);
+          },
+        });
         window.__gwtTerminalTestApi = Object.freeze({
           metrics(windowId) {
             const runtime = terminalMap.get(windowId);
@@ -7298,6 +7486,24 @@
             if (terminal && typeof terminal.scrollToBottom === "function") {
               terminal.scrollToBottom();
             }
+          },
+          // SPEC #1921 Phase 86 (#3813) T519: plain-text tail of a pane's
+          // xterm buffer so live specs can assert on agent output without
+          // scraping renderer DOM.
+          bufferText(windowId, maxLines = 400) {
+            const buffer = terminalMap.get(windowId)?.terminal?.buffer?.active;
+            if (!buffer) {
+              return "";
+            }
+            const lines = [];
+            const start = Math.max(0, buffer.length - maxLines);
+            for (let index = start; index < buffer.length; index += 1) {
+              const line = buffer.getLine(index);
+              if (line) {
+                lines.push(line.translateToString(true));
+              }
+            }
+            return lines.join("\n");
           },
         });
       }

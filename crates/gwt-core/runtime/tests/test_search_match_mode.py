@@ -48,6 +48,34 @@ class SearchMatchModeTests(unittest.TestCase):
         self.assertEqual(suggestions[0]["matched_terms"], ["Workspace"])
         self.assertEqual(suggestions[0]["missing_terms"], ["置き換え"])
 
+    def test_all_terms_preserves_authoritative_union_raw_order_and_distance(self):
+        items = [
+            {
+                "id": "overlay",
+                "document": "alpha beta from the authoritative overlay",
+                "metadata": {"path": "src/z_overlay.rs"},
+                "distance": 0.12341,
+            },
+            {
+                "id": "base",
+                "document": "alpha beta from the visible base",
+                "metadata": {"path": "src/a_base.rs"},
+                "distance": 0.12344,
+            },
+        ]
+
+        strict, suggestions = runner._apply_match_mode(
+            items,
+            query="alpha beta",
+            match_mode="all_terms",
+        )
+
+        self.assertEqual([item["id"] for item in strict], ["overlay", "base"])
+        self.assertEqual(
+            [item["distance"] for item in strict], [0.12341, 0.12344]
+        )
+        self.assertEqual(suggestions, [])
+
     def test_search_multi_returns_suggestions_by_scope(self):
         with mock.patch.object(
             runner,

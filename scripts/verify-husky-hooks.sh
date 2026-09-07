@@ -29,7 +29,7 @@ require_contains() {
 require_not_contains() {
   local file="$1"
   local pattern="$2"
-  if grep -Fq "$pattern" "$file"; then
+  if grep -Fq -- "$pattern" "$file"; then
     fail "Unexpected pattern found in $file: $pattern"
   fi
 }

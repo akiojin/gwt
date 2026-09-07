@@ -54,11 +54,56 @@ pub struct SpawnConfig {
     pub cwd: Option<PathBuf>,
 }
 
+/// Scheduling priority of a gated PTY process tree relative to the gwt
+/// process (SPEC #1921 Phase 86, Issue #3813).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessPriority {
+    Normal,
+    BelowNormal,
+    Idle,
+}
+
+impl ProcessPriority {
+    /// Unix nice value. Descendants inherit it across fork/exec.
+    pub fn unix_nice(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::BelowNormal => 10,
+            Self::Idle => 19,
+        }
+    }
+
+    /// Windows process priority class. Children created without an explicit
+    /// class inherit BELOW_NORMAL / IDLE from their parent.
+    #[cfg(windows)]
+    pub fn windows_priority_class(self) -> gwt_core::process_tree::ProcessPriorityClass {
+        use gwt_core::process_tree::ProcessPriorityClass;
+        match self {
+            Self::Normal => ProcessPriorityClass::Normal,
+            Self::BelowNormal => ProcessPriorityClass::BelowNormal,
+            Self::Idle => ProcessPriorityClass::Idle,
+        }
+    }
+}
+
+/// Resource policy applied to a pending PTY tree before its target runs.
+///
+/// `cpu_limit_percent` is enforced through the Windows Job Object hard cap;
+/// Unix has no equivalent tree-wide cap and relies on the nice value alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessPolicy {
+    pub priority: ProcessPriority,
+    pub cpu_limit_percent: Option<u8>,
+}
+
 const START_GATE_ENDPOINT_ENV: &str = "GWT_INTERNAL_PTY_GATE_ENDPOINT";
 const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
 const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
 const START_GATE_HELLO: u8 = 1;
 const START_GATE_RELEASE: u8 = 2;
+/// Sent by the helper instead of `START_GATE_HELLO` when the encoded target
+/// cannot be executed at all, so the owner reports a pre-spawn failure.
+const START_GATE_TARGET_MISSING: u8 = 3;
 /// `CSI 1 ; 1 R` — the reply Windows ConPTY waits for before it lets a console
 /// client finish attaching.
 #[cfg(windows)]
@@ -76,6 +121,19 @@ impl PendingPty {
     /// when it replaces itself with the target on Unix.
     pub fn process_id(&self) -> Option<u32> {
         self.handle.as_ref().and_then(PtyHandle::process_id)
+    }
+
+    /// Apply a resource policy to the blocked gate helper. The target and
+    /// every descendant inherit it once [`Self::release`] runs, so no child
+    /// can exist outside the policy. Failure leaves the target unreleased.
+    pub fn apply_policy(&self, policy: ProcessPolicy) -> Result<(), TerminalError> {
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| TerminalError::PtyIoError {
+                details: "PTY start gate is unavailable".to_string(),
+            })?;
+        handle.apply_process_policy(policy)
     }
 
     /// Release the helper to execute the target and return the live PTY.
@@ -190,6 +248,10 @@ struct SpawnDiagnostic {
 struct PtyInputState {
     protected: bool,
     queued: VecDeque<Vec<u8>>,
+    /// Ordinary (unprotected) keystrokes that have not been submitted or
+    /// cleared. Used so PM wake injection can wait instead of splicing a
+    /// `[gwt]` prompt into a live TUI composer.
+    unsent_user_input: bool,
 }
 
 pub struct PtyHandle {
@@ -293,7 +355,12 @@ impl PtyHandle {
         loop {
             match listener.accept() {
                 Ok((mut gate, peer)) if peer.ip().is_loopback() => {
-                    gate.set_read_timeout(Some(Duration::from_secs(2)))
+                    // Windows hands out accepted sockets in the listener's
+                    // non-blocking mode; the handshake read below must block
+                    // (bounded by the timeout) until the helper's HELLO
+                    // arrives instead of failing with WSAEWOULDBLOCK.
+                    gate.set_nonblocking(false)
+                        .and_then(|()| gate.set_read_timeout(Some(Duration::from_secs(2))))
                         .map_err(|error| {
                             pending_spawn_error(
                                 handle.take().expect("pending handle"),
@@ -305,6 +372,12 @@ impl PtyHandle {
                         return Err(pending_spawn_error(
                             handle.take().expect("pending handle"),
                             format!("read PTY start-gate handshake: {error}"),
+                        ));
+                    }
+                    if hello[0] == START_GATE_TARGET_MISSING && hello[1..] == *nonce.as_bytes() {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            format!("PTY start-gate target not found: {}", config.command),
                         ));
                     }
                     if hello[0] != START_GATE_HELLO || hello[1..] != *nonce.as_bytes() {
@@ -470,6 +543,7 @@ impl PtyHandle {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
+        state.note_user_input(data);
         if state.protected {
             state.queued.push_back(data.to_vec());
             return Ok(());
@@ -488,6 +562,16 @@ impl PtyHandle {
         drop(state);
 
         Self::write_with_locked_writer(&mut writer, data, lock_wait_us)
+    }
+
+    /// Whether the last ordinary keystrokes left unsent prompt content in the
+    /// TUI composer. Escape-only navigation and protected injects do not
+    /// count; submit (`\r`/`\n`) and composer-clear (Ctrl+C / Ctrl+U) reset it.
+    pub fn has_unsent_user_input(&self) -> bool {
+        self.input_state
+            .lock()
+            .map(|state| state.unsent_user_input)
+            .unwrap_or(false)
     }
 
     /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
@@ -518,11 +602,20 @@ impl PtyHandle {
         })
     }
 
-    /// Invalidate this writer generation at the physical-write commit point.
-    /// Once this method returns, no writer from this generation can begin a
-    /// later PTY mutation.
-    pub fn invalidate_input_generation(&self) {
+    /// Revoke this writer generation without waiting for an in-flight physical
+    /// write. New transactions fail immediately; teardown can finish the
+    /// physical commit barrier on a background worker.
+    pub fn revoke_input_generation(&self) {
         self.generation_active.store(false, Ordering::Release);
+    }
+
+    /// Finish invalidating this writer generation at the physical-write commit
+    /// point. Logical lifecycle transitions should call
+    /// [`Self::revoke_input_generation`] first so new input is rejected without
+    /// waiting for an in-flight writer; background teardown then calls this
+    /// barrier before releasing the registry entry.
+    pub fn invalidate_input_generation(&self) {
+        self.revoke_input_generation();
         let _writer = self
             .writer
             .lock()
@@ -668,6 +761,23 @@ impl PtyHandle {
     /// Drop chain from running.
     ///
     /// This must not wait for the child to reap. `portable-pty`'s Unix
+    fn apply_process_policy(&self, policy: ProcessPolicy) -> Result<(), TerminalError> {
+        let pid = self
+            .process_id()
+            .ok_or_else(|| TerminalError::PtyCreationFailed {
+                reason: "apply process policy: PTY child has no process id".to_string(),
+            })?;
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group
+            .apply_policy(pid, policy)
+            .map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: format!("apply process policy: {reason}"),
+            })
+    }
+
     /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
     /// run on the GUI event loop and freeze every `pane.*` operation during
     /// consecutive live-PTY closes (Issue #3705).
@@ -805,14 +915,29 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
         TcpStream::connect(&endpoint).map_err(|error| TerminalError::PtyCreationFailed {
             reason: format!("connect PTY start gate at {endpoint}: {error}"),
         })?;
+    // SPEC #1921 Phase 86 T518: the helper runs with the target's exact
+    // environment, so it is the right place to notice a target that cannot
+    // exist. Reporting it through the handshake keeps such launches on the
+    // owner's pre-spawn failure path instead of releasing a doomed target.
+    let target_missing = !start_gate_target_can_exist(&command);
     let mut hello = Vec::with_capacity(1 + nonce.len());
-    hello.push(START_GATE_HELLO);
+    hello.push(if target_missing {
+        START_GATE_TARGET_MISSING
+    } else {
+        START_GATE_HELLO
+    });
     hello.extend_from_slice(nonce.as_bytes());
     gate.write_all(&hello)
         .and_then(|()| gate.flush())
         .map_err(|error| TerminalError::PtyIoError {
             details: format!("send PTY start-gate handshake: {error}"),
         })?;
+    if target_missing {
+        drop(gate);
+        return Err(TerminalError::PtyCreationFailed {
+            reason: format!("PTY start-gate target not found: {command}"),
+        });
+    }
     let mut release = [0_u8; 1];
     match gate.read_exact(&mut release) {
         Ok(()) if release[0] == START_GATE_RELEASE => {}
@@ -866,6 +991,107 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
                 reason: format!("execute released PTY target: {error}"),
             })?;
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+impl PtyInputState {
+    fn note_user_input(&mut self, data: &[u8]) {
+        self.unsent_user_input = next_unsent_user_input(self.unsent_user_input, data);
+    }
+}
+
+/// Issue #3702: classify one ordinary PTY write as leaving, submitting, or
+/// clearing unsent composer content. Protected injects never call this.
+fn next_unsent_user_input(unsent: bool, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return unsent;
+    }
+    if data.iter().any(|&byte| matches!(byte, 0x03 | 0x15)) {
+        return false;
+    }
+    if let Some(offset) = data
+        .iter()
+        .rposition(|&byte| byte == b'\r' || byte == b'\n')
+    {
+        return chunk_has_prompt_content(&data[offset + 1..]);
+    }
+    unsent || chunk_has_prompt_content(data)
+}
+
+fn chunk_has_prompt_content(data: &[u8]) -> bool {
+    let mut index = 0;
+    while index < data.len() {
+        match data[index] {
+            0x1b => index = skip_escape_sequence(data, index),
+            0x08 | 0x09 | 0x7f => return true,
+            0x20..=0x7e => return true,
+            byte if byte >= 0x80 => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn skip_escape_sequence(data: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    if index >= data.len() {
+        return index;
+    }
+    match data[index] {
+        b'[' => {
+            index += 1;
+            while index < data.len() && (0x20..0x40).contains(&data[index]) {
+                index += 1;
+            }
+            if index < data.len() {
+                index += 1;
+            }
+            index
+        }
+        b']' => {
+            index += 1;
+            while index < data.len() && data[index] != 0x07 && data[index] != 0x1b {
+                index += 1;
+            }
+            if index < data.len() && data[index] == 0x07 {
+                index + 1
+            } else if index + 1 < data.len() && data[index] == 0x1b {
+                index + 2
+            } else {
+                index
+            }
+        }
+        _ => index + 1,
+    }
+}
+
+/// Conservative existence check for a decoded gate target, evaluated inside
+/// the helper with the target's environment. Only clearly impossible targets
+/// return `false`: an explicit path that does not exist, or (on Unix) a bare
+/// name absent from every `PATH` entry. Bare names on Windows are left to
+/// `CreateProcess`, whose search order goes beyond `PATH`.
+fn start_gate_target_can_exist(command: &str) -> bool {
+    let has_separator = command.contains('/') || (cfg!(windows) && command.contains('\\'));
+    if has_separator {
+        let path = std::path::Path::new(command);
+        if path.is_file() {
+            return true;
+        }
+        if cfg!(windows) && path.extension().is_none() {
+            return path.with_extension("exe").is_file();
+        }
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Some(path_value) = std::env::var_os("PATH") else {
+            return false;
+        };
+        std::env::split_paths(&path_value).any(|dir| is_executable_file(&dir.join(command)))
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -1128,10 +1354,15 @@ impl Drop for PtyHandle {
 
 #[cfg(test)]
 mod tests {
+    // `Instant` is only consumed by the Unix reaping tests below.
+    #[cfg_attr(windows, allow(unused_imports))]
     use std::{
         sync::{Arc, Mutex},
-        time::{Duration, Instant},
+        time::Duration,
     };
+
+    #[cfg(unix)]
+    use std::time::Instant;
 
     use super::*;
     use crate::test_util::{
@@ -1753,6 +1984,72 @@ mod tests {
             .expect("invalidation completes after the physical write commit point");
         invalidator.join().expect("invalidation thread");
 
+        assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn next_unsent_user_input_tracks_compose_submit_and_clear() {
+        assert!(
+            next_unsent_user_input(false, "ちゃんとbunx/npxで実行されてい".as_bytes()),
+            "printable / UTF-8 composer text is unsent"
+        );
+        assert!(
+            next_unsent_user_input(true, b"\x1b[A"),
+            "navigation must not clear an already-unsent composer"
+        );
+        assert!(
+            !next_unsent_user_input(false, b"\x1b[A"),
+            "escape-only input is not composer content"
+        );
+        assert!(
+            !next_unsent_user_input(true, "ますか？\r".as_bytes()),
+            "a trailing submit consumes the composer"
+        );
+        assert!(
+            next_unsent_user_input(false, b"hello\rworld"),
+            "bytes after the last submit start a new unsent composer"
+        );
+        assert!(
+            !next_unsent_user_input(true, b"\x03"),
+            "Ctrl+C clears the composer"
+        );
+        assert!(
+            !next_unsent_user_input(true, b"\x15"),
+            "Ctrl+U clears the composer"
+        );
+        assert!(
+            !next_unsent_user_input(false, b"\x1b[1;1R"),
+            "cursor-position replies are not composer content"
+        );
+    }
+
+    #[test]
+    fn write_input_marks_unsent_user_input_until_submit() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper");
+        assert!(!handle.has_unsent_user_input());
+        handle
+            .write_input("実行されてい".as_bytes())
+            .expect("compose");
+        assert!(handle.has_unsent_user_input());
+        handle.write_input(b"\r").expect("submit");
+        assert!(!handle.has_unsent_user_input());
+    }
+
+    #[test]
+    fn generation_revocation_is_non_blocking_while_physical_invalidation_waits() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let writer = handle.writer.lock().expect("hold physical writer");
+
+        handle.revoke_input_generation();
+
+        assert!(
+            Arc::clone(&handle).reserve_input_transaction().is_err(),
+            "logical close must reject new input without waiting for the physical writer"
+        );
+        drop(writer);
+        handle.invalidate_input_generation();
         assert!(handle.write_input(b"late input").is_err());
     }
 

@@ -1,8 +1,11 @@
-/* SPEC-3671 — Issue window as the primary surface.
+/* SPEC-3671 — Issue window as the primary surface, amended by Issue #3884.
  *
  * An Issue Monitor auto-launch must not add a window to the canvas. It becomes an
  * `issue_preview` placement that the Issue window mirrors read-only in its right
- * pane, and only an explicit Windowize puts it back on the canvas.
+ * pane, and only an explicit Windowize puts it back on the canvas. Since Issue
+ * #3884 that placement is also visible without selection as a read-only status
+ * row on the Issue row, is not drawn on the Fleet Minimap, and is broken out of
+ * the Status Strip RUNNING cell as "N inline".
  *
  * The fixture serves the embedded frontend through Playwright routes and replaces
  * WebSocket with a deterministic backend, matching `tests/kanban.spec.ts`.
@@ -76,7 +79,9 @@ test.describe("Issue preview placement", () => {
       "tab-issue::agent-preview",
     );
 
-    await page.locator(".surface-knowledge [data-issue-number='3672']").click();
+    await page
+      .locator(".surface-knowledge .knowledge-row[data-issue-number='3672'] .knowledge-row-select")
+      .click();
 
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(1);
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveAttribute(
@@ -94,7 +99,7 @@ test.describe("Issue preview placement", () => {
 
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await page
-      .locator(".surface-knowledge [data-action='windowize-issue-preview']")
+      .locator(".surface-knowledge .issue-preview [data-action='windowize-issue-preview']")
       .click();
 
     const undocked = await page.evaluate(() =>
@@ -109,6 +114,67 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(0);
   });
 
+  // SPEC #3885 AC-11 / AC-12 / AC-13 — the Windowized agent is an Issue window.
+  test("Windowize produces an Issue window that can fold back into the list", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    await page
+      .locator(".surface-knowledge .issue-preview [data-action='windowize-issue-preview']")
+      .click();
+
+    // AC-11: what lands on the canvas is an Issue window, not a bare terminal.
+    const agentWindow = page.locator(
+      ".workspace-window.surface-terminal[data-id='tab-issue::agent-preview']",
+    );
+    await expect(agentWindow).toBeVisible();
+    const header = agentWindow.locator(".issue-window-header");
+    await expect(header).toHaveCount(1);
+    await expect(header).toHaveAttribute("data-issue-number", "3671");
+    await expect(header.locator(".issue-window-header-number")).toHaveText("#3671");
+    await expect(header.locator(".issue-window-header-title")).toHaveText("Issue #3671");
+    await expect(header.locator(".issue-window-header-badge")).toHaveText("Running");
+    await expect(header.locator(".issue-window-header-badge")).toHaveCount(1);
+    expect(
+      await header.locator("button[data-action]").count(),
+    ).toBeLessThanOrEqual(2);
+    // The terminal is still the window's own, and it is still interactive.
+    await expect(agentWindow.locator(".window-body .terminal-root")).toBeVisible();
+
+    // AC-12: the return control folds the window back into its Issue row.
+    await header.locator("[data-action='return-to-list']").dispatchEvent("click");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__knowledgeLoadMessages
+            .filter((message) => message.kind === "dock_agent_window_to_issue")
+            .map((message) => message.id),
+        ),
+      )
+      .toEqual(["tab-issue::agent-preview"]);
+    await expect(
+      page.locator(".workspace-window.surface-terminal[data-id='tab-issue::agent-preview']:visible"),
+    ).toHaveCount(0);
+    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveAttribute(
+      "data-window-id",
+      "tab-issue::agent-preview",
+    );
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
   // 受け入れシナリオ 5 / FR-011.
   test("an errored agent is badged in the Issue row, not opened on the canvas", async ({
     page,
@@ -121,6 +187,9 @@ test.describe("Issue preview placement", () => {
     await expect(
       page.locator(".surface-knowledge .issue-preview .knowledge-monitor-chip"),
     ).toHaveText("Error");
+    const badge = page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge");
+    await expect(badge).toHaveText("Error");
+    await expect(badge).toHaveAttribute("data-tone", "blocked");
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
   });
@@ -137,22 +206,188 @@ test.describe("Issue preview placement", () => {
 
     await expect(page.locator(".workspace-window.surface-work")).toHaveCount(0);
 
-    const work = page.locator(
-      ".surface-knowledge [data-issue-number='3671'] .knowledge-row-work",
-    );
-    await expect(work).toHaveCount(1);
-    await expect(work.locator(".knowledge-work-lifecycle")).toHaveText("Active");
-    await expect(work.locator(".knowledge-work-attention")).toHaveText("Waiting on review");
-    await expect(work.locator(".knowledge-work-pr")).toHaveText("PR #3699 · open");
-    await expect(work.locator('[data-action="continue-work"]')).toBeEnabled();
-    await expect(work.locator('[data-action="resume-work"]')).toBeEnabled();
-    // The backend owns cleanup eligibility; a live agent keeps the action off.
-    await expect(work.locator('[data-action="cleanup-work"]')).toBeDisabled();
-
-    // An Issue with no correlated Work row shows no Work band.
+    // SPEC #3885 T-004: the Work state is folded into the row — the attention
+    // reason and the PR are the two secondary items under the primary badge, and
+    // the Work actions sit in the row's overflow menu while the agent is live.
+    // `.issue-preview` in the detail pane also carries data-issue-number, so
+    // scope every row assertion to `.knowledge-row`.
+    const row = page.locator(".surface-knowledge .knowledge-row[data-issue-number='3671']");
+    await expect(row.locator(".knowledge-row-work")).toHaveCount(0);
+    await expect(row.locator(".knowledge-row-badge")).toHaveText("Running");
+    const secondary = row.locator(".knowledge-row-secondary-item");
+    await expect(secondary).toHaveCount(2);
+    await expect(secondary.nth(0)).toHaveAttribute("data-kind", "reason");
+    await expect(secondary.nth(0)).toHaveText("Waiting on review");
+    await expect(secondary.nth(1)).toHaveText("PR #3699 · open");
     await expect(
-      page.locator(".surface-knowledge [data-issue-number='3672'] .knowledge-row-work"),
+      row.locator("button[data-action]:not(.knowledge-row-menu-list button)"),
+    ).toHaveText(["Windowize"]);
+    const menu = row.locator(".knowledge-row-menu");
+    await expect(menu).toHaveCount(1);
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
+    await expect(menu.locator('[data-action="continue-work"]')).toBeVisible();
+    await expect(menu.locator('[data-action="continue-work"]')).toBeEnabled();
+    await expect(menu.locator('[data-action="resume-work"]')).toBeEnabled();
+    // The backend owns cleanup eligibility; a live agent keeps the action off.
+    await expect(menu.locator('[data-action="cleanup-work"]')).toBeDisabled();
+
+    // An Issue with no correlated Work row has no PR chip and no Work actions.
+    const other = page.locator(".surface-knowledge .knowledge-row[data-issue-number='3672']");
+    await expect(other.locator('.knowledge-row-secondary-item[data-key="pr"]')).toHaveCount(0);
+    await expect(other.locator('[data-action="continue-work"]')).toHaveCount(0);
+
+    // SPEC #3885 AC-5: one primary badge, at most two secondary items, at most
+    // two visible actions on every row.
+    for (const issue of ["3671", "3672", "3673", "3674"]) {
+      const each = page.locator(`.surface-knowledge .knowledge-row[data-issue-number='${issue}']`);
+      await expect(each.locator(".knowledge-row-badge")).toHaveCount(1);
+      expect(await each.locator(".knowledge-row-secondary-item").count()).toBeLessThanOrEqual(2);
+      const visibleActions = await each
+        .locator("button[data-action]:not(.knowledge-row-menu-list button)")
+        .count();
+      expect(visibleActions).toBeLessThanOrEqual(2);
+      await expect(each.locator(".knowledge-chip")).toHaveCount(0);
+      await expect(each.locator(".knowledge-state-chip")).toHaveCount(0);
+      await expect(each.locator(".knowledge-monitor-chip")).toHaveCount(0);
+    }
+  });
+
+  // Issue #3884 AC-1 / AC-3 / AC-5: with three auto-launched agents and an
+  // otherwise empty canvas, nothing suggests a vanished window — the minimap
+  // shows only the Issue window, and RUNNING says where the agents are.
+  test("Issue #3884: no minimap cell for auto-launched agents, and RUNNING explains itself", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
+    const cells = page.locator("#fleet-minimap .fleet-minimap__cell");
+    await expect(cells).toHaveCount(1);
+    await expect(cells.first()).toHaveAttribute("data-window-id", "tab-issue::issue-1");
+
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    const inline = page.locator("#op-strip-running-inline");
+    await expect(inline).toBeVisible();
+    await expect(inline).toHaveText("3 inline");
+    await expect(page.locator(".op-status-strip__cell--running")).toHaveAttribute(
+      "title",
+      "3 of 3 running agents are inline terminals in the Issue window",
+    );
+
+    // Windowize one: it gains a minimap cell and the breakdown drops.
+    await page
+      .locator(
+        ".surface-knowledge [data-issue-number='3671'] .issue-agent-status [data-action='windowize-issue-preview']",
+      )
+      .click();
+    await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(1);
+    await expect(page.locator("#fleet-minimap .fleet-minimap__cell")).toHaveCount(2);
+    await expect(
+      page.locator("#fleet-minimap .fleet-minimap__cell[data-window-id='tab-issue::agent-preview']"),
+    ).toHaveCount(1);
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    await expect(inline).toHaveText("2 inline");
+
+    // SPEC #3885 T-005 / FR-012: the row keeps the Issue ↔ agent link as a
+    // "Shown on canvas" face with no second input face for the PTY.
+    const face = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
+    );
+    await expect(face).toHaveCount(1);
+    await expect(face).toHaveClass(/is-on-canvas/);
+    await expect(face).toContainText("Shown on canvas");
+    await expect(face.locator(".terminal-root")).toHaveCount(0);
+    await expect(face.locator("[data-action='windowize-issue-preview']")).toHaveCount(0);
+    await expect(
+      page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
+    ).toHaveText("Running");
+    // The Windowized canvas window overlaps the Issue window in the fixture, so
+    // dispatch the click instead of relying on hit-testing through it.
+    await face.locator("[data-action='focus-canvas-window']").dispatchEvent("click");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__knowledgeLoadMessages
+            .filter((message) => message.kind === "focus_window")
+            .map((message) => message.id)
+            .at(-1),
+        ),
+      )
+      .toBe("tab-issue::agent-preview");
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  // Issue #3884 AC-6 (PM ruling): every launched Issue row carries a read-only
+  // status row — name, state, last activity line, elapsed — without selection.
+  test("Issue #3884: each launched Issue row shows a read-only agent status row", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    const statusRows = page.locator(".surface-knowledge .issue-agent-status");
+    await expect(statusRows).toHaveCount(3);
+    for (const [issue, id] of [
+      ["3671", "tab-issue::agent-preview"],
+      ["3672", "tab-issue::agent-preview-2"],
+      ["3673", "tab-issue::agent-preview-3"],
+    ]) {
+      const row = page.locator(
+        `.surface-knowledge [data-issue-number='${issue}'] .issue-agent-status`,
+      );
+      await expect(row).toHaveAttribute("data-window-id", id);
+      // SPEC #3885 AC-5: the agent state is the Issue row's single primary badge.
+      await expect(row.locator(".knowledge-monitor-chip")).toHaveCount(0);
+      await expect(
+        page.locator(`.surface-knowledge [data-issue-number='${issue}'] .knowledge-row-badge`),
+      ).toHaveText("Running");
+      await expect(row.locator(".terminal-root")).toHaveCount(0);
+    }
+    await expect(
+      page.locator(".surface-knowledge [data-issue-number='3674'] .issue-agent-status"),
     ).toHaveCount(0);
+    // Unselected rows carry the status row too (3672 / 3673 are not selected).
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(1);
+
+    const first = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
+    );
+    await expect(first.locator(".issue-agent-status-title")).toHaveText("Issue #3671 agent");
+    await expect(first.locator(".issue-agent-status-output")).toHaveText("Running cargo test");
+    await expect(first.locator(".issue-agent-status-elapsed")).toHaveText("<1m");
+    await expect(page.locator(".surface-knowledge .knowledge-list")).not.toContainText(
+      /preview/i,
+    );
+
+    // Clicking the status row is not a selection gesture.
+    await first.locator(".issue-agent-status-output").click();
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveAttribute(
+      "data-issue-number",
+      "3671",
+    );
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
   });
 });
 
@@ -193,6 +428,9 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         agent_color: null,
         tab_group_id: null,
         tab_group_active: false,
+        // SPEC #3885 FR-011: the Issue a window belongs to is durable and survives
+        // Windowize, so the canvas face can carry the Issue header.
+        linked_issue_number: issueNumber,
         placement: {
           kind: "issue_preview",
           issue_window_id: "tab-issue::issue-1",
@@ -202,8 +440,12 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
 
       let windows = [
         issueWindow,
-        agentWindow("tab-issue::agent-preview", 3671, "Issue #3671 agent"),
+        {
+          ...agentWindow("tab-issue::agent-preview", 3671, "Issue #3671 agent"),
+          dynamic_title_detail: "Running cargo test",
+        },
         agentWindow("tab-issue::agent-preview-2", 3672, "Issue #3672 agent"),
+        agentWindow("tab-issue::agent-preview-3", 3673, "Issue #3673 agent"),
       ];
 
       const workspaceState = () => ({
@@ -227,7 +469,7 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         },
       });
 
-      const entries = [3671, 3672].map((number) => ({
+      const entries = [3671, 3672, 3673, 3674].map((number) => ({
         number,
         title: `Issue #${number}`,
         state: "open",
@@ -354,6 +596,24 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
             windows = windows.map((entry) =>
               entry.id === message.id
                 ? { ...entry, placement: { kind: "canvas" } }
+                : entry,
+            );
+            this.emit(workspaceState());
+            return;
+          }
+          if (message.kind === "dock_agent_window_to_issue") {
+            // SPEC #3885 FR-012: the inverse transition. The window already knows
+            // its Issue, so the backend resolves the host Issue window itself.
+            windows = windows.map((entry) =>
+              entry.id === message.id
+                ? {
+                    ...entry,
+                    placement: {
+                      kind: "issue_preview",
+                      issue_window_id: "tab-issue::issue-1",
+                      issue_number: entry.linked_issue_number,
+                    },
+                  }
                 : entry,
             );
             this.emit(workspaceState());

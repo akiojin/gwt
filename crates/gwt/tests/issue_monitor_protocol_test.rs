@@ -147,7 +147,7 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 #[test]
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
-        status: IssueMonitorStatusView {
+        status: Box::new(IssueMonitorStatusView {
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -160,13 +160,24 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::LastSettings,
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
+            quota_hold: None,
+            update_drain: None,
             autonomous_issues: Vec::new(),
-        },
+            launch_profile_candidates: Vec::new(),
+            provider_quota_holds: Vec::new(),
+            usage_threshold_percent: 80,
+        }),
     };
 
     let value = serde_json::to_value(event).expect("serialize status");
 
     assert_eq!(value["kind"], "issue_monitor_status");
+    // SPEC #3914 FR-009: the pool projection is always present on the wire.
+    assert_eq!(
+        value["status"]["launch_profile_candidates"],
+        serde_json::json!([])
+    );
+    assert_eq!(value["status"]["usage_threshold_percent"], 80);
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);
@@ -314,6 +325,7 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         phase: None,
         has_unknown_phase: false,
         is_spec: false,
+        parent_spec: None,
         monitor_state: Some(MonitorInboxState::HoldExcluded),
         queue_position: Some(3),
         exclusion_reason: Some("matched label: hold".to_string()),

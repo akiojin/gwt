@@ -568,9 +568,13 @@ pub fn open_obligation_refusal(
         .join(", ");
     Some(format!(
         "open action obligations [{kinds}] from this session's prompts are unsettled (T-247). \
-         Settle them first — `issue.comment` / `issue.spec.edit` for issue_update, a plan-covering \
-         all-passing `verify.run` for implementation/verification, `pr.create` / `pr.edit` / `pr.ready` \
-         for pr — or defer them with `execution.blocked` and a non-empty `params.reason`."
+         Settle them with the operation that is executable in the current state — \
+         issue_update: `issue.comment` / `issue.spec.edit`; implementation/verification: a \
+         plan-covering all-passing `verify.run`; pr: `pr.edit` (any PR state, including MERGED), \
+         `pr.ready` (open draft only), `pr.create` (only while no PR exists). A PR that someone \
+         else readied or merged on your behalf is settled by `pr.edit` on it. `execution.blocked` \
+         is not a shortcut: it is terminal, and recovery costs `execution.reopen` plus a fresh \
+         derived-plan `verify.run` — use it only for a real blocker."
     ))
 }
 
@@ -920,6 +924,30 @@ mod tests {
         let refusal = open_obligation_refusal(dir.path(), "sess-1", &[]).unwrap();
         assert!(refusal.contains("pr"), "{refusal}");
         assert!(refusal.contains("issue_update"), "{refusal}");
+        // Issue #3868 AC-28 / AC-29: the means are stated per PR state, a
+        // proxied Ready/merge has a settlement path, and the deferral names
+        // its recovery cost instead of posing as the easy way out.
+        assert!(
+            refusal.contains("`pr.edit` (any PR state, including MERGED)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`pr.ready` (open draft only)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`pr.create` (only while no PR exists)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("readied or merged on your behalf"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`execution.blocked` is not a shortcut"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("`execution.reopen`"), "{refusal}");
 
         // A PR mutation settles its own kind — excluding it leaves only the
         // issue update in the way.

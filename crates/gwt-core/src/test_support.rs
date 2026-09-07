@@ -104,6 +104,40 @@ impl Drop for ScopedEnvVar {
     }
 }
 
+/// Materialize `contents` at `path` as an executable script (mode 0755)
+/// without this process ever holding a writable descriptor to it.
+///
+/// Issue #3521: a test binary writes a fake `git` / `gh` and executes it while
+/// sibling tests fork children of their own. A child forked while the
+/// writable descriptor is still open inherits it until its own exec, and on
+/// Linux `execve` of that file fails with `ETXTBSY` for as long as the
+/// descriptor exists. Unique names, explicit drops, and `sync_all` do not
+/// close that window; never opening the file for writing in this process
+/// does. The file is therefore written by a short-lived `/bin/sh` child that
+/// has exited before this call returns.
+///
+/// `contents` travels as one argument, so keep scripts well below the
+/// platform's single-argument limit (128 KiB on Linux).
+#[cfg(unix)]
+pub fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
+    let output = crate::process::hidden_command("/bin/sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(contents)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "/bin/sh could not materialize {} ({}): {}",
+        path.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
 /// Real executable fixture for Windows-only integration tests of the Bun
 /// global Claude Code layout reported in Issue #3290.
 #[cfg(windows)]
@@ -1074,5 +1108,80 @@ mod tests {
         }
 
         assert!(gwt_home_override().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_executable_script_materializes_a_runnable_script() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("fake-tool");
+        let body = "#!/bin/sh\nprintf '%s %s\\n' \"issue-3521\" \"$1\"\n";
+
+        write_executable_script(&script, body).expect("write script");
+
+        assert_eq!(std::fs::read_to_string(&script).expect("read back"), body);
+        let output = crate::process::hidden_command(&script)
+            .arg("arg")
+            .output()
+            .expect("run script");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "issue-3521 arg\n");
+    }
+
+    /// Issue #3521: a child forked by another thread while this process holds
+    /// the script open for writing inherits that descriptor until its own
+    /// exec, and Linux refuses `execve` of the script with `ETXTBSY` for as
+    /// long as the descriptor exists. The helper must never open that window.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_executable_script_is_immediately_executable_under_concurrent_forks() {
+        use std::{
+            os::unix::process::CommandExt,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut command = crate::process::hidden_command("/bin/true");
+                        // Force the fork path and keep the child inside its
+                        // fork-to-exec window, holding every inherited
+                        // descriptor the way a slow child does under CI load.
+                        // SAFETY: `nanosleep` is async-signal-safe, so the
+                        // forked child only sleeps before it execs.
+                        unsafe {
+                            command.pre_exec(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                                Ok(())
+                            });
+                        }
+                        let _ = command.status();
+                    }
+                })
+            })
+            .collect();
+
+        for index in 0..120 {
+            let script = temp.path().join(format!("script-{index}"));
+            write_executable_script(&script, "#!/bin/sh\nexit 0\n").expect("write script");
+            let status = crate::process::hidden_command(&script)
+                .status()
+                .unwrap_or_else(|error| {
+                    panic!("script {index} must run right after it was written: {error}")
+                });
+            assert!(status.success(), "script {index} exited with {status}");
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for forker in forkers {
+            forker.join().expect("forker thread");
+        }
     }
 }
