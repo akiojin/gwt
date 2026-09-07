@@ -708,6 +708,11 @@ fn run_monitor_launch_now<E: CliEnv>(
     .map_err(io_as_api_error)?;
 
     let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+    // SPEC #4093 FR-006 (Issue #3737 AC-4): inside a GitHub refusal window the
+    // requested scan runs but its GitHub reads are refused until the window
+    // ends, so say so — with the resume time — instead of answering as if the
+    // instruction will take effect now.
+    let github_backoff = github_backoff_windows(chrono::Utc::now());
 
     out.push_str(
         &serde_json::json!({
@@ -718,11 +723,32 @@ fn run_monitor_launch_now<E: CliEnv>(
             "scan_requested": delivery.scan_requested,
             "scan_delivery": delivery.scan_delivery,
             "scan_error": delivery.scan_error,
+            "github_backoff": github_backoff,
         })
         .to_string(),
     );
     out.push('\n');
     Ok(if delivery.scan_requested { 0 } else { 1 })
+}
+
+/// The GitHub refusal windows still open on this machine (per resource), as
+/// `launch_now` reports them: resource, when the window ends, seconds to go.
+fn github_backoff_windows(now: chrono::DateTime<chrono::Utc>) -> Vec<serde_json::Value> {
+    gwt_core::github_budget::BudgetLedger::global()
+        .snapshot(now)
+        .blocks
+        .into_iter()
+        .filter(|(_, block)| block.reset_at > now)
+        .map(|(resource, block)| {
+            serde_json::json!({
+                "resource": resource,
+                "backoff_until": block
+                    .reset_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "retry_after_secs": (block.reset_at - now).num_seconds().max(0),
+            })
+        })
+        .collect()
 }
 
 /// Issue #3923 AC-1 / Issue #3961 AC-3: list every provider quota hold in
@@ -3620,6 +3646,66 @@ mod tests {
                 .priority_order
                 .starts_with(&[42]),
             "the partial priority update remains explicit and durable"
+        );
+    }
+
+    /// SPEC #4093 AC-8 (Issue #3737 AC-4): `launch_now` inside a GitHub
+    /// refusal window names the window and its resume time instead of
+    /// answering as if the scan will read GitHub right now.
+    #[test]
+    fn launch_now_reports_the_open_github_backoff_window() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let now = chrono::Utc::now();
+        let window = gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(600),
+            },
+            now,
+        );
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        let backoff = &result["github_backoff"][0];
+        assert_eq!(backoff["resource"], "graphql");
+        assert_eq!(
+            backoff["backoff_until"],
+            window
+                .reset_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        assert!(
+            backoff["retry_after_secs"].as_i64().unwrap_or(0) > 0,
+            "{result}"
+        );
+        assert!(
+            result["github_backoff"].as_array().unwrap().len() == 1,
+            "only the open window is reported: {result}"
         );
     }
 
