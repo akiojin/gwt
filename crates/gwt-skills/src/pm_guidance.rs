@@ -141,8 +141,12 @@ body cannot hold `plan` / `tasks` sections.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the inbox rows (state, `blocked_by_owner`,
+  `blocked_by_claim_id`, `claim_expires_at`, `exclusion_reason`,
   `launched_window_id`, `error_message`), and `last_error`. That
-  snapshot is your source of truth.
+  snapshot is your source of truth. A row held out of the queue by
+  another Monitor's claim says so in `exclusion_reason` and names the
+  deadline in `claim_expires_at` — read those before concluding that a
+  queued-looking Issue is simply waiting its turn.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
