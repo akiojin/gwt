@@ -52861,13 +52861,120 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0")),
         Some(CodexHookDiscoveryMode::WorkspaceHome)
     );
+    // Issue #3481 AC-1: `latest` is an alias, not a capability. It must defer
+    // to the probe evidence for the executable that will actually be spawned,
+    // exactly like `installed` does.
     assert_eq!(
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("latest")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        None
     );
     assert_eq!(
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("installed")),
         None
+    );
+}
+
+/// Issue #3481 AC-1/AC-2/AC-4: the `codex@latest` matrix. The launch-argument
+/// snapshot (`bunx --yes @openai/codex@latest`) and the resume-readiness
+/// decision both read the same runner-probe evidence, and only an absent
+/// snapshot falls back to a diagnosable superset.
+#[test]
+fn codex_latest_hook_discovery_mode_follows_runner_probe_evidence() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+
+    let old = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.130.0".to_string()),
+        ..Default::default()
+    };
+    let current = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.133.0".to_string()),
+        ..Default::default()
+    };
+    let unparseable = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("unexpected output".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&old)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
+        CodexHookDiscoveryMode::WorkspaceHome,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unparseable)),
+        CodexHookDiscoveryMode::Both,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, None),
+        CodexHookDiscoveryMode::Both,
+    );
+}
+
+/// Issue #3481 AC-2: measured evidence outranks the "we switched to the latest
+/// package, so it must be new" heuristic. A fallback that probed an old Codex
+/// still has to materialize the hooks where that Codex looks for them.
+#[test]
+fn codex_latest_fallback_evidence_outranks_the_fallback_heuristic() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        switched_to_fallback: true,
+        version_output: Some("codex-cli 0.130.0".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+}
+
+/// Issue #3481 AC-4/AC-5: an explicitly pinned version is already the exact
+/// identity of the package that will be materialized, so it stays
+/// selector-derived and never depends on a probe; non-Codex agents keep their
+/// unconditional mode.
+#[test]
+fn codex_explicit_version_and_other_agents_keep_their_existing_modes() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let pinned = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("0.130.0")
+        .build();
+    let stale_evidence = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.133.0".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&pinned, Some(&stale_evidence)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+
+    let claude = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&claude, None),
+        CodexHookDiscoveryMode::WorkspaceHome,
     );
 }
 

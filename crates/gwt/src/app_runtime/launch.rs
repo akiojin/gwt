@@ -2595,25 +2595,33 @@ pub(super) fn codex_hook_discovery_mode_for_launch_config(
     let Some(report) = health_report else {
         return gwt_skills::CodexHookDiscoveryMode::Both;
     };
-    if report.switched_to_fallback {
-        return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
-    }
-    report
+    // Issue #3481 AC-2: measured evidence from the runner probe outranks the
+    // "we switched to the latest package, so it must be new" heuristic. Both
+    // describe the same launch, but only the probe ran the executable.
+    if let Some(mode) = report
         .version_output
         .as_deref()
         .and_then(codex_hook_discovery_mode_from_codex_version_output)
-        .unwrap_or(gwt_skills::CodexHookDiscoveryMode::Both)
+    {
+        return mode;
+    }
+    if report.switched_to_fallback {
+        return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
+    }
+    gwt_skills::CodexHookDiscoveryMode::Both
 }
 
 pub(super) fn codex_hook_discovery_mode_from_selected_codex_version(
     version: Option<&str>,
 ) -> Option<gwt_skills::CodexHookDiscoveryMode> {
     let version = version?.trim();
-    if version.is_empty() || version == "installed" {
+    // Issue #3481 AC-1: `installed` and `latest` are selectors, not versions.
+    // Neither states what the resolved binary can do, so both defer to the
+    // runner-probe evidence gathered for this launch. Only an explicitly
+    // pinned version is already the exact identity of the package that the
+    // launch argv will materialize.
+    if version.is_empty() || version == "installed" || version == "latest" {
         return None;
-    }
-    if version == "latest" {
-        return Some(gwt_skills::CodexHookDiscoveryMode::WorkspaceHome);
     }
     codex_hook_discovery_mode_from_semver(version)
 }
