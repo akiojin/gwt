@@ -7682,6 +7682,7 @@ exit 0
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -7788,6 +7789,7 @@ exit 0
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11471,6 +11473,7 @@ exit 0
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -11962,6 +11965,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14210,6 +14214,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14274,6 +14279,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14391,6 +14397,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -14408,6 +14415,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -14475,6 +14483,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15087,6 +15096,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15226,6 +15236,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15360,6 +15371,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15713,6 +15725,7 @@ exit 1
             wait: None,
             needs_human_kind: None,
             steering: None,
+            review_dispatch_hold: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -15937,6 +15950,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -16948,6 +16962,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -17239,6 +17254,7 @@ exit 1
             wait: None,
             needs_human_kind: None,
             steering: None,
+            review_dispatch_hold: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,

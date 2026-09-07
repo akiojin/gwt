@@ -1570,6 +1570,20 @@ fn advance_one_autonomous_issue(
             // inventory (the readback degraded) and no row (no open PR) both
             // leave the phase where the last successful readback put it.
             if let Some(pr) = open_prs.and_then(|index| index.get(&branch).copied()) {
+                // Issue #4117 AC-1/AC-2: admission before the readbacks. A PR
+                // whose review window is already live, or a full `max_active`,
+                // keeps the record Implementing so the next scan retries; the
+                // reason lands on the record for `issue.monitor.status`.
+                if let Some(hold) = monitor.review_dispatch_hold(issue_number, pr, now) {
+                    tracing::info!(
+                        issue = issue_number,
+                        pr,
+                        reason = %hold.reason,
+                        "issue monitor: review dispatch held"
+                    );
+                    monitor.hold_review_dispatch(issue_number, hold);
+                    return Ok(());
+                }
                 if let Some(sha) =
                     run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
                         gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
@@ -1594,21 +1608,37 @@ fn advance_one_autonomous_issue(
                             gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
                         })?
                         .unwrap_or_default();
-                    monitor.begin_review(issue_number, pr, &sha);
                     let linked_issue_kind = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
                         .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
                         .unwrap_or_default();
-                    monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
-                        issue_number,
-                        pr_number: pr,
-                        reviewed_sha: sha,
-                        required_criteria: criteria,
-                        diff,
-                        linked_issue_kind,
-                    });
+                    // Issue #4117: `dispatch_review` binds the PR (`begin_review`),
+                    // enters the review window into its own ledger, and queues
+                    // the GUI spawn — or refuses and records why.
+                    if let Err(hold) = monitor.dispatch_review(
+                        crate::AutonomousReviewDispatch {
+                            issue_number,
+                            pr_number: pr,
+                            reviewed_sha: sha,
+                            required_criteria: criteria,
+                            diff,
+                            linked_issue_kind,
+                        },
+                        now,
+                    ) {
+                        tracing::info!(
+                            issue = issue_number,
+                            pr,
+                            reason = %hold.reason,
+                            "issue monitor: review dispatch held"
+                        );
+                    }
                 }
+            } else if open_prs.is_some() {
+                // Issue #4117: the inventory is fresh and shows no open PR for
+                // this branch, so a hold about an earlier PR no longer applies.
+                monitor.clear_review_dispatch_hold(issue_number);
             }
         }
         crate::AutonomousPhase::Reviewing => {
