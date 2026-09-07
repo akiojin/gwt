@@ -2375,7 +2375,6 @@ mod tests {
                 refresh: false,
                 include: None,
                 force_reason: None,
-                force_reason: None,
             },
             &mut out,
         )
@@ -2454,7 +2453,6 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
-                force_reason: None,
                 force_reason: None,
             }
         );
