@@ -2791,6 +2791,132 @@ query($owner: String!, $repo: String!, $number: Int!) {
     Ok(parse_linked_pr_nodes(&value, number.0))
 }
 
+/// Issues per bulk timeline query (SPEC #4093 FR-005). A claim frontier of
+/// any size costs `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls — one for
+/// every frontier the Issue Monitor's `max_active` can produce.
+pub const LINKED_PR_BULK_CHUNK: usize = 25;
+
+/// The timeline selection one issue alias carries in the bulk query.
+const LINKED_PR_TIMELINE_SELECTION: &str = r#"timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+        nodes {
+          __typename
+          ... on CrossReferencedEvent {
+            willCloseTarget
+            source {
+              __typename
+              ... on PullRequest {
+                number
+                title
+                state
+                url
+                body
+                mergedAt
+              }
+            }
+          }
+          ... on ConnectedEvent {
+            subject {
+              __typename
+              ... on PullRequest {
+                number
+                title
+                state
+                url
+                body
+                mergedAt
+              }
+            }
+          }
+        }
+      }"#;
+
+/// The bulk query for `numbers`: one `i<N>: issue(number: N)` alias each,
+/// plus the rate-limit block that settles the query's cost.
+pub(crate) fn linked_prs_bulk_query(numbers: &[u64]) -> String {
+    let mut query = String::from(
+        "query($owner: String!, $repo: String!) {\n  rateLimit { cost remaining resetAt nodeCount }\n  repository(owner: $owner, name: $repo) {\n",
+    );
+    for number in numbers {
+        query.push_str(&format!(
+            "    i{number}: issue(number: {number}) {{\n      {LINKED_PR_TIMELINE_SELECTION}\n    }}\n"
+        ));
+    }
+    query.push_str("  }\n}\n");
+    query
+}
+
+/// Linked PRs for every issue in `numbers` through the bulk query
+/// (SPEC #4093 FR-005): `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls
+/// instead of one per issue. An issue GitHub does not return (deleted,
+/// no access) is absent from the map.
+pub(crate) fn fetch_linked_prs_bulk_via_gh(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
+    fetch_linked_prs_bulk_via_gh_with(numbers, |query| {
+        let hub = gwt_core::process_console::global();
+        let output = gwt_core::process_console::spawn_logged_blocking(
+            &hub,
+            gwt_core::process_console::ProcessKind::Gh,
+            "gh",
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={query}"),
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("repo={repo}"),
+            ],
+            gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
+        )?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "gh api graphql failed: {}",
+                output.stderr.trim()
+            )));
+        }
+        Ok(output.stdout)
+    })
+}
+
+/// Injectable core of [`fetch_linked_prs_bulk_via_gh`]: `run` executes one
+/// bulk query and answers its JSON body.
+pub(crate) fn fetch_linked_prs_bulk_via_gh_with<F>(
+    numbers: &[u64],
+    mut run: F,
+) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>>
+where
+    F: FnMut(&str) -> io::Result<String>,
+{
+    let mut linked = std::collections::BTreeMap::new();
+    for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
+        let stdout = run(&linked_prs_bulk_query(chunk))?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
+            gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
+                &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
+                &rate_limit,
+                chrono::Utc::now(),
+            );
+        }
+        let repository = value.get("data").and_then(|v| v.get("repository"));
+        for number in chunk {
+            let Some(issue) = repository
+                .and_then(|v| v.get(format!("i{number}")))
+                .filter(|v| !v.is_null())
+            else {
+                continue;
+            };
+            linked.insert(*number, parse_linked_pr_timeline(issue, *number));
+        }
+    }
+    Ok(linked)
+}
+
 /// Parse the issue-timeline GraphQL response into linked-PR summaries.
 /// `will_close_target` comes from `CrossReferencedEvent.willCloseTarget`;
 /// `ConnectedEvent` (a manually linked PR) closes the issue on merge, so it
@@ -2800,11 +2926,22 @@ pub(crate) fn parse_linked_pr_nodes(
     value: &serde_json::Value,
     issue_number: u64,
 ) -> Vec<LinkedPrSummary> {
-    let nodes = value
+    value
         .get("data")
         .and_then(|v| v.get("repository"))
         .and_then(|v| v.get("issue"))
-        .and_then(|v| v.get("timelineItems"))
+        .map(|issue| parse_linked_pr_timeline(issue, issue_number))
+        .unwrap_or_default()
+}
+
+/// [`parse_linked_pr_nodes`] for one `issue { timelineItems { nodes } }`
+/// object, as the single query and every alias of the bulk query return it.
+pub(crate) fn parse_linked_pr_timeline(
+    issue: &serde_json::Value,
+    issue_number: u64,
+) -> Vec<LinkedPrSummary> {
+    let nodes = issue
+        .get("timelineItems")
         .and_then(|v| v.get("nodes"))
         .and_then(|v| v.as_array())
         .cloned()
@@ -5946,6 +6083,48 @@ mod tests {
 
         assert!(error.to_string().contains("not found"));
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    /// SPEC #4093 AC-7: the completion probe reads every candidate's linked
+    /// PRs in `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls, never one per
+    /// candidate, and each alias is parsed back to its own issue.
+    #[test]
+    fn linked_prs_are_read_in_bulk_with_a_constant_number_of_calls() {
+        let numbers: Vec<u64> = (1..=30).collect();
+        let mut queries = Vec::new();
+        let linked = fetch_linked_prs_bulk_via_gh_with(&numbers, |query| {
+            queries.push(query.to_string());
+            let mut repository = serde_json::Map::new();
+            for number in 1..=30u64 {
+                if !query.contains(&format!("i{number}: issue(number: {number})")) {
+                    continue;
+                }
+                repository.insert(
+                    format!("i{number}"),
+                    serde_json::json!({"timelineItems": {"nodes": [{
+                        "__typename": "CrossReferencedEvent",
+                        "willCloseTarget": true,
+                        "source": {"__typename": "PullRequest", "number": number + 100,
+                                   "title": format!("fix #{number}"), "state": "MERGED",
+                                   "url": "https://example.test/pull", "body": "", "mergedAt": "2026-09-01T00:00:00Z"}
+                    }]}}),
+                );
+            }
+            Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+        })
+        .expect("bulk read");
+        assert_eq!(
+            queries.len(),
+            30_usize.div_ceil(LINKED_PR_BULK_CHUNK),
+            "calls grow with the chunk count, not with the candidate count"
+        );
+        assert!(queries[0].contains("rateLimit { cost remaining resetAt nodeCount }"));
+        assert!(queries[0].contains("i1: issue(number: 1)"));
+        assert!(queries[1].contains("i30: issue(number: 30)"));
+        assert_eq!(linked.len(), 30);
+        assert_eq!(linked[&7][0].number, 107);
+        assert!(linked[&7][0].will_close_target);
+        assert_eq!(linked[&30][0].number, 130);
     }
 
     /// SPEC #4093 AC-10: `issue.view refresh:true` inside a persisted GitHub

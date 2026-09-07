@@ -4345,6 +4345,18 @@ fn scan_issue_monitor_once_blocking(
             let mut probe_deferred = std::collections::BTreeSet::new();
             let mut probe_deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> =
                 None;
+            // SPEC #4093 FR-005: read the linked PRs of the whole claim
+            // frontier in one bulk query; the per-candidate probe below
+            // answers from it and only spawns for a candidate it missed.
+            let (_, probe_frontier) = monitor.claim_probe_plan(active_cap);
+            let probe_batch = crate::issue_monitor_worker::LinkedPrProbeBatch::prefetch(
+                &owner,
+                &repo,
+                loaded
+                    .issues
+                    .iter()
+                    .filter(|issue| probe_frontier.contains(&issue.number)),
+            );
             let prepared = monitor.try_prepare_claim_effects_with_probe_confirmed(
                 &monitor_owner,
                 &now,
@@ -4358,8 +4370,11 @@ fn scan_issue_monitor_once_blocking(
                     else {
                         return Ok(crate::issue_monitor::ClaimProbeOutcome::Claimable);
                     };
-                    match crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
-                        &owner, &repo, issue,
+                    match crate::issue_monitor_worker::try_issue_completed_by_merged_pr_with(
+                        &owner,
+                        &repo,
+                        issue,
+                        Some(&probe_batch),
                     ) {
                         Ok(completed) => Ok(
                             crate::issue_monitor::ClaimProbeOutcome::from_completed(completed),
