@@ -51,6 +51,7 @@ pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_drain;
 pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
@@ -162,11 +163,12 @@ pub use issue_monitor::{
     IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver, IssueMonitorScanDriverKind,
     IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch,
     IssueMonitorStopOutcome, IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts,
-    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary,
-    IssueMonitorWindowObservation, IssueMonitorWindowSnapshot, LaunchProfileSelection,
-    LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement, MergedIssueSettlementAction,
-    MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
-    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl, IssueMonitorUpdateDrainReason,
+    IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
+    LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement,
+    MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect,
+    AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

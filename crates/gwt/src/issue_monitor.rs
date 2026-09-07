@@ -164,6 +164,15 @@ pub struct AutonomousTuning {
     /// launch profile's model (still a fresh, adversarial session).
     #[serde(default)]
     pub review_model: Option<String>,
+    /// Issue #3906 AC-9: how long an update drain may last before the
+    /// "still draining" warning fires (and re-fires at the same cadence).
+    /// Elapsing never kills an agent; the drain keeps waiting.
+    #[serde(default = "default_update_drain_notify_after_secs")]
+    pub update_drain_notify_after_secs: u64,
+}
+
+fn default_update_drain_notify_after_secs() -> u64 {
+    crate::update_drain::DEFAULT_UPDATE_DRAIN_NOTIFY_AFTER_SECS
 }
 
 impl Default for AutonomousTuning {
@@ -177,6 +186,7 @@ impl Default for AutonomousTuning {
             retry_backoff_base_secs: 60,
             retry_backoff_cap_secs: 1800,
             review_model: None,
+            update_drain_notify_after_secs: default_update_drain_notify_after_secs(),
         }
     }
 }
@@ -967,6 +977,11 @@ pub struct IssueMonitorPrefs {
     /// `None` follows `autonomous_mode`; `Some` is an explicit override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: apply a staged gwt update automatically once the
+    /// host is quiescent. `None` follows `autonomous_mode` (ON while
+    /// unattended, OFF otherwise); `Some` is an explicit override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: deliveries already settled (closed / annotated), so
     /// the same merge is never settled twice after a human reopen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1044,6 +1059,7 @@ impl Default for IssueMonitorPrefs {
             closure_records: Vec::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
@@ -1457,6 +1473,15 @@ pub struct IssueMonitorGenerationReclaimSummary {
     /// When that releasing scan ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<String>,
+    /// Issue #4042 AC-2: the generation id each Issue was last released on.
+    /// Carried forward across scans; a later refusal on the same generation is
+    /// a reclaim loop, a refusal on a successor is a fresh fact.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub released_generations: BTreeMap<u64, String>,
+    /// Issue #4042 AC-2: Issues this scan held with `reclaim loop detected`
+    /// instead of releasing again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_detected: Vec<u64>,
 }
 
 /// converges on it. Kept until the same issue fails again, at which point the
@@ -2062,13 +2087,34 @@ pub enum IssueMonitorUpdateDrainReason {
 /// `AcquireClaim` effect, exactly like a provider quota hold — but unlike
 /// `enabled:false` it never touches the launches already in flight, so the
 /// agents being drained stay attributable and are never relaunched after the
-/// restart. `version` is the gwt version that raised the drain and `since`
-/// the RFC3339 instant it was raised; re-raising keeps the original instant.
+/// restart. `version` is the gwt version the drain is about — the staged
+/// update version for an `Auto` drain (#3906 AC-3), the running gwt version
+/// for a `Manual` one — and `since` the RFC3339 instant it was raised;
+/// re-raising keeps the original instant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorUpdateDrain {
     pub version: String,
     pub since: String,
     pub reason: IssueMonitorUpdateDrainReason,
+    /// Issue #3906 AC-12: what still keeps the host from being quiescent.
+    /// Filled by the GUI process on the status view only (it is the one that
+    /// sees the panes); the persisted prefs copy stays empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<crate::update_drain::UpdateBlocker>,
+}
+
+/// Issue #3906 AC-3: how a `config_set` control asks for the drain.
+/// `true` / `false` (the #4037 operator form) raise a `Manual` drain stamped
+/// with the running gwt version or clear it; the object form lets the update
+/// mechanism raise an `Auto` drain for the staged update version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IssueMonitorUpdateDrainControl {
+    Toggle(bool),
+    Raise {
+        reason: IssueMonitorUpdateDrainReason,
+        version: String,
+    },
 }
 
 /// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
@@ -2248,6 +2294,10 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
     #[serde(default)]
     pub autonomous_mode: bool,
+    /// Issue #3906 AC-1: effective auto-apply setting (override or
+    /// `autonomous_mode`), so the GUI toggle shows what will happen.
+    #[serde(default)]
+    pub auto_apply_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
     /// Issue #4037 AC-6: the update drain, if raised.
@@ -2913,6 +2963,9 @@ pub struct IssueMonitorState {
     /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
     #[serde(default)]
     auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: auto-apply override; `None` follows `autonomous_mode`.
+    #[serde(default)]
+    auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: settled deliveries keyed by Issue number.
     #[serde(default)]
     merged_issue_settlements: BTreeMap<u64, MergedIssueSettlement>,
@@ -4658,6 +4711,7 @@ impl IssueMonitorState {
             closure_reopen_tombstones: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
@@ -4849,6 +4903,7 @@ impl IssueMonitorState {
         }
         state.autonomous_mode = prefs.autonomous_mode;
         state.auto_close_merged_issues = prefs.auto_close_merged_issues;
+        state.auto_apply_updates = prefs.auto_apply_updates;
         for settlement in prefs.merged_issue_settlements {
             state
                 .merged_issue_settlements
@@ -4936,6 +4991,7 @@ impl IssueMonitorState {
             closure_records: self.closure_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
             auto_close_merged_issues: self.auto_close_merged_issues,
+            auto_apply_updates: self.auto_apply_updates,
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
@@ -6990,6 +7046,7 @@ impl IssueMonitorState {
         // commit to disk, so disk owns it like the other config switches.
         self.update_drain = disk.update_drain.clone();
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
+        self.auto_apply_updates = disk.auto_apply_updates;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
@@ -8001,6 +8058,7 @@ impl IssueMonitorState {
             version: version.to_string(),
             since: now.to_string(),
             reason,
+            blocking: Vec::new(),
         });
     }
 
@@ -8089,6 +8147,7 @@ impl IssueMonitorState {
                 &self.launch_profiles,
             ),
             autonomous_mode: self.autonomous_mode,
+            auto_apply_updates: self.auto_apply_updates_enabled(),
             quota_hold,
             update_drain: self.update_drain.clone(),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
@@ -8371,6 +8430,25 @@ impl IssueMonitorState {
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
         self.auto_close_merged_issues = value;
         Some(next_epoch)
+    }
+
+    /// Issue #3906 AC-1: the explicit auto-apply override, if any.
+    pub fn auto_apply_updates(&self) -> Option<bool> {
+        self.auto_apply_updates
+    }
+
+    /// Issue #3906 AC-1: whether a staged gwt update is applied by gwt itself
+    /// once the host is quiescent. Without an override this follows
+    /// `autonomous_mode`, so unattended operation defaults to ON and attended
+    /// operation keeps the manual update button.
+    pub fn auto_apply_updates_enabled(&self) -> bool {
+        self.auto_apply_updates.unwrap_or(self.autonomous_mode)
+    }
+
+    /// Change the auto-apply override. Unlike the auto-close override this
+    /// authorizes no remote effect, so no authority epoch advances.
+    pub fn set_auto_apply_updates(&mut self, value: Option<bool>) {
+        self.auto_apply_updates = value;
     }
 
     /// Issue #3917: the settlement recorded for `issue_number`, if any.
@@ -11474,6 +11552,7 @@ impl IssueMonitorState {
             summary.released = previous.released.clone();
             summary.released_by_holder_state = previous.released_by_holder_state.clone();
             summary.released_at = previous.released_at.clone();
+            summary.released_generations = previous.released_generations.clone();
         }
         let mut released = Vec::new();
         let mut released_by_holder_state = BTreeMap::<String, usize>::new();
@@ -11492,12 +11571,37 @@ impl IssueMonitorState {
                     .pending_launch_deliveries
                     .iter()
                     .any(|delivery| delivery.issue_number == issue_number);
-            match hold.map(|hold| hold.status) {
-                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed)
-                    if !launch_live =>
+            match hold {
+                Some(hold)
+                    if matches!(
+                        hold.status,
+                        ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed
+                    ) && !launch_live =>
                 {
+                    // Issue #4042 AC-2: this generation was already released
+                    // and the launch that followed was refused on it anyway.
+                    // The two readings disagree; releasing again would only
+                    // repeat the refusal once a minute (#3885), so hold the
+                    // row and say so once.
+                    if summary.released_generations.get(&issue_number) == Some(&hold.generation_id)
+                    {
+                        let reason = format!(
+                            "reclaim loop detected: the Issue Monitor released generation {} of issue #{issue_number} (holder Session {} {holder_state}) and the next launch was refused on the same generation; holding the row instead of requeueing again. Run the execution.status JSON operation for the exact recovery route",
+                            hold.generation_id, hold.holder_session_id
+                        );
+                        if self.replace_failed_issue_message(issue_number, &reason) {
+                            self.push_autonomous_notice(
+                                "warn",
+                                issue_number,
+                                format!("Issue #{issue_number} held: {reason}"),
+                            );
+                        }
+                        summary.loop_detected.push(issue_number);
+                        continue;
+                    }
                     let reason = format!(
-                        "stranded execution generation released (holder Session {holder_state}); returned to the queue by the Issue Monitor"
+                        "stranded execution generation {} released (holder Session {holder_state}); returned to the queue by the Issue Monitor",
+                        hold.generation_id
                     );
                     if matches!(
                         self.release_failed_issue_hold(issue_number, &reason, now),
@@ -11510,6 +11614,9 @@ impl IssueMonitorState {
                         );
                         released.push(issue_number);
                         *released_by_holder_state.entry(holder_state).or_default() += 1;
+                        summary
+                            .released_generations
+                            .insert(issue_number, hold.generation_id);
                     }
                 }
                 Some(_) | None => {
@@ -11528,12 +11635,44 @@ impl IssueMonitorState {
         }
         if summary.stranded.is_empty()
             && summary.released.is_empty()
+            && summary.loop_detected.is_empty()
             && self.generation_reclaim.is_none()
         {
             return summary;
         }
         self.generation_reclaim = Some(summary.clone());
         summary
+    }
+
+    /// Issue #4042 AC-2: keep a failed row held but replace what it says.
+    ///
+    /// Unlike [`Self::record_failed_issue`] this never re-enters the failure
+    /// lifecycle (attempt accounting, autonomous retry, window bookkeeping):
+    /// the row already failed, only its explanation changes. Returns whether
+    /// the message actually changed, so a repeated scan stays silent.
+    fn replace_failed_issue_message(&mut self, issue_number: u64, message: &str) -> bool {
+        let Some(current) = self.failed_issues.get(&issue_number) else {
+            return false;
+        };
+        if current == message {
+            return false;
+        }
+        let previous_banner = format!("issue #{issue_number}: {current}");
+        self.failed_issues.insert(issue_number, message.to_string());
+        // A hold that supersedes the release must not be erased by it on the
+        // next cross-process rebase, exactly like a newer failure.
+        self.released_failures.remove(&issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = Some(message.to_string());
+        }
+        if self.last_error.as_deref() == Some(previous_banner.as_str()) {
+            self.last_error = Some(format!("issue #{issue_number}: {message}"));
+        }
+        true
     }
 
     /// Issue #3959 AC-5: return every row still held by a pre-#3930
@@ -11796,8 +11935,22 @@ impl IssueMonitorState {
         for entry in incoming {
             by_version.insert(entry.release_version, entry);
         }
-        let drop_count = by_version.len().saturating_sub(REQUEUE_AUDIT_CAP);
-        self.requeue_audit = by_version.into_values().skip(drop_count).collect();
+        // Issue #4042 AC-3: a run of releases of one Issue for one reason is
+        // one fact repeating, not history worth the cap; keep its latest
+        // occurrence so the audit stays bounded by content as well as count.
+        let mut compressed = Vec::<IssueMonitorReleasedFailure>::with_capacity(by_version.len());
+        for entry in by_version.into_values() {
+            match compressed.last_mut() {
+                Some(last)
+                    if last.issue_number == entry.issue_number && last.reason == entry.reason =>
+                {
+                    *last = entry;
+                }
+                _ => compressed.push(entry),
+            }
+        }
+        let drop_count = compressed.len().saturating_sub(REQUEUE_AUDIT_CAP);
+        self.requeue_audit = compressed.into_iter().skip(drop_count).collect();
     }
 
     /// Restore the invariant that one issue is never both failed and released.
@@ -15145,6 +15298,7 @@ mod tests {
                 version: "9.91.0".to_string(),
                 since: now.to_string(),
                 reason: IssueMonitorUpdateDrainReason::Manual,
+                blocking: Vec::new(),
             })
         );
         // Re-raising an already raised drain keeps the original instant.
@@ -18169,6 +18323,170 @@ mod tests {
         )
     }
 
+    /// Issue #4042 AC-2 / AC-4: production looped on #3885 once a minute —
+    /// the reclaim read the generation as Blocked with an Idle holder and
+    /// released the row, the launch that followed was refused on the very
+    /// same generation as Active with a Running holder, and the row failed
+    /// again. Releasing the same generation twice can never help: the second
+    /// refusal proves the two readings disagree, so the row is held with a
+    /// `reclaim loop detected` failure instead, and three scans on the
+    /// divergent fixture grow the audit by exactly one entry.
+    #[test]
+    fn release_stranded_generation_failures_stops_after_the_same_generation_is_refused_again() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-06T16:44:00Z");
+        let divergent_probe = |_: u64| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                generation_id: "gen-3885".to_string(),
+                holder_session_id: "holder-42".to_string(),
+                holder_session_state: "Idle".to_string(),
+            })
+        };
+
+        // Scan 1: the release itself is legitimate and audited once.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let first =
+            monitor.release_stranded_generation_failures("2026-09-06T16:45:26Z", divergent_probe);
+        assert_eq!(first.released, vec![42]);
+        assert_eq!(
+            first.released_generations,
+            BTreeMap::from([(42, "gen-3885".to_string())]),
+            "the reclaim remembers which generation it released"
+        );
+        assert!(first.loop_detected.is_empty());
+        assert!(monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+
+        // Scan 2: the launch was refused on the same generation. Do not
+        // release again; hold the row and say why.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let second =
+            monitor.release_stranded_generation_failures("2026-09-06T16:46:09Z", divergent_probe);
+        assert_eq!(second.loop_detected, vec![42]);
+        assert!(second.stranded.is_empty());
+        assert_eq!(
+            second.released_at.as_deref(),
+            Some("2026-09-06T16:45:26Z"),
+            "a loop scan releases nothing"
+        );
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+        let held_message = monitor
+            .prefs()
+            .failed_issues
+            .into_iter()
+            .find(|failed| failed.issue_number == 42)
+            .map(|failed| failed.message)
+            .expect("the row stays held");
+        assert!(
+            held_message.contains("reclaim loop detected")
+                && held_message.contains("gen-3885")
+                && held_message.contains("holder-42"),
+            "unexpected hold message: {held_message}"
+        );
+        assert!(
+            !crate::cli::execution_state::is_execution_generation_conflict(&held_message),
+            "the hold must not read as a fresh generation conflict, or the next scan probes it again"
+        );
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+
+        // Scan 3: a stale process re-stamps the same refusal. Still one audit
+        // entry, still held, same message.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let third =
+            monitor.release_stranded_generation_failures("2026-09-06T16:47:08Z", divergent_probe);
+        assert_eq!(third.loop_detected, vec![42]);
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.prefs().requeue_audit.len(),
+            1,
+            "three scans on the divergent fixture must not grow the audit past the first release"
+        );
+        assert_eq!(
+            monitor
+                .prefs()
+                .failed_issues
+                .into_iter()
+                .find(|failed| failed.issue_number == 42)
+                .map(|failed| failed.message),
+            Some(held_message)
+        );
+
+        // A successor generation is a different fact: releasing it is legitimate.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let successor =
+            monitor.release_stranded_generation_failures("2026-09-06T16:48:00Z", |_| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                    generation_id: "gen-successor".to_string(),
+                    holder_session_id: "holder-42-successor".to_string(),
+                    holder_session_state: "Idle".to_string(),
+                })
+            });
+        assert_eq!(successor.released, vec![42]);
+        assert!(successor.loop_detected.is_empty());
+        assert_eq!(
+            successor.released_generations,
+            BTreeMap::from([(42, "gen-successor".to_string())])
+        );
+        assert!(monitor.queued_issue_numbers().contains(&42));
+    }
+
+    /// Issue #4042 AC-3: the audit is bounded by content, not only by count.
+    /// Consecutive releases of one Issue for one reason collapse to the latest
+    /// occurrence, so a repeating release cannot push distinct history out of
+    /// the cap.
+    #[test]
+    fn requeue_audit_compresses_consecutive_entries_with_the_same_issue_and_reason() {
+        let entry =
+            |release_version: u64, issue_number: u64, reason: &str| IssueMonitorReleasedFailure {
+                issue_number,
+                release_version,
+                released_at: format!("2026-09-06T16:{release_version:02}:00Z"),
+                reason: reason.to_string(),
+                attempts_before: 1,
+                attempts_after: 0,
+            };
+        let stranded = "stranded execution generation released (holder Session Idle); returned to the queue by the Issue Monitor";
+        let monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                failure_release_version: 7,
+                requeue_audit: vec![
+                    entry(1, 3885, stranded),
+                    entry(2, 3885, stranded),
+                    entry(3, 3885, "operator recovery"),
+                    entry(4, 3885, stranded),
+                    entry(5, 3885, stranded),
+                    entry(6, 3885, stranded),
+                    entry(7, 3886, stranded),
+                ],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        let audit = monitor.prefs().requeue_audit;
+        assert_eq!(
+            audit
+                .iter()
+                .map(|entry| (entry.release_version, entry.issue_number))
+                .collect::<Vec<_>>(),
+            vec![(2, 3885), (3, 3885), (6, 3885), (7, 3886)],
+            "runs collapse to their latest entry; a different reason or Issue breaks the run"
+        );
+        assert_eq!(
+            audit
+                .iter()
+                .find(|entry| entry.release_version == 6)
+                .map(|entry| entry.released_at.as_str()),
+            Some("2026-09-06T16:06:00Z")
+        );
+    }
+
     /// Issue #3964 AC-1: the generation reaper releases the owner's
     /// generation, but the Monitor row that failed on that generation stayed
     /// `agent_failed` until a human ran `issue.monitor.requeue` — 29 of the 45
@@ -18193,11 +18511,15 @@ mod tests {
             monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
                 match issue_number {
                     42 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        generation_id: "gen-fixture".to_string(),
+                        holder_session_id: "holder-fixture".to_string(),
                         status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
                         holder_session_state: "Interrupted".to_string(),
                     }),
                     43 => panic!("a row that did not fail on a generation is never probed"),
                     44 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        generation_id: "gen-fixture".to_string(),
+                        holder_session_id: "holder-fixture".to_string(),
                         status: crate::cli::execution_state::ExecutionControlStatus::Completed,
                         holder_session_state: "Idle".to_string(),
                     }),
@@ -18273,6 +18595,8 @@ mod tests {
         let first =
             monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
                 Some(crate::cli::execution_state::OwnerGenerationHold {
+                    generation_id: "gen-fixture".to_string(),
+                    holder_session_id: "holder-fixture".to_string(),
                     status: crate::cli::execution_state::ExecutionControlStatus::Active,
                     holder_session_state: if issue_number == 42 {
                         "Running".to_string()
@@ -18301,6 +18625,8 @@ mod tests {
         let second =
             monitor.release_stranded_generation_failures("2026-09-05T00:10:00Z", |issue_number| {
                 Some(crate::cli::execution_state::OwnerGenerationHold {
+                    generation_id: "gen-fixture".to_string(),
+                    holder_session_id: "holder-fixture".to_string(),
                     status: if issue_number == 43 {
                         crate::cli::execution_state::ExecutionControlStatus::Blocked
                     } else {
@@ -18320,6 +18646,8 @@ mod tests {
         // A quiet scan keeps the last release visible instead of blanking it.
         let third = monitor.release_stranded_generation_failures("2026-09-05T00:15:00Z", |_| {
             Some(crate::cli::execution_state::OwnerGenerationHold {
+                generation_id: "gen-fixture".to_string(),
+                holder_session_id: "holder-fixture".to_string(),
                 status: crate::cli::execution_state::ExecutionControlStatus::Active,
                 holder_session_state: "Running".to_string(),
             })
@@ -18350,6 +18678,8 @@ mod tests {
 
         let summary = monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |_| {
             Some(crate::cli::execution_state::OwnerGenerationHold {
+                generation_id: "gen-fixture".to_string(),
+                holder_session_id: "holder-fixture".to_string(),
                 status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
                 holder_session_state: "Interrupted".to_string(),
             })
@@ -24114,6 +24444,87 @@ mod tests {
                 )
             })
             .cloned()
+    }
+
+    #[test]
+    fn update_drain_blocking_defaults_empty_and_control_accepts_both_shapes() {
+        // Issue #3906 AC-3 / AC-12: a #4037-era drain without `blocking`
+        // still loads, and the control accepts the operator bool as well as
+        // the auto-drain object.
+        let legacy = r#"{"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}"#;
+        let drain: IssueMonitorUpdateDrain = serde_json::from_str(legacy).expect("legacy drain");
+        assert!(drain.blocking.is_empty());
+        assert_eq!(
+            serde_json::to_value(&drain).expect("serialize"),
+            serde_json::json!({"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}),
+            "an empty blocking list is not persisted"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(serde_json::json!(true))
+                .expect("bool control"),
+            IssueMonitorUpdateDrainControl::Toggle(true)
+        );
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+                serde_json::json!({"reason":"auto","version":"9.99.0"})
+            )
+            .expect("object control"),
+            IssueMonitorUpdateDrainControl::Raise {
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                version: "9.99.0".to_string(),
+            }
+        );
+        assert!(serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+            serde_json::json!({"reason":"auto"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auto_apply_updates_defaults_to_autonomous_mode_and_round_trips() {
+        // Issue #3906 AC-1: no override follows autonomous_mode (ON while
+        // unattended, OFF otherwise); an override persists and the effective
+        // value is what the status view reports.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(monitor.auto_apply_updates(), None);
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert!(!monitor.status_view().auto_apply_updates);
+        assert!(monitor
+            .set_autonomous_mode_with_effect_revocation(true)
+            .is_some());
+        assert!(
+            monitor.auto_apply_updates_enabled(),
+            "autonomous mode turns auto-apply on by default"
+        );
+        assert!(monitor.status_view().auto_apply_updates);
+
+        let epoch = monitor.effect_authority_epoch();
+        monitor.set_auto_apply_updates(Some(false));
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert_eq!(
+            monitor.effect_authority_epoch(),
+            epoch,
+            "the override authorizes no remote effect, so no grant is revoked"
+        );
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.auto_apply_updates, Some(false));
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.auto_apply_updates(), Some(false));
+        assert!(restored.autonomous_mode());
+        assert!(!restored.auto_apply_updates_enabled());
+        assert!(!restored.status_view().auto_apply_updates);
+    }
+
+    #[test]
+    fn autonomous_tuning_without_update_drain_notify_after_secs_uses_1800() {
+        // Issue #3906 AC-9: pre-#3906 tuning objects (every other field
+        // present, this one absent) deserialize with the documented default.
+        let legacy = r#"{"max_attempts":3,"stuck_timeout_secs":1800,"heartbeat_interval_secs":120,"merge_watch_timeout_secs":3600,"deliver_fix_loop_cap":5,"retry_backoff_base_secs":60,"retry_backoff_cap_secs":1800}"#;
+        let tuning: AutonomousTuning = serde_json::from_str(legacy).expect("legacy tuning");
+        assert_eq!(tuning.update_drain_notify_after_secs, 1800);
+        assert_eq!(tuning, AutonomousTuning::default());
     }
 
     #[test]

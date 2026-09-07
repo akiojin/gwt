@@ -11,6 +11,8 @@ use serde_json::Value;
 
 const SLOW_HANDLER_THRESHOLD_MS: f64 = 1000.0;
 const SELF_HEALED_MARKER: &str = ".gwt/managed-hook-self-healed";
+/// How long a hook failure keeps showing in `hook.health` (Issue #3541).
+const HOOK_FAILURE_RETENTION_HOURS: i64 = 24;
 const MANAGED_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -133,6 +135,7 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
 
     audit_managed_hook_configs(input, &mut health);
     audit_hook_profile(input, &mut health);
+    audit_hook_failures(input, &mut health);
 
     let Some(runtime_state_path) = input.runtime_state_path.as_ref() else {
         if health.status == ManagedHookHealthStatus::Ready {
@@ -267,6 +270,86 @@ fn audit_hook_profile(input: &ManagedHookHealthInput, health: &mut ManagedHookHe
             format!("slow managed hook handler: {event}/{handler} took {duration_ms:.1}ms"),
         );
     }
+}
+
+/// Issue #3541: project recent hook failures from the host error ledger so a
+/// later successful event turns them into "recovered" evidence instead of
+/// erasing them. Unresolved handler failures degrade health; recovered and
+/// fail-open (live forwarding) failures need attention until they age out.
+fn audit_hook_failures(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
+    use gwt_core::error_ledger::{ErrorKind, ErrorRecord};
+
+    let since = chrono::Utc::now() - chrono::Duration::hours(HOOK_FAILURE_RETENTION_HOURS);
+    let Ok(rows) = gwt_core::error_ledger::list_since(Some(since)) else {
+        return;
+    };
+    let worktree = comparable_path(&input.worktree_root);
+    let mut latest_hard: Option<ErrorRecord> = None;
+    let mut latest_fail_open: Option<ErrorRecord> = None;
+    // `list_since` returns rows oldest first, so the last match wins.
+    for row in rows.into_iter().filter(|row| {
+        row.kind == ErrorKind::HookFailure
+            && row
+                .target
+                .project_root
+                .as_deref()
+                .is_some_and(|root| comparable_path(Path::new(root)) == worktree)
+    }) {
+        if row.context.get("fail_open").map(String::as_str) == Some("true") {
+            latest_fail_open = Some(row);
+        } else {
+            latest_hard = Some(row);
+        }
+    }
+
+    if let Some(row) = latest_hard {
+        let completed_at = input
+            .runtime_state_path
+            .as_deref()
+            .and_then(read_last_completed_hook_event_at);
+        let recovered = completed_at.is_some_and(|at| at > row.recorded_at);
+        let state = if recovered { "recovered" } else { "unresolved" };
+        let issue = describe_hook_failure(&row, state);
+        if recovered {
+            needs_attention(health, issue);
+        } else {
+            degraded(health, issue);
+        }
+    }
+    if let Some(row) = latest_fail_open {
+        needs_attention(health, describe_hook_failure(&row, "fail-open"));
+    }
+}
+
+fn describe_hook_failure(row: &gwt_core::error_ledger::ErrorRecord, state: &str) -> String {
+    let field = |key: &str| {
+        row.context
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    format!(
+        "managed hook failure: {}/{} state={state} recorded_at={} (errors.list id={})",
+        field("event"),
+        field("handler"),
+        row.recorded_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        row.id
+    )
+}
+
+fn read_last_completed_hook_event_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let at = value.get("last_completed_hook_event_at")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
