@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Issue #3545: the release close guard reopens Issues the Release PR merge
+  # closed by accident.
+  issues: write
 
 jobs:
   create-tag:
@@ -25,6 +28,21 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+
+      # Issue #3545 AC-3: `main` is the default branch, so any closing keyword
+      # that reached it with this merge (Release PR body, carried commit
+      # messages) closed its Issue regardless of open acceptance criteria.
+      # Reopen those Issues with a marker comment. A guard failure must not
+      # block the release build, so the step only annotates the run.
+      - name: Reopen Issues closed by the release merge
+        if: github.event_name == 'push'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_close_guard.py \
+            --merge-sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Get version from Cargo.toml
         id: tag
