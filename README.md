@@ -689,8 +689,10 @@ gwt shows an actionable hint.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
-  focused window is recentered
+- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
+  windows by activity: running/starting first, waiting/idle next, then the
+  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
+  activated when selected, and the focused Agent is recentered
 
 ## Operator Design Language (SPEC-2356)
 
