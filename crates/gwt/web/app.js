@@ -3570,20 +3570,24 @@
       const STOPPED_RUNTIME_STATES = new Set(["stopped", "exited", "error"]);
 
       function updateWindowKillSwitchControls(element, windowData, runtimeState) {
-        const stopButton = element.querySelector("[data-action='stop']");
         const restartButton = element.querySelector("[data-action='restart']");
-        if (!stopButton || !restartButton) {
+        const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
+        const openIssueButton = element.querySelector("[data-action='open-issue']");
+        if (!restartButton || !minimizeToIssueButton || !openIssueButton) {
           return;
         }
+        // SPEC #3885 FR-015: the Issue controls exist exactly when the window is
+        // the canvas face of an Issue — the same condition that gives it an
+        // Issue header. FR-013's bare terminal shows neither.
+        const isIssueWindow = Boolean(issueWindowHeaderModelFor(windowData));
+        minimizeToIssueButton.hidden = !isIssueWindow;
+        openIssueButton.hidden = !isIssueWindow;
         const isAgentWindow = shouldShowRuntimeStatus(windowData);
         if (!isAgentWindow) {
-          stopButton.hidden = true;
           restartButton.hidden = true;
           return;
         }
-        const isStopped = STOPPED_RUNTIME_STATES.has(runtimeState);
-        stopButton.hidden = isStopped;
-        restartButton.hidden = !isStopped;
+        restartButton.hidden = !STOPPED_RUNTIME_STATES.has(runtimeState);
       }
 
       function stopSpinnerAnimation(overlay) {
@@ -5091,6 +5095,13 @@
         const body = element.querySelector(".window-body");
         if (!body) return;
         const model = issueWindowHeaderModelFor(windowData);
+        // SPEC #3885 FR-015: the titlebar's Issue controls appear on exactly the
+        // windows that carry the header, so they follow placement changes
+        // (Windowize / return to list) and not just runtime status events.
+        const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
+        const openIssueButton = element.querySelector("[data-action='open-issue']");
+        if (minimizeToIssueButton) minimizeToIssueButton.hidden = !model;
+        if (openIssueButton) openIssueButton.hidden = !model;
         const existing = body.querySelector(".issue-window-header");
         // The terminal fills the body absolutely; the class tells the stylesheet to
         // leave the header's band free rather than letting the two overlap.
@@ -5376,7 +5387,8 @@
               </div>
               <div class="window-actions">
                 <button class="icon-button" data-action="restart" aria-label="Restart agent" title="Restart agent" hidden>↻</button>
-                <button class="icon-button" data-action="stop" aria-label="Stop agent" title="Stop agent" hidden>■</button>
+                <button class="icon-button" data-action="minimize-to-issue" aria-label="Return to Issue list" title="Return to Issue list" hidden>▁</button>
+                <button class="icon-button" data-action="open-issue" aria-label="Open Issue" title="Open Issue" hidden>⧉</button>
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
@@ -5389,22 +5401,40 @@
 
           const titlebar = element.querySelector(".titlebar");
           const closeButton = element.querySelector("[data-action='close']");
-          const stopButton = element.querySelector("[data-action='stop']");
           const restartButton = element.querySelector("[data-action='restart']");
+          const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
+          const openIssueButton = element.querySelector("[data-action='open-issue']");
           const resizeHandle = element.querySelector(".resize-handle");
 
-          // SPEC-2356 Anshin Addendum (FR-041/FR-044): the kill-switch lives in
-          // the window chrome next to close. STOP halts the agent runtime but
-          // keeps the window + its output; RESTART relaunches the same preset
-          // in place. Both target the window id; visibility is driven per
-          // render from the runtime state by the status-apply path.
-          stopButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "stop_window", id: windowData.id });
-          });
+          // SPEC-2356 Anshin Addendum (FR-044): RESTART relaunches the same
+          // preset in place. The agent-stop button that used to sit beside it
+          // was removed by SPEC #3885 FR-015 (user ruling 2026-09-03): stopping
+          // an agent is offered only from the Issue row's ⋯ menu, so the window
+          // chrome cannot halt a run with one stray click. Visibility is driven
+          // per render from the runtime state by the status-apply path.
           restartButton.addEventListener("click", (event) => {
             event.stopPropagation();
             send({ kind: "restart_window", id: windowData.id });
+          });
+
+          // SPEC #3885 FR-015: the freed slot carries the Issue controls —
+          // minimize folds the window back into its Issue row (the FR-012 path)
+          // and the popup opens the Issue this agent works on. Both read the
+          // live window so a window that gains its Issue after mount still acts
+          // on the current link.
+          minimizeToIssueButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            runIssueWindowHeaderAction(
+              "return-to-list",
+              workspaceWindowById(windowData.id) || windowData,
+            );
+          });
+          openIssueButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            runIssueWindowHeaderAction(
+              "open-issue",
+              workspaceWindowById(windowData.id) || windowData,
+            );
           });
 
           // SPEC-2008 camera-focus: minimize/maximize buttons were removed

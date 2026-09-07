@@ -76,6 +76,18 @@ export function formatAgentElapsed(ms) {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
+// SPEC #3885 T-020: the agent's own start time, broadcast by the backend with
+// the window, is the elapsed clock. `windowRuntimeStateSince` only knows when
+// this frontend last saw the state change, so it restarts at every reload and
+// at every state transition; it stays the fallback for a window whose runtime
+// the backend cannot name (a restored window with no live PTY).
+export function issueAgentElapsedMs(windowData, observedSince, now = Date.now()) {
+  const started = Number(windowData?.runtime_started_at_ms);
+  const since = Number.isFinite(started) && started > 0 ? started : Number(observedSince);
+  if (!Number.isFinite(since) || since <= 0) return null;
+  return Math.max(0, now - since);
+}
+
 export function issuePreviewStatusView(windowData) {
   const status = String(windowData?.status || "").trim().toLowerCase();
   const known = ISSUE_PREVIEW_STATUS_VIEWS[status];
@@ -135,6 +147,14 @@ export function issuePreviewWindowsForIssue(windows, issueWindowId, issueNumber)
 const ISSUE_ROW_SECONDARY_LIMIT = 2;
 const ISSUE_ROW_ACTION_LIMIT = 2;
 const ISSUE_ROW_LIVE_AGENT_STATUSES = new Set(["running", "starting", "idle", "waiting", "error"]);
+// SPEC #3885 FR-015: an agent that is still running can be stopped; one that
+// already exited or errored offers RESTART in its window chrome instead.
+const ISSUE_ROW_STOPPABLE_AGENT_STATUSES = new Set([
+  "running",
+  "starting",
+  "idle",
+  "waiting",
+]);
 const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_failed"]);
 const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
   closed: Object.freeze({ label: "Done", tone: "done" }),
@@ -209,11 +229,19 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
 
 function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindow }) {
   const workActions = ["continue-work", "resume-work", "cleanup-work"];
+  // SPEC #3885 FR-015: stopping the agent is always last and always in the
+  // overflow menu, so a live run is never one stray click away from ending.
   if (inlineWindow) {
-    return { order: ["windowize-issue-preview", "configure-issue", ...workActions], limit: 1 };
+    return {
+      order: ["windowize-issue-preview", "configure-issue", ...workActions, "stop-agent"],
+      limit: 1,
+    };
   }
   if (canvasWindow) {
-    return { order: ["focus-canvas-window", "configure-issue", ...workActions], limit: 1 };
+    return {
+      order: ["focus-canvas-window", "configure-issue", ...workActions, "stop-agent"],
+      limit: 1,
+    };
   }
   const monitor = monitorStateView(entry?.monitor_state);
   switch (monitor?.state) {
@@ -250,9 +278,16 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   return { order: issueEntryStateKey(entry) === "open" ? ["launch-agent"] : [] };
 }
 
-function issueRowActionAvailable(action, { entry, work, queue }) {
+function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, canvasWindow }) {
   const monitor = monitorStateView(entry?.monitor_state);
   switch (action) {
+    case "stop-agent": {
+      const live = inlineWindow || canvasWindow;
+      return (
+        Boolean(live) &&
+        ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(live).status)
+      );
+    }
     case "launch-now":
       return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
     case "configure-issue":
@@ -875,6 +910,12 @@ export function createKnowledgeKanbanSurface({
             entries: [],
             baseEntries: [],
             selectedNumber: null,
+            // SPEC #3885 FR-014 / AC-14: the Issue window's view mode. List is
+            // the default; split lays the running Issues out as detail +
+            // terminal pairs. `splitPairSizes` remembers which pairs the user
+            // grew (T-005) so a data refresh does not shrink them back.
+            viewMode: "list",
+            splitPairSizes: new Map(),
             // SPEC #3170 FR-101: independent monotonically increasing
             // explicit-selection generation; 0 means no explicit selection.
             selectionGeneration: 0,
@@ -2514,11 +2555,10 @@ export function createKnowledgeKanbanSurface({
         }
 
         const statusView = issuePreviewStatusView(target);
-        const since = windowRuntimeStateSince?.(target.id);
         const elapsed = createNode(
           "span",
           "issue-agent-status-elapsed",
-          Number.isFinite(since) ? formatAgentElapsed(Date.now() - since) : "",
+          issueAgentElapsedLabel(target),
         );
         elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
         row.appendChild(elapsed);
@@ -2538,9 +2578,146 @@ export function createKnowledgeKanbanSurface({
         return row;
       }
 
-      function renderKnowledgeDetailPane(windowId, state, detailPane) {
+      // SPEC #3885 FR-014 / T-018: one pair of the split view — the Issue's own
+      // header above its interactive terminal. Everything except the terminal
+      // comes from the row's state model, so the same agent reads identically
+      // in both view modes and neither face invents its own vocabulary.
+      function renderIssueSplitPair(windowId, state, entry) {
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        const attention = work ? workAttentionFor?.(work) || null : null;
+        const faces = issueRowFaces(windowId, entry, work);
+        const target = faces.inlineWindow || faces.canvasWindow;
+        if (!target) {
+          return null;
+        }
+        const model = issueRowStateModel({
+          entry,
+          work,
+          attention,
+          inlineWindow: faces.inlineWindow,
+          canvasWindow: faces.canvasWindow,
+        });
+        const context = { windowId, state, entry, work, queue: null, target };
+        const pair = createNode("div", "issue-split-pair");
+        pair.setAttribute("role", "listitem");
+        pair.dataset.issueNumber = String(entry.number);
+        pair.dataset.windowId = target.id;
+        const expanded = state.splitPairSizes.get(entry.number) === "expanded";
+        pair.dataset.size = expanded ? "expanded" : "normal";
+        if (state.selectedNumber === entry.number) {
+          pair.classList.add("selected");
+          pair.setAttribute("aria-current", "true");
+        }
+
+        const header = createNode("div", "issue-split-header");
+        header.addEventListener("click", (event) => {
+          if (event.target?.closest?.(".knowledge-row-actions")) return;
+          requestKnowledgeDetail(windowId, state.kind, entry.number);
+        });
+        const titleWrap = createNode("div", "issue-split-title-wrap");
+        titleWrap.appendChild(
+          createNode("div", "issue-split-title", entry.title || `Issue #${entry.number}`),
+        );
+        titleWrap.appendChild(createNode("div", "issue-split-number", `#${entry.number}`));
+        header.appendChild(titleWrap);
+        const badge = createNode("span", "knowledge-row-badge", model.primary.label);
+        badge.dataset.tone = model.primary.tone;
+        badge.dataset.stateKey = model.primary.key;
+        header.appendChild(badge);
+        const elapsed = createNode("span", "issue-split-elapsed", issueAgentElapsedLabel(target));
+        elapsed.title = elapsed.textContent
+          ? `${model.primary.label} for ${elapsed.textContent}`
+          : "";
+        header.appendChild(elapsed);
+
+        const actions = createNode("div", "knowledge-row-actions");
+        actions.setAttribute("role", "group");
+        actions.setAttribute("aria-label", `Issue #${entry.number} actions`);
+        // In the split view the terminal hand-off (Windowize / Focus) belongs to
+        // the pair itself, so it is shown rather than moved to a status row.
+        for (const action of model.actions) {
+          actions.appendChild(issueRowActionButton(action, context));
+        }
+        actions.appendChild(renderIssueSplitSizeToggle(windowId, state, entry, expanded));
+        if (model.overflow.length > 0) {
+          actions.appendChild(renderIssueRowMenu(model.overflow, context));
+        }
+        header.appendChild(actions);
+        pair.appendChild(header);
+
+        const output = createNode(
+          "div",
+          "issue-split-output",
+          String(windowActivityDetail?.(target) || "").trim(),
+        );
+        output.title = output.textContent;
+        pair.appendChild(output);
+
+        if (!faces.inlineWindow) {
+          // FR-003a / US-4: the agent is on the canvas, so this face is a status
+          // face only — a second terminal would double the input path.
+          pair.classList.add("is-on-canvas");
+          pair.appendChild(
+            createNode(
+              "div",
+              "issue-split-placeholder",
+              "Shown on canvas. Input goes to the canvas window.",
+            ),
+          );
+          return pair;
+        }
+
+        const shell = createNode("div", "issue-split-terminal");
+        const terminalRoot = createNode("div", "terminal-root");
+        // A stray mousedown inside the terminal must not start a window drag on
+        // the host Issue window.
+        terminalRoot.addEventListener("mousedown", (event) => event.stopPropagation());
+        shell.appendChild(terminalRoot);
+        pair.appendChild(shell);
+        // FR-003: the split view is one of the two faces that may take input, so
+        // the shared runtime is reparented here interactive, not mirrored.
+        createTerminalRuntime?.(target.id, terminalRoot, { readOnly: false });
+        return pair;
+      }
+
+      // SPEC #3885 T-005: a pair grows and shrinks in place. The size lives in
+      // the surface state, so a data refresh keeps it and the terminal runtime
+      // is only reparented, never rebuilt.
+      function renderIssueSplitSizeToggle(windowId, state, entry, expanded) {
+        const label = expanded ? "Shrink" : "Expand";
+        const button = createNode(
+          "button",
+          "wizard-button is-compact knowledge-row-action",
+          label,
+        );
+        button.type = "button";
+        button.dataset.action = "toggle-pair-size";
+        button.setAttribute("aria-expanded", expanded ? "true" : "false");
+        button.setAttribute("aria-label", `${label} the agent pane for Issue #${entry.number}`);
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (expanded) {
+            state.splitPairSizes.delete(entry.number);
+          } else {
+            state.splitPairSizes.set(entry.number, "expanded");
+          }
+          renderKnowledgeBridge(windowId);
+        });
+        return button;
+      }
+
+      // SPEC #3885 T-020: one elapsed-time source for both faces of an agent.
+      function issueAgentElapsedLabel(target) {
+        const elapsed = issueAgentElapsedMs(target, windowRuntimeStateSince?.(target?.id));
+        return elapsed === null ? "" : formatAgentElapsed(elapsed);
+      }
+
+      function renderKnowledgeDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
         detailPane.innerHTML = "";
-        const preview = renderIssueAgentPreview(windowId, state);
+        // In split mode the agent already has an interactive face in its pair;
+        // a second, read-only one would show the same PTY twice.
+        const preview = agentPreview ? renderIssueAgentPreview(windowId, state) : null;
         if (preview) {
           detailPane.appendChild(preview);
         }
@@ -2791,6 +2968,11 @@ export function createKnowledgeKanbanSurface({
           label: "Focus window",
           aria: "Focus the agent's canvas window for",
         }),
+        // SPEC #3885 FR-015: the only place an agent can be stopped from.
+        "stop-agent": Object.freeze({
+          label: "Stop agent",
+          aria: "Stop the agent for",
+        }),
       });
       // Actions rendered inside the agent status row rather than the row's
       // action group.
@@ -2848,6 +3030,11 @@ export function createKnowledgeKanbanSurface({
             if (target?.id) {
               focusWindowLocally(target.id);
               sendWindowFocus(target.id);
+            }
+            return;
+          case "stop-agent":
+            if (target?.id) {
+              send({ kind: "stop_window", id: target.id });
             }
             return;
           default:
@@ -3032,12 +3219,38 @@ export function createKnowledgeKanbanSurface({
           button.classList.toggle("is-active", selected);
           button.setAttribute("aria-pressed", selected ? "true" : "false");
         }
+        // SPEC #3885 FR-014 / AC-14: list is the default face; split is the one
+        // that takes input. The mode is an attribute on the root so the
+        // stylesheet, not a second render path, lays the two out.
+        const splitMode = state.viewMode === "split";
+        const root = element.querySelector(".issue-bridge-root");
+        if (root) {
+          root.dataset.viewMode = splitMode ? "split" : "list";
+        }
+        for (const button of element.querySelectorAll("[data-issue-view]")) {
+          const selected = button.dataset.issueView === (splitMode ? "split" : "list");
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-pressed", selected ? "true" : "false");
+        }
 
         renderKnowledgeStatusOnly(windowId, state);
 
         list.innerHTML = "";
         const visibleEntries = filteredIssueEntries(state);
-        if (visibleEntries.length === 0) {
+        if (splitMode) {
+          const pairs = visibleEntries
+            .map((entry) => renderIssueSplitPair(windowId, state, entry))
+            .filter(Boolean);
+          if (pairs.length === 0) {
+            list.appendChild(
+              createNode("div", "knowledge-empty", "No running agents to show side by side"),
+            );
+          } else {
+            for (const pair of pairs) {
+              list.appendChild(pair);
+            }
+          }
+        } else if (visibleEntries.length === 0) {
           const filterLabel = state.issueStateFilter === "all"
             ? ""
             : `${state.issueStateFilter || "open"} `;
@@ -3049,7 +3262,7 @@ export function createKnowledgeKanbanSurface({
             list.appendChild(renderIssueRow(windowId, state, entry));
           }
         }
-        renderKnowledgeDetailPane(windowId, state, detailPane);
+        renderKnowledgeDetailPane(windowId, state, detailPane, { agentPreview: !splitMode });
       }
 
       function renderKnowledgeBridge(windowId) {
@@ -3239,6 +3452,10 @@ export function createKnowledgeKanbanSurface({
                       <button type="button" data-issue-filter="closed">Closed</button>
                       <button type="button" data-issue-filter="all">All</button>
                     </div>
+                    <div class="knowledge-state-filter knowledge-view-mode" role="group" aria-label="Issue view mode">
+                      <button type="button" data-issue-view="list">List</button>
+                      <button type="button" data-issue-view="split">Split</button>
+                    </div>
                   </div>
                   <div class="workspace-toolbar-actions">
                     <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached work items">↻</button>
@@ -3319,6 +3536,18 @@ export function createKnowledgeKanbanSurface({
             filterButton.addEventListener("click", (event) => {
               event.stopPropagation();
               state.issueStateFilter = filterButton.dataset.issueFilter || "open";
+              renderKnowledgeBridge(
+                windowData.id,
+              );
+            });
+          }
+          // SPEC #3885 T-018: switching the view mode re-renders the same state;
+          // the terminal runtimes are reparented by the render, so the PTY, the
+          // scrollback and the selection are never rebuilt.
+          for (const viewButton of body.querySelectorAll("[data-issue-view]")) {
+            viewButton.addEventListener("click", (event) => {
+              event.stopPropagation();
+              state.viewMode = viewButton.dataset.issueView === "split" ? "split" : "list";
               renderKnowledgeBridge(
                 windowData.id,
               );

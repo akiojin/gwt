@@ -3406,14 +3406,34 @@ test("active work projection only upgrades live work to RUNNING telemetry", () =
   );
 });
 
-test("FR-041/044 (安心): window chrome carries STOP + RESTART kill-switch controls", () => {
-  // The window titlebar actions must expose STOP and RESTART alongside close,
-  // both starting hidden (visibility is driven per render from runtime state).
-  assert.match(appSource, /data-action="stop"[^>]*aria-label="Stop agent"/);
+test("FR-044 (安心) / SPEC #3885 FR-015: window chrome carries RESTART, minimize and Issue popup — never STOP", () => {
+  // SPEC #3885 FR-015 (user ruling 2026-09-03): the agent-stop button left the
+  // titlebar; stopping an agent is offered only in the Issue row's ⋯ menu. The
+  // same slot now holds the minimize (return to the Issue row) and Issue popup
+  // controls, both hidden unless the window belongs to an Issue.
+  assert.doesNotMatch(appSource, /data-action="stop"[^>]*aria-label="Stop agent"/);
+  assert.match(
+    appSource,
+    /data-action="minimize-to-issue"[^>]*aria-label="Return to Issue list"[^>]*hidden/,
+  );
+  assert.match(appSource, /data-action="open-issue"[^>]*aria-label="Open Issue"[^>]*hidden/);
   assert.match(appSource, /data-action="restart"[^>]*aria-label="Restart agent"/);
-  // STOP click sends stop_window (PTY halts, window stays); RESTART sends
+  // The titlebar minimize reuses the FR-012 fold-back path; the popup opens the
+  // owning Issue's detail.
+  assert.match(
+    appSource,
+    /minimizeToIssueButton\.addEventListener\("click"[\s\S]{0,320}runIssueWindowHeaderAction\(\s*"return-to-list"/,
+  );
+  assert.match(
+    appSource,
+    /openIssueButton\.addEventListener\("click"[\s\S]{0,320}runIssueWindowHeaderAction\(\s*"open-issue"/,
+  );
+  // The titlebar never sends stop_window itself; RESTART still sends
   // restart_window (relaunch in place).
-  assert.match(appSource, /kind:\s*"stop_window",\s*id:\s*windowData\.id/);
+  assert.doesNotMatch(
+    appSource,
+    /stopButton\.addEventListener\("click"[\s\S]{0,200}kind:\s*"stop_window"/,
+  );
   assert.match(appSource, /kind:\s*"restart_window",\s*id:\s*windowData\.id/);
   // The render path toggles the controls based on runtime state.
   assert.match(appSource, /updateWindowKillSwitchControls/);
@@ -5081,15 +5101,22 @@ test("window template restores the manual resize handle as a window-body sibling
     /<div class="window-body"><\/div>\s*<div class="resize-handle"><\/div>/,
     "the resize handle must be a sibling div after the window body",
   );
-  // SPEC-2008 retired maximize/minimize; SPEC-2356 Anshin (FR-041/044) added
-  // the STOP + RESTART kill-switch alongside close. Window-actions may carry
-  // those, but never maximize/minimize.
+  // SPEC-2008 retired maximize/minimize; SPEC-2356 Anshin (FR-044) kept RESTART
+  // beside close, and SPEC #3885 FR-015 replaced the agent-STOP button with the
+  // Issue controls (minimize back to the row, open the Issue). Window-actions
+  // may carry those, but never maximize/minimize.
   const windowActions = ensureWindowBody.match(
     /<div class="window-actions">[\s\S]*?<\/div>/,
   );
   assert.ok(windowActions, "window-actions block must exist");
   assert.match(windowActions[0], /data-action="close"/, "close must remain");
-  assert.match(windowActions[0], /data-action="stop"/, "STOP kill-switch must be present");
+  assert.doesNotMatch(
+    windowActions[0],
+    /data-action="stop"/,
+    "the agent-STOP button moved to the Issue row menu (SPEC #3885 FR-015)",
+  );
+  assert.match(windowActions[0], /data-action="minimize-to-issue"/, "minimize must be present");
+  assert.match(windowActions[0], /data-action="open-issue"/, "the Issue popup must be present");
   assert.match(windowActions[0], /data-action="restart"/, "RESTART must be present");
   assert.doesNotMatch(
     windowActions[0],
