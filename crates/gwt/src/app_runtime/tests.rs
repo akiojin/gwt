@@ -43682,12 +43682,15 @@ fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposa
             latest, &loaded, &repo, now,
         );
         latest.set_gui_connected(true);
+        // Issue #3528: an outcome is bound to the Issue it was observed for,
+        // and a candidate without one is deferred — so the fixture states that
+        // #42 was probed this tick and is still open.
         prepare_local_issue_monitor_claim_proposals(
             latest,
             &loaded,
             "windows-host/session",
             now,
-            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeMap::from([(42, false)]),
         );
         // The proposal exists in memory; the durable rename is what comes next.
         thread::sleep(persist_delay);
