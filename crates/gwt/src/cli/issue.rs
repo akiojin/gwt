@@ -2199,6 +2199,7 @@ mod tests {
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-1".to_string(),
+                    launch_identity: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -2277,6 +2278,7 @@ mod tests {
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-1".to_string(),
+                    launch_identity: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },

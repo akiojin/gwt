@@ -122,12 +122,17 @@ pub(super) fn run<E: CliEnv>(
     // execution refuses every PR mutation, draft creation and edits
     // included; an active execution keeps the mid-work Draft flow available.
     let is_pr_mutation = matches!(
-        cmd,
+        &cmd,
         PrCommand::Create { .. }
             | PrCommand::CreateBody { .. }
             | PrCommand::Edit { .. }
             | PrCommand::EditBody { .. }
             | PrCommand::Ready { .. }
+            | PrCommand::Draft { .. }
+            | PrCommand::Comment { .. }
+            | PrCommand::CommentBody { .. }
+            | PrCommand::ReviewThreadsReplyAndResolve { .. }
+            | PrCommand::ReviewThreadsReplyAndResolveBody { .. }
     );
     let mut mutation_binding = None;
     if is_pr_mutation {
@@ -147,7 +152,7 @@ pub(super) fn run<E: CliEnv>(
             }
         };
         let is_ready_handoff = matches!(
-            cmd,
+            &cmd,
             PrCommand::Create { draft: false, .. }
                 | PrCommand::CreateBody { draft: false, .. }
                 | PrCommand::Ready { .. }
@@ -159,7 +164,13 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             return Ok(2);
         }
-        if let Some(refusal) = crate::cli::verification_record::branch_push_refusal(&worktree) {
+        let requested_head = match &cmd {
+            PrCommand::Create { head, .. } | PrCommand::CreateBody { head, .. } => head.as_deref(),
+            _ => None,
+        };
+        if let Some(refusal) =
+            crate::cli::verification_record::branch_push_refusal_for_head(&worktree, requested_head)
+        {
             out.push_str(&refusal);
             out.push('\n');
             return Ok(2);
@@ -183,11 +194,7 @@ pub(super) fn run<E: CliEnv>(
             }
         }
     }
-    let cmd_settles_pr_obligation = is_pr_mutation
-        || matches!(
-            cmd,
-            PrCommand::Comment { .. } | PrCommand::CommentBody { .. }
-        );
+    let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -283,23 +290,27 @@ pub(super) fn run<E: CliEnv>(
             0
         }
         PrCommand::Draft { number } => {
-            let pr = env
-                .convert_pr_to_draft(number)
-                .map_err(super::io_as_api_error)?;
+            let pr =
+                dispatch_pr_mutation(mutation_binding.as_ref(), || env.convert_pr_to_draft(number))
+                    .map_err(super::io_as_api_error)?;
             out.push_str(&format!("converted pull request #{number} to draft\n"));
             render_pr(out, &pr);
             0
         }
         PrCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            env.comment_on_pr(number, &body)
-                .map_err(super::io_as_api_error)?;
+            dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.comment_on_pr(number, &body)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str(&format!("created comment on PR #{number}\n"));
             0
         }
         PrCommand::CommentBody { number, body } => {
-            env.comment_on_pr(number, &body)
-                .map_err(super::io_as_api_error)?;
+            dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.comment_on_pr(number, &body)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str(&format!("created comment on PR #{number}\n"));
             0
         }
@@ -319,18 +330,20 @@ pub(super) fn run<E: CliEnv>(
         }
         PrCommand::ReviewThreadsReplyAndResolve { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            let resolved = env
-                .reply_and_resolve_pr_review_threads(number, &body)
-                .map_err(super::io_as_api_error)?;
+            let resolved = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.reply_and_resolve_pr_review_threads(number, &body)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str(&format!(
                 "replied to and resolved {resolved} review threads on PR #{number}\n"
             ));
             0
         }
         PrCommand::ReviewThreadsReplyAndResolveBody { number, body } => {
-            let resolved = env
-                .reply_and_resolve_pr_review_threads(number, &body)
-                .map_err(super::io_as_api_error)?;
+            let resolved = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.reply_and_resolve_pr_review_threads(number, &body)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str(&format!(
                 "replied to and resolved {resolved} review threads on PR #{number}\n"
             ));
@@ -744,6 +757,9 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
         env.seed_pr(7, seeded_pr());
         env.seed_created_pr(seeded_pr());
+        let reply_file = "review-reply.md".to_string();
+        env.files
+            .insert(reply_file.clone(), "authority-gated reply".to_string());
         let mutations = [
             PrCommand::CreateBody {
                 base: s("develop"),
@@ -768,10 +784,26 @@ mod tests {
                 add_labels: vec![],
             },
             PrCommand::Ready { number: 7 },
+            PrCommand::CommentBody {
+                number: 7,
+                body: s("authority-gated comment"),
+            },
+            PrCommand::Draft { number: 7 },
+            PrCommand::ReviewThreadsReplyAndResolve {
+                number: 7,
+                file: reply_file,
+            },
+            PrCommand::ReviewThreadsReplyAndResolveBody {
+                number: 7,
+                body: s("authority-gated reply"),
+            },
         ];
-        for mutation in mutations {
+        let outcomes = mutations.map(|mutation| {
             let mut out = String::new();
             let code = run(&mut env, mutation, &mut out).expect("run PR mutation gate");
+            (code, out)
+        });
+        for (code, out) in outcomes {
             assert_eq!(code, 2, "unauthorized PR mutation was not refused: {out}");
             assert!(
                 out.contains("authority"),
@@ -781,6 +813,12 @@ mod tests {
         assert!(env.pr_create_call_log.is_empty(), "create reached GitHub");
         assert!(env.pr_edit_call_log.is_empty(), "edit reached GitHub");
         assert!(env.pr_ready_call_log.is_empty(), "ready reached GitHub");
+        assert!(env.pr_draft_call_log.is_empty(), "draft reached GitHub");
+        assert!(env.pr_comments.is_empty(), "comment reached GitHub");
+        assert!(
+            env.pr_reply_and_resolve_call_log.is_empty(),
+            "review reply/resolve reached GitHub"
+        );
     }
 
     #[test]
@@ -801,6 +839,76 @@ mod tests {
         assert_pr_mutations_refuse_without_caller_authority(
             worktree.path(),
             Some("session-foreign-secret"),
+        );
+    }
+
+    #[test]
+    fn refused_pr_mutations_do_not_settle_the_pr_obligation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let identity = initialize_pr_generation_authority(&fixture.repo, "session-comment-owner");
+        persist_pr_generation_session(&fixture.repo, "session-comment-owner", identity.clone());
+        let foreign_session = "session-comment-foreign";
+        persist_pr_generation_session(&fixture.repo, foreign_session, identity);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            foreign_session,
+        );
+        crate::cli::action_obligation::mark_from_prompt(
+            &fixture.repo,
+            foreign_session,
+            "PR #7 にコメントを追加して",
+        )
+        .expect("arm foreign PR obligation");
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_pr(7, seeded_pr());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CommentBody {
+                number: 7,
+                body: s("must not dispatch"),
+            },
+            &mut out,
+        )
+        .expect("run refused PR comment");
+
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_comments.is_empty());
+        let reply_file = "foreign-review-reply.md".to_string();
+        env.files
+            .insert(reply_file.clone(), "must not dispatch".to_string());
+        let outcomes = [
+            PrCommand::Draft { number: 7 },
+            PrCommand::ReviewThreadsReplyAndResolveBody {
+                number: 7,
+                body: s("must not dispatch"),
+            },
+            PrCommand::ReviewThreadsReplyAndResolve {
+                number: 7,
+                file: reply_file,
+            },
+        ]
+        .map(|command| {
+            let mut out = String::new();
+            let code = run(&mut env, command, &mut out).expect("run refused PR mutation");
+            (code, out)
+        });
+        for (code, out) in outcomes {
+            assert_eq!(code, 2, "{out}");
+        }
+        assert!(env.pr_draft_call_log.is_empty());
+        assert!(env.pr_reply_and_resolve_call_log.is_empty());
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(&fixture.repo, foreign_session),
+            vec![crate::cli::action_obligation::ObligationKind::Pr],
+            "only a successfully dispatched PR mutation may settle the obligation",
         );
     }
 
@@ -1290,10 +1398,44 @@ mod tests {
             "a successful pr.comment must settle the PR obligation"
         );
 
+        let reply_file = "receiptless-review-reply.md".to_string();
+        env.files.insert(
+            reply_file.clone(),
+            "receiptless review reply".to_string(),
+        );
+        for command in [
+            PrCommand::Draft { number: 7 },
+            PrCommand::ReviewThreadsReplyAndResolveBody {
+                number: 7,
+                body: s("receiptless review reply body"),
+            },
+            PrCommand::ReviewThreadsReplyAndResolve {
+                number: 7,
+                file: reply_file,
+            },
+        ] {
+            crate::cli::action_obligation::mark_from_prompt(
+                &fixture.repo,
+                session_id,
+                "PR #7 を更新して",
+            )
+            .expect("arm receiptless PR obligation");
+            let mut out = String::new();
+            let code = run(&mut env, command, &mut out)
+                .expect("run receiptless draft/review reply mutation");
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                crate::cli::action_obligation::open_kinds(&fixture.repo, session_id).is_empty(),
+                "a successful draft/review reply mutation must settle the PR obligation"
+            );
+        }
+
         assert_eq!(env.pr_create_call_log.len(), 1);
         assert_eq!(env.pr_edit_call_log.len(), 1);
         assert_eq!(env.pr_ready_call_log, vec![7]);
+        assert_eq!(env.pr_draft_call_log, vec![7]);
         assert_eq!(env.pr_comments.len(), 1);
+        assert_eq!(env.pr_reply_and_resolve_call_log.len(), 2);
     }
 
     #[test]
@@ -1332,6 +1474,63 @@ mod tests {
         assert_eq!(code, 2, "{out}");
         assert!(out.contains("current HEAD is not contained"), "{out}");
         assert!(env.pr_edit_call_log.is_empty());
+    }
+
+    #[test]
+    fn pr_create_validates_the_explicit_head_branch_upstream() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "session-explicit-head-pr";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let git_ok = |args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&fixture.repo)
+                .output()
+                .expect("run git for explicit-head fixture");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+        };
+        git_ok(&["switch", "-qc", "delivery-head"]);
+        git_ok(&["push", "-qu", "origin", "delivery-head"]);
+        std::fs::write(fixture.repo.join("explicit-head.txt"), "unpushed head\n")
+            .expect("write explicit head change");
+        git_ok(&["add", "explicit-head.txt"]);
+        git_ok(&["commit", "-qm", "feat: unpushed explicit PR head"]);
+        git_ok(&["switch", "-q", "main"]);
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_created_pr(seeded_pr());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: Some(s("delivery-head")),
+                title: s("explicit unpushed head"),
+                body: s("body"),
+                labels: vec![],
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run explicit-head PR create");
+
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("delivery-head"), "{out}");
+        assert!(out.contains("not contained"), "{out}");
+        assert!(env.pr_create_call_log.is_empty());
     }
 
     #[test]
@@ -1721,6 +1920,83 @@ mod tests {
         assert!(
             env.pr_create_call_log.is_empty(),
             "authority loss must be detected before the GitHub mutation",
+        );
+    }
+
+    #[test]
+    fn draft_and_review_reply_mutations_refuse_capability_rotation_before_dispatch() {
+        fn assert_refused(
+            session_id: &str,
+            command: impl FnOnce(&std::path::Path) -> PrCommand,
+            dispatched: impl FnOnce(&crate::cli::TestEnv) -> bool,
+        ) {
+            let worktree = tempfile::tempdir().expect("PR authority repository");
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+            let identity = initialize_pr_generation_authority(worktree.path(), session_id);
+            persist_pr_generation_session(worktree.path(), session_id, identity);
+            let _session = gwt_core::test_support::ScopedEnvVar::set(
+                gwt_agent::GWT_SESSION_ID_ENV,
+                session_id,
+            );
+            let command = command(worktree.path());
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let session_id_for_hook = session_id.to_string();
+            crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                gwt_agent::rotate_session_execution_capability(
+                    &sessions_dir,
+                    &session_id_for_hook,
+                )
+                .expect("rotate capability after the PR gate snapshot");
+            });
+            let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+            env.seed_pr(7, seeded_pr());
+            env.files
+                .insert("review-reply.md".to_string(), "done".to_string());
+            let mut out = String::new();
+
+            let error = run(&mut env, command, &mut out)
+                .expect_err("a rotated capability must refuse dispatch");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("changed before external dispatch"),
+                "unexpected refusal: {error}"
+            );
+            assert!(
+                !dispatched(&env),
+                "authority loss must be detected before the GitHub mutation"
+            );
+        }
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile =
+            gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+
+        assert_refused(
+            "session-draft-capability-race",
+            |_| PrCommand::Draft { number: 7 },
+            |env| !env.pr_draft_call_log.is_empty(),
+        );
+        assert_refused(
+            "session-review-body-capability-race",
+            |_| PrCommand::ReviewThreadsReplyAndResolveBody {
+                number: 7,
+                body: s("done"),
+            },
+            |env| !env.pr_reply_and_resolve_call_log.is_empty(),
+        );
+        assert_refused(
+            "session-review-file-capability-race",
+            |_| PrCommand::ReviewThreadsReplyAndResolve {
+                number: 7,
+                file: s("review-reply.md"),
+            },
+            |env| !env.pr_reply_and_resolve_call_log.is_empty(),
         );
     }
 

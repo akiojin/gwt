@@ -180,6 +180,86 @@ pub fn plan_state_path(worktree: &Path) -> PathBuf {
     worktree.join(VERIFICATION_PLAN_STATE_RELATIVE)
 }
 
+fn verification_scope_key(
+    session_id: &str,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"verification-scope-v1\0");
+    digest.update(session_id.as_bytes());
+    if let Some(binding) = execution_binding {
+        digest.update(b"\0generation\0");
+        digest.update(binding.generation_id.as_bytes());
+        digest.update(b"\0binding\0");
+        digest.update(binding.binding_id.as_bytes());
+    }
+    format!("{:x}", digest.finalize())[..32].to_string()
+}
+
+fn scoped_artifact_name(
+    stem: &str,
+    session_id: &str,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+) -> String {
+    format!(
+        "{stem}-{}.json",
+        verification_scope_key(session_id, execution_binding)
+    )
+}
+
+fn scoped_artifact_mirror_path(
+    worktree: &Path,
+    stem: &str,
+    session_id: &str,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+) -> PathBuf {
+    worktree.join(".gwt/skill-state").join(scoped_artifact_name(
+        stem,
+        session_id,
+        execution_binding,
+    ))
+}
+
+fn load_artifact_contents(
+    worktree: &Path,
+    trusted_name: &str,
+    mirror_path: &Path,
+) -> io::Result<Option<String>> {
+    match crate::cli::trusted_store::read(worktree, trusted_name)? {
+        Some(contents) => Ok(Some(contents)),
+        None if crate::cli::trusted_store::under_trusted_management(worktree) => Ok(None),
+        None => match fs::read_to_string(mirror_path) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn load_plan_for_identity(
+    worktree: &Path,
+    session_id: &str,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+) -> io::Result<Option<VerificationPlanRecord>> {
+    let trusted_name = scoped_artifact_name("verification-plan", session_id, execution_binding);
+    let mirror_path =
+        scoped_artifact_mirror_path(worktree, "verification-plan", session_id, execution_binding);
+    if let Some(contents) = load_artifact_contents(worktree, &trusted_name, &mirror_path)? {
+        return serde_json::from_str::<VerificationPlanRecord>(&contents)
+            .map(Some)
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error));
+    }
+    load_plan(worktree)
+}
+
+pub(crate) fn load_plan_for_session(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<VerificationPlanRecord>> {
+    let (_, execution_binding) = execution_context_for_session(worktree, session_id)?;
+    load_plan_for_identity(worktree, session_id, execution_binding.as_ref())
+}
+
 /// Load the registered plan. `Ok(None)` when missing.
 pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> {
     // P9b: trusted copy authoritative; mirror-only plans are refused in
@@ -223,6 +303,23 @@ fn save_plan_unleased(worktree: &Path, plan: &VerificationPlanRecord) -> io::Res
     plan.content_hash = compute_plan_hash(&plan);
     let serialized = serde_json::to_vec_pretty(&plan)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let scoped_name = scoped_artifact_name(
+        "verification-plan",
+        &plan.session_id,
+        plan.execution_binding.as_ref(),
+    );
+    let scoped_mirror = scoped_artifact_mirror_path(
+        worktree,
+        "verification-plan",
+        &plan.session_id,
+        plan.execution_binding.as_ref(),
+    );
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        &scoped_name,
+        &scoped_mirror,
+        &serialized,
+    )?;
     crate::cli::trusted_store::write_with_mirror(
         worktree,
         "verification-plan.json",
@@ -339,6 +436,30 @@ pub fn state_path(worktree: &Path) -> PathBuf {
     worktree.join(VERIFICATION_RUN_STATE_RELATIVE)
 }
 
+fn load_run_for_identity(
+    worktree: &Path,
+    session_id: &str,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+) -> io::Result<Option<VerificationRunRecord>> {
+    let trusted_name = scoped_artifact_name("verification-run", session_id, execution_binding);
+    let mirror_path =
+        scoped_artifact_mirror_path(worktree, "verification-run", session_id, execution_binding);
+    if let Some(contents) = load_artifact_contents(worktree, &trusted_name, &mirror_path)? {
+        return serde_json::from_str::<VerificationRunRecord>(&contents)
+            .map(Some)
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error));
+    }
+    load(worktree)
+}
+
+pub(crate) fn load_for_session(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<VerificationRunRecord>> {
+    let (_, execution_binding) = execution_context_for_session(worktree, session_id)?;
+    load_run_for_identity(worktree, session_id, execution_binding.as_ref())
+}
+
 /// Load the latest record. `Ok(None)` when missing; malformed JSON and I/O
 /// failures propagate.
 pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
@@ -367,6 +488,23 @@ pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
     record.content_hash = compute_content_hash(&record);
     let serialized = serde_json::to_vec_pretty(&record)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let scoped_name = scoped_artifact_name(
+        "verification-run",
+        &record.session_id,
+        record.execution_binding.as_ref(),
+    );
+    let scoped_mirror = scoped_artifact_mirror_path(
+        worktree,
+        "verification-run",
+        &record.session_id,
+        record.execution_binding.as_ref(),
+    );
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        &scoped_name,
+        &scoped_mirror,
+        &serialized,
+    )?;
     crate::cli::trusted_store::write_with_mirror(
         worktree,
         "verification-run.json",
@@ -1156,49 +1294,97 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
 /// pushed, not which bookkeeping event established that fact.
 #[must_use]
 pub fn branch_push_refusal(worktree: &Path) -> Option<String> {
-    let head_commit = match git_stdout(worktree, &["rev-parse", "HEAD"]) {
+    branch_push_refusal_for_head(worktree, None)
+}
+
+/// Return an actionable refusal unless the branch named by an explicit PR
+/// `--head` (or the current branch when absent) is durably contained by that
+/// branch's own configured upstream.
+#[must_use]
+pub fn branch_push_refusal_for_head(
+    worktree: &Path,
+    requested_head: Option<&str>,
+) -> Option<String> {
+    let requested = requested_head
+        .map(str::trim)
+        .filter(|head| !head.is_empty());
+    let (requested_owner, branch, local_ref) = match requested {
+        Some(head) => {
+            let (owner, branch) = match head.split_once(':') {
+                Some((owner, branch)) if !owner.is_empty() && !branch.is_empty() => {
+                    (Some(owner), branch)
+                }
+                _ => (None, head),
+            };
+            if branch.is_empty() {
+                return Some("Branch push refused: the explicit PR head is empty or malformed. Name a pushed local branch and retry.".to_string());
+            }
+            (owner, Some(branch), format!("refs/heads/{branch}"))
+        }
+        None => (None, None, "HEAD".to_string()),
+    };
+    let subject = branch.map_or_else(
+        || "the current HEAD".to_string(),
+        |branch| format!("explicit PR head `{branch}`"),
+    );
+    let head_commit = match git_stdout(worktree, &["rev-parse", "--verify", &local_ref]) {
         Ok(commit) if !commit.is_empty() => commit,
         _ => {
-            return Some(
-                "Branch push refused: Git could not resolve the current HEAD. Commit the intended changes, push HEAD to its configured upstream, and retry."
-                    .to_string(),
-            )
+            return Some(format!(
+                "Branch push refused: Git could not resolve {subject} as a local branch commit. Commit the intended changes, push that branch to its configured upstream, and retry."
+            ))
         }
     };
-    let (remote, merge_ref, _) = match configured_upstream(worktree) {
+    let upstream = match branch {
+        Some(branch) => configured_upstream_for_branch(worktree, branch),
+        None => configured_upstream(worktree),
+    };
+    let (remote, merge_ref, _) = match upstream {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return Some(
-                "Branch push refused: the current branch has no usable configured upstream. Push HEAD with an upstream and retry."
-                    .to_string(),
-            )
+            return Some(format!(
+                "Branch push refused: {subject} has no usable configured upstream. Push that branch with an upstream and retry."
+            ))
         }
         Err(UpstreamFailure::Git) => {
-            return Some(
-                "Branch push refused: Git could not inspect the configured upstream. Repair the branch configuration, push HEAD, and retry."
-                    .to_string(),
-            )
+            return Some(format!(
+                "Branch push refused: Git could not inspect the configured upstream for {subject}. Repair the branch configuration, push that branch, and retry."
+            ))
         }
     };
+    if let Some(requested_owner) = requested_owner {
+        let remote_url = git_stdout(worktree, &["remote", "get-url", &remote]);
+        let remote_owner = remote_url
+            .ok()
+            .and_then(|url| crate::issue_monitor_worker::parse_github_remote_url(&url))
+            .map(|(owner, _)| owner);
+        if remote_owner
+            .as_deref()
+            .is_none_or(|owner| !owner.eq_ignore_ascii_case(requested_owner))
+        {
+            return Some(format!(
+                "Branch push refused: explicit PR head `{requested_owner}:{}` does not match the configured upstream owner for local branch `{}`. Configure and push the exact requested head, then retry.",
+                branch.expect("explicit owner implies a branch"),
+                branch.expect("explicit owner implies a branch"),
+            ));
+        }
+    }
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return Some(
-                "Branch push refused: the configured upstream could not be fetched and read back. Restore remote access, push HEAD, and retry."
-                    .to_string(),
-            )
+            return Some(format!(
+                "Branch push refused: the configured upstream for {subject} could not be fetched and read back. Restore remote access, push that branch, and retry."
+            ))
         }
     };
     match git_is_ancestor(worktree, &head_commit, &remote_tip) {
         Ok(true) => None,
-        Ok(false) => Some(
-            "Branch push refused: the current HEAD is not contained by its configured upstream. Push HEAD and retry."
-                .to_string(),
-        ),
-        Err(()) => Some(
-            "Branch push refused: Git could not prove that the current HEAD is contained by its configured upstream. Push HEAD and retry."
-                .to_string(),
-        ),
+        Ok(false) => Some(format!(
+            "Branch push refused: {subject} is not contained by its configured upstream. Push that branch and retry."
+        )),
+        Err(()) => Some(format!(
+            "Branch push refused: Git could not prove that {subject} is contained by its configured upstream. Push that branch and retry."
+        )),
     }
 }
 
@@ -1404,6 +1590,13 @@ fn configured_upstream(worktree: &Path) -> Result<(String, String, String), Upst
     if branch.is_empty() {
         return Err(UpstreamFailure::Missing);
     }
+    configured_upstream_for_branch(worktree, &branch)
+}
+
+fn configured_upstream_for_branch(
+    worktree: &Path,
+    branch: &str,
+) -> Result<(String, String, String), UpstreamFailure> {
     let remote_key = format!("branch.{branch}.remote");
     let merge_key = format!("branch.{branch}.merge");
     let remote = git_config_value(worktree, &remote_key)?;
@@ -1626,7 +1819,7 @@ where
             } else {
                 execution_context_for_session(worktree, session_id)?
             };
-            let plan = load_plan(worktree)?;
+            let plan = load_plan_for_identity(worktree, session_id, execution_binding.as_ref())?;
             let generated_outputs = plan
                 .as_ref()
                 .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
@@ -1723,7 +1916,11 @@ where
         } else {
             execution_context_for_session(worktree, session_id)?
         };
-        let current_plan = load_plan(worktree)?;
+        let current_plan = load_plan_for_identity(
+            worktree,
+            session_id,
+            current_binding.as_ref(),
+        )?;
         let fingerprint_after = worktree_fingerprint_excluding(
             worktree,
             plan_snapshot
@@ -2185,12 +2382,16 @@ pub fn evaluate_evidence(
     session_id: &str,
     expected_owner_number: Option<u64>,
 ) -> EvidenceStatus {
-    let record = match load(worktree) {
+    let (_, execution_binding) = match execution_context_for_session(worktree, session_id) {
+        Ok(context) => context,
+        Err(_) => return EvidenceStatus::Unreadable,
+    };
+    let record = match load_run_for_identity(worktree, session_id, execution_binding.as_ref()) {
         Ok(Some(record)) => record,
         Ok(None) => return EvidenceStatus::MissingRecord,
         Err(_) => return EvidenceStatus::Unreadable,
     };
-    let plan = match load_plan(worktree) {
+    let plan = match load_plan_for_identity(worktree, session_id, execution_binding.as_ref()) {
         Ok(plan) => plan,
         Err(_) => return EvidenceStatus::Unreadable,
     };
@@ -2335,7 +2536,11 @@ pub(super) fn run<E: CliEnv>(
             // T-131 core: surface the coverage map of the plan this run
             // covered, so the rationale travels with the evidence output.
             if record.plan_covered {
-                if let Ok(Some(plan)) = load_plan(&worktree) {
+                if let Ok(Some(plan)) = load_plan_for_identity(
+                    &worktree,
+                    &session_id,
+                    record.execution_binding.as_ref(),
+                ) {
                     if !plan.surfaces.is_empty() {
                         out.push_str(&format!(
                             "verify: coverage map [{}]\n",
@@ -4276,6 +4481,100 @@ pub(crate) mod tests {
         assert_eq!(
             evaluate_evidence(dir.path(), "session-generation-a", Some(2359)),
             EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn sibling_generations_keep_independent_verification_plans_and_runs() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("sibling verification repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+        let session_a = "session-verification-sibling-a";
+        let session_b = "session-verification-sibling-b";
+        let commands = vec!["git --version".to_string()];
+
+        let binding_a = initialize_generation_scoped_execution(dir.path(), session_a);
+        persist_generation_scoped_session(dir.path(), session_a, binding_a, 1);
+        assert_eq!(
+            run_verify_cli_as(
+                dir.path(),
+                session_a,
+                VerifyCommand::Plan {
+                    commands: commands.clone(),
+                    derive: false,
+                },
+            )
+            .expect("register sibling A plan")
+            .0,
+            0
+        );
+
+        let request = crate::cli::execution_state::SuccessorRequest {
+            operation_id: "fresh-verification-sibling-b".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: crate::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "fresh-verification-sibling-b-binding".to_string(),
+            initial_session_id: session_b.to_string(),
+            entrypoint: "$gwt-execute #2359".to_string(),
+            requested_at: Utc::now(),
+        };
+        crate::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &request,
+        )
+        .expect("prepare sibling B");
+        crate::cli::execution_state::activate_successor(dir.path(), owner, &request)
+            .expect("activate sibling B");
+        let binding_b = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
+            .expect("read sibling B binding")
+            .expect("sibling B binding exists");
+        persist_generation_scoped_session(dir.path(), session_b, binding_b, 1);
+
+        for session_id in [session_b, session_a] {
+            assert_eq!(
+                run_verify_cli_as(
+                    dir.path(),
+                    session_id,
+                    VerifyCommand::Plan {
+                        commands: commands.clone(),
+                        derive: false,
+                    },
+                )
+                .expect("register exact sibling plan")
+                .0,
+                0
+            );
+            assert_eq!(
+                run_verify_cli_as(
+                    dir.path(),
+                    session_id,
+                    VerifyCommand::Run {
+                        commands: commands.clone(),
+                    },
+                )
+                .expect("run exact sibling verification")
+                .0,
+                0
+            );
+        }
+
+        assert_eq!(
+            evaluate_evidence(dir.path(), session_a, Some(owner.number)),
+            EvidenceStatus::Fresh,
+            "sibling B must not replace A's exact verification evidence"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), session_b, Some(owner.number)),
+            EvidenceStatus::Fresh,
+            "sibling A must not replace B's exact verification evidence"
         );
     }
 

@@ -15044,6 +15044,7 @@ struct PendingFreshExecutionFixture {
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     window_id: String,
     operation_id: String,
+    predecessor_session_id: String,
     candidate_session_id: String,
     predecessor_binding: gwt_agent::ExecutionBindingIdentity,
     binding: gwt_agent::SessionExecutionBinding,
@@ -15145,10 +15146,23 @@ fn pending_fresh_execution_fixture(
     temp_root: &Path,
     operation_id: &str,
 ) -> PendingFreshExecutionFixture {
-    pending_fresh_execution_fixture_with_owner_kind(
+    pending_fresh_execution_fixture_with_owner_kind_and_status(
         temp_root,
         operation_id,
         gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        false,
+    )
+}
+
+fn pending_fresh_execution_fixture_with_active_predecessor(
+    temp_root: &Path,
+    operation_id: &str,
+) -> PendingFreshExecutionFixture {
+    pending_fresh_execution_fixture_with_owner_kind_and_status(
+        temp_root,
+        operation_id,
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        true,
     )
 }
 
@@ -15156,6 +15170,20 @@ fn pending_fresh_execution_fixture_with_owner_kind(
     temp_root: &Path,
     operation_id: &str,
     owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+) -> PendingFreshExecutionFixture {
+    pending_fresh_execution_fixture_with_owner_kind_and_status(
+        temp_root,
+        operation_id,
+        owner_kind,
+        false,
+    )
+}
+
+fn pending_fresh_execution_fixture_with_owner_kind_and_status(
+    temp_root: &Path,
+    operation_id: &str,
+    owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+    active_predecessor: bool,
 ) -> PendingFreshExecutionFixture {
     let repo = temp_root.join(format!("repo-{operation_id}"));
     fs::create_dir_all(&repo).expect("create repo");
@@ -15175,22 +15203,28 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         false,
     )
     .expect("materialize predecessor");
-    assert!(matches!(
-        gwt::cli::execution_state::settle(
-            &repo,
-            &predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Blocked {
-                reason: "legacy terminal blocker".to_string(),
-                missing_verification: Some("legacy evidence gap".to_string()),
-            },
-        )
-        .expect("settle Blocked predecessor"),
-        gwt::cli::execution_state::SettleResult::Settled(_)
-    ));
+    if !active_predecessor {
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &repo,
+                &predecessor_session_id,
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "legacy terminal blocker".to_string(),
+                    missing_verification: Some("legacy evidence gap".to_string()),
+                },
+            )
+            .expect("settle Blocked predecessor"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+    }
     gwt::cli::execution_state::ensure_generation_ledger(
         &repo,
         owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+        if active_predecessor {
+            gwt::cli::execution_state::LegacyActiveDisposition::Live
+        } else {
+            gwt::cli::execution_state::LegacyActiveDisposition::Unknown
+        },
     )
     .expect("import Blocked predecessor");
     let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
@@ -15303,6 +15337,7 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         owner,
         window_id,
         operation_id: operation_id.to_string(),
+        predecessor_session_id,
         candidate_session_id,
         predecessor_binding,
         binding,
@@ -15419,6 +15454,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 900,
                 window_id: "tab-1::sentinel".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -15466,6 +15502,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 900,
             window_id: "tab-1::sentinel".to_string(),
+            launch_identity: None,
         }],
         "the active execution project must not receive the monitor ACK"
     );
@@ -15476,6 +15513,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
             window_id: fixture.window_id,
+            launch_identity: None,
         }],
         "authenticated SessionStart must bind the launch in its monitor owner project"
     );
@@ -16221,11 +16259,14 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
         .expect("manual successor must reuse fresh readiness finalization");
     assert_eq!(pending.operation_id, operation_id);
     assert_eq!(pending.readiness_nonce, readiness_nonce);
-    assert!(launch_events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalStatus { detail: Some(detail), .. }
-            if detail == "Waiting for authenticated SessionStart..."
-    )));
+    assert!(
+        launch_events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                if detail == "Waiting for authenticated SessionStart..."
+        )),
+        "unexpected launch events: {launch_events:#?}"
+    );
     let candidate_binding = pending.binding.identity.clone();
     let ready_events =
         runtime.finalize_fresh_execution_launch_session_start(&window_id, Some(&readiness_nonce));
@@ -18881,6 +18922,120 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
 }
 
 #[test]
+fn fresh_execution_launch_completion_with_active_predecessor_reaches_authenticated_readiness() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture_with_active_predecessor(
+        temp.path(),
+        "fresh-active-launch-completion",
+    );
+    fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .remove(&fixture.window_id);
+    fixture
+        .runtime
+        .active_agent_sessions
+        .remove(&fixture.window_id);
+    fixture
+        .runtime
+        .agent_capability_tokens
+        .remove(&fixture.window_id);
+    let readiness_nonce = "fresh-active-launch-completion-readiness";
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+    let launch_events = fixture.runtime.handle_launch_complete(
+        fixture.window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::from([
+                    (
+                        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                        fixture.token.clone(),
+                    ),
+                    (
+                        gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
+                        readiness_nonce.to_string(),
+                    ),
+                ]),
+                remove_env: Vec::new(),
+                cwd: Some(fixture.repo.clone()),
+                pending_tool_runtime_migration: None,
+            },
+            fixture.candidate_session_id.clone(),
+            "work/issue-2359".to_string(),
+            "Codex".to_string(),
+            fixture.repo.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(fixture.owner.number),
+            Some("origin/develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            gwt_agent::SessionMode::Normal,
+            false,
+            fixture.repo.display().to_string().into(),
+        )),
+    );
+
+    assert!(
+        !launch_events.is_empty(),
+        "launch completion must publish state"
+    );
+    assert!(
+        fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id),
+        "unexpected launch events: {launch_events:#?}"
+    );
+
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.continuation_readiness_nonce = Some(readiness_nonce.to_string());
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+    let ready_events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(
+        !ready_events.is_empty(),
+        "authenticated readiness must publish"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read activated fresh generation"),
+        Some(fixture.binding.identity.clone()),
+    );
+    assert!(
+        gwt::cli::execution_state::current_active_execution_binding_matches(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.predecessor_session_id,
+            &fixture.predecessor_binding,
+        )
+        .expect("read concurrent predecessor authority"),
+        "fresh activation must not settle the independently active predecessor",
+    );
+}
+
+#[test]
 fn continue_work_pre_dispatch_abort_surfaces_durable_write_failure() {
     let temp = tempdir().expect("tempdir");
     init_repo(temp.path());
@@ -19638,6 +19793,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched() {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
             window_id,
+            launch_identity: None,
         }]
     );
 }
@@ -19811,6 +19967,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: window_id.clone(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -19919,6 +20076,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: window_id.clone(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -33324,6 +33482,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "tab-1::agent-1".to_string(),
+                launch_identity: None,
             }],
             autonomous_records: vec![gwt::AutonomousIssueRecord {
                 issue_number: 42,
@@ -33402,6 +33561,7 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "tab-1::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -34642,6 +34802,7 @@ fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "window-43".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -44850,6 +45011,7 @@ fn issue_monitor_windows_closed_requeue_is_non_scanning() {
         launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
             window_id: "tab-1::agent-1".to_string(),
+            launch_identity: None,
         }],
         ..gwt::IssueMonitorPrefs::default()
     };
@@ -44903,6 +45065,7 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 900,
                 window_id: "project-a::sentinel".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -44964,6 +45127,7 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 900,
             window_id: "project-a::sentinel".to_string(),
+            launch_identity: None,
         }],
         "the active project must remain unchanged"
     );
@@ -44973,6 +45137,7 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
             window_id: "project-b::agent-1".to_string(),
+            launch_identity: None,
         }],
         "the launch ACK belongs to the window owner project"
     );
@@ -44998,6 +45163,7 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 900,
                 window_id: "project-a::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -45009,6 +45175,7 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-b::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -45047,6 +45214,7 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 900,
             window_id: "project-a::agent-1".to_string(),
+            launch_identity: None,
         }],
         "closing another project's window must not consume the active project's slot"
     );
@@ -45075,6 +45243,7 @@ fn closing_an_inactive_project_tab_requeues_its_owned_monitor_windows() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-b::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -45119,6 +45288,7 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 900,
                 window_id: "project-a::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -45130,6 +45300,7 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-b::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },

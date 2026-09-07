@@ -318,7 +318,7 @@ struct ExecutionContinuationAuthority {
     record: crate::cli::execution_state::ExecutionControlRecord,
     owner: crate::cli::execution_state::ExecutionOwnerKey,
     exact_unbound: bool,
-    current_binding: ExecutionBindingIdentity,
+    execution_binding: ExecutionBindingIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -512,39 +512,68 @@ fn evaluate_authenticated_execution_continuation(
             "execution_continuation_worktree_mismatch",
         ));
     }
-    let record = crate::cli::execution_state::load(&worktree)
-        .map_err(|_| execution_binding_error("execution_continuation_record_unreadable"))?
-        .ok_or_else(|| {
-            AgentWorkspaceUpdateError::new(
-                AgentWorkspaceUpdateErrorCode::RelaunchRequired,
-                "no linked execution exists; start the Work before continuing",
-            )
-        })?;
-    let owner = crate::cli::execution_state::ExecutionOwnerKey {
-        kind: record.owner_kind,
-        number: record.owner_number,
-    };
     let repo_hash = repo_hash_for_mutation(&worktree, "repo hash")
         .map_err(|_| execution_binding_error("execution_continuation_repo_hash_unavailable"))?;
     let exact_unbound = is_exact_unbound_host_session(&session);
-    let activated_publication_repair = (!crate::cli::execution_state::integrity_ok(&record)
-        && exact_unbound)
-        .then(|| {
-            crate::cli::execution_state::activated_continuation_binding_for_session(
+    let (record, owner, execution_binding) = if exact_unbound {
+        let record = crate::cli::execution_state::load(&worktree)
+            .map_err(|_| execution_binding_error("execution_continuation_record_unreadable"))?
+            .ok_or_else(|| {
+                AgentWorkspaceUpdateError::new(
+                    AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+                    "no linked execution exists; start the Work before continuing",
+                )
+            })?;
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: record.owner_kind,
+            number: record.owner_number,
+        };
+        let activated_publication_repair = (!crate::cli::execution_state::integrity_ok(&record))
+            .then(|| {
+                crate::cli::execution_state::activated_continuation_binding_for_session(
+                    &worktree,
+                    owner,
+                    &session.id,
+                )
+            })
+            .transpose()
+            .map_err(|_| {
+                execution_binding_error("execution_continuation_record_integrity_failure")
+            })?
+            .flatten();
+        if !crate::cli::execution_state::integrity_ok(&record)
+            && activated_publication_repair.is_none()
+        {
+            return Err(execution_binding_error(
+                "execution_continuation_record_integrity_failure",
+            ));
+        }
+        let execution_binding = match activated_publication_repair {
+            Some(binding) => binding,
+            None => crate::cli::execution_state::current_execution_binding(&worktree, owner)
+                .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
+                .ok_or_else(|| execution_binding_error("execution_continuation_binding_missing"))?,
+        };
+        (record, owner, execution_binding)
+    } else {
+        let (record, execution_binding, session_binding) =
+            crate::cli::execution_state::exact_execution_projection_for_session(
                 &worktree,
-                owner,
                 &session.id,
             )
-        })
-        .transpose()
-        .map_err(|_| execution_binding_error("execution_continuation_record_integrity_failure"))?
-        .flatten();
-    if !crate::cli::execution_state::integrity_ok(&record) && activated_publication_repair.is_none()
-    {
-        return Err(execution_binding_error(
-            "execution_continuation_record_integrity_failure",
-        ));
-    }
+            .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
+            .ok_or_else(|| execution_binding_error("execution_continuation_binding_not_exact"))?;
+        if session.execution_binding.as_ref() != Some(&session_binding) {
+            return Err(execution_binding_error(
+                "execution_continuation_binding_not_exact",
+            ));
+        }
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: record.owner_kind,
+            number: record.owner_number,
+        };
+        (record, owner, execution_binding)
+    };
     if session.runtime_target != LaunchRuntimeTarget::Host
         || session.docker_runtime_binding.is_some()
         || (session.linked_issue_number != Some(owner.number) && !exact_unbound)
@@ -564,52 +593,6 @@ fn evaluate_authenticated_execution_continuation(
             "execution_continuation_host_identity_mismatch",
         ));
     }
-    let current_binding = match activated_publication_repair {
-        Some(binding) => binding,
-        None => match crate::cli::execution_state::current_execution_binding(&worktree, owner) {
-            Ok(Some(binding)) => binding,
-            Ok(None) => {
-                return Err(execution_binding_error(
-                    "execution_continuation_binding_missing",
-                ))
-            }
-            Err(_) if exact_unbound => {
-                crate::cli::execution_state::activated_continuation_binding_for_session(
-                    &worktree,
-                    owner,
-                    &session.id,
-                )
-                .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
-                .ok_or_else(|| {
-                    execution_binding_error("execution_continuation_binding_unreadable")
-                })?
-            }
-            Err(_) => {
-                return Err(execution_binding_error(
-                    "execution_continuation_binding_unreadable",
-                ))
-            }
-        },
-    };
-    if !exact_unbound {
-        let exact_bound = gwt_agent::SessionExecutionIdentity::from_session(&session)
-            .map_err(|_| execution_binding_error("execution_continuation_binding_invalid"))?
-            .is_some_and(|identity| {
-                record.primary_session_id == session.id
-                    && crate::cli::execution_state::session_binding_authorizes_current_lifecycle_descendant(
-                        &worktree,
-                        owner,
-                        &session.id,
-                        &identity.execution_binding.identity,
-                    )
-                    .unwrap_or(false)
-            });
-        if !exact_bound {
-            return Err(execution_binding_error(
-                "execution_continuation_binding_not_exact",
-            ));
-        }
-    }
     Ok(ExecutionContinuationAuthority {
         session,
         project_state_root,
@@ -617,7 +600,7 @@ fn evaluate_authenticated_execution_continuation(
         record,
         owner,
         exact_unbound,
-        current_binding,
+        execution_binding,
     })
 }
 
@@ -640,12 +623,12 @@ pub(crate) fn probe_authenticated_execution_continuation(
                     "execution.continue:{}:{}:{}",
                     authority.owner.number,
                     authority.session.id,
-                    authority.current_binding.generation_id
+                    authority.execution_binding.generation_id
                 )),
                 retryable: Some(true),
                 repository_target: authority.session.repo_hash.clone(),
                 target_state: Some(format!("{:?}", authority.record.status).to_ascii_lowercase()),
-                execution_generation: Some(authority.current_binding.generation_id.clone()),
+                execution_generation: Some(authority.execution_binding.generation_id.clone()),
                 ..GovernanceMetadata::default()
             };
             if authority.record.status
@@ -668,7 +651,7 @@ pub(crate) fn probe_authenticated_execution_continuation(
                     .session
                     .execution_binding
                     .as_ref()
-                    .is_some_and(|binding| binding.identity == authority.current_binding);
+                    .is_some_and(|binding| binding.identity == authority.execution_binding);
             if current_bound {
                 RecoveryProbe::satisfied("execution.continue", governance)
             } else {
@@ -714,7 +697,7 @@ pub fn continue_authenticated_execution(
         record,
         owner,
         exact_unbound,
-        current_binding,
+        execution_binding,
     } = authority;
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
         &worktree,
@@ -726,12 +709,9 @@ pub fn continue_authenticated_execution(
         let binding = session.execution_binding.clone().ok_or_else(|| {
             execution_binding_error("execution_continuation_replay_binding_missing")
         })?;
-        let current = crate::cli::execution_state::current_execution_binding(&worktree, owner)
-            .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
-            .ok_or_else(|| execution_binding_error("execution_continuation_binding_missing"))?;
         if audit.session_id != session.id
-            || audit.generation_id != current.generation_id
-            || audit.execution_binding != current
+            || audit.generation_id != execution_binding.generation_id
+            || audit.execution_binding != execution_binding
             || audit.execution_binding != binding.identity
             || audit.capability_generation != binding.capability_generation
         {
@@ -787,7 +767,7 @@ pub fn continue_authenticated_execution(
                 owner,
                 &existing.request,
                 existing.predecessor_status,
-                &current_binding,
+                &execution_binding,
                 &gwt_core::paths::gwt_sessions_dir(),
                 &session,
             )
@@ -841,7 +821,8 @@ pub fn continue_authenticated_execution(
             .execution_binding
             .as_ref()
             .map(|binding| binding.identity.clone());
-        let binding = rebind_session_to_current_execution(&worktree, owner, &session, None)?;
+        let binding =
+            rebind_session_to_exact_execution(owner, &session, execution_binding.clone())?;
         validate_continuation_binding(
             &project_state_root,
             &session.id,
@@ -904,7 +885,7 @@ pub fn continue_authenticated_execution(
         },
         |attempt| attempt.request,
     );
-    let predecessor_binding = current_binding;
+    let predecessor_binding = execution_binding;
     let predecessor_status = match record.status {
         crate::cli::execution_state::ExecutionControlStatus::Active => {
             crate::cli::execution_state::SuccessorPredecessorStatus::Active
@@ -959,20 +940,11 @@ pub fn continue_authenticated_execution(
     ))
 }
 
-fn rebind_session_to_current_execution(
-    worktree: &Path,
+fn rebind_session_to_exact_execution(
     owner: crate::cli::execution_state::ExecutionOwnerKey,
     expected_session: &Session,
-    expected_generation_id: Option<&str>,
+    identity: ExecutionBindingIdentity,
 ) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
-    let identity = crate::cli::execution_state::current_execution_binding(worktree, owner)
-        .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
-        .ok_or_else(|| execution_binding_error("execution_continuation_binding_missing"))?;
-    if expected_generation_id.is_some_and(|expected| expected != identity.generation_id) {
-        return Err(execution_binding_error(
-            "execution_continuation_generation_mismatch",
-        ));
-    }
     let repo_hash = expected_session.repo_hash.clone().ok_or_else(|| {
         execution_binding_error("execution_continuation_session_repo_hash_missing")
     })?;
@@ -4530,6 +4502,223 @@ mod tests {
     }
 
     #[test]
+    fn execution_continuation_rebinds_older_exact_active_generation_without_switching_lineage() {
+        with_strict_target_fixture(|repo, session| {
+            let (older_session, older_binding) = bind_session_to_current_execution(repo, session);
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 2359,
+            };
+            let mut newer_session =
+                session_fixture("continuation-newer-session", repo, &older_session.branch);
+            save_session_fixture(&newer_session);
+            let successor_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "fresh-newer-before-older-continuation".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: crate::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+                session_binding_id: "fresh-newer-session-binding".to_string(),
+                initial_session_id: newer_session.id.clone(),
+                entrypoint: "$gwt-execute #2359".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+                repo,
+                owner,
+                &successor_request,
+            )
+            .expect("prepare newer fresh generation");
+            crate::cli::execution_state::activate_successor(repo, owner, &successor_request)
+                .expect("activate newer fresh generation");
+            let newer_identity =
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read newer current binding")
+                    .expect("newer current binding");
+            let newer_binding = SessionExecutionBinding {
+                schema_version: SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: newer_session.id.clone(),
+                repo_hash: newer_session
+                    .repo_hash
+                    .clone()
+                    .expect("newer Session repository identity"),
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity: newer_identity.clone(),
+                capability_generation: 1,
+            };
+            newer_session
+                .set_execution_binding(Some(newer_binding))
+                .expect("bind newer Session");
+            save_session_fixture(&newer_session);
+
+            let probe = probe_authenticated_execution_continuation(repo, &older_session.id);
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Satisfied,
+                "an older exact Active Session remains its own continuation authority: {probe:?}"
+            );
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-older-exact-active".to_string(),
+            };
+            let (receipt, rebound) =
+                continue_authenticated_execution(repo, &older_session.id, request.clone())
+                    .expect("continue the older exact Active lineage");
+            let replay = continue_authenticated_execution(repo, &older_session.id, request)
+                .expect("replay the older exact Active continuation");
+
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::ReboundCurrent
+            );
+            assert_eq!(receipt.execution_binding, older_binding.identity);
+            assert_eq!(rebound, older_binding);
+            assert_eq!(replay, (receipt.clone(), rebound.clone()));
+            assert_eq!(
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read current cursor")
+                    .as_ref(),
+                Some(&newer_identity),
+                "continuing older A must not switch the shared current cursor away from newer B"
+            );
+            let ledger = crate::cli::execution_state::load_generation_ledger(repo, owner)
+                .expect("read continuation ledger")
+                .expect("continuation ledger");
+            let audit = ledger
+                .continuation_validations
+                .iter()
+                .find(|audit| audit.operation_id == "continue-older-exact-active")
+                .expect("exact older rebound audit");
+            assert_eq!(audit.generation_id, older_binding.identity.generation_id);
+            assert_eq!(audit.execution_binding, older_binding.identity);
+        });
+    }
+
+    #[test]
+    fn execution_continuation_branches_from_older_exact_completed_generation() {
+        with_strict_target_fixture(|repo, session| {
+            let (older_session, older_binding) = bind_session_to_current_execution(repo, session);
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 2359,
+            };
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    repo,
+                    &older_session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("settle older generation"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+            let mut newer_session =
+                session_fixture("continuation-current-session", repo, &older_session.branch);
+            save_session_fixture(&newer_session);
+            let current_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "fresh-current-before-older-completed-continuation".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: crate::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+                session_binding_id: "fresh-current-session-binding".to_string(),
+                initial_session_id: newer_session.id.clone(),
+                entrypoint: "$gwt-execute #2359".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+                repo,
+                owner,
+                &current_request,
+            )
+            .expect("prepare current fresh generation");
+            crate::cli::execution_state::activate_successor(repo, owner, &current_request)
+                .expect("activate current fresh generation");
+            let newer_identity =
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read current fresh binding")
+                    .expect("current fresh binding");
+            newer_session
+                .set_execution_binding(Some(SessionExecutionBinding {
+                    schema_version: SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: newer_session.id.clone(),
+                    repo_hash: newer_session
+                        .repo_hash
+                        .clone()
+                        .expect("current Session repository identity"),
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity: newer_identity.clone(),
+                    capability_generation: 1,
+                }))
+                .expect("bind current Session");
+            save_session_fixture(&newer_session);
+
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-older-exact-completed".to_string(),
+            };
+            let (receipt, successor_binding) =
+                continue_authenticated_execution(repo, &older_session.id, request)
+                    .expect("continue from the older exact Completed lineage");
+
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::SuccessorCreated
+            );
+            assert_eq!(
+                receipt.predecessor_generation_id.as_deref(),
+                Some(older_binding.identity.generation_id.as_str())
+            );
+            assert_eq!(receipt.execution_binding, successor_binding.identity);
+            let ledger = crate::cli::execution_state::load_generation_ledger(repo, owner)
+                .expect("read branched continuation ledger")
+                .expect("branched continuation ledger");
+            let older_generation = ledger
+                .generations
+                .iter()
+                .find(|generation| {
+                    generation.identity.generation_id == older_binding.identity.generation_id
+                })
+                .expect("older predecessor generation");
+            let newer_generation = ledger
+                .generations
+                .iter()
+                .find(|generation| {
+                    generation.identity.generation_id == newer_identity.generation_id
+                })
+                .expect("newer pre-existing generation");
+            let successor = ledger
+                .generations
+                .iter()
+                .find(|generation| {
+                    generation.identity.generation_id == successor_binding.identity.generation_id
+                })
+                .expect("exact continuation successor");
+            assert_eq!(
+                successor.identity.predecessor_generation_id.as_deref(),
+                Some(older_binding.identity.generation_id.as_str())
+            );
+            assert!(ledger.lifecycle_events.iter().any(|event| {
+                event.generation_id == older_generation.identity.generation_id
+                    && event.to_status
+                        == crate::cli::execution_state::ExecutionControlStatus::Completed
+            }));
+            assert_eq!(
+                newer_generation.status,
+                crate::cli::execution_state::ExecutionControlStatus::Active,
+                "branching from older A must preserve current B's Active authority"
+            );
+            assert!(!ledger
+                .lifecycle_events
+                .iter()
+                .any(|event| { event.generation_id == newer_generation.identity.generation_id }));
+            assert_eq!(
+                ledger.current_generation_id,
+                successor_binding.identity.generation_id
+            );
+        });
+    }
+
+    #[test]
     fn split_root_exact_unbound_status_matches_host_continuation_from_all_invocation_shapes() {
         with_split_root_exact_unbound_fixture(
             |project_state_root, worktree, nested, _sibling, session| {
@@ -5546,6 +5735,116 @@ mod tests {
     }
 
     #[test]
+    fn historical_execution_continuation_post_ledger_failure_rebinds_predecessor_session_to_committed_successor(
+    ) {
+        with_strict_target_fixture(|repo, session| {
+            let (older_session, older_binding) = bind_session_to_current_execution(repo, session);
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 2359,
+            };
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    repo,
+                    &older_session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("settle historical predecessor"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+            let current_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "fresh-current-before-historical-response-loss".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: crate::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+                session_binding_id: "fresh-current-before-historical-response-loss-binding"
+                    .to_string(),
+                initial_session_id: "fresh-current-before-historical-response-loss-session"
+                    .to_string(),
+                entrypoint: "$gwt-execute #2359".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+                repo,
+                owner,
+                &current_request,
+            )
+            .expect("prepare newer current generation");
+            crate::cli::execution_state::activate_successor(repo, owner, &current_request)
+                .expect("activate newer current generation");
+
+            crate::cli::execution_state::set_generation_write_failure_after_ledger();
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-historical-post-ledger-retry".to_string(),
+            };
+            continue_authenticated_execution(repo, &older_session.id, request.clone())
+                .expect_err("inject response loss after historical successor ledger commit");
+
+            let predecessor_bound = Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", older_session.id)),
+            )
+            .expect("load predecessor-bound Session after response loss");
+            assert_eq!(
+                predecessor_bound.execution_binding.as_ref(),
+                Some(&older_binding),
+                "ledger-first failure must leave the durable Session on its exact predecessor"
+            );
+            let committed = crate::cli::execution_state::load_owner_generation_ledger(repo, owner)
+                .expect("read committed owner ledger")
+                .expect("committed owner ledger");
+            let attempt = committed
+                .continuation_attempts
+                .iter()
+                .rev()
+                .find(|attempt| attempt.request.operation_id == request.operation_id)
+                .expect("committed historical continuation attempt");
+            assert_eq!(
+                attempt.status,
+                crate::cli::execution_state::ContinuationAttemptStatus::Activated
+            );
+            let successor = attempt
+                .activated_generation
+                .as_ref()
+                .expect("committed successor identity")
+                .clone();
+            assert_eq!(
+                attempt.predecessor.generation_id,
+                older_binding.identity.generation_id
+            );
+
+            let (receipt, repaired_binding) =
+                continue_authenticated_execution(repo, &older_session.id, request)
+                    .expect("retry must rebind the predecessor Session to the committed successor");
+
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::SuccessorCreated
+            );
+            assert_eq!(receipt.execution_binding, repaired_binding.identity);
+            assert_eq!(
+                repaired_binding.identity.generation_id,
+                successor.generation_id
+            );
+            assert_eq!(
+                Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", older_session.id)),
+                )
+                .expect("load repaired successor-bound Session")
+                .execution_binding
+                .as_ref(),
+                Some(&repaired_binding)
+            );
+            assert_eq!(
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read repaired current binding")
+                    .as_ref(),
+                Some(&repaired_binding.identity)
+            );
+        });
+    }
+
+    #[test]
     fn activated_response_loss_retry_refuses_a_legal_takeover_suffix_byte_identically() {
         with_strict_target_fixture(|repo, session| {
             let (session, owner, _) = seed_foreign_active_exact_unbound(repo, session);
@@ -5716,8 +6015,8 @@ mod tests {
                 .expect("Session A observes predecessor P");
             let observed_b = evaluate_authenticated_execution_continuation(repo, &session_b.id)
                 .expect("Session B observes predecessor P");
-            assert_eq!(observed_a.current_binding, predecessor);
-            assert_eq!(observed_b.current_binding, predecessor);
+            assert_eq!(observed_a.execution_binding, predecessor);
+            assert_eq!(observed_b.execution_binding, predecessor);
 
             let winner_request = crate::cli::execution_state::SuccessorRequest {
                 operation_id: "continue-distinct-session-winner".to_string(),
@@ -5734,7 +6033,7 @@ mod tests {
                 owner,
                 &winner_request,
                 crate::cli::execution_state::SuccessorPredecessorStatus::Active,
-                &observed_b.current_binding,
+                &observed_b.execution_binding,
                 &gwt_core::paths::gwt_sessions_dir(),
                 &observed_b.session,
             )
@@ -5761,7 +6060,7 @@ mod tests {
                 owner,
                 &loser_request,
                 crate::cli::execution_state::SuccessorPredecessorStatus::Active,
-                &observed_a.current_binding,
+                &observed_a.execution_binding,
                 &gwt_core::paths::gwt_sessions_dir(),
                 &observed_a.session,
             )

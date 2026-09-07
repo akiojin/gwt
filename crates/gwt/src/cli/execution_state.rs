@@ -852,16 +852,14 @@ pub fn classify_exact_session_runtime(
 
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
     attempt.request.work_id.is_none()
-        && matches!(
-            (attempt.predecessor_status, attempt.request.source.as_str()),
-            (
-                SuccessorPredecessorStatus::Blocked,
-                FRESH_LINKED_OWNER_LAUNCH_SOURCE
-            ) | (
-                SuccessorPredecessorStatus::Completed,
-                MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
-            )
-        )
+        && (attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE
+            || matches!(
+                (attempt.predecessor_status, attempt.request.source.as_str()),
+                (
+                    SuccessorPredecessorStatus::Completed,
+                    MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+                )
+            ))
 }
 
 fn is_completed_successor_status(status: &SuccessorPredecessorStatus) -> bool {
@@ -1550,12 +1548,20 @@ fn validate_generation_ledger(
                 ));
             }
         } else {
-            let predecessor = &ledger.generations[index - 1];
+            let predecessor = ledger.generations[..index]
+                .iter()
+                .find(|predecessor| {
+                    generation.identity.predecessor_generation_id.as_deref()
+                        == Some(predecessor.identity.generation_id.as_str())
+                })
+                .ok_or_else(|| {
+                    invalid_generation_data(
+                        "execution generation predecessor must name an earlier generation",
+                    )
+                })?;
             let predecessor_head = generation.identity.predecessor_content_hash.as_deref();
-            if generation.identity.predecessor_generation_id.as_deref()
-                != Some(predecessor.identity.generation_id.as_str())
-                || predecessor_head
-                    .is_none_or(|head| !generation_has_historical_head(ledger, predecessor, head))
+            if predecessor_head
+                .is_none_or(|head| !generation_has_historical_head(ledger, predecessor, head))
             {
                 return Err(invalid_generation_data(
                     "execution generation predecessor id/hash chain is invalid",
@@ -2080,7 +2086,17 @@ fn validate_generation_ledger(
     }
 
     for (index, generation) in ledger.generations.iter().enumerate().skip(1) {
-        let predecessor = &ledger.generations[index - 1];
+        let predecessor = ledger.generations[..index]
+            .iter()
+            .find(|predecessor| {
+                generation.identity.predecessor_generation_id.as_deref()
+                    == Some(predecessor.identity.generation_id.as_str())
+            })
+            .ok_or_else(|| {
+                invalid_generation_data(
+                    "successor generation predecessor must name an earlier generation",
+                )
+            })?;
         let authorized_attempt = ledger.continuation_attempts.iter().find(|attempt| {
             attempt.status == ContinuationAttemptStatus::Activated
                 && attempt.predecessor == predecessor.identity
@@ -2098,9 +2114,7 @@ fn validate_generation_ledger(
                     &attempt.predecessor_generation_content_hash,
                     successor_predecessor_execution_status(attempt.predecessor_status),
                 )
-        }) || generation.identity.predecessor_generation_id.as_deref()
-            != Some(predecessor.identity.generation_id.as_str())
-        {
+        }) {
             return Err(invalid_generation_data(
                 "successor generation does not follow its authorized terminal predecessor",
             ));
@@ -2390,8 +2404,23 @@ fn generation_has_historical_head_with_status(
     expected_head: &str,
     expected_status: ExecutionControlStatus,
 ) -> bool {
-    generation_historical_prefixes(ledger, generation).any(|prefix| {
-        effective_generation_head_hash(&prefix, generation) == expected_head
+    generation_historical_prefix_with_head_and_status(
+        ledger,
+        generation,
+        expected_head,
+        expected_status,
+    )
+    .is_some()
+}
+
+fn generation_historical_prefix_with_head_and_status(
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+    expected_head: &str,
+    expected_status: ExecutionControlStatus,
+) -> Option<ExecutionGenerationLedger> {
+    generation_historical_prefixes(ledger, generation).find(|prefix| {
+        effective_generation_head_hash(prefix, generation) == expected_head
             && prefix.effective_status_for(generation) == expected_status
     })
 }
@@ -2494,35 +2523,15 @@ fn execution_binding_authorizes_lifecycle_descendant(
     false
 }
 
-/// Validate one durable Session prefix against the current generation while
-/// permitting only same-session lifecycle suffixes. Takeovers, generation
-/// changes, and arbitrary stale heads remain fail-closed.
-pub(crate) fn session_binding_authorizes_current_lifecycle_descendant(
-    worktree: &Path,
-    owner: ExecutionOwnerKey,
-    session_id: &str,
-    expected: &gwt_agent::ExecutionBindingIdentity,
-) -> io::Result<bool> {
-    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
-        return Ok(false);
-    };
-    let Some(generation) = ledger.current_generation() else {
-        return Ok(false);
-    };
-    Ok(execution_binding_authorizes_lifecycle_descendant(
-        &ledger, generation, session_id, expected,
-    ))
-}
-
 /// Reconstruct one Activated attempt's binding at activation time and require
-/// that it is still the exact current Active authority.
+/// that it is still exact Active authority for its own generation.
 ///
 /// Lifecycle and takeover events are append-only suffixes to the immutable
 /// generation. Stripping all of them from a clone reconstructs the binding
 /// emitted by activation; comparing that binding with the strict current head
 /// makes every later suffix fail closed before repair can publish or bind a
 /// Session.
-fn exact_current_activated_continuation_binding(
+fn exact_active_activated_continuation_binding(
     ledger: &ExecutionGenerationLedger,
     attempt: &ContinuationAttempt,
 ) -> Option<gwt_agent::ExecutionBindingIdentity> {
@@ -2530,27 +2539,28 @@ fn exact_current_activated_continuation_binding(
         return None;
     }
     let activated = attempt.activated_generation.as_ref()?;
-    let current = ledger.current_generation()?;
-    if current.identity != *activated
-        || ledger.effective_status_for(current) != ExecutionControlStatus::Active
-    {
+    let generation = ledger
+        .generations
+        .iter()
+        .find(|generation| generation.identity == *activated)?;
+    if ledger.effective_status_for(generation) != ExecutionControlStatus::Active {
         return None;
     }
 
     let mut activation_ledger = ledger.clone();
     activation_ledger
         .lifecycle_events
-        .retain(|event| event.generation_id != current.identity.generation_id);
+        .retain(|event| event.generation_id != generation.identity.generation_id);
     activation_ledger
         .takeovers
-        .retain(|event| event.generation_id != current.identity.generation_id);
-    let activation_binding = execution_binding_for_generation(&activation_ledger, current);
-    if execution_binding_for_generation(ledger, current) != activation_binding {
+        .retain(|event| event.generation_id != generation.identity.generation_id);
+    let activation_binding = execution_binding_for_generation(&activation_ledger, generation);
+    if execution_binding_for_generation(ledger, generation) != activation_binding {
         return None;
     }
 
     let projection =
-        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(generation))
             .map(hydrate_recovery_envelopes)
             .ok()?;
     if projection.status != ExecutionControlStatus::Active
@@ -2560,6 +2570,30 @@ fn exact_current_activated_continuation_binding(
         return None;
     }
     Some(activation_binding)
+}
+
+fn exact_activated_continuation_predecessor_binding(
+    ledger: &ExecutionGenerationLedger,
+    attempt: &ContinuationAttempt,
+) -> Option<gwt_agent::ExecutionBindingIdentity> {
+    if attempt.status != ContinuationAttemptStatus::Activated {
+        return None;
+    }
+    let predecessor = ledger
+        .generations
+        .iter()
+        .find(|generation| generation.identity == attempt.predecessor)?;
+    let prefix = generation_historical_prefix_with_head_and_status(
+        ledger,
+        predecessor,
+        &attempt.predecessor_generation_content_hash,
+        successor_predecessor_execution_status(attempt.predecessor_status),
+    )?;
+    let predecessor = prefix
+        .generations
+        .iter()
+        .find(|generation| generation.identity == attempt.predecessor)?;
+    Some(execution_binding_for_generation(&prefix, predecessor))
 }
 
 /// Recover the exact activation-time binding from an owner-ledger Activated
@@ -2580,7 +2614,7 @@ pub(crate) fn activated_continuation_binding_for_session(
     }) else {
         return Ok(None);
     };
-    Ok(exact_current_activated_continuation_binding(
+    Ok(exact_active_activated_continuation_binding(
         &ledger, attempt,
     ))
 }
@@ -5049,6 +5083,61 @@ fn build_successor_generation(
     Ok((successor, projection))
 }
 
+fn prepared_successor_predecessor_snapshot(
+    ledger: &ExecutionGenerationLedger,
+    attempt: &ContinuationAttempt,
+) -> io::Result<(ExecutionGeneration, ExecutionGenerationLedger)> {
+    let expected_status = successor_predecessor_execution_status(attempt.predecessor_status);
+    if successor_uses_historical_predecessor(&attempt.request) {
+        let predecessor = ledger
+            .generations
+            .iter()
+            .find(|generation| generation.identity == attempt.predecessor)
+            .cloned()
+            .ok_or_else(|| {
+                generation_conflict(
+                    "branching successor predecessor no longer exists in the owner ledger",
+                )
+            })?;
+        let prefix = generation_historical_prefix_with_head_and_status(
+            ledger,
+            &predecessor,
+            &attempt.predecessor_generation_content_hash,
+            expected_status,
+        )
+        .ok_or_else(|| {
+            generation_conflict(
+                "branching successor predecessor no longer has its exact Prepared historical prefix",
+            )
+        })?;
+        return Ok((predecessor, prefix));
+    }
+
+    let predecessor = ledger
+        .current_generation()
+        .ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?
+        .clone();
+    if predecessor.identity != attempt.predecessor
+        || effective_generation_head_hash(ledger, &predecessor)
+            != attempt.predecessor_generation_content_hash
+        || ledger.effective_status_for(&predecessor) != expected_status
+    {
+        return Err(generation_conflict(
+            "prepared successor CAS lost: current generation or authorized terminal status changed",
+        ));
+    }
+    Ok((predecessor, ledger.clone()))
+}
+
+fn successor_uses_historical_predecessor(request: &SuccessorRequest) -> bool {
+    matches!(
+        request.source.as_str(),
+        FRESH_LINKED_OWNER_LAUNCH_SOURCE | "execution-continue"
+    )
+}
+
 fn prepared_successor_generation(
     context: &GenerationTransactionContext,
     ledger: &ExecutionGenerationLedger,
@@ -5061,23 +5150,12 @@ fn prepared_successor_generation(
     if latest.status != ContinuationAttemptStatus::Prepared {
         return Ok(None);
     }
-    let predecessor = ledger.current_generation().ok_or_else(|| {
-        invalid_generation_data("execution generation ledger current id is missing")
-    })?;
-    let predecessor_head = effective_generation_head_hash(ledger, predecessor);
-    if predecessor.identity != latest.predecessor
-        || predecessor_head != latest.predecessor_generation_content_hash
-        || ledger.effective_status_for(predecessor)
-            != successor_predecessor_execution_status(latest.predecessor_status)
-    {
-        return Err(generation_conflict(
-            "prepared successor CAS lost: current generation or authorized terminal status changed",
-        ));
-    }
+    let (predecessor, predecessor_ledger) =
+        prepared_successor_predecessor_snapshot(ledger, latest)?;
     build_successor_generation(
         context.owner,
-        ledger,
-        predecessor,
+        &predecessor_ledger,
+        &predecessor,
         latest,
         &context.worktree_binding_hash,
     )
@@ -5203,11 +5281,20 @@ pub fn record_rebound_continuation_validation(
                 "continuation operation id is already bound to another operation",
             ));
         }
-        let current = ledger.current_generation().ok_or_else(|| {
-            invalid_generation_data("execution generation ledger current id is missing")
-        })?;
+        let generation = ledger
+            .generations
+            .iter()
+            .find(|generation| {
+                generation.identity.generation_id == binding.identity.generation_id
+                    && generation.identity.session_binding_id == binding.identity.binding_id
+            })
+            .ok_or_else(|| {
+                generation_conflict(
+                    "rebound continuation validation generation is no longer present",
+                )
+            })?;
         let projection = serde_json::from_str::<ExecutionControlRecord>(
-            ledger.effective_projection_for(current),
+            ledger.effective_projection_for(generation),
         )
         .map(hydrate_recovery_envelopes)
         .map_err(|error| {
@@ -5215,15 +5302,14 @@ pub fn record_rebound_continuation_validation(
                 "current execution projection is malformed: {error}"
             ))
         })?;
-        if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+        if ledger.effective_status_for(generation) != ExecutionControlStatus::Active
             || projection.primary_session_id != session_id
-            || execution_binding_for_generation(&ledger, current) != binding.identity
+            || execution_binding_for_generation(&ledger, generation) != binding.identity
         {
             return Err(generation_conflict(
-                "rebound continuation validation no longer matches current authority",
+                "rebound continuation validation no longer matches exact Session authority",
             ));
         }
-        let projection_json = ledger.effective_projection_for(current).to_string();
         let audit = append_continuation_validation(
             &mut ledger,
             ExecutionContinuationValidationAudit {
@@ -5240,7 +5326,7 @@ pub fn record_rebound_continuation_validation(
         stamp_generation_ledger(&mut ledger);
         #[cfg(test)]
         fail_continuation_validation_write_if_requested()?;
-        write_activated_generation(context, &ledger, &projection_json)?;
+        write_owner_ledger(context, &ledger)?;
         let readback = load_owner_generation_ledger_from_context(context)?
             .and_then(|ledger| ledger.continuation_validations.last().cloned())
             .filter(|readback| readback == &audit)
@@ -5312,16 +5398,29 @@ pub fn continuation_attempt_execution_binding_matches(
     else {
         return Ok(false);
     };
-    if effective_generation_head_hash(&ledger, predecessor)
-        != latest.predecessor_generation_content_hash
-        || ledger.effective_status_for(predecessor)
-            != successor_predecessor_execution_status(latest.predecessor_status)
-    {
-        return Ok(false);
-    }
+    let predecessor_ledger = if successor_uses_historical_predecessor(&latest.request) {
+        let Some(prefix) = generation_historical_prefix_with_head_and_status(
+            &ledger,
+            predecessor,
+            &latest.predecessor_generation_content_hash,
+            successor_predecessor_execution_status(latest.predecessor_status),
+        ) else {
+            return Ok(false);
+        };
+        prefix
+    } else {
+        if effective_generation_head_hash(&ledger, predecessor)
+            != latest.predecessor_generation_content_hash
+            || ledger.effective_status_for(predecessor)
+                != successor_predecessor_execution_status(latest.predecessor_status)
+        {
+            return Ok(false);
+        }
+        ledger.clone()
+    };
     let (candidate, _) = build_successor_generation(
         owner,
-        &ledger,
+        &predecessor_ledger,
         predecessor,
         latest,
         &context.worktree_binding_hash,
@@ -6631,6 +6730,78 @@ fn plan_successor_for_status(
             }
         }));
     }
+    Ok(plan_successor_from_predecessor(
+        context,
+        ledger,
+        request,
+        predecessor_status,
+        &predecessor,
+    ))
+}
+
+fn plan_successor_for_exact_binding(
+    context: &GenerationTransactionContext,
+    ledger: &mut ExecutionGenerationLedger,
+    request: &SuccessorRequest,
+    predecessor_status: SuccessorPredecessorStatus,
+    expected_binding: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<ContinuationAttempt> {
+    if ledger
+        .takeover_attempts
+        .iter()
+        .any(|attempt| attempt.request.operation_id == request.operation_id)
+    {
+        return Err(generation_conflict(
+            "operation id is already bound to a same-generation takeover",
+        ));
+    }
+    if let Some(existing) =
+        latest_operation_attempt(ledger, request, &context.worktree_binding_hash)?
+    {
+        if existing.predecessor.generation_id != expected_binding.generation_id
+            || existing.predecessor.session_binding_id != expected_binding.binding_id
+            || existing.predecessor_generation_content_hash != expected_binding.ledger_head_hash
+            || existing.predecessor_status != predecessor_status
+        {
+            return Err(generation_conflict(
+                "continuation operation no longer matches its exact Session predecessor",
+            ));
+        }
+        return Ok(existing.clone());
+    }
+    let predecessor = ledger
+        .generations
+        .iter()
+        .find(|generation| {
+            generation.identity.generation_id == expected_binding.generation_id
+                && generation.identity.session_binding_id == expected_binding.binding_id
+        })
+        .cloned()
+        .ok_or_else(|| generation_conflict("exact continuation predecessor is missing"))?;
+    if execution_binding_for_generation(ledger, &predecessor) != *expected_binding
+        || ledger.effective_status_for(&predecessor)
+            != successor_predecessor_execution_status(predecessor_status)
+    {
+        return Err(generation_conflict(
+            "exact continuation predecessor head or status changed before preparation",
+        ));
+    }
+    Ok(plan_successor_from_predecessor(
+        context,
+        ledger,
+        request,
+        predecessor_status,
+        &predecessor,
+    ))
+}
+
+fn plan_successor_from_predecessor(
+    context: &GenerationTransactionContext,
+    ledger: &mut ExecutionGenerationLedger,
+    request: &SuccessorRequest,
+    predecessor_status: SuccessorPredecessorStatus,
+    predecessor: &ExecutionGeneration,
+) -> ContinuationAttempt {
     let predecessor_head = effective_generation_head_hash(ledger, &predecessor);
     let attempt = ContinuationAttempt {
         request: request.clone(),
@@ -6652,7 +6823,7 @@ fn plan_successor_for_status(
         previous_attempt_hash: String::new(),
         content_hash: String::new(),
     };
-    Ok(append_continuation_attempt(ledger, attempt))
+    append_continuation_attempt(ledger, attempt)
 }
 
 /// Append an Aborted event for a Prepared attempt. Current generation and
@@ -6874,26 +7045,20 @@ fn activate_successor_from_ledger_in_context(
     }
     validate_generation_activation_owner(context, false)?;
 
-    let predecessor = ledger
-        .current_generation()
-        .ok_or_else(|| {
-            invalid_generation_data("execution generation ledger current id is missing")
-        })?
-        .clone();
-    let predecessor_head = effective_generation_head_hash(&ledger, &predecessor);
-    if predecessor.identity != latest.predecessor
-        || predecessor_head != latest.predecessor_generation_content_hash
-        || ledger.effective_status_for(&predecessor)
-            != successor_predecessor_execution_status(latest.predecessor_status)
-    {
-        return Err(generation_conflict(
-                "successor activation CAS lost: current generation or authorized terminal status changed",
-            ));
-    }
+    let (predecessor, predecessor_ledger) =
+        prepared_successor_predecessor_snapshot(&ledger, &latest).map_err(|error| {
+            if latest.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE {
+                error
+            } else {
+                generation_conflict(
+                    "successor activation CAS lost: current generation or authorized terminal status changed",
+                )
+            }
+        })?;
 
     let (successor, projection) = build_successor_generation(
         context.owner,
-        &ledger,
+        &predecessor_ledger,
         &predecessor,
         &latest,
         &context.worktree_binding_hash,
@@ -7002,7 +7167,7 @@ pub fn activate_successor_with_session_rebind(
     owner: ExecutionOwnerKey,
     request: &SuccessorRequest,
     predecessor_status: SuccessorPredecessorStatus,
-    expected_current_binding: &gwt_agent::ExecutionBindingIdentity,
+    expected_execution_binding: &gwt_agent::ExecutionBindingIdentity,
     sessions_dir: &Path,
     expected_session: &gwt_agent::Session,
 ) -> io::Result<
@@ -7068,34 +7233,81 @@ pub fn activate_successor_with_session_rebind(
                 let latest =
                     latest_operation_attempt(&ledger, request, &context.worktree_binding_hash)?
                         .cloned();
-                let current = ledger.current_generation().ok_or_else(|| {
-                    invalid_generation_data("execution generation ledger current id is missing")
-                })?;
-                let current_binding = execution_binding_for_generation(&ledger, current);
-                let activated_retry_binding = latest.as_ref().and_then(|attempt| {
-                    exact_current_activated_continuation_binding(&ledger, attempt)
-                });
-                if latest
+                if let Some(attempt) = latest
                     .as_ref()
-                    .is_some_and(|attempt| attempt.status == ContinuationAttemptStatus::Activated)
+                    .filter(|attempt| attempt.status == ContinuationAttemptStatus::Activated)
                 {
-                    if activated_retry_binding.as_ref() != Some(expected_current_binding) {
+                    let successor_binding =
+                        exact_active_activated_continuation_binding(&ledger, attempt);
+                    let successor_bound = successor_binding.as_ref()
+                        == Some(expected_execution_binding)
+                        && (expected_exact_unbound
+                            || session.execution_binding.as_ref().is_some_and(|binding| {
+                                binding.identity == *expected_execution_binding
+                            }));
+                    let predecessor = ledger
+                        .generations
+                        .iter()
+                        .find(|generation| generation.identity == attempt.predecessor);
+                    let predecessor_bound =
+                        exact_activated_continuation_predecessor_binding(&ledger, attempt).as_ref()
+                            == Some(expected_execution_binding)
+                            && predecessor.is_some_and(|predecessor| {
+                                session.execution_binding.as_ref().is_some_and(|binding| {
+                                    binding.schema_version
+                                    == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+                                    && binding.session_id == session.id
+                                    && binding.owner_kind == owner.kind.as_str()
+                                    && binding.owner_number == owner.number
+                                    && binding.capability_generation > 0
+                                    && execution_binding_authorizes_lifecycle_descendant(
+                                        &ledger,
+                                        predecessor,
+                                        &session.id,
+                                        &binding.identity,
+                                    )
+                                })
+                            });
+                    if !successor_bound && !predecessor_bound {
                         return Err(io::Error::new(
                             ErrorKind::WouldBlock,
-                            "Activated successor no longer matches strict current authority",
+                            "Activated successor no longer matches exact Session authority",
                         ));
                     }
-                } else if current_binding != *expected_current_binding {
-                    return Err(io::Error::new(
-                        ErrorKind::WouldBlock,
-                        "successor predecessor changed before activation",
-                    ));
                 }
                 if latest
                     .as_ref()
                     .is_none_or(|attempt| attempt.status != ContinuationAttemptStatus::Activated)
                 {
-                    plan_successor_for_status(context, &mut ledger, request, predecessor_status)?;
+                    if expected_exact_unbound {
+                        let current = ledger.current_generation().ok_or_else(|| {
+                            invalid_generation_data(
+                                "execution generation ledger current id is missing",
+                            )
+                        })?;
+                        if execution_binding_for_generation(&ledger, current)
+                            != *expected_execution_binding
+                        {
+                            return Err(io::Error::new(
+                                ErrorKind::WouldBlock,
+                                "successor predecessor changed before activation",
+                            ));
+                        }
+                        plan_successor_for_status(
+                            context,
+                            &mut ledger,
+                            request,
+                            predecessor_status,
+                        )?;
+                    } else {
+                        plan_successor_for_exact_binding(
+                            context,
+                            &mut ledger,
+                            request,
+                            predecessor_status,
+                            expected_execution_binding,
+                        )?;
+                    }
                 }
                 #[cfg(test)]
                 fail_continuation_rebind_if_requested(
@@ -7108,14 +7320,15 @@ pub fn activate_successor_with_session_rebind(
                         "successor Session rebind lost activated generation readback",
                     )
                 })?;
-                let generation = readback.current_generation().ok_or_else(|| {
-                    invalid_generation_data("activated generation is not current")
-                })?;
-                if generation.identity != activated {
-                    return Err(invalid_generation_data(
-                        "successor Session rebind and activated generation disagree",
-                    ));
-                }
+                let generation = readback
+                    .generations
+                    .iter()
+                    .find(|generation| generation.identity == activated)
+                    .ok_or_else(|| {
+                        invalid_generation_data(
+                            "successor Session rebind lost its activated generation",
+                        )
+                    })?;
                 let planned_identity = execution_binding_for_generation(&readback, generation);
                 let capability_generation =
                     session.execution_binding.as_ref().map_or(1, |binding| {
@@ -7761,6 +7974,82 @@ fn with_satisfied_recovery_session_lease<T>(
     };
     with_generation_owner_lease(worktree, owner, |_| {
         with_exact_recovery_session_lease(expected_session, operation)
+    })
+}
+
+/// Repair the derived current projection/pointer after the authoritative
+/// owner ledger already contains a lifecycle transition. Historical
+/// generations deliberately remain ledger-only, so retrying them must not
+/// replace the flat current projection.
+fn repair_committed_lifecycle_publication(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+    expected_session: Option<&gwt_agent::Session>,
+) -> io::Result<()> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    if !owner_generation_ledger_exists(worktree, owner)? {
+        return Ok(());
+    }
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data(
+                "generation ledger disappeared during lifecycle publication repair",
+            )
+        })?;
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        gwt_agent::with_session_path_lease(
+            &sessions_dir,
+            &record.primary_session_id,
+            |session_state| {
+                if let Some(expected_session) = expected_session {
+                    ensure_recovery_session_snapshot_unchanged(&session_state, expected_session)?;
+                }
+                if !session_binding_authorizes_current_generation(
+                    context,
+                    &ledger,
+                    &record.primary_session_id,
+                    &session_state,
+                )? {
+                    return Err(generation_binding_mismatch());
+                }
+                let target = match &session_state {
+                    gwt_agent::SessionPathState::Present(session) => {
+                        session.execution_binding.as_ref().and_then(|binding| {
+                            ledger.generations.iter().find(|generation| {
+                                generation.identity.generation_id == binding.identity.generation_id
+                                    && generation.identity.session_binding_id
+                                        == binding.identity.binding_id
+                            })
+                        })
+                    }
+                    gwt_agent::SessionPathState::Missing => ledger.current_generation(),
+                    gwt_agent::SessionPathState::Error(_) => None,
+                }
+                .ok_or_else(generation_binding_mismatch)?;
+                let committed = serde_json::from_str::<ExecutionControlRecord>(
+                    ledger.effective_projection_for(target),
+                )
+                .map(hydrate_recovery_envelopes)
+                .map_err(|error| {
+                    invalid_generation_data(format!(
+                        "committed lifecycle projection is malformed: {error}"
+                    ))
+                })?;
+                if committed != *record || ledger.effective_status_for(target) != record.status {
+                    return Err(generation_conflict(
+                        "committed lifecycle projection changed before publication repair",
+                    ));
+                }
+                if ledger.current_generation_id == target.identity.generation_id {
+                    let projection = ledger.effective_projection_for(target).to_string();
+                    write_activated_generation(context, &ledger, &projection)?;
+                }
+                Ok(())
+            },
+        )
     })
 }
 
@@ -8432,6 +8721,18 @@ fn settle_locked(
         });
     }
     if record.status != ExecutionControlStatus::Active {
+        match repair_committed_lifecycle_publication(worktree, &record, None) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == ErrorKind::PermissionDenied
+                    && error
+                        .to_string()
+                        .starts_with(GENERATION_BINDING_MISMATCH_PREFIX) =>
+            {
+                return Ok(SettleResult::BindingMismatch);
+            }
+            Err(error) => return Err(error),
+        }
         return Ok(SettleResult::AlreadySettled(record));
     }
     let lifecycle_reason = match settlement {
@@ -9118,7 +9419,7 @@ fn diagnose_with_mode(
         warnings: Vec::new(),
     };
 
-    let record = match load(worktree) {
+    let mut record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => {
             return finalize_diagnosis(
@@ -9147,12 +9448,6 @@ fn diagnose_with_mode(
         }
     };
 
-    snapshot.owner_kind = Some(record.owner_kind);
-    snapshot.owner_number = Some(record.owner_number);
-    snapshot.blocked_reason.clone_from(&record.blocked_reason);
-    snapshot
-        .missing_verification
-        .clone_from(&record.missing_verification);
     if !integrity_ok(&record) {
         snapshot.ecr_status = ExecutionDiagnosisState::Corrupt;
         snapshot.binding_state = ExecutionBindingState::Corrupt;
@@ -9170,6 +9465,27 @@ fn diagnose_with_mode(
         );
     }
 
+    let mut exact_session_binding = None;
+    if let Some(session_id) = session_id {
+        match exact_execution_projection_for_session(worktree, session_id) {
+            Ok(Some((exact_record, exact_binding, session_binding))) => {
+                record = exact_record;
+                exact_session_binding = Some((exact_binding, session_binding));
+            }
+            Ok(None) => {}
+            Err(error) => snapshot.warnings.push(format!(
+                "exact Session execution projection is unreadable: {error}"
+            )),
+        }
+    }
+
+    snapshot.owner_kind = Some(record.owner_kind);
+    snapshot.owner_number = Some(record.owner_number);
+    snapshot.blocked_reason.clone_from(&record.blocked_reason);
+    snapshot
+        .missing_verification
+        .clone_from(&record.missing_verification);
+
     snapshot.ecr_status = match record.status {
         ExecutionControlStatus::Active => ExecutionDiagnosisState::Active,
         ExecutionControlStatus::Completed => ExecutionDiagnosisState::Completed,
@@ -9181,15 +9497,21 @@ fn diagnose_with_mode(
     };
     match load_generation_ledger(worktree, owner) {
         Ok(Some(ledger)) if generation_ledger_integrity_ok(&ledger) => {
-            snapshot.generation_id = Some(ledger.current_generation_id.clone());
+            let diagnosis_generation_id = exact_session_binding
+                .as_ref()
+                .map_or(ledger.current_generation_id.as_str(), |(binding, _)| {
+                    binding.generation_id.as_str()
+                });
+            snapshot.generation_id = Some(diagnosis_generation_id.to_string());
             let mut continuation_evidence = Vec::new();
-            if let Some(attempt) = ledger
-                .continuation_attempts
-                .iter()
-                .rev()
-                .find(|attempt| attempt.status == ContinuationAttemptStatus::Activated)
-                .or_else(|| ledger.continuation_attempts.last())
-            {
+            if let Some(attempt) = ledger.continuation_attempts.iter().rev().find(|attempt| {
+                attempt
+                    .activated_generation
+                    .as_ref()
+                    .is_some_and(|generation| generation.generation_id == diagnosis_generation_id)
+                    || (attempt.status != ContinuationAttemptStatus::Activated
+                        && attempt.candidate_generation_id == diagnosis_generation_id)
+            }) {
                 let status = match attempt.status {
                     ContinuationAttemptStatus::Prepared => "prepared",
                     ContinuationAttemptStatus::Aborted => "aborted",
@@ -9198,7 +9520,7 @@ fn diagnose_with_mode(
                 let activated = attempt.activated_generation.as_ref();
                 let validated = attempt.status == ContinuationAttemptStatus::Activated
                     && activated.is_some_and(|generation| {
-                        generation.generation_id == ledger.current_generation_id
+                        generation.generation_id == diagnosis_generation_id
                     });
                 continuation_evidence.push((
                     attempt.recorded_at,
@@ -9208,12 +9530,12 @@ fn diagnose_with_mode(
                             .then(|| "successor_created".to_string()),
                         predecessor_generation_id: Some(attempt.predecessor.generation_id.clone()),
                         predecessor_stale: validated
-                            && attempt.predecessor.generation_id != ledger.current_generation_id,
+                            && attempt.predecessor.generation_id != diagnosis_generation_id,
                         from_session_id: generation_writer(
                             &ledger,
                             &attempt.predecessor.generation_id,
                         ),
-                        current_writer: generation_writer(&ledger, &ledger.current_generation_id),
+                        current_writer: generation_writer(&ledger, diagnosis_generation_id),
                         generation_id: activated.map_or_else(
                             || attempt.candidate_generation_id.clone(),
                             |generation| generation.generation_id.clone(),
@@ -9229,7 +9551,12 @@ fn diagnose_with_mode(
                     attempt.candidate_generation_id
                 ));
             }
-            if let Some(validation) = ledger.continuation_validations.last() {
+            if let Some(validation) = ledger
+                .continuation_validations
+                .iter()
+                .rev()
+                .find(|validation| validation.generation_id == diagnosis_generation_id)
+            {
                 continuation_evidence.push((
                     validation.recorded_at,
                     ExecutionContinuationDiagnosis {
@@ -9238,12 +9565,12 @@ fn diagnose_with_mode(
                         predecessor_generation_id: None,
                         predecessor_stale: false,
                         from_session_id: None,
-                        current_writer: generation_writer(&ledger, &ledger.current_generation_id),
+                        current_writer: generation_writer(&ledger, diagnosis_generation_id),
                         generation_id: validation.generation_id.clone(),
                         takeover_audit_id: None,
-                        validated: validation.generation_id == ledger.current_generation_id
+                        validated: validation.generation_id == diagnosis_generation_id
                             && validation.execution_binding.generation_id
-                                == ledger.current_generation_id,
+                                == diagnosis_generation_id,
                     },
                 ));
                 snapshot.warnings.push(format!(
@@ -9251,19 +9578,24 @@ fn diagnose_with_mode(
                     validation.generation_id
                 ));
             }
-            if let Some(takeover) = ledger.takeovers.last() {
+            if let Some(takeover) = ledger
+                .takeovers
+                .iter()
+                .rev()
+                .find(|takeover| takeover.generation_id == diagnosis_generation_id)
+            {
                 continuation_evidence.push((
                     takeover.observed_at,
                     ExecutionContinuationDiagnosis {
                         status: "activated".to_string(),
                         outcome: Some("takeover".to_string()),
                         predecessor_generation_id: Some(takeover.generation_id.clone()),
-                        predecessor_stale: takeover.generation_id == ledger.current_generation_id,
+                        predecessor_stale: takeover.generation_id == diagnosis_generation_id,
                         from_session_id: Some(takeover.from_session_id.clone()),
-                        current_writer: generation_writer(&ledger, &ledger.current_generation_id),
+                        current_writer: generation_writer(&ledger, diagnosis_generation_id),
                         generation_id: takeover.generation_id.clone(),
                         takeover_audit_id: Some(takeover.content_hash.clone()),
-                        validated: takeover.generation_id == ledger.current_generation_id,
+                        validated: takeover.generation_id == diagnosis_generation_id,
                     },
                 ));
                 snapshot.warnings.push(format!(
@@ -9282,22 +9614,28 @@ fn diagnose_with_mode(
                 }
                 ExecutionControlStatus::Active => match session_id {
                     Some(session_id) => {
-                        match crate::cli::verification_record::
-                            snapshot_current_generation_caller_binding(
-                                worktree,
-                                Some(session_id),
-                            )
-                        {
-                            Ok(binding) => {
-                                snapshot.binding_state = ExecutionBindingState::Bound;
-                                snapshot.binding_cause = "current_generation".to_string();
-                                snapshot.capability_generation =
-                                    binding.map(|binding| binding.capability_generation);
-                            }
-                            Err(_) => {
-                                snapshot.binding_state = ExecutionBindingState::Stale;
-                                snapshot.binding_cause =
-                                    "current_session_not_authorized".to_string();
+                        if let Some((_, binding)) = exact_session_binding.as_ref() {
+                            snapshot.binding_state = ExecutionBindingState::Bound;
+                            snapshot.binding_cause = "exact_session_generation".to_string();
+                            snapshot.capability_generation = Some(binding.capability_generation);
+                        } else {
+                            match crate::cli::verification_record::
+                                snapshot_current_generation_caller_binding(
+                                    worktree,
+                                    Some(session_id),
+                                )
+                            {
+                                Ok(binding) => {
+                                    snapshot.binding_state = ExecutionBindingState::Bound;
+                                    snapshot.binding_cause = "current_generation".to_string();
+                                    snapshot.capability_generation =
+                                        binding.map(|binding| binding.capability_generation);
+                                }
+                                Err(_) => {
+                                    snapshot.binding_state = ExecutionBindingState::Stale;
+                                    snapshot.binding_cause =
+                                        "current_session_not_authorized".to_string();
+                                }
                             }
                         }
                     }
@@ -9374,7 +9712,9 @@ fn diagnose_with_mode(
                 ))
                 .to_string();
         }
-        if let Ok(Some(plan)) = crate::cli::verification_record::load_plan(worktree) {
+        if let Ok(Some(plan)) =
+            crate::cli::verification_record::load_plan_for_session(worktree, session_id)
+        {
             snapshot
                 .generated_outputs
                 .clone_from(&plan.generated_outputs);
@@ -10145,7 +10485,7 @@ fn evaluate_execution_reopen_prerequisites(
         ));
     }
     use crate::cli::verification_record as vr;
-    let plan = vr::load_plan(worktree)
+    let plan = vr::load_plan_for_session(worktree, session_id)
         .map_err(|error| {
             unavailable_recovery_prerequisite(
                 GovernanceCause::Integrity,
@@ -10182,7 +10522,7 @@ fn evaluate_execution_reopen_prerequisites(
             "the derived verification plan must be registered after the block; rerun verify.plan with params.derive:true",
         ));
     }
-    let verification = vr::load(worktree)
+    let verification = vr::load_for_session(worktree, session_id)
         .map_err(|error| {
             unavailable_recovery_prerequisite(
                 GovernanceCause::Integrity,
@@ -11724,23 +12064,27 @@ fn run_reopen_locked(
     let (mut record, blocked_at, plan, verification, verification_started_at) = match prerequisites
     {
         ExecutionReopenPrerequisites::Satisfied { record, binding } => {
-            // Only an in-flight record with embedded recoveries needs the
-            // rolling-upgrade write. A modern idempotent retry stays a true
-            // no-op and cannot fail because of an unnecessary rewrite.
-            let validate_and_upgrade = || {
-                if recovery_storage_needs_upgrade(worktree)? && binding.is_none() {
-                    save(worktree, &record)?;
+            // A ledger-first response-loss retry republishes the derived flat
+            // current projection/pointer. Historical generations remain
+            // ledger-only. Legacy records retain their rolling-upgrade path.
+            let satisfied = if binding.is_some() {
+                repair_committed_lifecycle_publication(worktree, &record, expected_session)
+            } else {
+                let validate_and_upgrade = || {
+                    if recovery_storage_needs_upgrade(worktree)? {
+                        save(worktree, &record)?;
+                    }
+                    Ok(())
+                };
+                match expected_session {
+                    Some(expected_session) => with_satisfied_recovery_session_lease(
+                        worktree,
+                        &record,
+                        expected_session,
+                        validate_and_upgrade,
+                    ),
+                    None => validate_and_upgrade(),
                 }
-                Ok(())
-            };
-            let satisfied = match expected_session {
-                Some(expected_session) => with_satisfied_recovery_session_lease(
-                    worktree,
-                    &record,
-                    expected_session,
-                    validate_and_upgrade,
-                ),
-                None => validate_and_upgrade(),
             };
             match satisfied {
                 Ok(()) => {}
@@ -14045,6 +14389,215 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_fresh_successors_prepared_from_one_predecessor_both_activate() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_session = "session-shared-predecessor";
+        let mut active = active_record(predecessor_session);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            dir.path(),
+            owner,
+            predecessor_session,
+            predecessor_binding.clone(),
+        );
+
+        let request_a = successor_request(
+            "fresh-concurrent-a",
+            "gwt-host-launch-a",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        let request_b = successor_request(
+            "fresh-concurrent-b",
+            "gwt-host-launch-b",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request_a).unwrap();
+        prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request_b).unwrap();
+        let binding_a =
+            prepared_successor_execution_binding(dir.path(), owner, &request_a).unwrap();
+        let binding_b =
+            prepared_successor_execution_binding(dir.path(), owner, &request_b).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles = [request_a.clone(), request_b.clone()]
+            .into_iter()
+            .map(|request| {
+                let worktree = dir.path().to_path_buf();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    activate_successor(&worktree, owner, &request)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(ledger.generations.len(), 3);
+        assert!(
+            current_active_execution_binding_matches(
+                dir.path(),
+                owner,
+                predecessor_session,
+                &predecessor_binding,
+            )
+            .unwrap(),
+            "the shared live predecessor must remain independently Active",
+        );
+        for (request, binding) in [(&request_a, &binding_a), (&request_b, &binding_b)] {
+            let generation = ledger
+                .generations
+                .iter()
+                .find(|generation| generation.identity.generation_id == binding.generation_id)
+                .expect("activated fresh branch");
+            assert_eq!(
+                ledger.effective_status_for(generation),
+                ExecutionControlStatus::Active
+            );
+            assert!(
+                current_active_execution_binding_matches(
+                    dir.path(),
+                    owner,
+                    &request.initial_session_id,
+                    binding,
+                )
+                .unwrap(),
+                "each fresh Session must retain its exact Active branch authority",
+            );
+        }
+        assert!(
+            [binding_a, binding_b]
+                .iter()
+                .any(|binding| binding.generation_id == ledger.current_generation_id),
+            "the current cursor must point to the latest activated fresh branch",
+        );
+    }
+
+    #[test]
+    fn fresh_prepared_session_activates_from_historical_active_prefix_after_predecessor_settles() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_session = "session-historical-active-predecessor";
+        let mut active = active_record(predecessor_session);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            dir.path(),
+            owner,
+            predecessor_session,
+            predecessor_binding.clone(),
+        );
+        let request = successor_request(
+            "fresh-historical-active-prefix",
+            "gwt-host-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request).unwrap();
+        let candidate_binding =
+            prepared_successor_execution_binding(dir.path(), owner, &request).unwrap();
+        let mut candidate =
+            gwt_agent::Session::new(dir.path(), "work/issue-2359", gwt_agent::AgentId::Codex);
+        candidate.id = request.initial_session_id.clone();
+        candidate.linked_issue_number = Some(owner.number);
+        candidate
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: candidate.id.clone(),
+                repo_hash: candidate.repo_hash.clone().expect("candidate repo hash"),
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity: candidate_binding.clone(),
+                capability_generation: 1,
+            }))
+            .unwrap();
+        candidate.save(sessions.path()).unwrap();
+        let candidate_identity = gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            settle(
+                dir.path(),
+                predecessor_session,
+                ExecutionSettlement::Completed,
+            )
+            .unwrap(),
+            SettleResult::Settled(_)
+        ));
+        assert!(
+            prepared_execution_binding_matches(
+                dir.path(),
+                owner,
+                &candidate.id,
+                &candidate_binding,
+            )
+            .unwrap(),
+            "later predecessor settlement must not invalidate the Prepared fresh binding",
+        );
+
+        let activated = with_prepared_successor_exact_session_activation(
+            dir.path(),
+            owner,
+            &request,
+            sessions.path(),
+            &candidate_identity,
+            |activate| activate(),
+        )
+        .unwrap()
+        .expect("exact candidate Session must retain atomic activation authority");
+
+        assert_eq!(activated.generation_id, candidate_binding.generation_id);
+        assert_eq!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(candidate_binding),
+        );
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        let predecessor = ledger
+            .generations
+            .iter()
+            .find(|generation| {
+                generation.identity.generation_id == predecessor_binding.generation_id
+            })
+            .unwrap();
+        assert_eq!(
+            ledger.effective_status_for(predecessor),
+            ExecutionControlStatus::Completed,
+        );
+    }
+
+    #[test]
     fn generation_ledger_prepare_replay_is_bound_to_original_worktree() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -14839,6 +15392,74 @@ mod tests {
             .unwrap(),
             "same-Session lifecycle suffixes keep the original binding as an authentic prefix"
         );
+    }
+
+    #[test]
+    fn diagnosis_projects_ambient_older_session_exact_generation_instead_of_newer_current() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let older_session = "session-diagnosis-older";
+        let newer_session = "session-diagnosis-newer";
+        let mut active = active_record(older_session);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let older_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, older_session, older_binding.clone());
+
+        let mut request = successor_request(
+            "operation-diagnosis-newer",
+            "gwt-host-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        request.initial_session_id = newer_session.to_string();
+        prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request).unwrap();
+        activate_successor(dir.path(), owner, &request).unwrap();
+        let newer_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, newer_session, newer_binding);
+        assert!(matches!(
+            settle(
+                dir.path(),
+                newer_session,
+                ExecutionSettlement::Blocked {
+                    reason: "newer generation blocker".to_string(),
+                    missing_verification: Some("newer generation matrix".to_string()),
+                },
+            )
+            .unwrap(),
+            SettleResult::Settled(_)
+        ));
+
+        let diagnosis = diagnose(dir.path(), Some(older_session));
+
+        assert_eq!(diagnosis.ecr_status, ExecutionDiagnosisState::Active);
+        assert_eq!(
+            diagnosis.generation_id.as_deref(),
+            Some(older_binding.generation_id.as_str())
+        );
+        assert_eq!(diagnosis.binding_state, ExecutionBindingState::Bound);
+        assert_eq!(diagnosis.blocked_reason, None);
+        assert_eq!(diagnosis.missing_verification, None);
+        assert_eq!(diagnosis.continuation, None);
+        assert!(!diagnosis
+            .available_recoveries
+            .iter()
+            .any(|operation| matches!(
+                operation.as_str(),
+                "verify.plan" | "verify.run" | "execution.reopen"
+            )));
     }
 
     #[test]
@@ -15695,6 +16316,57 @@ mod tests {
                 .unwrap(),
             before_flat_refusal,
             "pointer-owned projection bytes must remain unchanged even when a flat writer changes owner"
+        );
+    }
+
+    #[test]
+    fn settlement_retry_republishes_current_generation_after_ledger_first_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-settle-partial";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+
+        set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
+        let failure = settle(dir.path(), session_id, ExecutionSettlement::Completed)
+            .expect_err("ledger-first settlement failure must surface");
+        assert!(failure.to_string().contains("AfterLedger"), "{failure}");
+        assert_eq!(
+            load_owner_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Completed),
+        );
+
+        assert!(matches!(
+            settle(dir.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::AlreadySettled(_),
+        ));
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .expect("retry must repair the flat projection/pointer pair")
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Completed),
+        );
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().status,
+            ExecutionControlStatus::Completed,
         );
     }
 
@@ -20855,6 +21527,69 @@ exit 1
         }
 
         #[test]
+        fn reopen_retry_republishes_current_generation_after_ledger_first_failure() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-reopen-partial";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record(session_id)).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(dir.path(), owner, session_id, binding);
+            settle_blocked(dir.path(), session_id);
+            save_covering_evidence(dir.path(), session_id, true);
+
+            set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
+            let failure = run_cmd(
+                dir.path(),
+                ExecutionCommand::Reopen {
+                    reason: "dependency recovered before publication failure".to_string(),
+                },
+            )
+            .expect_err("ledger-first reopen failure must surface");
+            assert!(failure.to_string().contains("AfterLedger"), "{failure}");
+            assert_eq!(
+                load_owner_generation_ledger(dir.path(), owner)
+                    .unwrap()
+                    .unwrap()
+                    .current_effective_status(),
+                Some(ExecutionControlStatus::Active),
+            );
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Reopen {
+                    reason: "idempotent retry repairs publication".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("already active"), "{out}");
+            assert_eq!(
+                load_generation_ledger(dir.path(), owner)
+                    .expect("retry must repair the flat projection/pointer pair")
+                    .unwrap()
+                    .current_effective_status(),
+                Some(ExecutionControlStatus::Active),
+            );
+            let reopened = load(dir.path()).unwrap().unwrap();
+            assert_eq!(reopened.status, ExecutionControlStatus::Active);
+            assert_eq!(reopened.recoveries.len(), 1);
+        }
+
+        #[test]
         fn reopen_honors_derived_plan_generated_output_allowlist() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -21917,6 +22652,24 @@ exit 1
             let flat_before = load(dir.path()).unwrap().unwrap();
             assert_eq!(flat_before.primary_session_id, newer_session);
 
+            assert!(matches!(
+                settle(
+                    dir.path(),
+                    older_session,
+                    ExecutionSettlement::Blocked {
+                        reason: "idempotent historical retry".to_string(),
+                        missing_verification: None,
+                    },
+                )
+                .unwrap(),
+                SettleResult::AlreadySettled(_),
+            ));
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap(),
+                flat_before,
+                "retrying settlement for a non-current generation must preserve the flat current ECR",
+            );
+
             save_covering_evidence(dir.path(), older_session, true);
             let mut out = String::new();
             assert_eq!(
@@ -21940,6 +22693,31 @@ exit 1
                 load(dir.path()).unwrap().unwrap(),
                 flat_before,
                 "reopening a non-current generation must not overwrite the flat current ECR",
+            );
+            assert_eq!(
+                current_execution_binding(dir.path(), owner)
+                    .unwrap()
+                    .unwrap(),
+                newer_binding,
+            );
+
+            out.clear();
+            assert_eq!(
+                run_reopen(
+                    dir.path(),
+                    older_session,
+                    "idempotent historical reopen retry",
+                    &mut out,
+                )
+                .unwrap(),
+                0,
+                "{out}",
+            );
+            assert!(out.contains("already active"), "{out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap(),
+                flat_before,
+                "retrying reopen for a non-current generation must preserve the flat current ECR",
             );
             assert_eq!(
                 current_execution_binding(dir.path(), owner)

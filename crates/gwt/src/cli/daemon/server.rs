@@ -5468,6 +5468,7 @@ exit 0
             vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "tab-1::agent-42".to_string(),
+                launch_identity: None,
             }]
         );
     }
@@ -6452,6 +6453,7 @@ exit 0
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "window-43".to_string(),
+                    launch_identity: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -6638,6 +6640,7 @@ exit 0
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "window-43".to_string(),
+                    launch_identity: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -10675,6 +10678,7 @@ exit 1
             launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "tab-1::agent-1".to_string(),
+                launch_identity: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -10923,6 +10927,7 @@ exit 1
             launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                launch_identity: None,
             }],
             failed_issues: vec![unrelated_failure.clone()],
             autonomous_tuning: crate::issue_monitor::AutonomousTuning {
@@ -10970,6 +10975,7 @@ exit 1
                 vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "tab-1::agent-43".to_string(),
+                    launch_identity: None,
                 }]
             );
         }
@@ -11018,6 +11024,7 @@ exit 1
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "tab-1::agent-43".to_string(),
+                    launch_identity: None,
                 }],
                 failed_issues: vec![competing_failure],
                 autonomous_records: vec![crate::AutonomousIssueRecord {
@@ -11057,6 +11064,7 @@ exit 1
             vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                launch_identity: None,
             }],
             "the disk-only real launch is merged before migration adoption"
         );
@@ -12491,6 +12499,7 @@ exit 1
             vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                launch_identity: None,
             }]
         );
         assert_eq!(launched.prefs(), launched_prefs);
@@ -12531,6 +12540,7 @@ exit 1
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "tab-1::agent-43".to_string(),
+                    launch_identity: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -12772,6 +12782,7 @@ exit 1
             launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "tab-1::agent-max".to_string(),
+                launch_identity: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };

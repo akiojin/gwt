@@ -120,9 +120,8 @@ when possible and set `params.status:"done"`, but Stop and terminal lifecycle
 operations never wait for its delivery receipt. `build.complete`, `build.abort`,
 `execution.complete`, and `execution.blocked` are idempotent terminal surfaces;
 the first terminal state wins and callers may settle build and execution in
-either order. After a terminal lifecycle transition, do not issue another
-`workspace.update`; keep blocker/recovery coordination on the Board or in a
-Draft PR comment instead.
+either order. After a terminal lifecycle transition, do not issue another `workspace.update`;
+keep blocker/recovery coordination on the Board or in a Draft PR comment instead.
 
 Include `.gwt/work/events.jsonl` in the related source commit. If no source
 change remains and the event log is the only bookkeeping change, use a scoped

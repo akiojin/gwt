@@ -182,9 +182,6 @@ fn pending_fresh_execution_launch_from_session(
         kind: owner_kind,
         number: binding.owner_number,
     };
-    let ledger = gwt::cli::execution_state::load_generation_ledger(worktree_path, owner)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "fresh linked-owner launch owner ledger is missing".to_string())?;
     let attempt = gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
         worktree_path,
         owner,
@@ -194,20 +191,6 @@ fn pending_fresh_execution_launch_from_session(
     .ok_or_else(|| {
         "fresh linked-owner launch has no unique Prepared successor attempt".to_string()
     })?;
-    let expected_status = match attempt.predecessor_status {
-        gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked => {
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked
-        }
-        gwt::cli::execution_state::SuccessorPredecessorStatus::Completed => {
-            gwt::cli::execution_state::ExecutionControlStatus::Completed
-        }
-        gwt::cli::execution_state::SuccessorPredecessorStatus::Active => {
-            return Err("fresh linked-owner launch cannot bypass an Active predecessor".to_string())
-        }
-    };
-    if ledger.current_effective_status() != Some(expected_status) {
-        return Err("fresh linked-owner launch predecessor status changed".to_string());
-    }
     if !gwt::cli::execution_state::prepared_execution_binding_matches(
         worktree_path,
         owner,
@@ -220,12 +203,11 @@ fn pending_fresh_execution_launch_from_session(
             "fresh linked-owner launch Session does not match its Prepared successor".to_string(),
         );
     }
-    let predecessor_binding =
-        gwt::cli::execution_state::current_execution_binding(worktree_path, owner)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                "fresh linked-owner launch predecessor binding is missing".to_string()
-            })?;
+    let predecessor_binding = gwt_agent::ExecutionBindingIdentity {
+        generation_id: attempt.predecessor.generation_id.clone(),
+        binding_id: attempt.predecessor.session_binding_id.clone(),
+        ledger_head_hash: attempt.predecessor_generation_content_hash.clone(),
+    };
     if predecessor_binding == binding.identity {
         return Err(
             "fresh linked-owner launch candidate is already the current generation".to_string(),
@@ -894,13 +876,16 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 kind: owner_kind,
                 number: binding.owner_number,
             };
-            if gwt::cli::execution_state::current_execution_binding(worktree, owner)
-                .map_err(|error| error.to_string())?
-                .as_ref()
-                != Some(&binding.identity)
+            if !gwt::cli::execution_state::current_active_execution_binding_matches(
+                worktree,
+                owner,
+                &session.id,
+                &binding.identity,
+            )
+            .map_err(|error| error.to_string())?
             {
                 return Err(
-                    "Rebound continuation no longer matches the current execution generation"
+                    "Rebound continuation no longer matches its exact Active execution generation"
                         .to_string(),
                 );
             }
@@ -5527,6 +5512,77 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
+    fn rebound_continuation_installs_older_exact_active_generation_after_current_advances() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, binding) = rebound_relaunch_fixture(home.path());
+        let successor_request = gwt::cli::execution_state::SuccessorRequest {
+            operation_id: "fresh-current-after-rebound".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "fresh-current-after-rebound-binding".to_string(),
+            initial_session_id: "fresh-current-after-rebound-session".to_string(),
+            entrypoint: "$gwt-execute #2359".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            &launch.project,
+            launch.owner,
+            &successor_request,
+        )
+        .expect("prepare newer fresh generation");
+        gwt::cli::execution_state::activate_successor(
+            &launch.project,
+            launch.owner,
+            &successor_request,
+        )
+        .expect("activate newer fresh generation");
+        assert_ne!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner,)
+                .expect("read newer current generation")
+                .expect("newer current generation"),
+            binding.identity,
+        );
+
+        let mut resumed = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("reload older exact rebound Session");
+        resumed.update_status(gwt_agent::AgentStatus::Running);
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut resumed,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: None,
+            prepared_continuation: None,
+            rebound_continuation: Some(&binding),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("install older exact rebound authority after current advances");
+
+        let token = env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("older exact rebound capability token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate older exact rebound capability");
+        assert_eq!(grant.principal().execution_binding(), Some(&binding));
+    }
+
+    #[test]
     fn rebound_continuation_rejects_stale_generation_binding() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -5568,7 +5624,7 @@ mod agent_endpoint_env_tests {
         .expect_err("a stale rebound binding must fail closed");
         assert!(
             error.contains(
-                "Rebound continuation no longer matches the current execution generation"
+                "Rebound continuation no longer matches its exact Active execution generation"
             ),
             "{error}"
         );

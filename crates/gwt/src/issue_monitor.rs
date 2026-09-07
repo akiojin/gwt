@@ -655,6 +655,17 @@ impl IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+    /// Durable incarnation fence for this ACKed launch. Legacy records omit
+    /// it, while new records retain the exact claim/delivery pair after the
+    /// pending delivery has been consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_identity: Option<IssueMonitorLaunchIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchIdentity {
+    pub claim_id: String,
+    pub delivery_id: String,
 }
 
 /// #3223 follow-up: one unbound launch with its lifecycle anchor.
@@ -1213,6 +1224,9 @@ pub struct IssueMonitorState {
     priority_order: Vec<u64>,
     launch_profile: Option<IssueMonitorLaunchProfile>,
     launched_windows: BTreeMap<u64, String>,
+    /// Exact claim/delivery incarnation for ACKed launches. Kept separately
+    /// from the pending queue so ACK consumption does not erase the stop fence.
+    launched_identities: BTreeMap<u64, IssueMonitorLaunchIdentity>,
     /// issue → work branch for currently launched Issues, used to look up the
     /// PR when checking whether the work has merged.
     launched_branches: BTreeMap<u64, String>,
@@ -2252,6 +2266,7 @@ impl IssueMonitorState {
             priority_order: Vec::new(),
             launch_profile: None,
             launched_windows: BTreeMap::new(),
+            launched_identities: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
             autonomous_mode: false,
@@ -2287,6 +2302,13 @@ impl IssueMonitorState {
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
                 continue;
+            }
+            if let Some(identity) = launched.launch_identity {
+                if !identity.claim_id.is_empty() && !identity.delivery_id.is_empty() {
+                    state
+                        .launched_identities
+                        .insert(launched.issue_number, identity);
+                }
             }
             state
                 .launched_windows
@@ -2360,6 +2382,7 @@ impl IssueMonitorState {
                 .map(|(issue_number, window_id)| IssueMonitorLaunchedIssue {
                     issue_number: *issue_number,
                     window_id: window_id.clone(),
+                    launch_identity: self.launched_identities.get(issue_number).cloned(),
                 })
                 .collect(),
             launching_issues: self
@@ -3488,9 +3511,25 @@ impl IssueMonitorState {
             {
                 continue;
             }
-            self.launched_windows
-                .entry(launched.issue_number)
-                .or_insert_with(|| launched.window_id.clone());
+            let same_or_inserted_window = match self.launched_windows.entry(launched.issue_number) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(launched.window_id.clone());
+                    true
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    entry.get() == &launched.window_id
+                }
+            };
+            if same_or_inserted_window
+                && !self
+                    .launched_identities
+                    .contains_key(&launched.issue_number)
+            {
+                if let Some(identity) = &launched.launch_identity {
+                    self.launched_identities
+                        .insert(launched.issue_number, identity.clone());
+                }
+            }
             if !self.active_launches.contains(&launched.issue_number) {
                 self.active_launches.push(launched.issue_number);
             }
@@ -3682,7 +3721,7 @@ impl IssueMonitorState {
                     // has to be readable from the same snapshot, or the exact
                     // match it enforces is unsatisfiable from the PM's side.
                     claim_id: self.live_claim_id(item.issue.number),
-                    delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                    delivery_id: self.live_launch_delivery_id(item.issue.number),
                 })
                 .collect(),
             last_error: status.last_error,
@@ -4693,6 +4732,7 @@ impl IssueMonitorState {
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
         let launch_session_strategy = self.take_launch_session_strategy(issue_number);
+        self.launched_identities.remove(&issue_number);
         self.record_claimed(issue, claim_id.clone());
         self.queue.retain(|queued| *queued != issue_number);
         if !self.active_launches.contains(&issue_number) {
@@ -4733,7 +4773,7 @@ impl IssueMonitorState {
         delivery_id: Option<&str>,
     ) -> bool {
         let window_id = window_id.into();
-        if let Some(delivery_id) = delivery_id {
+        let launch_identity = if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
                     let delivery = &self.pending_launch_deliveries[index];
@@ -4743,14 +4783,24 @@ impl IssueMonitorState {
                     {
                         return false;
                     }
+                    let identity = IssueMonitorLaunchIdentity {
+                        claim_id: delivery.claim_id.clone(),
+                        delivery_id: delivery.delivery_id.clone(),
+                    };
                     self.pending_launch_deliveries.remove(index);
+                    Some(identity)
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
                     return false
                 }
             }
-        }
+        } else {
+            None
+        };
         self.complete_active_launch(issue_number, window_id);
+        if let Some(identity) = launch_identity {
+            self.launched_identities.insert(issue_number, identity);
+        }
         true
     }
 
@@ -4842,6 +4892,7 @@ impl IssueMonitorState {
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
         let window_id = window_id.into();
         self.launching_claimed_at.remove(&issue_number);
+        self.launched_identities.remove(&issue_number);
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -4975,6 +5026,7 @@ impl IssueMonitorState {
             .retain(|active| *active != issue_number);
         self.launching_claimed_at.remove(&issue_number);
         self.launched_windows.remove(&issue_number);
+        self.launched_identities.remove(&issue_number);
         self.launched_branches.remove(&issue_number);
         // #3165 error-window lifecycle: terminal transitions (merged / released /
         // needs-human) and retry all funnel through here; drop any retained stale
@@ -5221,6 +5273,16 @@ impl IssueMonitorState {
             .map(|delivery| delivery.delivery_id.clone())
     }
 
+    /// Delivery identity for the current launch incarnation, whether it is
+    /// still materializing or has already been ACKed.
+    pub fn live_launch_delivery_id(&self, issue_number: u64) -> Option<String> {
+        self.pending_launch_delivery_id(issue_number).or_else(|| {
+            self.launched_identities
+                .get(&issue_number)
+                .map(|identity| identity.delivery_id.clone())
+        })
+    }
+
     /// SPEC-3431 FR-033: stop one launch and hold its issue, without requeueing.
     ///
     /// This is the "stop" half of the Monitor-owned lifecycle, and it is
@@ -5280,14 +5342,18 @@ impl IssueMonitorState {
     /// SPEC-3431 FR-033: the claim backing the live launch for `issue_number`.
     ///
     /// The pending delivery carries it durably while the agent materializes;
-    /// once the GUI ACKs, the delivery is consumed and only a scanned inbox
-    /// row still knows it. Both are consulted so the answer is the same in the
-    /// daemon and in a bare `gwtd` process.
+    /// the ACKed launch identity retains it after that delivery is consumed.
+    /// A scanned inbox is only a legacy fallback.
     pub fn live_claim_id(&self, issue_number: u64) -> Option<String> {
         self.pending_launch_deliveries
             .iter()
             .find(|delivery| delivery.issue_number == issue_number)
             .map(|delivery| delivery.claim_id.clone())
+            .or_else(|| {
+                self.launched_identities
+                    .get(&issue_number)
+                    .map(|identity| identity.claim_id.clone())
+            })
             .or_else(|| {
                 self.inbox_item(issue_number)
                     .and_then(|item| item.claim_id.clone())
@@ -5336,7 +5402,7 @@ impl IssueMonitorState {
         if target.claim_id != self.live_claim_id(issue_number) {
             return Err(IssueMonitorStopMismatch::ClaimMismatch);
         }
-        if target.delivery_id != self.pending_launch_delivery_id(issue_number) {
+        if target.delivery_id != self.live_launch_delivery_id(issue_number) {
             return Err(IssueMonitorStopMismatch::DeliveryMismatch);
         }
         let live_window = self.launched_window_id(issue_number);
@@ -5657,6 +5723,7 @@ impl IssueMonitorState {
         if let Some(window_id) = stale_window {
             self.failed_windows.insert(issue_number, window_id);
         }
+        self.launched_identities.remove(&issue_number);
         self.failed_issues.insert(issue_number, message.clone());
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
@@ -5971,6 +6038,7 @@ mod tests {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-42".to_string(),
+                    launch_identity: None,
                 }],
                 ..IssueMonitorPrefs::default()
             },
@@ -6065,19 +6133,20 @@ mod tests {
         }
     }
 
-    // SPEC-3431 T-023 (AS2 / FR-006): the PM's launch_now writes the target to
-    // the head of priority_order and asks for a scan. This pins the two
-    // properties that make it safe: the reordered issue is the one the very
-    // next scan claims, and re-scanning (which an immediate ScanNow racing the
-    // interval tick can cause) never yields a second launch for it.
     #[test]
-    fn launch_now_priority_head_claims_the_target_once_across_rescans() {
+    fn issue_monitor_launch_now_active_issue_emits_second_distinct_delivery() {
         let prefs = IssueMonitorPrefs {
             // exactly what run_monitor_launch_now writes for issue 7
             priority_order: vec![7],
             ..IssueMonitorPrefs::default()
         };
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            prefs,
+        );
         monitor.set_gui_connected(true);
         scan_issue_monitor_candidates(
             &mut monitor,
@@ -6091,33 +6160,49 @@ mod tests {
             "launch_now's priority head must be first in the scan queue"
         );
 
-        let request = monitor
-            .next_launch_request("2026-08-04T00:00:00Z")
-            .expect("the head issue is claimed");
-        assert_eq!(request.issue_number, 7);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-04T00:00:00Z",
+                |_| false,
+            ),
+            1,
+        );
+        let first_delivery_id = monitor.prefs().pending_launch_deliveries[0]
+            .delivery_id
+            .clone();
+        assert_eq!(monitor.active_issue_numbers(), vec![7]);
 
-        // A second scan (immediate ScanNow landing next to the interval tick)
-        // must not re-queue the in-flight issue, and no further launch for it
-        // may be claimed.
+        // A later explicit Launch Now persists the same priority head and asks
+        // for another scan. The new proposal has its own UUID-backed delivery
+        // identity, so the existing active launch is observation only.
         scan_issue_monitor_candidates(
             &mut monitor,
             &[issue(42), issue(7), issue(9)],
             "2026-08-04T00:00:05Z",
         );
         assert!(
-            !monitor.queued_issue_numbers().contains(&7),
-            "an in-flight launch must not be re-queued by a rescan"
+            monitor.queued_issue_numbers().contains(&7),
+            "a new Launch Now request must remain eligible while the first launch is active"
         );
-
-        let mut claimed = vec![request.issue_number];
-        while let Some(next) = monitor.next_launch_request("2026-08-04T00:00:05Z") {
-            claimed.push(next.issue_number);
-        }
         assert_eq!(
-            claimed.iter().filter(|number| **number == 7).count(),
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-04T00:00:05Z",
+                |_| false,
+            ),
             1,
-            "issue 7 must be claimed exactly once: {claimed:?}"
         );
+        let deliveries = monitor
+            .prefs()
+            .pending_launch_deliveries
+            .into_iter()
+            .filter(|delivery| delivery.issue_number == 7)
+            .collect::<Vec<_>>();
+        assert_eq!(deliveries.len(), 2);
+        assert_ne!(deliveries[0].delivery_id, first_delivery_id);
+        assert_ne!(deliveries[0].delivery_id, deliveries[1].delivery_id);
+        assert_eq!(monitor.active_issue_numbers(), vec![7]);
     }
 
     #[test]
@@ -6186,6 +6271,10 @@ mod tests {
             prefs.launching_issues[0].claimed_at.as_deref(),
             Some("2026-07-02T00:00:00Z")
         );
+        let legacy_launched = r#"{"enabled":true,"priority_order":[],"launched_issues":[{"issue_number":42,"window_id":"tab-1::agent-42"}]}"#;
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(legacy_launched).expect("legacy launched record parses");
+        assert_eq!(prefs.launched_issues[0].launch_identity, None);
     }
 
     #[test]
@@ -6196,6 +6285,7 @@ mod tests {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "project-a::agent-1".to_string(),
+                    launch_identity: None,
                 }],
                 ..IssueMonitorPrefs::default()
             },
@@ -6235,6 +6325,7 @@ mod tests {
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-a::agent-1".to_string(),
+                launch_identity: None,
             }],
             launching_issues: vec![IssueMonitorLaunchingIssue {
                 issue_number: 43,
@@ -6283,10 +6374,12 @@ mod tests {
                 IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "project-b::agent-1".to_string(),
+                    launch_identity: None,
                 },
                 IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "legacy-agent-1".to_string(),
+                    launch_identity: None,
                 },
             ],
             ..IssueMonitorPrefs::default()
@@ -6410,6 +6503,7 @@ mod tests {
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-2".to_string(),
+                launch_identity: None,
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -6427,6 +6521,91 @@ mod tests {
             .launched_issues
             .iter()
             .any(|entry| entry.issue_number == 43));
+    }
+
+    #[test]
+    fn cross_process_merge_fills_missing_identity_for_the_same_acked_window() {
+        let mut daemon = IssueMonitorState::new(IssueMonitorConfig::default());
+        daemon.record_candidate(issue(42));
+        daemon.complete_active_launch(42, "tab-1::agent-42");
+        assert_eq!(
+            daemon.prefs().launched_issues[0].launch_identity,
+            None,
+            "precondition: the daemon observed the window before the durable ACK identity"
+        );
+
+        let disk_identity = IssueMonitorLaunchIdentity {
+            claim_id: "claim-42".to_string(),
+            delivery_id: "launch:effect-42".to_string(),
+        };
+        let disk = IssueMonitorPrefs {
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-42".to_string(),
+                launch_identity: Some(disk_identity.clone()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+
+        daemon.merge_inflight_launches_from_disk(&disk);
+
+        assert_eq!(
+            daemon.prefs().launched_issues[0].launch_identity,
+            Some(disk_identity.clone()),
+            "the daemon's next persist must not erase the sibling ACK fence"
+        );
+        let status = daemon.agent_status();
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .expect("same-process inbox row remains observable");
+        assert_eq!(row.claim_id.as_deref(), Some("claim-42"));
+        assert_eq!(row.delivery_id.as_deref(), Some("launch:effect-42"));
+
+        let local_identity = IssueMonitorLaunchIdentity {
+            claim_id: "claim-local".to_string(),
+            delivery_id: "launch:effect-local".to_string(),
+        };
+        let mut different_window = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-local".to_string(),
+                    launch_identity: Some(local_identity.clone()),
+                }],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        different_window.merge_inflight_launches_from_disk(&disk);
+        assert_eq!(
+            different_window.prefs().launched_issues,
+            vec![IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-local".to_string(),
+                launch_identity: Some(local_identity.clone()),
+            }],
+            "a different local incarnation must remain authoritative"
+        );
+
+        let mut already_identified = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                    launch_identity: Some(local_identity.clone()),
+                }],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        already_identified.merge_inflight_launches_from_disk(&disk);
+        assert_eq!(
+            already_identified.prefs().launched_issues[0].launch_identity,
+            Some(local_identity),
+            "a local exact identity must not be overwritten"
+        );
     }
 
     #[test]
@@ -6474,6 +6653,7 @@ mod tests {
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                launch_identity: None,
             }],
             launching_issues: vec![IssueMonitorLaunchingIssue {
                 issue_number: 100,
@@ -6763,6 +6943,7 @@ mod tests {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-42".to_string(),
+                    launch_identity: None,
                 }],
                 launching_issues: vec![IssueMonitorLaunchingIssue {
                     issue_number: 43,
@@ -7413,6 +7594,111 @@ mod tests {
             }
         );
         assert_eq!(fresh.active_count(), 0);
+    }
+
+    #[test]
+    fn acked_launch_identity_survives_reload_and_fences_a_stale_stop_after_relaunch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-old",
+            "host/session",
+            "effect-old",
+            "2026-08-15T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-old",
+            "gui-old",
+            101,
+            "tab-1::agent-old",
+            |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-old",
+            "gui-old",
+            "tab-1::agent-old",
+        ));
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-old",
+            "gui-old",
+            "tab-1::agent-old",
+        ));
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-old",
+            Some("launch:effect-old"),
+        ));
+        assert!(
+            monitor.prefs().pending_launch_deliveries.is_empty(),
+            "precondition: ACK consumes the in-flight delivery"
+        );
+
+        let old_target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: Some("claim-old".to_string()),
+            delivery_id: Some("launch:effect-old".to_string()),
+            window_id: Some("tab-1::agent-old".to_string()),
+        };
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(
+            restored.failover_restart(&old_target, "switch provider", "2026-08-15T00:01:00Z",),
+            IssueMonitorFailoverOutcome::Restarting {
+                stopped_window_id: Some("tab-1::agent-old".to_string()),
+            },
+            "the exact ACKed launch identity must survive a prefs reload"
+        );
+
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-08-15T00:01:30Z");
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-new",
+            "host/session",
+            "effect-new",
+            "2026-08-15T00:02:00Z",
+        ));
+        assert!(restored.claim_launch_delivery(
+            42,
+            "launch:effect-new",
+            "gui-new",
+            202,
+            "tab-1::agent-new",
+            |_| false,
+        ));
+        assert!(restored.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-new",
+            "gui-new",
+            "tab-1::agent-new",
+        ));
+        assert!(restored.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-new",
+            "gui-new",
+            "tab-1::agent-new",
+        ));
+        assert!(restored.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-new",
+            Some("launch:effect-new"),
+        ));
+
+        let mut relaunched =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored.prefs());
+        assert_eq!(
+            relaunched.stop_only(&old_target, "late old stop", "2026-08-15T00:03:00Z"),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::ClaimMismatch),
+            "an old request must not stop a newer launch of the same issue"
+        );
+        assert_eq!(relaunched.active_issue_numbers(), vec![42]);
+        assert_eq!(
+            relaunched.launched_window_id(42).as_deref(),
+            Some("tab-1::agent-new")
+        );
     }
 
     /// SPEC-3431 FR-033 / T-087c: the running daemon must converge on a stop

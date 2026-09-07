@@ -348,12 +348,12 @@ fn snapshot_workspace_update_bridge_authority(
         Ok(Some(recovery)) => recovery,
         Ok(None) | Err(_) => return WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable,
     };
-    let (recovery, policy, host_recovery) = match recovery {
+    let (recovery, host_recovery) = match recovery {
         crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) => {
-            (recovery, WorkspaceEnsurePolicy::HostMayBootstrap, true)
+            (recovery, true)
         }
         crate::agent_project_state::ValidatedWorkspaceEnsureSession::Docker(recovery) => {
-            (recovery, WorkspaceEnsurePolicy::DockerExistingOnly, false)
+            (recovery, false)
         }
     };
     let projection = load_workspace_projection_from_path(
@@ -386,7 +386,6 @@ fn snapshot_workspace_update_bridge_authority(
         &recovery,
         &input,
         expected_owner.as_deref(),
-        policy,
         &projection,
         &work_items,
     );
@@ -394,12 +393,14 @@ fn snapshot_workspace_update_bridge_authority(
         canonical_id: work_id,
         canonicalize_work_agent_id,
         canonicalize_work_owner,
+        resume_terminal_work,
     }) = authority
     else {
         return WorkspaceUpdateBridgeAuthoritySnapshot::NeedsEnsure;
     };
     if canonicalize_work_agent_id
         || canonicalize_work_owner
+        || resume_terminal_work
         || !projection
             .latest_agent_for_session(session_id)
             .is_some_and(|agent| {
@@ -1568,7 +1569,6 @@ pub(super) fn ensure_workspace_for_agent(
                                     &recovery,
                                     &input,
                                     owner.as_deref(),
-                                    WorkspaceEnsurePolicy::HostMayBootstrap,
                                     projection,
                                     existing,
                                 )
@@ -1625,18 +1625,17 @@ pub(super) fn ensure_workspace_for_agent(
                                     &recovery,
                                     &input,
                                     owner.as_deref(),
-                                    WorkspaceEnsurePolicy::DockerExistingOnly,
                                     projection,
                                     existing,
                                 )
                                 .map(|_| ())
                             },
                             |projection, existing, _| {
-                                apply_existing_docker_workspace_ensure_transition(
+                                apply_session_bound_workspace_ensure_transition(
                                     projection,
                                     existing,
                                     &input,
-                                    owner.as_deref(),
+                                    owner.clone(),
                                     &recovery,
                                 )
                             },
@@ -1702,13 +1701,9 @@ pub(crate) fn probe_workspace_ensure(
             )
         }
     };
-    let (recovery, policy) = match &recovery {
-        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) => {
-            (recovery, WorkspaceEnsurePolicy::HostMayBootstrap)
-        }
-        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Docker(recovery) => {
-            (recovery, WorkspaceEnsurePolicy::DockerExistingOnly)
-        }
+    let recovery = match &recovery {
+        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) => recovery,
+        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Docker(recovery) => recovery,
     };
     let owner =
         match resolve_workspace_ensure_owner(Some(&recovery.session), input.spec, input.issue) {
@@ -1767,7 +1762,6 @@ pub(crate) fn probe_workspace_ensure(
         recovery,
         input,
         owner.as_deref(),
-        policy,
         &projection,
         &work_items,
     ) {
@@ -1800,12 +1794,6 @@ pub(crate) fn workspace_ensure_status_candidate(session_id: &str) -> WorkspaceEn
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkspaceEnsurePolicy {
-    HostMayBootstrap,
-    DockerExistingOnly,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkspaceEnsureAuthorityState {
     Missing {
@@ -1815,6 +1803,7 @@ enum WorkspaceEnsureAuthorityState {
         canonical_id: String,
         canonicalize_work_agent_id: bool,
         canonicalize_work_owner: bool,
+        resume_terminal_work: bool,
     },
 }
 
@@ -1833,8 +1822,9 @@ impl WorkspaceEnsureAuthorityState {
             Self::ExactExisting {
                 canonicalize_work_agent_id,
                 canonicalize_work_owner,
+                resume_terminal_work,
                 ..
-            } => *canonicalize_work_agent_id || *canonicalize_work_owner,
+            } => *canonicalize_work_agent_id || *canonicalize_work_owner || *resume_terminal_work,
         }
     }
 }
@@ -1892,7 +1882,6 @@ fn validate_workspace_ensure_recovery_state(
     recovery: &crate::agent_project_state::ValidatedWorkspaceRecoverySession,
     input: &WorkspaceEnsureInput,
     expected_owner: Option<&str>,
-    policy: WorkspaceEnsurePolicy,
     projection: &WorkspaceProjection,
     existing: &WorkItemsProjection,
 ) -> gwt_core::error::Result<WorkspaceEnsureAuthorityState> {
@@ -1963,7 +1952,6 @@ fn validate_workspace_ensure_recovery_state(
     if projection
         .latest_agent_for_session(&input.agent_session)
         .is_none()
-        && policy == WorkspaceEnsurePolicy::HostMayBootstrap
         && recovery.session.execution_binding.is_none()
     {
         return Err(GwtError::Other(format!(
@@ -1994,19 +1982,8 @@ fn validate_workspace_ensure_recovery_state(
         )));
     }
     let Some(item) = canonical_items.first().copied() else {
-        if policy == WorkspaceEnsurePolicy::DockerExistingOnly {
-            return Err(GwtError::Other(format!(
-                "Docker workspace.ensure for Session {} cannot recover a missing Work; the originating launch must remain failed",
-                input.agent_session
-            )));
-        }
         return Ok(WorkspaceEnsureAuthorityState::Missing { canonical_id });
     };
-    if item.is_terminal() {
-        return Err(GwtError::Other(format!(
-            "canonical Work {canonical_id} is terminal"
-        )));
-    }
     let canonicalize_work_owner = item.owner.as_deref() != expected_owner;
     if canonicalize_work_owner
         && !workspace_ensure_can_upgrade_owner(item.owner.as_deref(), expected_owner)
@@ -2051,23 +2028,12 @@ fn validate_workspace_ensure_recovery_state(
             "canonical Work {canonical_id} has ambiguous exact execution containers"
         )));
     }
-    if policy == WorkspaceEnsurePolicy::DockerExistingOnly {
-        let exact_assigned = projection
-            .latest_agent_for_session(&input.agent_session)
-            .is_some_and(|agent| {
-                agent.is_assigned() && agent.workspace_id.as_deref() == Some(canonical_id.as_str())
-            });
-        if !exact_assigned {
-            return Err(GwtError::Other(format!(
-                "Docker workspace.ensure for Session {} requires an exact existing assignment; the originating launch must remain failed",
-                input.agent_session
-            )));
-        }
-    }
     Ok(WorkspaceEnsureAuthorityState::ExactExisting {
         canonicalize_work_agent_id: session_ref.and_then(|agent| agent.agent_id.as_deref())
             != Some(durable_agent_id),
         canonicalize_work_owner,
+        resume_terminal_work: item.status_category == WorkspaceStatusCategory::Done
+            && !item.discarded,
         canonical_id,
     })
 }
@@ -2324,7 +2290,6 @@ fn apply_session_bound_workspace_ensure_transition(
         recovery,
         input,
         owner.as_deref(),
-        WorkspaceEnsurePolicy::HostMayBootstrap,
         projection,
         existing,
     )?;
@@ -2362,6 +2327,7 @@ fn apply_session_bound_workspace_ensure_transition(
             canonical_id,
             canonicalize_work_agent_id,
             canonicalize_work_owner,
+            resume_terminal_work,
         } => {
             let item = existing
                 .work_items
@@ -2384,21 +2350,26 @@ fn apply_session_bound_workspace_ensure_transition(
                 Some(input.title_summary.clone()),
             )
             .map_err(spec_ops_as_core_error)?;
-            let events = if canonicalize_work_agent_id || canonicalize_work_owner {
-                vec![workspace_authority_correction_event(
-                    item,
-                    &input.agent_session,
-                    recovery.session.agent_id.command(),
-                    !had_exact_assignment,
-                    if canonicalize_work_owner {
-                        owner.as_deref()
-                    } else {
-                        None
-                    },
-                )?]
-            } else {
-                Vec::new()
-            };
+            if resume_terminal_work {
+                projection.status_category = WorkspaceStatusCategory::Active;
+            }
+            let events =
+                if canonicalize_work_agent_id || canonicalize_work_owner || resume_terminal_work {
+                    vec![workspace_authority_correction_event(
+                        item,
+                        &input.agent_session,
+                        recovery.session.agent_id.command(),
+                        !had_exact_assignment,
+                        if canonicalize_work_owner {
+                            owner.as_deref()
+                        } else {
+                            None
+                        },
+                        resume_terminal_work,
+                    )?]
+                } else {
+                    Vec::new()
+                };
             Ok((
                 WorkspaceEnsureResult {
                     workspace_id: canonical_id,
@@ -2487,75 +2458,17 @@ fn resolve_workspace_ensure_owner(
     Ok(explicit)
 }
 
-fn apply_existing_docker_workspace_ensure_transition(
-    projection: &mut WorkspaceProjection,
-    existing: &WorkItemsProjection,
-    input: &WorkspaceEnsureInput,
-    owner: Option<&str>,
-    recovery: &crate::agent_project_state::ValidatedWorkspaceRecoverySession,
-) -> gwt_core::error::Result<(WorkspaceEnsureResult, Vec<WorkEvent>)> {
-    let authority = validate_workspace_ensure_recovery_state(
-        recovery,
-        input,
-        owner,
-        WorkspaceEnsurePolicy::DockerExistingOnly,
-        projection,
-        existing,
-    )?;
-    let WorkspaceEnsureAuthorityState::ExactExisting {
-        canonical_id: workspace_id,
-        canonicalize_work_agent_id,
-        canonicalize_work_owner,
-    } = authority
-    else {
-        return Err(GwtError::Other(format!(
-            "Docker workspace.ensure for Session {} cannot recover a missing Work",
-            input.agent_session
-        )));
-    };
-    if let Some(agent) = projection.latest_agent_for_session_mut(&input.agent_session) {
-        agent.agent_id = recovery.session.agent_id.command().to_string();
-    }
-    if canonicalize_work_owner {
-        projection.owner = owner.map(str::to_string);
-    }
-    let item = existing
-        .work_items
-        .iter()
-        .find(|item| item.id == workspace_id.as_str())
-        .ok_or_else(|| {
-            GwtError::Other(format!(
-                "canonical Work {workspace_id} disappeared during Docker workspace.ensure"
-            ))
-        })?;
-    let events = if canonicalize_work_agent_id || canonicalize_work_owner {
-        vec![workspace_authority_correction_event(
-            item,
-            &input.agent_session,
-            recovery.session.agent_id.command(),
-            false,
-            if canonicalize_work_owner { owner } else { None },
-        )?]
-    } else {
-        Vec::new()
-    };
-    Ok((
-        WorkspaceEnsureResult {
-            workspace_id,
-            disposition: WorkspaceEnsureDisposition::AlreadyAssigned,
-        },
-        events,
-    ))
-}
-
 fn workspace_authority_correction_event(
     item: &WorkItem,
     session_id: &str,
     canonical_agent_id: &str,
     establishes_assignment: bool,
     canonical_owner: Option<&str>,
+    resume_terminal_work: bool,
 ) -> gwt_core::error::Result<WorkEvent> {
-    let kind = if establishes_assignment {
+    let kind = if resume_terminal_work {
+        WorkEventKind::Resume
+    } else if establishes_assignment {
         WorkEventKind::Claim
     } else {
         WorkEventKind::Update
@@ -2579,8 +2492,12 @@ fn workspace_authority_correction_event(
     event.agent_session_id = Some(session_id.to_string());
     event.agent_id = Some(canonical_agent_id.to_string());
     event.owner = canonical_owner.map(str::to_string);
-    if establishes_assignment {
-        event.status_category = Some(item.status_category);
+    if establishes_assignment || resume_terminal_work {
+        event.status_category = Some(if resume_terminal_work {
+            WorkspaceStatusCategory::Active
+        } else {
+            item.status_category
+        });
     }
     Ok(event)
 }
@@ -7241,7 +7158,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_terminal_canonical_work_without_mutation() {
+    fn workspace_ensure_host_resumes_terminal_canonical_work_for_exact_session() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -7267,7 +7184,7 @@ pub(crate) mod tests {
             gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
                 .expect("load exact WorkItems")
                 .expect("exact WorkItems");
-        let mut done = WorkEvent::new(WorkEventKind::Done, work_id, Utc::now());
+        let mut done = WorkEvent::new(WorkEventKind::Done, work_id.clone(), Utc::now());
         done.status_category = Some(WorkspaceStatusCategory::Done);
         work_items.apply_event(done.clone());
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
@@ -7280,14 +7197,11 @@ pub(crate) mod tests {
             &done,
         )
         .expect("append terminal event");
-        let paths = workspace_recovery_state_paths(&project_root, &worktree);
-        let before = workspace_recovery_state_bytes(&paths);
-
-        let error = ensure_workspace_for_agent(
+        let result = ensure_workspace_for_agent(
             &worktree,
             WorkspaceEnsureInput {
                 agent_session: "session-terminal-canonical".to_string(),
-                title_summary: "Reject terminal canonical Work".to_string(),
+                title_summary: "Resume terminal canonical Work".to_string(),
                 current_focus: None,
                 spec: None,
                 issue: None,
@@ -7295,10 +7209,73 @@ pub(crate) mod tests {
                 boundary: None,
             },
         )
-        .expect_err("terminal canonical Work must not be resurrected");
+        .expect("terminal canonical Work must not block an exact Host Session");
 
-        assert!(error.to_string().contains("terminal"), "{error}");
-        assert_eq!(workspace_recovery_state_bytes(&paths), before);
+        assert_eq!(result.workspace_id, work_id);
+        let items = load_workspace_work_items(&project_root)
+            .expect("load resumed Host WorkItems")
+            .expect("resumed Host WorkItems");
+        let item = items
+            .work_items
+            .iter()
+            .find(|item| item.id == result.workspace_id)
+            .expect("resumed canonical Host Work");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(
+            item.events.last().map(|event| event.kind),
+            Some(WorkEventKind::Resume),
+        );
+    }
+
+    #[test]
+    fn workspace_ensure_accepts_discarded_canonical_work_without_resurrecting_history() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let session_id = "session-discarded-canonical";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            session_id,
+            Some("Issue #3412"),
+            "codex",
+        );
+        let mut discard = WorkEvent::new(WorkEventKind::Discard, work_id.clone(), Utc::now());
+        discard.status_category = Some(WorkspaceStatusCategory::Idle);
+        record_recovery_work_event(&project_root, &worktree, discard);
+
+        let result = ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Preserve discarded canonical Work".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("discarded canonical Work must not reject an exact Session bootstrap");
+
+        assert_eq!(result.workspace_id, work_id);
+        let items = load_workspace_work_items(&project_root)
+            .expect("load discarded Host WorkItems")
+            .expect("discarded Host WorkItems");
+        let item = items
+            .work_items
+            .iter()
+            .find(|item| item.id == result.workspace_id)
+            .expect("discarded canonical Host Work");
+        assert!(item.discarded, "workspace.ensure must preserve Discard");
+        assert_eq!(
+            item.events.last().map(|event| event.kind),
+            Some(WorkEventKind::Discard),
+        );
     }
 
     #[test]
@@ -8028,6 +8005,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workspace_ensure_docker_resumes_terminal_canonical_work_for_exact_session() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let session_id = "session-docker-terminal-canonical";
+        write_docker_session(session_id, &repo);
+        let work_id =
+            seed_exact_workspace_work(&repo, &repo, session_id, Some("Issue #3412"), "codex");
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut agent = assigned_agent_with_window(session_id, "window-docker", &repo);
+        agent.workspace_id = Some(work_id.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save Docker assignment");
+        let mut done = WorkEvent::new(WorkEventKind::Done, work_id.clone(), Utc::now());
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        record_recovery_work_event(&repo, &repo, done);
+
+        let result = ensure_workspace_for_agent(
+            &repo,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Resume terminal Docker Work".to_string(),
+                current_focus: Some("Restore exact Docker Session Work".to_string()),
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("terminal canonical Work must not block an exact Docker Session");
+
+        assert_eq!(result.workspace_id, work_id);
+        let items = load_workspace_work_items(&repo)
+            .expect("load resumed Docker WorkItems")
+            .expect("resumed Docker WorkItems");
+        let item = items
+            .work_items
+            .iter()
+            .find(|item| item.id == result.workspace_id)
+            .expect("resumed canonical Docker Work");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(
+            item.events.last().map(|event| event.kind),
+            Some(WorkEventKind::Resume),
+        );
+    }
+
+    #[test]
     fn workspace_ensure_docker_ignores_terminal_and_paused_foreign_history() {
         let _guard = env_guard();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -8477,7 +8504,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_docker_missing_work_without_recovery() {
+    fn workspace_ensure_docker_bootstraps_missing_canonical_work_for_exact_session() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -8485,89 +8512,34 @@ pub(crate) mod tests {
         let repo = temp.path().join("repo");
         write_docker_session("session-docker-missing", &repo);
 
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
-        let mut agent =
-            assigned_agent_with_window("session-docker-missing", "window-docker", &repo);
-        agent.workspace_id = gwt_core::workspace_projection::canonical_work_id(
-            &repo,
-            Some("work/20260601-0934"),
-            Some(repo.as_path()),
-        );
-        projection.agents.push(agent);
-        save_workspace_projection(&repo, &projection).expect("save Docker assignment");
-        let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
-
-        let error = ensure_workspace_for_agent(
+        let result = ensure_workspace_for_agent(
             &repo,
             WorkspaceEnsureInput {
                 agent_session: "session-docker-missing".to_string(),
                 title_summary: "Missing Docker Work".to_string(),
-                current_focus: Some("Reject local recovery".to_string()),
+                current_focus: Some("Bootstrap canonical Work".to_string()),
                 spec: None,
                 issue: None,
                 topic: None,
                 boundary: None,
             },
         )
-        .expect_err("Docker recovery requires the Host bridge");
+        .expect("exact Docker Session must bootstrap its missing canonical Work");
 
-        assert!(error.to_string().contains("cannot recover a missing Work"));
-        assert!(
-            !events_path.exists(),
-            "Docker refusal must not append Start"
-        );
-    }
-
-    #[test]
-    fn workspace_ensure_rejects_docker_legacy_missing_work_without_migration() {
-        let _guard = env_guard();
-        let gwt_home = tempfile::tempdir().expect("gwt home");
-        let _home = ScopedHome::set(gwt_home.path());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        write_docker_session("session-docker-legacy-missing", &repo);
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
-        let mut agent =
-            assigned_agent_with_window("session-docker-legacy-missing", "window-docker", &repo);
-        agent.workspace_id = gwt_core::workspace_projection::canonical_work_id(
-            &repo,
-            Some("work/20260601-0934"),
-            Some(repo.as_path()),
-        );
-        projection.agents.push(agent);
-        let legacy_current =
-            gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace/current.json");
-        std::fs::create_dir_all(legacy_current.parent().expect("legacy current parent"))
-            .expect("legacy current parent");
-        let legacy_bytes =
-            serde_json::to_vec_pretty(&projection).expect("serialize legacy current");
-        std::fs::write(&legacy_current, &legacy_bytes).expect("write legacy current");
-        let canonical_current = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
-        let canonical_works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
-        let canonical_events = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
-
-        let error = ensure_workspace_for_agent(
-            &repo,
-            WorkspaceEnsureInput {
-                agent_session: "session-docker-legacy-missing".to_string(),
-                title_summary: "Missing legacy Docker Work".to_string(),
-                current_focus: None,
-                spec: None,
-                issue: None,
-                topic: None,
-                boundary: None,
-            },
-        )
-        .expect_err("Docker legacy recovery must fail before migration");
-
-        assert!(error.to_string().contains("cannot recover a missing Work"));
-        assert_eq!(
-            std::fs::read(&legacy_current).expect("legacy current after refusal"),
-            legacy_bytes
-        );
-        assert!(!canonical_current.exists());
-        assert!(!canonical_works.exists());
-        assert!(!canonical_events.exists());
+        assert_eq!(result.disposition, WorkspaceEnsureDisposition::Created);
+        let items = load_workspace_work_items(&repo)
+            .expect("load bootstrapped Docker WorkItems")
+            .expect("bootstrapped Docker WorkItems");
+        let item = items
+            .work_items
+            .iter()
+            .find(|item| item.id == result.workspace_id)
+            .expect("bootstrapped canonical Docker Work");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+        assert!(item
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-docker-missing"));
     }
 
     #[test]
