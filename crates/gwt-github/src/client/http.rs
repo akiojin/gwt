@@ -358,11 +358,15 @@ pub struct HttpIssueClient<T: HttpTransport = ReqwestTransport> {
     repo: String,
     rest_base: String,
     graphql_url: String,
-    /// SPEC #4093 FR-004: the machine-wide budget ledger this client's calls
-    /// are charged to and refused from, shared with every `gh` spawn.
-    budget: gwt_core::github_budget::BudgetLedger,
-    /// The in-process refusal memory shared with the spawn gate.
-    gate: &'static gwt_core::github_quota::QuotaGate,
+    /// SPEC #4093 FR-004: the budget ledger this client's calls are charged
+    /// to and refused from, plus the in-process refusal memory. Production
+    /// constructors attach the machine-wide pair shared with every `gh`
+    /// spawn; a bare [`Self::with_transport`] client is unbudgeted so test
+    /// fixtures never write into the real ledger.
+    budget: Option<(
+        gwt_core::github_budget::BudgetLedger,
+        &'static gwt_core::github_quota::QuotaGate,
+    )>,
 }
 
 /// The argv shape the budget classifies this client's GraphQL calls as.
@@ -376,7 +380,7 @@ impl HttpIssueClient<ReqwestTransport> {
     pub fn from_gh_auth(owner: &str, repo: &str) -> Result<Self, ApiError> {
         let token = resolve_gh_token()?;
         let transport = ReqwestTransport::new().map_err(|e| ApiError::Network(e.to_string()))?;
-        Ok(Self::with_transport(transport, token, owner, repo))
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
     }
 
     pub fn from_gh_auth_with_deadline(
@@ -389,7 +393,7 @@ impl HttpIssueClient<ReqwestTransport> {
         let transport =
             ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
         deadline.remaining("owner client construction")?;
-        Ok(Self::with_transport(transport, token, owner, repo))
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
     }
 
     pub fn from_owner_environment_with_deadline(
@@ -443,9 +447,18 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             repo: repo.to_string(),
             rest_base: "https://api.github.com".to_string(),
             graphql_url: "https://api.github.com/graphql".to_string(),
-            budget: gwt_core::github_budget::BudgetLedger::global(),
-            gate: gwt_core::github_quota::global(),
+            budget: None,
         }
+    }
+
+    /// Charge this client's calls to the machine-wide budget ledger and the
+    /// process-global refusal gate (SPEC #4093 FR-004) — what every
+    /// production constructor does.
+    pub fn with_global_budget(self) -> Self {
+        self.with_budget(
+            gwt_core::github_budget::BudgetLedger::global(),
+            gwt_core::github_quota::global(),
+        )
     }
 
     /// Charge this client's calls to an explicit ledger and gate (tests).
@@ -454,8 +467,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         budget: gwt_core::github_budget::BudgetLedger,
         gate: &'static gwt_core::github_quota::QuotaGate,
     ) -> Self {
-        self.budget = budget;
-        self.gate = gate;
+        self.budget = Some((budget, gate));
         self
     }
 
@@ -463,19 +475,19 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     /// — the in-process gate's or the one another process persisted — before
     /// it is sent, and otherwise count it on the ledger.
     fn admit(&self, args: &[&str]) -> Result<(), ApiError> {
+        let Some((budget, gate)) = &self.budget else {
+            return Ok(());
+        };
         let now = chrono::Utc::now();
-        if gwt_core::github_budget::suppressed_spawn_detail(self.gate, &self.budget, args, now)
-            .is_some()
-        {
+        if gwt_core::github_budget::suppressed_spawn_detail(gate, budget, args, now).is_some() {
             let quota = gwt_core::github_quota::classify_gh_args(args);
-            let retry_after = self
-                .budget
+            let retry_after = budget
                 .active_block(quota, now)
-                .or_else(|| self.gate.active_block(quota, now))
+                .or_else(|| gate.active_block(quota, now))
                 .map(|block| u64::try_from(block.retry_after_secs(now)).unwrap_or(0));
             return Err(ApiError::RateLimited { retry_after });
         }
-        self.budget.record_spawn_from(
+        budget.record_spawn_from(
             gwt_core::github_quota::classify_gh_args(args),
             &gwt_core::github_budget::http_source(args),
             now,
@@ -486,19 +498,22 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     /// Settle a call's outcome on the shared budget: a refusal opens the
     /// persisted window every process honours; a success closes it.
     fn settle<V>(&self, args: &[&str], result: Result<V, ApiError>) -> Result<V, ApiError> {
+        let Some((budget, gate)) = &self.budget else {
+            return result;
+        };
         let quota = gwt_core::github_quota::classify_gh_args(args);
         let now = chrono::Utc::now();
         match &result {
             Ok(_) => {
-                self.gate.record_success(quota);
-                self.budget.clear_block(quota);
+                gate.record_success(quota);
+                budget.clear_block(quota);
             }
             Err(ApiError::RateLimited { .. }) => {
-                let block = self.budget.record_block(
+                let block = budget.record_block(
                     &gwt_core::github_quota::block_from_probe(quota, None, now),
                     now,
                 );
-                self.gate.record_exhaustion(block);
+                gate.record_exhaustion(block);
             }
             Err(_) => {}
         }
@@ -610,11 +625,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     fn graphql(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
         self.admit(&GRAPHQL_BUDGET_ARGS)?;
         let result = self.graphql_unbudgeted(query, variables);
-        if let Ok(value) = &result {
+        if let (Ok(value), Some((budget, _))) = (&result, &self.budget) {
             // SPEC #4093 FR-001: settle the points the query cost and refresh
             // the window from the same response.
             if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(value) {
-                self.budget.record_graphql_response(
+                budget.record_graphql_response(
                     &gwt_core::github_budget::http_source(&GRAPHQL_BUDGET_ARGS),
                     &rate_limit,
                     chrono::Utc::now(),
