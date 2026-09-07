@@ -114,6 +114,67 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(0);
   });
 
+  // SPEC #3885 AC-11 / AC-12 / AC-13 — the Windowized agent is an Issue window.
+  test("Windowize produces an Issue window that can fold back into the list", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    await page
+      .locator(".surface-knowledge .issue-preview [data-action='windowize-issue-preview']")
+      .click();
+
+    // AC-11: what lands on the canvas is an Issue window, not a bare terminal.
+    const agentWindow = page.locator(
+      ".workspace-window.surface-terminal[data-id='tab-issue::agent-preview']",
+    );
+    await expect(agentWindow).toBeVisible();
+    const header = agentWindow.locator(".issue-window-header");
+    await expect(header).toHaveCount(1);
+    await expect(header).toHaveAttribute("data-issue-number", "3671");
+    await expect(header.locator(".issue-window-header-number")).toHaveText("#3671");
+    await expect(header.locator(".issue-window-header-title")).toHaveText("Issue #3671");
+    await expect(header.locator(".issue-window-header-badge")).toHaveText("Running");
+    await expect(header.locator(".issue-window-header-badge")).toHaveCount(1);
+    expect(
+      await header.locator("button[data-action]").count(),
+    ).toBeLessThanOrEqual(2);
+    // The terminal is still the window's own, and it is still interactive.
+    await expect(agentWindow.locator(".window-body .terminal-root")).toBeVisible();
+
+    // AC-12: the return control folds the window back into its Issue row.
+    await header.locator("[data-action='return-to-list']").dispatchEvent("click");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__knowledgeLoadMessages
+            .filter((message) => message.kind === "dock_agent_window_to_issue")
+            .map((message) => message.id),
+        ),
+      )
+      .toEqual(["tab-issue::agent-preview"]);
+    await expect(
+      page.locator(".workspace-window.surface-terminal[data-id='tab-issue::agent-preview']:visible"),
+    ).toHaveCount(0);
+    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveAttribute(
+      "data-window-id",
+      "tab-issue::agent-preview",
+    );
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
   // 受け入れシナリオ 5 / FR-011.
   test("an errored agent is badged in the Issue row, not opened on the canvas", async ({
     page,
@@ -367,6 +428,9 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         agent_color: null,
         tab_group_id: null,
         tab_group_active: false,
+        // SPEC #3885 FR-011: the Issue a window belongs to is durable and survives
+        // Windowize, so the canvas face can carry the Issue header.
+        linked_issue_number: issueNumber,
         placement: {
           kind: "issue_preview",
           issue_window_id: "tab-issue::issue-1",
@@ -532,6 +596,24 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
             windows = windows.map((entry) =>
               entry.id === message.id
                 ? { ...entry, placement: { kind: "canvas" } }
+                : entry,
+            );
+            this.emit(workspaceState());
+            return;
+          }
+          if (message.kind === "dock_agent_window_to_issue") {
+            // SPEC #3885 FR-012: the inverse transition. The window already knows
+            // its Issue, so the backend resolves the host Issue window itself.
+            windows = windows.map((entry) =>
+              entry.id === message.id
+                ? {
+                    ...entry,
+                    placement: {
+                      kind: "issue_preview",
+                      issue_window_id: "tab-issue::issue-1",
+                      issue_number: entry.linked_issue_number,
+                    },
+                  }
                 : entry,
             );
             this.emit(workspaceState());

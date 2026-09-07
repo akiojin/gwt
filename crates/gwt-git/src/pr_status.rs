@@ -461,18 +461,6 @@ fn owner_issue(fields: &PrInventoryFields) -> Option<u64> {
         .or_else(|| launch_ref_issue(&fields.head_ref_name))
 }
 
-/// Whether the PR head is the launch ref the Issue Monitor would fresh-launch
-/// the owner from — the exact case its unique-commits guard refuses.
-fn head_is_owner_launch_ref(fields: &PrInventoryFields) -> bool {
-    launch_ref_issue(&fields.head_ref_name).is_some_and(|head_issue| {
-        fields.closing_issues.is_empty()
-            || fields
-                .closing_issues
-                .iter()
-                .any(|issue| issue.number == head_issue)
-    })
-}
-
 /// Classify one open PR into the PM inventory taxonomy with default thresholds.
 pub fn classify_pr_lifecycle(
     fields: &PrInventoryFields,
@@ -539,16 +527,14 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         }
     };
     let owner = owner_issue(fields);
+    // Issue #4074 AC-2: a head sitting on the owner's own launch ref used to be
+    // a blocker because the fresh-launch guard refused any ref with unique
+    // commits. The guard now inherits that ref, so the relaunch is executable
+    // and only a missing or closed owner still blocks it.
     let blocker = if owner_issue_closed {
         Some("owner_issue_closed")
-    } else if class.relaunches_owner() {
-        if owner.is_none() {
-            Some("owner_unknown")
-        } else if head_is_owner_launch_ref(fields) {
-            Some("owner_relaunch_refused_unique_commits")
-        } else {
-            None
-        }
+    } else if class.relaunches_owner() && owner.is_none() {
+        Some("owner_unknown")
     } else {
         None
     };
@@ -808,6 +794,131 @@ pub struct PrInventoryRead {
     pub throttled: Option<String>,
     /// Budget-spending `gh` calls this read made (the free probe excluded).
     pub github_calls: u32,
+    /// Issue #4074 FR-005: `work/issue-*` branches with commits and no open PR
+    /// to land them. Read from local refs, so it stays truthful even when the
+    /// PR rows came from cache.
+    pub unlanded_branches: Vec<UnlandedBranch>,
+}
+
+/// The base every `work/issue-*` branch is expected to land on.
+pub const UNLANDED_BRANCH_BASE_REF: &str = "origin/develop";
+
+/// One remote `work/issue-*` branch carrying commits the base does not have
+/// (Issue #4074 FR-005), before the open-PR filter is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlandedBranchProbe {
+    pub branch: String,
+    pub ahead: usize,
+    pub last_commit_at: Option<DateTime<Utc>>,
+}
+
+/// A branch whose commits have nowhere to land: unique work against
+/// `origin/develop` and no open PR carrying it (Issue #4074 FR-005 / AC-4).
+///
+/// `has_open_pr` is part of the row rather than implied by the collection so a
+/// single row stays self-describing; the inventory itself only lists branches
+/// where it is false, which is the set a PM must triage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlandedBranch {
+    pub branch: String,
+    /// Issue named by the launch ref, when the branch is one.
+    pub owner_issue: Option<u64>,
+    pub ahead: usize,
+    pub last_commit_at: Option<DateTime<Utc>>,
+    pub has_open_pr: bool,
+}
+
+/// Keep the branches a PM must triage, oldest residue first.
+///
+/// Pure so the stocktake rule is testable without a repository: a branch is
+/// unlanded when it has unique commits and no open PR head points at it.
+pub fn classify_unlanded_branches(
+    probes: Vec<UnlandedBranchProbe>,
+    open_pr_head_refs: &[String],
+) -> Vec<UnlandedBranch> {
+    let mut rows: Vec<UnlandedBranch> = probes
+        .into_iter()
+        .filter(|probe| probe.ahead > 0)
+        .filter(|probe| {
+            !open_pr_head_refs
+                .iter()
+                .any(|head| head.as_str() == probe.branch)
+        })
+        .map(|probe| UnlandedBranch {
+            owner_issue: launch_ref_issue(&probe.branch),
+            branch: probe.branch,
+            ahead: probe.ahead,
+            last_commit_at: probe.last_commit_at,
+            has_open_pr: false,
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        left.last_commit_at
+            .cmp(&right.last_commit_at)
+            .then_with(|| left.branch.cmp(&right.branch))
+    });
+    rows
+}
+
+/// Parse `git for-each-ref --format=%(refname:short)%09%(committerdate:iso-strict)`
+/// output into branch names stripped of their `origin/` prefix.
+pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<Utc>>)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (reference, date) = line.split_once('\t')?;
+            let branch = reference.trim().strip_prefix("origin/")?;
+            (!branch.is_empty()).then(|| {
+                (
+                    branch.to_string(),
+                    DateTime::parse_from_rfc3339(date.trim())
+                        .ok()
+                        .map(|value| value.with_timezone(&Utc)),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Read the remote `work/issue-*` branches that are not merged into `base_ref`
+/// and count how far each is ahead.
+///
+/// `git for-each-ref --no-merged` narrows the set in one local command so the
+/// per-branch `rev-list` stays bounded by the residue, not by branch count.
+pub fn collect_unlanded_work_branches(
+    repo_path: &Path,
+    base_ref: &str,
+) -> std::result::Result<Vec<UnlandedBranchProbe>, String> {
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(committerdate:iso-strict)",
+            "--no-merged",
+            base_ref,
+            "refs/remotes/origin/work/",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let mut probes = Vec::new();
+    for (branch, last_commit_at) in
+        parse_unlanded_branch_refs(&String::from_utf8_lossy(&output.stdout))
+    {
+        let Ok(divergence) =
+            crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
+        else {
+            continue;
+        };
+        probes.push(UnlandedBranchProbe {
+            branch,
+            ahead: divergence.ahead,
+            last_commit_at,
+        });
+    }
+    Ok(probes)
 }
 
 /// Fetch open PRs, classify them, and fold the read into the per-project
@@ -829,6 +940,17 @@ pub fn fetch_pr_inventory_tracked(
         options,
         run_gh_command,
     )?;
+    // Issue #4074 FR-005: the stocktake is local git, so it costs no GitHub
+    // budget and is never served stale beside a cached PR list. A git failure
+    // degrades the inventory to empty rather than failing the whole read.
+    let open_pr_head_refs: Vec<String> = read
+        .items
+        .iter()
+        .map(|item| item.head_ref_name.clone())
+        .collect();
+    read.unlanded_branches = collect_unlanded_work_branches(repo_path, UNLANDED_BRANCH_BASE_REF)
+        .map(|probes| classify_unlanded_branches(probes, &open_pr_head_refs))
+        .unwrap_or_default();
     let mut history = PrInventoryHistory::load(history_path);
     history.observe(&mut read.items, now, options);
     if let Err(error) = history.save(history_path) {
@@ -880,6 +1002,7 @@ where
                     cache_age_secs: Some(age),
                     throttled: None,
                     github_calls: 0,
+                    unlanded_branches: Vec::new(),
                 });
             }
         }
@@ -892,6 +1015,7 @@ where
                     cache_age_secs: cache_age,
                     throttled: Some(reason),
                     github_calls: 0,
+                    unlanded_branches: Vec::new(),
                 });
             }
             return Err(GwtError::Git(format!(
@@ -955,6 +1079,7 @@ where
         cache_age_secs: Some(0),
         throttled: None,
         github_calls,
+        unlanded_branches: Vec::new(),
     })
 }
 
@@ -1540,10 +1665,10 @@ pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GhCliOutput {
-    success: bool,
-    stdout: String,
-    stderr: String,
+pub(crate) struct GhCliOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Authoritative remote state used to reconcile an auto-merge effect.
@@ -1627,7 +1752,7 @@ where
     parse_rest_pr_list_json(&rest.stdout)
 }
 
-fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+pub(crate) fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     run_gh_command_with(repo_path, args, spawn_gh_command)
 }
 
@@ -3953,8 +4078,11 @@ mod tests {
         assert_eq!(decision.default_action, "escalate: no update for 24h");
     }
 
+    /// Issue #4074 AC-2: the launch guard now inherits a launch ref carrying
+    /// unique commits instead of refusing it, so a relaunch of the owner on
+    /// its own branch is an action the Monitor can actually take.
     #[test]
-    fn relaunch_actions_on_the_owner_launch_ref_are_not_executable() {
+    fn relaunch_actions_on_the_owner_launch_ref_are_executable() {
         let mut fields = sample_inventory_fields();
         fields.mergeable = "CONFLICTING".to_string();
         fields.head_ref_name = "work/issue-10".to_string();
@@ -3964,42 +4092,97 @@ mod tests {
         }];
         let decision = classify_pr_lifecycle(&fields, now_3868());
         assert_eq!(decision.class, PrLifecycleClass::Conflicted);
-        assert!(!decision.default_action_executable);
-        assert_eq!(
-            decision.blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
-        );
-        assert_eq!(
-            decision.fallback.as_deref(),
-            Some(PR_FALLBACK_WHEN_NOT_EXECUTABLE)
-        );
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+        assert_eq!(decision.fallback, None);
 
         fields.mergeable = "MERGEABLE".to_string();
         fields.ci_status = "FAILURE".to_string();
         let decision = classify_pr_lifecycle(&fields, now_3868());
         assert_eq!(decision.class, PrLifecycleClass::CiRed);
-        assert!(!decision.default_action_executable);
-        assert_eq!(
-            decision.blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
-        );
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
     }
 
     #[test]
     fn relaunch_actions_on_a_launch_ref_without_closing_issues_name_the_owner_from_the_head() {
         // #3726 / #3598 / #3593 in the wild: no `Closes #N`, head on
-        // `work/issue-<n>`. The launch ref itself names the owner and is what
-        // the Monitor's unique-commits guard refuses.
+        // `work/issue-<n>`. The launch ref itself names the owner, and since
+        // Issue #4074 the relaunch inherits that ref rather than being refused.
         let mut fields = sample_inventory_fields();
         fields.mergeable = "CONFLICTING".to_string();
         fields.head_ref_name = "work/issue-3712".to_string();
         fields.closing_issues = vec![];
         let decision = classify_pr_lifecycle(&fields, now_3868());
         assert_eq!(decision.owner_issue, Some(3712));
-        assert!(!decision.default_action_executable);
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+    }
+
+    // ---- Issue #4074 FR-005 / AC-4: unlanded branch stocktake ----
+
+    fn unlanded_probe(branch: &str, ahead: usize, last_commit_at: &str) -> UnlandedBranchProbe {
+        UnlandedBranchProbe {
+            branch: branch.to_string(),
+            ahead,
+            last_commit_at: Some(last_commit_at.parse().expect("commit date")),
+        }
+    }
+
+    #[test]
+    fn unlanded_inventory_keeps_branches_with_commits_and_no_open_pr() {
+        // #3551 in the wild: commits pushed 2026-08-27, no PR, ten days idle.
+        let probes = vec![
+            unlanded_probe("work/issue-3551", 3, "2026-08-27T04:00:00Z"),
+            unlanded_probe("work/issue-4090", 1, "2026-09-07T01:00:00Z"),
+            unlanded_probe("work/issue-4100", 0, "2026-09-07T02:00:00Z"),
+        ];
+        let rows = classify_unlanded_branches(probes, &["work/issue-4090".to_string()]);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].branch, "work/issue-3551");
+        assert_eq!(rows[0].owner_issue, Some(3551));
+        assert_eq!(rows[0].ahead, 3);
         assert_eq!(
-            decision.blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
+            rows[0].last_commit_at,
+            Some("2026-08-27T04:00:00Z".parse().expect("commit date"))
+        );
+        assert!(!rows[0].has_open_pr);
+    }
+
+    #[test]
+    fn unlanded_inventory_orders_the_longest_residue_first() {
+        let rows = classify_unlanded_branches(
+            vec![
+                unlanded_probe("work/issue-4069", 1, "2026-09-06T00:00:00Z"),
+                unlanded_probe("work/issue-3551", 2, "2026-08-27T04:00:00Z"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work/issue-3551", "work/issue-4069"]
+        );
+    }
+
+    #[test]
+    fn unlanded_branch_refs_parse_into_branch_and_last_commit_date() {
+        let stdout = "origin/work/issue-3551\t2026-08-27T13:00:00+09:00\n\
+             origin/work/issue-4069\t2026-09-06T09:00:00+09:00\n\
+             refs/tags/v1\t2026-09-06T09:00:00+09:00\n";
+        assert_eq!(
+            parse_unlanded_branch_refs(stdout),
+            vec![
+                (
+                    "work/issue-3551".to_string(),
+                    Some("2026-08-27T04:00:00Z".parse().expect("date"))
+                ),
+                (
+                    "work/issue-4069".to_string(),
+                    Some("2026-09-06T00:00:00Z".parse().expect("date"))
+                ),
+            ]
         );
     }
 
@@ -4267,11 +4450,8 @@ mod tests {
         assert_eq!(items[0].lifecycle, "CI-RED");
         assert_eq!(items[0].dwell_hours, Some(1));
         assert_eq!(items[0].stale_after_hours, 72);
-        assert!(!items[0].default_action_executable);
-        assert_eq!(
-            items[0].blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
-        );
+        assert!(items[0].default_action_executable);
+        assert_eq!(items[0].blocker, None);
         assert_eq!(items[0].lifecycle_source, "observed");
         assert_eq!(items[0].unchanged_cycles, 0);
     }

@@ -151,12 +151,21 @@ owner Issue.
 ## Verification and PR gate
 
 Phase 3 delegates to `gwt-verify --mode full`. Record the selected commands and
-results in the evidence bundle. UI-affecting work requires a concrete user
-verification handoff and a `User Verification Result`.
+results in the evidence bundle. In an `interactive` launch, UI-affecting work
+requires a concrete user verification handoff and a `User Verification Result`.
+
+In an `autonomous` launch (`GWT_AUTONOMOUS_EXECUTION` set by the gwt Issue
+Monitor) the handoff is waived: nobody is watching, and calling the question
+tool parks the owner Issue instead of pausing for an answer. Record
+`User Verification Result: n/a (autonomous)` and cover UI-affecting work with
+your own automated headed run — real browser, dark and light themes, zero
+console / page errors — reported on the separate `Agent Visual Check:` line.
+Your own browser-check is never a `User Verification Result`, and the waiver is
+never written as `skipped(<reason>)`.
 
 PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
-pre-PR verification passes and the `User Verification Result` is `confirmed` or
-`n/a`.
+pre-PR verification passes and the `User Verification Result` is `confirmed`,
+`n/a`, or `n/a (autonomous)`.
 
 ## Heavy command serialization
 

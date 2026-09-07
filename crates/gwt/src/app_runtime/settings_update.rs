@@ -776,11 +776,11 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend
-    /// commits the prepared payload via the helper subprocess and exits the
-    /// parent. Falls back to the legacy `apply_update_state_and_exit` path
-    /// when no prepared payload exists yet (e.g. user manually re-clicked CTA
-    /// before download completed).
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. The event
+    /// loop resolves the prepared payload (persisted manifest, or a download
+    /// when the user re-clicked the CTA before it persisted) and commits it
+    /// through the graceful `ApplyUpdateGraceful` route (Issue #4038), which
+    /// quits via `QuitApp` instead of exiting from a worker thread.
     pub(super) fn apply_update_restart_now_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(

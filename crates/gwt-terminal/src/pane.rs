@@ -1,6 +1,14 @@
 //! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::SystemTime,
+};
 
 use crate::{
     pty::{PendingPty, PtyHandle, SpawnConfig},
@@ -16,7 +24,20 @@ pub enum PaneStatus {
     Error(String),
 }
 
-const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+/// Scrollback rows a pane keeps and replays into `snapshot_bytes`.
+///
+/// This is the hard bound on how much work one snapshot can cost no matter how
+/// much the agent printed, so regression tests assert against this constant
+/// instead of a wall-clock budget (Issue #3988).
+pub const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+/// Upper bound for the unterminated escape prefix a snapshot carries
+/// (Issue #4095); longer prefixes are abandoned string sequences.
+const MAX_INCOMPLETE_ESCAPE_TAIL: usize = 1_024;
+/// Process-wide source for [`Pane::output_seq`] (Issue #4095). Positions stay
+/// monotonic across pane restarts that reuse a window id, so a client queue
+/// never mistakes a restarted pane's first chunks for chunks an older
+/// snapshot of the same window already covered.
+static NEXT_OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Trailing screen rows folded into the logged PTY exit record, and the
 /// character budget that keeps one log line readable (Issue #3341).
@@ -120,6 +141,18 @@ pub struct Pane {
     /// a plain-text rendering and the original byte stream so SGR formatting
     /// can be replayed later (SPEC-1919 FR-003j).
     line_buf: Vec<u8>,
+    /// Stream position of the last PTY chunk folded into `parser`
+    /// (Issue #4095), drawn from the process-wide [`NEXT_OUTPUT_SEQ`]. A
+    /// snapshot taken at position `n` already contains every chunk of this
+    /// pane with a position `<= n`; the client queue uses the pair to skip
+    /// streamed chunks that a later-queued snapshot already reproduces
+    /// instead of re-applying their relative cursor moves on top of it.
+    output_seq: u64,
+    /// Trailing bytes of the parsed stream that start an escape sequence the
+    /// parser has not finished (Issue #4095). Appended verbatim to snapshots
+    /// so a client that resets to the snapshot continues the sequence with
+    /// the next chunk exactly like the pane's own parser does.
+    incomplete_escape_tail: Vec<u8>,
 }
 
 /// A pane whose trusted gate helper is running but whose target is still
@@ -152,6 +185,8 @@ impl PendingPane {
             child_pid,
             last_exit: None,
             line_buf: Vec::new(),
+            output_seq: 0,
+            incomplete_escape_tail: Vec::new(),
         })
     }
 
@@ -167,6 +202,31 @@ impl PendingPane {
 
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
     parser.screen_mut().set_size(rows, cols);
+}
+
+/// Longest suffix of `bytes` that starts an escape sequence the terminal
+/// parser cannot have finished yet (Issue #4095): a bare `ESC`, a CSI without
+/// its final byte, an OSC / DCS / SOS / PM / APC string without `BEL` or `ST`,
+/// or an `ESC` + intermediate without its final byte. Anything the parser
+/// would already have executed or aborted counts as complete.
+fn incomplete_escape_suffix(bytes: &[u8]) -> &[u8] {
+    let Some(esc) = bytes.iter().rposition(|byte| *byte == 0x1b) else {
+        return &[];
+    };
+    let Some((&kind, body)) = bytes[esc + 1..].split_first() else {
+        return &bytes[esc..];
+    };
+    let complete = match kind {
+        b'[' => body.iter().any(|byte| !(0x20..=0x3f).contains(byte)),
+        b']' | b'P' | b'X' | b'^' | b'_' => body.contains(&0x07),
+        0x20..=0x2f => body.iter().any(|byte| !(0x20..=0x2f).contains(byte)),
+        _ => true,
+    };
+    if complete {
+        &[]
+    } else {
+        &bytes[esc..]
+    }
 }
 
 impl Pane {
@@ -212,6 +272,8 @@ impl Pane {
             child_pid,
             last_exit: None,
             line_buf: Vec::new(),
+            output_seq: 0,
+            incomplete_escape_tail: Vec::new(),
         })
     }
 
@@ -262,6 +324,19 @@ impl Pane {
     pub fn process_bytes(&mut self, data: &[u8]) {
         // Update vt100 screen state
         self.parser.process(data);
+        self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        self.incomplete_escape_tail = if self.incomplete_escape_tail.is_empty() {
+            incomplete_escape_suffix(data).to_vec()
+        } else {
+            let mut carried = std::mem::take(&mut self.incomplete_escape_tail);
+            carried.extend_from_slice(data);
+            incomplete_escape_suffix(&carried).to_vec()
+        };
+        if self.incomplete_escape_tail.len() > MAX_INCOMPLETE_ESCAPE_TAIL {
+            // A string sequence this long is not one the PTY split; treat it
+            // as abandoned rather than letting the tail grow unbounded.
+            self.incomplete_escape_tail.clear();
+        }
 
         // Capture raw bytes for scrollback. SGR escape sequences (CSI ... m)
         // never contain `\n`, so byte-level newline splitting preserves both
@@ -285,6 +360,14 @@ impl Pane {
         self.parser.screen()
     }
 
+    /// Stream position of the parsed screen: the position of the last PTY
+    /// chunk folded into it by [`Self::process_bytes`], monotonic across every
+    /// pane of the process. Read it under the same lock as the chunk or
+    /// snapshot it describes (Issue #4095).
+    pub fn output_seq(&self) -> u64 {
+        self.output_seq
+    }
+
     /// Build a replayable terminal snapshot for frontend reconnect.
     ///
     /// The snapshot is serialized from parsed vt100 state rather than raw PTY
@@ -300,9 +383,12 @@ impl Pane {
     /// cursor/attributes are best effort. Representable saved states remain
     /// exact.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        self.parser
+        let mut snapshot = self
+            .parser
             .screen()
-            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
+            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        snapshot.extend_from_slice(&self.incomplete_escape_tail);
+        snapshot
     }
 
     /// Get scrollback lines from the ring buffer.
@@ -1261,6 +1347,84 @@ mod tests {
             repeated_visible_line, 1,
             "snapshot should not replay visible scrollback lines when cursor moves; got: {snapshot:?}"
         );
+    }
+
+    /// Issue #4095: a PTY read can end inside an escape sequence. The parser
+    /// keeps that prefix pending, so a snapshot taken right there must carry
+    /// the prefix verbatim; otherwise a client that resets to the snapshot
+    /// prints the remainder of the sequence (`A`, `K`, ...) as text and its
+    /// cursor drifts away from the pane's.
+    #[test]
+    fn test_snapshot_bytes_carries_unterminated_escape_sequence_prefix() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-escape-tail", 6, sleep_command("60"));
+        pane.process_bytes(
+            "tool output\r\n✻ Frosting…\r\n  Tip: Use /clear\x1b[2K\x1b[1".as_bytes(),
+        );
+
+        let snapshot = pane.snapshot_bytes();
+        assert!(
+            snapshot.ends_with(b"\x1b[1"),
+            "snapshot must end with the pending escape prefix; got tail {:?}",
+            String::from_utf8_lossy(&snapshot[snapshot.len().saturating_sub(12)..])
+        );
+
+        let mut replay = vt100::Parser::new(6, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        replay.process(&snapshot);
+        let rest = "A\x1b[2K\x1b[G✢ Frosting…\r\n  Tip: next".as_bytes();
+        pane.process_bytes(rest);
+        replay.process(rest);
+        assert_eq!(replay.screen().contents(), pane.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            pane.screen().cursor_position()
+        );
+        assert!(
+            !pane.snapshot_bytes().ends_with(b"Tip: next"),
+            "a completed stream leaves no pending prefix"
+        );
+    }
+
+    /// Issue #4095: a restarted window reuses its id but gets a fresh pane.
+    /// Its first chunks must sort after any snapshot of the previous pane, or
+    /// the client queue would discard them as already-covered output.
+    #[test]
+    fn test_output_seq_is_monotonic_across_panes() {
+        let _pty_guard = lock_pty_test();
+        let mut first = test_pane_with_rows("test-seq-first", 4, sleep_command("60"));
+        let mut second = test_pane_with_rows("test-seq-second", 4, sleep_command("60"));
+        first.process_bytes(b"one");
+        let first_seq = first.output_seq();
+        second.process_bytes(b"two");
+        first.process_bytes(b"three");
+        assert!(first_seq > 0);
+        assert!(second.output_seq() > first_seq);
+        assert!(first.output_seq() > second.output_seq());
+        let _ = first.kill();
+        let _ = second.kill();
+    }
+
+    #[test]
+    fn test_incomplete_escape_suffix_recognizes_sequence_shapes() {
+        let cases: [(&[u8], &[u8]); 9] = [
+            (b"plain text", b""),
+            (b"text\x1b", b"\x1b"),
+            (b"text\x1b[2", b"\x1b[2"),
+            (b"text\x1b[2K", b""),
+            (b"text\x1b[?25l\x1b[1", b"\x1b[1"),
+            (b"text\x1b]0;title", b"\x1b]0;title"),
+            (b"text\x1b]0;title\x07", b""),
+            (b"text\x1b]0;title\x1b\\", b""),
+            (b"text\x1b(", b"\x1b("),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                incomplete_escape_suffix(input),
+                expected,
+                "input {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 
     #[test]

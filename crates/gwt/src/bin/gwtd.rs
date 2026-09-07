@@ -190,11 +190,12 @@ fn format_daemon_help() -> String {
         "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
-        "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
+        "  - Listens on a Unix domain socket (Unix) or a named pipe (Windows) per RuntimeScope.",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
         "  - An explicit project_root must resolve to an existing directory; invalid roots",
         "    fail closed and never fall back to cwd. Omitting it preserves cwd resolution.",
-        "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
+        "  - SIGINT / SIGTERM (Unix) or Ctrl-C / Ctrl-Break / console close (Windows) trigger",
+        "    graceful shutdown + endpoint file removal.",
         "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
         "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
         "    when the endpoint file is stale or unreachable.",
@@ -226,7 +227,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.questions | issue.monitor.question.answer",
         "  issue.monitor.wait",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
-        "  issue.monitor.reconcile",
+        "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -245,6 +246,10 @@ fn format_issue_help() -> String {
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
+        "  number?, dry_run                      issue.monitor.release_idle frees the slots",
+        "                                        of idle windows (review verdict published /",
+        "                                        settled execution / dead binding) and closes",
+        "                                        their panes; dry_run reports only",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -1082,6 +1087,8 @@ mod tests {
             // launch. If it is not discoverable here, the operator falls back
             // to hand-editing the state file, which is the bug.
             "issue.monitor.requeue",
+            // Issue #4084: the manual half of idle-window release.
+            "issue.monitor.release_idle",
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",

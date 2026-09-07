@@ -17,8 +17,8 @@ mod view_model;
 use options::*;
 
 pub use options::{
-    build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
-    load_agent_options,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
+    default_wizard_version_cache_path, load_agent_options, AgentSetupAffordance, AgentSetupKind,
 };
 pub use profiles::{
     load_previous_launch_profile, load_previous_launch_profiles,
@@ -60,9 +60,6 @@ pub enum LaunchWizardMode {
     Branch,
     StartWork,
     Knowledge,
-    /// SPEC-3214 FR-001: disposable branch-free intake session on an
-    /// ephemeral detached worktree.
-    Intake,
     /// SPEC-3214 FR-010: standalone existing-branch picker (US-83
     /// SelectExistingBranch) that continues on a remote branch without
     /// minting a new work/* branch.
@@ -289,6 +286,18 @@ pub struct LaunchWizardHolderDecisionView {
     pub move_unavailable_reason: Option<String>,
 }
 
+/// SPEC-3864 FR-005..FR-007: wire form of [`AgentSetupAffordance`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardAgentSetupView {
+    pub agent_id: String,
+    /// `"install"` or `"configure"`.
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    /// Button label; absent when gwt cannot run the setup itself.
+    pub action_label: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
@@ -364,6 +373,10 @@ pub struct LaunchWizardView {
     /// the wizard shows a non-blocking "OpenCode is not set up" hint with an
     /// in-pane setup launcher. Only meaningful for the OpenCode agent.
     pub opencode_needs_setup: bool,
+    /// SPEC-3864 FR-005..FR-007: agent-independent setup affordance for the
+    /// selected built-in (install when no `Installed` / `latest` route exists,
+    /// configure when first-time setup is missing). `None` when launchable.
+    pub agent_setup: Option<LaunchWizardAgentSetupView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
@@ -614,11 +627,6 @@ pub struct LaunchWizardContext {
     /// environment. This gate applies to installed, `latest`, and pinned
     /// versions.
     pub claude_workflows_enabled: bool,
-    /// SPEC-3214 Phase 3: when `Some(base_ref)`, this wizard launches an
-    /// ephemeral **intake session** — the agent runs in a detached, throwaway
-    /// worktree based on `base_ref` (e.g. `origin/develop`) and creates no
-    /// branch. `None` is the normal branch-based launch.
-    pub ephemeral_base_ref: Option<String>,
 }
 
 impl LaunchWizardContext {
@@ -957,15 +965,15 @@ pub enum LaunchWizardAction {
     SetHermesSafeMode {
         enabled: bool,
     },
-    /// SPEC-3151 FR-010: launch `<opencode runner> auth login` in an in-pane
-    /// host shell so the user can sign in to an AI provider without leaving the
-    /// wizard. OpenCode auth is host-global, so this always runs on the host.
+    /// SPEC-3864 FR-006 / FR-007: run the selected agent's setup affordance
+    /// in an in-pane host shell — the descriptor's install command when the
+    /// agent is missing, or `<runner> <setup_args>` (e.g. `opencode auth
+    /// login`) when first-time configuration is missing. Setup state is
+    /// host-global, so this always runs on the host.
     ///
-    /// Explicit serde rename: the default snake_case of `RunOpenCodeSetup` is
-    /// `run_open_code_setup`, but the frontend and the action-label use the
-    /// `opencode` convention, so the wire tag is `run_opencode_setup`.
-    #[serde(rename = "run_opencode_setup")]
-    RunOpenCodeSetup,
+    /// The SPEC-3151 wire tag `run_opencode_setup` stays accepted as an alias.
+    #[serde(rename = "run_agent_setup", alias = "run_opencode_setup")]
+    RunAgentSetup,
     Submit,
     /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
     GotoStep {
@@ -1022,15 +1030,11 @@ pub struct LaunchWizardState {
     /// config exists; the wizard then offers only the "use config default"
     /// and free-text "Other" entries.
     pub hermes_choices: gwt_skills::HermesLaunchChoices,
-    /// SPEC-3152 FR-005: `true` when the user's global Hermes home has no
-    /// resolvable credentials, so the wizard shows a non-blocking "Hermes is
-    /// not set up" hint. Populated at wizard open; never blocks launch.
-    pub hermes_needs_setup: bool,
-    /// SPEC-3151 FR-009: `true` when OpenCode has no AI provider configured in
-    /// its global data home, so the wizard shows a non-blocking "OpenCode is
-    /// not set up" hint with an in-pane setup launcher. Populated at wizard
-    /// open; never blocks launch.
-    pub opencode_needs_setup: bool,
+    /// SPEC-3864 FR-006: built-in agent ids (command keys) whose first-time
+    /// configuration is missing, populated by the app runtime at wizard open
+    /// (Hermes credentials, OpenCode provider auth, ...). Drives the
+    /// `configure` setup affordance; never blocks launch.
+    pub needs_configuration: std::collections::BTreeSet<String>,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.
