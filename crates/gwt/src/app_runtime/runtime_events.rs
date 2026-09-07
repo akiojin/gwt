@@ -275,24 +275,32 @@ impl AppRuntime {
         })]
     }
 
+    /// Test-only entry that streams output without a pane stream position;
+    /// production output arrives through [`Self::handle_runtime_output_event`]
+    /// with the reader thread's position (Issue #4095).
+    #[cfg(test)]
     pub(crate) fn handle_runtime_output(
         &mut self,
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_output_inner(id, data, true)
+        self.handle_runtime_output_inner(id, data, true, None)
     }
 
+    /// `seq` is the pane stream position the reader thread observed right
+    /// after parsing `data` (Issue #4095); it lets a client queue drop this
+    /// chunk when a snapshot taken at or past that position is queued first.
     pub(crate) fn handle_runtime_output_event(
         &mut self,
         id: String,
         incarnation: u64,
         data: Vec<u8>,
+        seq: u64,
     ) -> Vec<OutboundEvent> {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_output(id, data)
+        self.handle_runtime_output_inner(id, data, true, Some(seq))
     }
 
     pub(crate) fn handle_daemon_runtime_output(
@@ -303,7 +311,7 @@ impl AppRuntime {
         // Daemon publications describe another process and intentionally keep
         // their existing wire contract; a local PTY incarnation is neither
         // available nor authoritative for this path.
-        self.handle_runtime_output_inner(id, data, false)
+        self.handle_runtime_output_inner(id, data, false, None)
     }
 
     fn handle_runtime_output_inner(
@@ -311,6 +319,7 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
         publish_to_daemon: bool,
+        stream_seq: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             return Vec::new();
@@ -329,7 +338,8 @@ impl AppRuntime {
         let mut events = vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
             id,
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-        })];
+        })
+        .with_terminal_stream_seq(stream_seq)];
         if publish_to_daemon {
             let prompt = self.current_screen_approval_prompt(&output_id);
             events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
