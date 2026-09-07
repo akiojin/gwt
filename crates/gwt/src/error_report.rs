@@ -4,6 +4,8 @@
 //! channel when a project root is known. Publish failure never blocks the
 //! originating operation.
 
+use std::collections::BTreeMap;
+
 use chrono::{Duration, Utc};
 use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
 
@@ -16,29 +18,49 @@ pub const ERRORS_CHANNEL: &str = "errors";
 /// JSON operation refusals use [`report_error`] without publish so a rejected
 /// `daemon.subscribe` cannot handshake the cwd daemon as a side effect.
 pub fn report_error(kind: ErrorKind, message: impl Into<String>, target: ErrorTarget) {
-    report_error_with_publish(kind, message, target, false);
+    report_error_with_publish(kind, message, target, BTreeMap::new(), false);
 }
 
 /// Record the error and publish it on the daemon `errors` channel when a
 /// project root is known. Used by launch, hook, daemon, and toast paths.
 pub fn report_error_and_publish(kind: ErrorKind, message: impl Into<String>, target: ErrorTarget) {
-    report_error_with_publish(kind, message, target, true);
+    report_error_with_publish(kind, message, target, BTreeMap::new(), true);
+}
+
+/// [`report_error_and_publish`] with structured detail (Issue #3541). Returns
+/// the appended row so the caller can point the user at it, or `None` when the
+/// row was suppressed as a recent duplicate or the append failed.
+pub fn report_error_and_publish_with_context(
+    kind: ErrorKind,
+    message: impl Into<String>,
+    target: ErrorTarget,
+    context: BTreeMap<String, String>,
+) -> Option<ErrorRecord> {
+    report_error_with_publish(kind, message, target, context, true)
 }
 
 fn report_error_with_publish(
     kind: ErrorKind,
     message: impl Into<String>,
     target: ErrorTarget,
+    context: BTreeMap<String, String>,
     publish: bool,
-) {
-    let record = ErrorRecord::new(kind, message, target.clone());
+) -> Option<ErrorRecord> {
+    let record = ErrorRecord::new(kind, message, target.clone()).with_context(context);
     if recently_recorded(&record) {
-        return;
+        return None;
     }
     match gwt_core::error_ledger::record(record) {
-        Ok(recorded) if publish => publish_recorded(&recorded, target.project_root.as_deref()),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(error = %error, "error ledger append failed"),
+        Ok(recorded) => {
+            if publish {
+                publish_recorded(&recorded, target.project_root.as_deref());
+            }
+            Some(recorded)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "error ledger append failed");
+            None
+        }
     }
 }
 

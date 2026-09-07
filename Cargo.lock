@@ -1458,6 +1458,7 @@ name = "gwt-skills"
 version = "9.91.0"
 dependencies = [
  "chrono",
+ "dunce",
  "fs2",
  "gwt-core",
  "include_dir",
