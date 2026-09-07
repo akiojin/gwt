@@ -157,6 +157,10 @@ pub struct WindowRuntime {
     /// reused by a successor, so background events must carry this value and
     /// prove they still belong to the runtime currently stored for the id.
     incarnation: u64,
+    /// SPEC-3885 T-020: when this runtime started, in milliseconds since the
+    /// Unix epoch. It is the Issue row's elapsed-time source, so it must not
+    /// move when the agent merely changes state.
+    started_at_ms: u64,
     pane: Arc<Mutex<Pane>>,
     /// Lock-free process lifecycle handle captured before the reader/status
     /// workers can contend on `pane`. GUI-thread teardown must never acquire
@@ -180,6 +184,10 @@ impl WindowRuntime {
             .shared_pty();
         Self {
             incarnation,
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis() as u64)
+                .unwrap_or_default(),
             pane,
             pty,
             output_thread: None,
@@ -8222,6 +8230,13 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
+                    // SPEC-3885 T-020: the live PTY runtime owns the agent's
+                    // start time, so the Issue row's elapsed time survives a
+                    // frontend reload. A window with no runtime reports none.
+                    window.runtime_started_at_ms = self
+                        .runtimes
+                        .get(&window.id)
+                        .map(|runtime| runtime.started_at_ms);
                     if worktree_form_projection == WorktreeFormProjection::Resolve {
                         window.worktree_form = self
                             .active_agent_sessions

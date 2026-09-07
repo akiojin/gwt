@@ -254,11 +254,13 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     "the attention reason and the PR come before attribute chips",
   );
   assert.deepEqual(liveInline.actions, ["windowize-issue-preview"]);
+  // SPEC #3885 FR-015: stopping the agent is offered only from the ⋯ menu.
   assert.deepEqual(liveInline.overflow, [
     "configure-issue",
     "continue-work",
     "resume-work",
     "cleanup-work",
+    "stop-agent",
   ]);
 
   const onCanvas = issueRowStateModel({
@@ -570,6 +572,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
     "continue-work",
     "resume-work",
     "cleanup-work",
+    "stop-agent",
   ]);
   const cleanup3671 = row3671.querySelector('[data-action="cleanup-work"]');
   assert.equal(cleanup3671.disabled, true);

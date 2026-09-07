@@ -3179,6 +3179,110 @@ body {
   color: var(--color-text-muted);
 }
 
+/* SPEC #3885 Phase 2b (T-018 / T-005 / FR-014): the split view. Each running
+ * Issue becomes one pair — its own header above an interactive terminal — and a
+ * pair can be grown in place. The list view is unchanged; only this section is
+ * new, and the mode lives on the root as an attribute. */
+.issue-split-pair {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  height: clamp(200px, 34vh, 360px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.issue-split-pair[data-size="expanded"] {
+  height: clamp(320px, 62vh, 720px);
+}
+
+.issue-split-pair.selected {
+  border-color: var(--color-border-strong);
+}
+
+.issue-split-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+}
+
+.issue-split-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.issue-split-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.issue-split-number,
+.issue-split-elapsed,
+.issue-split-output,
+.issue-split-placeholder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-split-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-split-output {
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.issue-split-output:empty {
+  display: none;
+}
+
+.issue-split-terminal {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.issue-split-terminal .terminal-root {
+  position: absolute;
+  inset: 0;
+}
+
+.issue-split-placeholder {
+  display: flex;
+  align-items: center;
+  padding: var(--space-3);
+}
+
+/* The split view stacks its pairs in the list pane; the list view keeps the
+ * row layout it already had. */
+.issue-bridge-root[data-view-mode="split"] .knowledge-list {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+}
+
 /* SPEC #3885 Phase 2b (T-015 / FR-011): the Issue header of a Windowized agent.
  * It is the top band of the agent window's own body, so the window reads as one
  * piece — Issue identity and state above, the interactive terminal below — and a

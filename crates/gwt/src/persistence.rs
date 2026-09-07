@@ -178,6 +178,14 @@ pub struct PersistedWindowState {
     /// `None` is a session with no Issue behind it, which stays a bare terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_issue_number: Option<u64>,
+    /// SPEC-3885 T-020: wire-only moment this window's agent runtime started,
+    /// in milliseconds since the Unix epoch. The Issue row's elapsed time reads
+    /// it so a frontend reload does not restart the clock from the last state
+    /// change it happened to observe. Like `agent_color` it is recomputed per
+    /// broadcast and never read back from disk — a stored timestamp would
+    /// outlive the PTY it describes.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub runtime_started_at_ms: Option<u64>,
     /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
     /// window, recomputed per broadcast from the durable PM registration. It
     /// is never deserialized from disk — a stored flag would drift from
@@ -300,6 +308,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_active: false,
                 session_id: None,
                 linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -327,6 +336,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_active: false,
                 session_id: None,
                 linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             },
         ],
@@ -716,6 +726,7 @@ mod tests {
                     tab_group_active: false,
                     session_id: None,
                     linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -743,6 +754,7 @@ mod tests {
                     tab_group_active: false,
                     session_id: None,
                     linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
@@ -1263,6 +1275,7 @@ mod tests {
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
                 linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1355,6 +1368,7 @@ mod tests {
             tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1430,6 +1444,7 @@ mod tests {
                     tab_group_active: false,
                     session_id: None,
                     linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1457,6 +1472,7 @@ mod tests {
                     tab_group_active: false,
                     session_id: None,
                     linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
@@ -1672,6 +1688,7 @@ mod tests {
                     tab_group_active: false,
                     session_id: None,
                     linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1699,6 +1716,7 @@ mod tests {
                     tab_group_active: false,
                     session_id: None,
                     linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
