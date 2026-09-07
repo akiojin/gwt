@@ -206,13 +206,67 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         grants.sort();
-        for pair in grants.windows(2) {
+        assert_eq!(unpaced_spawn_pair(&grants, gap), None);
+    }
+
+    /// The first consecutive pair of grants that violates the pacing contract,
+    /// described for the assertion message, or `None` when every pair is paced.
+    ///
+    /// Issue #4111: the grants a test can observe are thread-side timestamps
+    /// taken after the pacer released its lock, so scheduling jitter on either
+    /// side of a pair shifts the measured spacing by tens of microseconds even
+    /// when the pacer itself honored the gap exactly. A pair only counts as
+    /// unpaced when it falls short by more than [`pacing_tolerance`].
+    fn unpaced_spawn_pair(grants: &[Instant], gap: Duration) -> Option<String> {
+        let floor = gap.saturating_sub(pacing_tolerance(gap));
+        grants.windows(2).find_map(|pair| {
             let spacing = pair[1].saturating_duration_since(pair[0]);
-            assert!(
-                spacing >= gap,
-                "consecutive Codex spawns must stay {gap:?} apart, got {spacing:?}"
-            );
-        }
+            (spacing < floor).then(|| {
+                format!("consecutive Codex spawns must stay {gap:?} apart, got {spacing:?}")
+            })
+        })
+    }
+
+    /// How far short of the gap a measured spacing may fall before it counts
+    /// as a pacing failure: 5% of the gap or 5ms, whichever is larger. Both
+    /// are far above timer and scheduling jitter and far below any gap worth
+    /// pacing with.
+    fn pacing_tolerance(gap: Duration) -> Duration {
+        (gap / 20).max(Duration::from_millis(5))
+    }
+
+    /// Issue #4111: the failure observed in CI — a 60ms gap measured as
+    /// 59.938575ms, 62µs short — is timer jitter, not a pacing regression, and
+    /// must not fail the check.
+    #[test]
+    fn sub_millisecond_timer_jitter_is_not_a_pacing_failure() {
+        let gap = Duration::from_millis(60);
+        let base = Instant::now();
+        let observed_spacing = gap - Duration::from_micros(62);
+        let grants: Vec<Instant> = (0..4u32).map(|n| base + observed_spacing * n).collect();
+        assert_eq!(unpaced_spawn_pair(&grants, gap), None);
+    }
+
+    /// Issue #4111 AC-2: the tolerance must not hide a pacer that does not
+    /// pace. Grants handed out with no spacing at all are still rejected.
+    #[test]
+    fn unpaced_spawns_are_still_rejected() {
+        let gap = Duration::from_millis(60);
+        let base = Instant::now();
+        let grants = vec![base; 4];
+        let violation = unpaced_spawn_pair(&grants, gap)
+            .expect("zero spacing between grants must be reported as unpaced");
+        assert!(violation.contains("60ms"), "got: {violation}");
+    }
+
+    /// Issue #4111 AC-2: a spacing that falls short by more than the tolerance
+    /// is a real regression, not jitter.
+    #[test]
+    fn spacing_short_by_more_than_the_tolerance_is_rejected() {
+        let gap = Duration::from_millis(60);
+        let base = Instant::now();
+        let grants = vec![base, base + gap - Duration::from_millis(6)];
+        assert!(unpaced_spawn_pair(&grants, gap).is_some());
     }
 
     #[test]
