@@ -53194,7 +53194,9 @@ fn assert_every_codex_hook_is_trusted(config: &toml::Value, hooks_path: &Path) {
         ("PostToolUse", "post_tool_use"),
         ("Stop", "stop"),
     ];
-    let canonical = fs::canonicalize(hooks_path).expect("canonicalize hooks path");
+    // Issue #4071: Codex keys hooks by the plain absolute path, never the
+    // Windows `\\?\` verbatim form `std::fs::canonicalize` returns.
+    let canonical = dunce::canonicalize(hooks_path).expect("canonicalize hooks path");
     let hooks: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(hooks_path).expect("read hooks.json"))
             .expect("parse hooks.json");

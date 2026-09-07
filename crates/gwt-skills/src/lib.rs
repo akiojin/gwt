@@ -21,7 +21,7 @@ pub use codex_home::{
 pub use codex_hook_trust::{
     collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
     register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
-    CodexHookTrustEntry, CodexHookTrustReport,
+    CodexHookTrustEntry, CodexHookTrustExpectation, CodexHookTrustReport,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
