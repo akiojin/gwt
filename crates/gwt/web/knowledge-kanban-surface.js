@@ -635,12 +635,17 @@ export function createKnowledgeKanbanSurface({
           toggle.dataset.enabled = enabled ? "true" : "false";
           toggle.classList.toggle("primary", !enabled);
         }
+        // Issue #3561: the Autonomous control is a WAI-ARIA switch whose label
+        // names the setting and whose aria-checked + state word carry the
+        // current value. It renders only what the server status says — the
+        // click handler never writes a local optimistic value.
         const autonomous = panel.querySelector('[data-action="monitor-autonomous"]');
         if (autonomous) {
           const enabled = Boolean(issueMonitorStatus.autonomous_mode);
-          autonomous.textContent = enabled ? "Autonomous: ON" : "Autonomous: OFF";
+          autonomous.setAttribute("aria-checked", enabled ? "true" : "false");
           autonomous.dataset.enabled = enabled ? "true" : "false";
-          autonomous.classList.toggle("primary", enabled);
+          const stateWord = autonomous.querySelector(".knowledge-monitor-switch__state");
+          if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
       }
 
@@ -3251,7 +3256,11 @@ export function createKnowledgeKanbanSurface({
                       <input type="number" min="1" step="1" value="1" />
                     </label>
                     <button type="button" class="wizard-button primary" data-action="monitor-toggle">Start</button>
-                    <button type="button" class="wizard-button" data-action="monitor-autonomous">Autonomous: OFF</button>
+                    <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Autonomous mode" data-action="monitor-autonomous" data-enabled="false">
+                      <span class="knowledge-monitor-switch__label">Autonomous</span>
+                      <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
+                      <span class="knowledge-monitor-switch__state">Off</span>
+                    </button>
                   </div>
                   <div class="knowledge-monitor-quick">
                     <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />

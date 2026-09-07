@@ -880,3 +880,70 @@ fn hook_envelope_serializes_runtime_scope_and_payload() {
     assert_eq!(json["scope"]["repo_hash"], "repo-scope-1234");
     assert_eq!(json["scope"]["worktree_hash"], "worktree-scope-5678");
 }
+
+// Issue #4038 (AC-6): a live daemon left behind by a previous gwt build must
+// not be adopted after an update. The version-aware bootstrap resolver names
+// it for retirement instead of reusing it; the descriptor stays because its
+// owner is alive (Issue #2338 AC-A).
+#[test]
+fn bootstrap_retires_a_live_daemon_of_another_version_instead_of_reusing_it() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let gwt_home = tempdir().unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "9.30.0".into(),
+    );
+    persist_endpoint(&scope.endpoint_path(gwt_home.path()), &endpoint).unwrap();
+
+    let stale = gwt_core::daemon::resolve_bootstrap_action_for_version(
+        gwt_home.path(),
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        "9.31.0",
+        |pid| pid == 4242,
+    )
+    .unwrap();
+    assert_eq!(
+        stale,
+        DaemonBootstrapAction::RetireStaleVersion {
+            endpoint: endpoint.clone()
+        }
+    );
+    assert!(
+        scope.endpoint_path(gwt_home.path()).exists(),
+        "a live owner's descriptor is never deleted by a reader"
+    );
+
+    let same = gwt_core::daemon::resolve_bootstrap_action_for_version(
+        gwt_home.path(),
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        "v9.30.0",
+        |pid| pid == 4242,
+    )
+    .unwrap();
+    assert_eq!(same, DaemonBootstrapAction::Reuse(endpoint));
+
+    let dead = gwt_core::daemon::resolve_bootstrap_action_for_version(
+        gwt_home.path(),
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        "9.31.0",
+        |_| false,
+    )
+    .unwrap();
+    assert!(
+        matches!(dead, DaemonBootstrapAction::Spawn { .. }),
+        "a dead stale-version daemon is simply replaced: {dead:?}"
+    );
+}
