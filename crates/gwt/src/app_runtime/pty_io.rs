@@ -470,10 +470,10 @@ impl AppRuntime {
             .iter()
             .filter_map(|id| {
                 let runtime = self.runtimes.get(id)?;
-                let snapshot = runtime
+                let (snapshot, seq) = runtime
                     .pane
                     .lock()
-                    .map(|pane| pane.snapshot_bytes())
+                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then(|| {
                     OutboundEvent::reply(
@@ -483,6 +483,7 @@ impl AppRuntime {
                             data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
                         },
                     )
+                    .with_terminal_stream_seq(Some(seq))
                 })
             })
             .collect()
@@ -1735,10 +1736,12 @@ impl AppRuntime {
                     Ok(read) => {
                         let chunk = buffer[..read].to_vec();
                         let lock_started = Instant::now();
+                        let mut seq = 0;
                         if let Ok(mut pane) = pane.lock() {
                             let lock_wait_us = lock_started.elapsed().as_micros() as u64;
                             let parse_started = Instant::now();
                             pane.process_bytes(&chunk);
+                            seq = pane.output_seq();
                             let parse_us = parse_started.elapsed().as_micros() as u64;
                             // Log only when the contention window is large enough
                             // to plausibly starve a concurrent `write_input`. The
@@ -1760,6 +1763,7 @@ impl AppRuntime {
                             id: id.clone(),
                             incarnation,
                             data: chunk,
+                            seq,
                         });
                     }
                     Err(error) => {
