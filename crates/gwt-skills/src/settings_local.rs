@@ -318,19 +318,15 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
     )))
 }
 
+/// Publish a fully written staging file as `destination` in one step.
+///
+/// `fs::rename` replaces an existing destination atomically on every
+/// supported platform (Windows uses `MOVEFILE_REPLACE_EXISTING` /
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`), so the destination is never
+/// missing between two writes. A former Windows-only remove-then-rename left
+/// exactly that window, and the in-process lock that guarded it could not see
+/// writers in other processes (PR #3520 review).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    let _replace_guard = {
-        static WINDOWS_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = WINDOWS_REPLACE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if destination.exists() {
-            fs::remove_file(destination)?;
-        }
-        guard
-    };
-
     fs::rename(staging_path, destination)
 }
 
@@ -959,6 +955,93 @@ mod tests {
         let hooks_path = worktree.join(CODEX_HOOKS_PATH);
         let rendered = fs::read_to_string(&hooks_path).expect("final hooks");
         serde_json::from_str::<Value>(&rendered).expect("valid final hooks JSON");
+        let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
+            .expect("hooks directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hooks.json.tmp-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(
+            staging_files.is_empty(),
+            "atomic staging files leaked: {staging_files:?}"
+        );
+    }
+
+    /// PR #3520 review (PRRT_kwDOPLof2M6YcffP): the in-process mutex cannot
+    /// protect writers running in independent processes, and a Windows-only
+    /// remove-then-rename left a window in which the destination did not
+    /// exist. `fs::rename` replaces an existing destination atomically on
+    /// every supported platform, so concurrent processes must never observe a
+    /// missing or partially written file.
+    #[test]
+    fn concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination() {
+        const CHILD_ENV: &str = "GWT_SETTINGS_LOCAL_CHILD_WORKTREE";
+        const TEST_NAME: &str = "settings_local::tests::concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination";
+        const CHILDREN: usize = 6;
+        const WRITES_PER_CHILD: usize = 24;
+
+        if let Some(worktree) = std::env::var_os(CHILD_ENV) {
+            let worktree = PathBuf::from(worktree);
+            for _ in 0..WRITES_PER_CHILD {
+                generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal)
+                    .expect("child hook write");
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("worktree");
+        let hooks_path = dir.path().join(CODEX_HOOKS_PATH);
+        generate_codex_hooks_for_mode(dir.path(), CodexHookDiscoveryMode::WorktreeLocal)
+            .expect("seed hooks");
+        let test_binary = std::env::current_exe().expect("current test binary");
+        let mut children = (0..CHILDREN)
+            .map(|_| {
+                hidden_command(&test_binary)
+                    .args(["--exact", TEST_NAME])
+                    .env(CHILD_ENV, dir.path())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("spawn independent writer process")
+            })
+            .collect::<Vec<_>>();
+
+        let mut observations = 0usize;
+        loop {
+            let all_done = children
+                .iter_mut()
+                .all(|child| child.try_wait().expect("poll child").is_some());
+            match fs::read_to_string(&hooks_path) {
+                Ok(rendered) => {
+                    serde_json::from_str::<Value>(&rendered)
+                        .expect("destination must always hold a complete hooks.json");
+                    observations += 1;
+                }
+                Err(err) => panic!(
+                    "destination vanished while independent processes regenerated it \
+                     (after {observations} good reads): {err}"
+                ),
+            }
+            if all_done {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        for mut child in children {
+            let status = child.wait().expect("wait child");
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                std::io::Read::read_to_string(&mut pipe, &mut stderr).ok();
+            }
+            assert!(status.success(), "child writer failed: {status}\n{stderr}");
+        }
+
         let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
             .expect("hooks directory")
             .filter_map(Result::ok)
