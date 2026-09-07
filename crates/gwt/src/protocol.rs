@@ -794,6 +794,12 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
+    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
+    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
+    /// the setting follows `autonomous_mode`.
+    SetIssueMonitorAutoApplyUpdates {
+        enabled: bool,
+    },
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },

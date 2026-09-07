@@ -249,7 +249,7 @@ test("update CTA shell mounts in the shared notice host", () => {
   );
 });
 
-function createFixture({ confirmResult = true } = {}) {
+function createFixture({ confirmResult = true, now } = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><div id="operator-notice-stack"></div></body></html>',
   );
@@ -263,6 +263,7 @@ function createFixture({ confirmResult = true } = {}) {
     versionUpdates,
     options: {
       document,
+      ...(now ? { now } : {}),
       send(message) {
         sent.push(message);
       },
@@ -760,4 +761,98 @@ test("phase19: controller exposes the Phase 19 event handlers required by app.js
   assert.equal(typeof controller.handleUpdateReady, "function");
   assert.equal(typeof controller.handleUpdateApplyError, "function");
   assert.equal(typeof controller.handleUpdateApplyPendingPersisted, "function");
+  // Issue #3906 AC-12: the drain state arrives on issue_monitor_status.
+  assert.equal(typeof controller.handleIssueMonitorStatus, "function");
+  assert.match(
+    appSource,
+    /case "issue_monitor_status":[\s\S]{0,400}updateCtaController\.handleIssueMonitorStatus\(event\.status \|\| \{\}\)/,
+    "app.js must hand issue_monitor_status to the update CTA controller",
+  );
+});
+
+// Issue #3906 AC-12 — drain-and-apply: while the Issue Monitor holds new
+// launches for a staged update, the CTA says what it is waiting for.
+test("issue #3906: update_drain in issue_monitor_status renders the draining CTA with blockers and minutes", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-06T12:47:30Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.91.0" });
+
+  controller.handleIssueMonitorStatus({
+    update_drain: {
+      version: "9.91.0",
+      since: "2026-09-06T12:35:00Z",
+      reason: "auto",
+      blocking: [
+        { kind: "active_pane", window_id: "w1", label: "work/issue-1", state: "running" },
+        { kind: "pending_acquire_claim", issue_number: 42 },
+      ],
+    },
+  });
+
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "draining");
+  assert.equal(cta.className, "update-cta is-draining");
+  assert.equal(cta.textContent, "Update v9.91.0 pending — draining 2 agents (12 min)");
+  assert.equal(cta.title, "Update v9.91.0 pending — draining 2 agents (12 min)");
+  assert.equal(cta.disabled, false, "draining is informational; the user may still act");
+  assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
+
+  // Pre-#3906 daemons omit `blocking`; the count degrades to 0 instead of NaN.
+  // An operator drain carries the running version, so it is named as manual.
+  controller.handleIssueMonitorStatus({
+    update_drain: { version: "9.91.0", since: "2026-09-06T12:47:00Z", reason: "manual" },
+  });
+  assert.equal(
+    fixture.document.getElementById("update-cta").textContent,
+    "Manual update drain — draining 0 agents (0 min)",
+  );
+});
+
+test("issue #3906: clearing update_drain returns the CTA to the staged (ready) state", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-06T12:47:30Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.91.0" });
+  controller.handleIssueMonitorStatus({
+    update_drain: { version: "9.91.0", since: "2026-09-06T12:35:00Z", reason: "auto", blocking: [] },
+  });
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "draining");
+
+  controller.handleIssueMonitorStatus({ enabled: true, state: "idle" });
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "ready");
+  assert.equal(cta.textContent, "Update v9.91.0 ready — Restart now");
+
+  // A status without a drain never conjures a CTA on its own.
+  const quiet = createFixture();
+  const quietController = createUpdateCtaController(quiet.options);
+  quietController.handleIssueMonitorStatus({ enabled: true, state: "idle" });
+  assert.equal(quiet.document.getElementById("update-cta"), null);
+});
+
+test("issue #3906: a dismissed draining CTA stays dismissed for that version across status ticks", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-06T12:47:30Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  const drain = {
+    update_drain: { version: "9.91.0", since: "2026-09-06T12:35:00Z", reason: "auto", blocking: [] },
+  };
+  controller.handleIssueMonitorStatus(drain);
+  fixture.document.querySelector("[data-update-cta-dismiss]").click();
+  assert.equal(fixture.document.getElementById("update-cta"), null);
+
+  controller.handleIssueMonitorStatus(drain);
+  assert.equal(fixture.document.getElementById("update-cta"), null, "same version stays dismissed");
+
+  controller.handleIssueMonitorStatus({
+    update_drain: { version: "9.92.0", since: "2026-09-06T12:40:00Z", reason: "auto", blocking: [] },
+  });
+  assert.equal(
+    fixture.document.getElementById("update-cta").textContent,
+    "Update v9.92.0 pending — draining 0 agents (7 min)",
+  );
+});
+
+test("issue #3906: .update-cta.is-draining is styled with Operator state tokens", () => {
+  const rule = cssRule(".update-cta.is-draining");
+  assert.match(rule, /var\(--color-state-needs-input/);
+  assert.doesNotMatch(rule, /#[0-9a-f]{3,8}\b|rgba?\(/i, "no raw colors");
 });
