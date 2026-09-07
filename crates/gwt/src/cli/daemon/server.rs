@@ -5276,21 +5276,35 @@ if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
   done
   rm -f "$owner_marker" || exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+# SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync,
+# never `gh pr list --state merged` (GraphQL).
+case "$1 $2" in
+  "api repos/{owner}/{repo}/pulls?state=closed"*)
+    merged_pulls_query=1
+    ;;
+  *)
+    merged_pulls_query=0
+    ;;
+esac
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$merged_pulls_query" = "1" ]; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$merged_pulls_query" = "1" ]; then
   if [ "$(git rev-parse --is-bare-repository 2>/dev/null)" != "true" ]; then
     printf '%s\n' 'gh merged query ran outside child bare repository' >&2
     exit 1
   fi
-  printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED"}]'
+  printf '%s\n' '[{"number":7,"head":{"ref":"work/issue-43"},"base":{"ref":"develop"},"merged_at":"2026-09-01T00:00:00Z","merge_commit_sha":"c0ffee","updated_at":"2026-09-01T00:00:00Z"}]'
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "settle_close" ] || [ "$GWT_FAKE_GH_MODE" = "settle_unmet" ] || [ "$GWT_FAKE_GH_MODE" = "settle_delegated" ]; then
   # Issue #3917: one merged delivery for work/issue-43 plus the readbacks the
   # settlement proposal may need (PR body, Issue comments).
+  if [ "$merged_pulls_query" = "1" ]; then
+    printf '%s\n' '[{"number":7,"head":{"ref":"work/issue-43"},"base":{"ref":"develop"},"merged_at":"2026-09-01T00:00:00Z","merge_commit_sha":"c0ffee","updated_at":"2026-09-01T00:00:00Z"}]'
+    exit 0
+  fi
   if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
     printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED","number":7,"mergeCommit":{"oid":"c0ffee"},"mergedAt":"2026-09-01T00:00:00Z","baseRefName":"develop"}]'
     exit 0

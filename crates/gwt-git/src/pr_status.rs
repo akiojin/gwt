@@ -1356,12 +1356,12 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
-/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
-/// call. A transient failure returns an `Err` (the caller keeps work as
-/// launched) rather than an empty set, so closing the active slot only happens
-/// on a positive merge signal.
+/// Branches (PR head refs) whose PR has merged, from the differential sync
+/// behind [`fetch_merged_pr_deliveries`]. A transient failure returns an `Err`
+/// (the caller keeps work as launched) rather than an empty set, so closing
+/// the active slot only happens on a positive merge signal.
 pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
-    fetch_merged_pr_deliveries_with(repo_path, run_gh_command).map(|merged| merged.branches)
+    fetch_merged_pr_deliveries(repo_path).map(|merged| merged.branches)
 }
 
 /// The base branch whose merges deliver a work branch (Issue #3917). `main`
@@ -1388,37 +1388,54 @@ pub struct MergedPrDeliveries {
     pub deliveries: std::collections::BTreeMap<String, MergedPrDelivery>,
 }
 
-/// Fetch merged PRs with their delivery identity (`number`, `mergeCommit`,
-/// `mergedAt`, `baseRefName`) in the same single query the branch-only
-/// reconciliation already pays for.
+/// Merged PRs with their delivery identity (`number`, merge SHA, `mergedAt`,
+/// base), accumulated by the differential REST sync of
+/// [`crate::merged_pr_sync`] (SPEC #4093 FR-003). One scan costs a bounded
+/// number of REST requests and no GraphQL, whatever the merged-PR count.
 pub fn fetch_merged_pr_deliveries(repo_path: &Path) -> Result<MergedPrDeliveries> {
-    fetch_merged_pr_deliveries_with(repo_path, run_gh_command)
+    crate::merged_pr_sync::sync_merged_pr_deliveries(repo_path)
 }
 
-fn fetch_merged_pr_deliveries_with<F>(repo_path: &Path, mut run_gh: F) -> Result<MergedPrDeliveries>
-where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
-{
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--json",
-            "headRefName,state,number,mergeCommit,mergedAt,baseRefName",
-            "--state",
-            "merged",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list merged: {}",
-            output.stderr.trim()
-        )));
+/// One merged head branch as a delivery source: the branch plus, when the
+/// row carried a PR number, its delivery identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedPrRow {
+    pub(crate) head_ref: String,
+    pub(crate) delivery: Option<MergedPrDelivery>,
+}
+
+impl MergedPrDeliveries {
+    /// Fold merged rows into branches plus the latest `develop` delivery per
+    /// branch. Rows without a PR number still count as merged branches but
+    /// cannot be settled.
+    pub(crate) fn from_rows(rows: impl IntoIterator<Item = MergedPrRow>) -> Self {
+        let mut merged = Self::default();
+        for row in rows {
+            merged.branches.insert(row.head_ref.clone());
+            let Some(delivery) = row.delivery else {
+                continue;
+            };
+            // Issue #3917: only a merge into the integration branch delivers the
+            // work. A later merge of the same head branch into `main` (release) or
+            // any other base must not become the branch's settlement delivery.
+            if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
+                continue;
+            }
+            let newer = match merged.deliveries.get(&row.head_ref) {
+                None => true,
+                Some(current) => match (&delivery.merged_at, &current.merged_at) {
+                    (Some(candidate), Some(existing)) if candidate != existing => {
+                        candidate > existing
+                    }
+                    _ => delivery.number > current.number,
+                },
+            };
+            if newer {
+                merged.deliveries.insert(row.head_ref, delivery);
+            }
+        }
+        merged
     }
-    parse_merged_pr_deliveries(&output.stdout)
 }
 
 /// Parse `gh pr list --json headRefName,state,number,mergeCommit,mergedAt,baseRefName`
@@ -1427,65 +1444,37 @@ where
 pub fn parse_merged_pr_deliveries(json: &str) -> Result<MergedPrDeliveries> {
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
-    let mut merged = MergedPrDeliveries::default();
-    for value in &arr {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(String::from)
+    };
+    let rows = arr.iter().filter_map(|value| {
         let is_merged = value
             .get("state")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
         if !is_merged {
-            continue;
+            return None;
         }
-        let Some(branch) = value
-            .get("headRefName")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        merged.branches.insert(branch.to_string());
-        let Some(number) = value.get("number").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(String::from)
-        };
-        let delivery = MergedPrDelivery {
-            number,
-            merge_sha: value
-                .get("mergeCommit")
-                .and_then(|commit| commit.get("oid"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|sha| !sha.is_empty())
-                .map(String::from),
-            base_ref: text("baseRefName"),
-            merged_at: text("mergedAt"),
-        };
-        // Issue #3917: only a merge into the integration branch delivers the
-        // work. A later merge of the same head branch into `main` (release) or
-        // any other base must not become the branch's settlement delivery.
-        if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
-            continue;
-        }
-        let newer = match merged.deliveries.get(branch) {
-            None => true,
-            Some(current) => match (&delivery.merged_at, &current.merged_at) {
-                (Some(candidate), Some(existing)) if candidate != existing => candidate > existing,
-                _ => delivery.number > current.number,
-            },
-        };
-        if newer {
-            merged.deliveries.insert(branch.to_string(), delivery);
-        }
-    }
-    Ok(merged)
+        let head_ref = text(value, "headRefName")?;
+        let delivery = value
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .map(|number| MergedPrDelivery {
+                number,
+                merge_sha: value
+                    .get("mergeCommit")
+                    .and_then(|commit| text(commit, "oid")),
+                base_ref: text(value, "baseRefName"),
+                merged_at: text(value, "mergedAt"),
+            });
+        Some(MergedPrRow { head_ref, delivery })
+    });
+    Ok(MergedPrDeliveries::from_rows(rows))
 }
 
 /// Read one PR body for delegation evidence (Issue #3917 AC-2).
@@ -2680,39 +2669,6 @@ mod tests {
             parsed.branches.contains("work/issue-50") && parsed.branches.contains("work/issue-51"),
             "branch-only reconciliation keeps every merged head branch"
         );
-    }
-
-    #[test]
-    fn fetch_merged_pr_deliveries_requests_delivery_fields() {
-        let mut seen = Vec::new();
-        let parsed = fetch_merged_pr_deliveries_with(Path::new("/repo"), |_, args| {
-            seen.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-            Ok(GhCliOutput {
-                success: true,
-                stdout: r#"[{"headRefName":"work/issue-1","state":"MERGED","number":3,"mergeCommit":{"oid":"c0ffee"},"baseRefName":"develop"}]"#.to_string(),
-                stderr: String::new(),
-            })
-        })
-        .unwrap();
-        assert_eq!(seen.len(), 1);
-        let args = &seen[0];
-        assert_eq!(&args[..2], &["pr", "list"]);
-        let fields = args[args.iter().position(|a| a == "--json").unwrap() + 1].clone();
-        for field in [
-            "headRefName",
-            "state",
-            "number",
-            "mergeCommit",
-            "mergedAt",
-            "baseRefName",
-        ] {
-            assert!(
-                fields.split(',').any(|f| f == field),
-                "missing {field} in {fields}"
-            );
-        }
-        assert!(args.iter().any(|a| a == "merged"));
-        assert_eq!(parsed.deliveries["work/issue-1"].number, 3);
     }
 
     #[test]

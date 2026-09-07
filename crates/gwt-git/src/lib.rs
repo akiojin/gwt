@@ -10,6 +10,7 @@ pub mod commit;
 pub mod diff;
 pub mod issue;
 pub mod merged_branch_prune;
+pub mod merged_pr_sync;
 pub mod migration;
 pub mod pr_status;
 pub mod refs;
