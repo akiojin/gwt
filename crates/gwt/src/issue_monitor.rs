@@ -9016,9 +9016,12 @@ impl IssueMonitorState {
             // Issue #4077 AC-2: a claim block keeps saying why across scans; the
             // label exclusion above is the only other writer of this field.
             .or_else(|| {
-                (state == MonitorInboxState::BlockedByClaim)
-                    .then(|| existing.as_ref().and_then(|item| item.exclusion_reason.clone()))
-                    .flatten()
+                if state != MonitorInboxState::BlockedByClaim {
+                    return None;
+                }
+                existing
+                    .as_ref()
+                    .and_then(|item| item.exclusion_reason.clone())
             });
         let item = IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),

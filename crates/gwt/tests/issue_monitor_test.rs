@@ -3300,16 +3300,20 @@ fn requeue_releases_the_confirmed_github_claim_of_the_failed_launch() {
     ));
 
     assert!(
-        monitor.prefs().pending_effects.iter().any(|effect| matches!(
-            &effect.payload,
-            gwt::IssueMonitorEffectPayload::ReleaseClaim {
-                issue_number,
-                claim_id,
-                owner,
-            } if *issue_number == 42
-                && claim_id == "gwt-auto-improve:df524fc5"
-                && owner == "akiojin:77083"
-        )),
+        monitor
+            .prefs()
+            .pending_effects
+            .iter()
+            .any(|effect| matches!(
+                &effect.payload,
+                gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number,
+                    claim_id,
+                    owner,
+                } if *issue_number == 42
+                    && claim_id == "gwt-auto-improve:df524fc5"
+                    && owner == "akiojin:77083"
+            )),
         "requeue must plan the release of the claim it released locally"
     );
 }
