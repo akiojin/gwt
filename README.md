@@ -464,6 +464,25 @@ and coordination-event summaries.
   worktree-local `.codex/hooks.json` and the workspace-home copy at the repo
   root — so hook health reporting and self-heal always target the same files.
 
+### Codex recommended config
+
+On every GUI startup gwt makes sure the host Codex config
+(`$CODEX_HOME/config.toml`, default `~/.codex/config.toml`) carries
+gwt's recommended `features.context_management.experimental_mode = true`, which
+keeps accumulated context as notes and searchable history instead of repeated
+single-summary compaction. gwt writes the key only when it is absent; every
+other table in the file is preserved and a config that already has the key is
+never rewritten. To opt out, set it explicitly in `config.toml`:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt respects any explicit value (`true` or `false`) and does not change it. A
+config that cannot be parsed or written never blocks startup; the path and
+cause are recorded in the error ledger (`errors.list`).
+
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
 the loopback endpoint and bearer token that gwt injects for that session, then

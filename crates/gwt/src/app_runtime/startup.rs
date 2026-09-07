@@ -284,6 +284,60 @@ pub(super) enum GenerationReaperFailureLog {
     Debug,
 }
 
+/// Issue #4075: keep gwt's recommended Codex keys in the host Codex config.
+///
+/// Runs once per GUI startup against `$CODEX_HOME/config.toml` (default
+/// `~/.codex/config.toml`). Only absent keys are written, so an explicit user
+/// value is never overridden and a settled config is never rewritten. Failures
+/// (unparseable config, permission) never block startup: they are logged and
+/// appended to the host error ledger so `errors.list` shows the path and cause.
+pub(super) fn ensure_codex_recommended_config_at_startup() {
+    let config_path = codex_home_for_startup(std::env::var_os("CODEX_HOME")).join("config.toml");
+    ensure_codex_recommended_config_at_path(&config_path);
+}
+
+pub(super) fn ensure_codex_recommended_config_at_path(config_path: &Path) {
+    match gwt_skills::ensure_codex_context_management_experimental_mode(config_path) {
+        Ok(report) => {
+            tracing::debug!(
+                config = %report.config_path.display(),
+                outcome = ?report.outcome,
+                key = gwt_skills::CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+                "Codex managed config key ensured at startup"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                config = %config_path.display(),
+                %error,
+                "Codex managed config write failed at startup; continuing"
+            );
+            gwt_core::error_ledger::record_fail_open(
+                gwt_core::error_ledger::ErrorKind::OperationRefusal,
+                format!(
+                    "Codex managed config write refused: could not set {} in {}: {error}",
+                    gwt_skills::CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+                    config_path.display()
+                ),
+                gwt_core::error_ledger::ErrorTarget::default(),
+            );
+        }
+    }
+}
+
+/// `CODEX_HOME` when set and non-empty, otherwise `<home>/.codex` derived from
+/// the same home directory that owns `~/.gwt`.
+pub(super) fn codex_home_for_startup(env_codex_home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(codex_home) = env_codex_home.filter(|value| !value.is_empty()) {
+        return PathBuf::from(codex_home);
+    }
+    let gwt_home = gwt_core::paths::gwt_home();
+    match gwt_home.parent() {
+        Some(home) => home.join(".codex"),
+        None => gwt_home.join(".codex"),
+    }
+}
+
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
     let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
         session.update_status(gwt_agent::AgentStatus::Stopped);
@@ -311,6 +365,9 @@ impl AppRuntime {
             })
             .collect::<Vec<_>>();
         self_heal_managed_hooks_in_worktrees(startup_worktrees.iter().map(PathBuf::as_path));
+
+        // Issue #4075: managed Codex config keys, fail-open.
+        ensure_codex_recommended_config_at_startup();
 
         // Fresh linked-owner launch authority is durable in the Session and
         // owner ledger, while readiness capabilities are intentionally
