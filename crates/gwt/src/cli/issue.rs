@@ -290,6 +290,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
             update_drain,
         } => run_monitor_config_set(
@@ -299,6 +300,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent.as_deref(),
             update_drain,
             out,
@@ -1504,16 +1506,18 @@ fn apply_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
-        update_drain,
+        update_drain.as_ref(),
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -1535,6 +1539,9 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
+    if let Some(auto_apply_updates) = auto_apply_updates {
+        candidate.set_auto_apply_updates(Some(auto_apply_updates));
+    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
@@ -1550,15 +1557,20 @@ fn apply_monitor_config_set(
 /// surface's question (#3906 wires that); the drain only pauses admission.
 pub(crate) fn apply_update_drain(
     monitor: &mut crate::IssueMonitorState,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     match update_drain {
-        Some(true) => monitor.set_update_drain(
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)) => monitor.set_update_drain(
             crate::IssueMonitorUpdateDrainReason::Manual,
             env!("CARGO_PKG_VERSION"),
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &now,
         ),
-        Some(false) => monitor.clear_update_drain(),
+        // Issue #3906 AC-3: the update mechanism names the staged version.
+        Some(crate::IssueMonitorUpdateDrainControl::Raise { reason, version }) => {
+            monitor.set_update_drain(reason, &version, &now)
+        }
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)) => monitor.clear_update_drain(),
         None => {}
     }
 }
@@ -1568,8 +1580,9 @@ fn validate_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<&crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
         return Err(io::Error::new(
@@ -1581,6 +1594,7 @@ fn validate_monitor_config_set(
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
+        && auto_apply_updates.is_none()
         && launch_agent.is_none()
         && update_drain.is_none()
     {
@@ -1617,8 +1631,9 @@ fn run_monitor_config_set<E: CliEnv>(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -1627,8 +1642,9 @@ fn run_monitor_config_set<E: CliEnv>(
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
-        update_drain,
+        update_drain.as_ref(),
     )
     .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
@@ -1655,6 +1671,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
                 "auto_close_merged_issues": auto_close_merged_issues,
+                "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
                 "update_drain": update_drain,
             }
@@ -1674,8 +1691,9 @@ fn run_monitor_config_set<E: CliEnv>(
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                auto_apply_updates,
                 launch_agent,
-                update_drain,
+                update_drain.clone(),
             )
         })
         .map_err(io_as_api_error)?;
@@ -1692,6 +1710,10 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
+                .unwrap_or(prefs.autonomous_mode),
+            "auto_apply_updates": prefs.auto_apply_updates,
+            "auto_apply_updates_effective": prefs
+                .auto_apply_updates
                 .unwrap_or(prefs.autonomous_mode),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
@@ -4547,7 +4569,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -4577,7 +4600,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(false),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -4617,6 +4641,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -4641,6 +4666,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -4883,6 +4909,7 @@ mod tests {
                     autonomous_mode,
                     max_active: None,
                     auto_close_merged_issues: None,
+                    auto_apply_updates: None,
                     launch_agent: None,
                     update_drain: None,
                 },
@@ -5941,6 +5968,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             },
@@ -5981,6 +6009,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),
                 update_drain: None,
             },

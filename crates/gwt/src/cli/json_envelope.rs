@@ -395,19 +395,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
+            let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             let launch_agent = optional_string(params, "launch_agent")?;
             // Issue #4037 AC-5: the non-destructive update drain.
-            let update_drain = optional_bool(params, "update_drain")?;
+            let update_drain = optional_update_drain_control(params)?;
             if enabled.is_none()
                 && autonomous_mode.is_none()
                 && max_active.is_none()
                 && auto_close_merged_issues.is_none()
+                && auto_apply_updates.is_none()
                 && launch_agent.is_none()
                 && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
+                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -424,6 +426,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                auto_apply_updates,
                 launch_agent,
                 update_drain,
             })
@@ -1453,6 +1456,22 @@ fn issue_monitor_priority_position(
     }
 }
 
+/// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
+/// auto-drain object `{reason, version}`.
+fn optional_update_drain_control(
+    params: &Map<String, Value>,
+) -> Result<Option<crate::IssueMonitorUpdateDrainControl>, CliParseError> {
+    match params.get("update_drain") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone()).map(Some).map_err(|_| {
+            CliParseError::InvalidJson(
+                "update_drain must be a bool or {\"reason\":\"auto\"|\"manual\",\"version\":\"x.y.z\"}"
+                    .to_string(),
+            )
+        }),
+    }
+}
+
 fn optional_bool(
     params: &Map<String, Value>,
     key: &'static str,
@@ -2337,6 +2356,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: Some(7),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -2349,6 +2369,7 @@ mod tests {
                 autonomous_mode: Some(true),
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -2364,10 +2385,28 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: Some(false),
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"auto_apply_updates": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            }),
+            "Issue #3906 AC-1: the auto-apply override is settable on its own"
         );
     }
 
@@ -2384,7 +2423,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             })
         );
         assert_eq!(
@@ -2396,7 +2436,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(false),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                auto_apply_updates: None,
             })
         );
         assert!(matches!(
@@ -2418,6 +2459,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             })
@@ -2425,7 +2467,7 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
+                "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
             )
         ));
     }
@@ -2821,6 +2863,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })

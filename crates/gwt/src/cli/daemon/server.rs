@@ -1614,10 +1614,12 @@ enum IssueMonitorControl {
         max_active_agents: Option<usize>,
         /// Issue #3917 AC-5: explicit auto-close override.
         auto_close_merged_issues: Option<bool>,
+        /// Issue #3906 AC-1: explicit auto-apply-updates override.
+        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise or clear the non-destructive update drain.
-        update_drain: Option<bool>,
+        update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
     /// SPEC #3914 FR-011: replace the launch candidate pool whole.
     ProfilesSet {
@@ -1959,6 +1961,7 @@ fn try_apply_issue_monitor_control(
             autonomous_mode,
             max_active_agents,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
             update_drain,
         } => {
@@ -1969,6 +1972,7 @@ fn try_apply_issue_monitor_control(
                     && autonomous_mode.is_none()
                     && max_active_agents.is_none()
                     && auto_close_merged_issues.is_none()
+                    && auto_apply_updates.is_none()
                     && launch_agent.is_none()
                     && update_drain.is_none())
             {
@@ -1993,6 +1997,9 @@ fn try_apply_issue_monitor_control(
                 candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
                     auto_close_merged_issues,
                 ))?;
+            }
+            if let Some(auto_apply_updates) = auto_apply_updates {
+                candidate.set_auto_apply_updates(Some(auto_apply_updates));
             }
             // Issue #4037 AC-3: the drain touches admission only, so it needs
             // no authority-epoch advance and revokes nothing.
@@ -2591,6 +2598,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
                 };
+                let auto_apply_updates = match config.get("auto_apply_updates") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
                 // Issue #3923 AC-5: a blank agent name is a malformed control.
                 let launch_agent = match config.get("launch_agent") {
                     None | Some(serde_json::Value::Null) => None,
@@ -2602,10 +2613,16 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         Some(agent.to_string())
                     }
                 };
-                // Issue #4037 AC-5: the update drain, a plain bool.
+                // Issue #4037 AC-5: the operator bool; #3906 AC-3: the auto
+                // drain object `{reason, version}`. Anything else is malformed.
                 let update_drain = match config.get("update_drain") {
                     None | Some(serde_json::Value::Null) => None,
-                    Some(value) => Some(value.as_bool()?),
+                    Some(value) => Some(
+                        serde_json::from_value::<crate::IssueMonitorUpdateDrainControl>(
+                            value.clone(),
+                        )
+                        .ok()?,
+                    ),
                 };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
@@ -2614,6 +2631,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         && autonomous_mode.is_none()
                         && max_active_agents.is_none()
                         && auto_close_merged_issues.is_none()
+                        && auto_apply_updates.is_none()
                         && launch_agent.is_none()
                         && update_drain.is_none())
                 {
@@ -2624,6 +2642,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                     auto_close_merged_issues,
+                    auto_apply_updates,
                     launch_agent,
                     update_drain,
                 });
@@ -8887,9 +8906,74 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             }
+        );
+        // Issue #3906 AC-1: the GUI toggle publishes the override alone and
+        // the daemon commits it without touching any other switch.
+        let auto_apply_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "auto_apply_updates": true } }),
+            std::process::id() + 1,
+        );
+        let auto_apply_control =
+            decode_issue_monitor_control(auto_apply_payload).expect("auto-apply control");
+        assert_eq!(
+            auto_apply_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            }
+        );
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            auto_apply_control
+        ));
+        assert_eq!(monitor.auto_apply_updates(), Some(true));
+        assert!(monitor.auto_apply_updates_enabled());
+        // Issue #3906 AC-3: the update mechanism raises an Auto drain for the
+        // staged version through the same control.
+        let raise_payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "config_set": { "update_drain": { "reason": "auto", "version": "9.99.0" } } }),
+            std::process::id() + 1,
+        );
+        let raise_control = decode_issue_monitor_control(raise_payload).expect("raise control");
+        assert_eq!(
+            raise_control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
+                    reason: crate::IssueMonitorUpdateDrainReason::Auto,
+                    version: "9.99.0".to_string(),
+                }),
+                launch_agent: None,
+            }
+        );
+        assert!(apply_issue_monitor_control(&mut monitor, raise_control));
+        let drain = monitor.update_drain().expect("auto drain raised");
+        assert_eq!(drain.reason, crate::IssueMonitorUpdateDrainReason::Auto);
+        assert_eq!(drain.version, "9.99.0");
+        assert!(
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "config_set": { "update_drain": "soon" } }),
+                std::process::id() + 1,
+            ))
+            .is_none(),
+            "a malformed drain control is refused whole"
         );
 
         let temp = TempDir::new().expect("tempdir");
@@ -8939,7 +9023,8 @@ exit 0
                 max_active_agents: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             }
         );
 
@@ -9091,6 +9176,7 @@ exit 0
                 autonomous_mode: None,
                 max_active_agents: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             }
@@ -9297,6 +9383,7 @@ exit 0
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
