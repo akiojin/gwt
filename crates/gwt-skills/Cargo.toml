@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
+dunce.workspace = true
 fs2.workspace = true
 gwt-core.workspace = true
 include_dir.workspace = true

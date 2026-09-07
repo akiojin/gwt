@@ -3719,6 +3719,7 @@ fn sample_runtime_with_events(
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        issue_monitor_review_dispatch_windows: HashSet::new(),
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
         terminal_close_grace: Duration::from_secs(60),
@@ -53194,7 +53195,9 @@ fn assert_every_codex_hook_is_trusted(config: &toml::Value, hooks_path: &Path) {
         ("PostToolUse", "post_tool_use"),
         ("Stop", "stop"),
     ];
-    let canonical = fs::canonicalize(hooks_path).expect("canonicalize hooks path");
+    // Issue #4071: Codex keys hooks by the plain absolute path, never the
+    // Windows `\\?\` verbatim form `std::fs::canonicalize` returns.
+    let canonical = dunce::canonicalize(hooks_path).expect("canonicalize hooks path");
     let hooks: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(hooks_path).expect("read hooks.json"))
             .expect("parse hooks.json");
@@ -63235,6 +63238,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         &repo,
         Some("tab-1"),
         None,
+        None,
         "2026-09-07T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -63290,6 +63294,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         "2026-09-07T07:00:00Z",
         &super::default_issue_client_factory(),
@@ -63354,6 +63359,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         &repo,
         Some("tab-1"),
         None,
+        None,
         "2026-09-07T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -63410,6 +63416,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         "2026-08-12T07:00:00Z",
         &super::default_issue_client_factory(),
@@ -63493,6 +63500,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
         &repo,
         Some("tab-1"),
         None,
+        None,
         "2026-09-04T07:00:00Z",
         &super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
@@ -63565,6 +63573,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
     let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
         &repo,
         Some("tab-1"),
+        None,
         None,
         "2026-09-05T07:00:00Z",
         &super::default_issue_client_factory(),
@@ -65948,5 +65957,82 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
         toasts[0].1.contains("0.0.1-never-installed") && toasts[0].1.contains("failed"),
         "notice names the expected version and the failure: {}",
         toasts[0].1
+    );
+}
+
+// Issue #4075 AC-1: startup writes the managed key into the profile-derived
+// `~/.codex/config.toml` when it is absent.
+#[test]
+fn codex_managed_config_startup_writes_experimental_mode_into_home_codex_config() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = super::startup::codex_home_for_startup(None).join("config.toml");
+    assert_eq!(config_path, home.path().join(".codex/config.toml"));
+
+    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+
+    let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        config
+            .get("features")
+            .and_then(|f| f.get("context_management"))
+            .and_then(|c| c.get("experimental_mode")),
+        Some(&toml::Value::Boolean(true))
+    );
+    assert!(
+        gwt_core::error_ledger::list_since(None).unwrap().is_empty(),
+        "a successful managed config write must not touch the error ledger"
+    );
+}
+
+// Issue #4075: `CODEX_HOME` wins over the profile-derived home.
+#[test]
+fn codex_managed_config_startup_prefers_codex_home_env() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = tempdir().expect("codex home");
+
+    let resolved = super::startup::codex_home_for_startup(Some(codex_home.path().into()));
+
+    assert_eq!(resolved, codex_home.path());
+    assert_eq!(
+        super::startup::codex_home_for_startup(Some(std::ffi::OsString::new())),
+        home.path().join(".codex"),
+        "an empty CODEX_HOME must fall back to the profile home"
+    );
+}
+
+// Issue #4075 AC-5: an unparseable config never blocks startup and lands in
+// `errors.list` with the path and cause.
+#[test]
+fn codex_managed_config_startup_records_operation_refusal_on_unparseable_config() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = home.path().join(".codex/config.toml");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let broken = "[features
+not toml";
+    fs::write(&config_path, broken).unwrap();
+
+    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
+    let rows = gwt_core::error_ledger::list_since(None).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one ledger row, got {rows:?}"
+    );
+    assert_eq!(
+        rows[0].kind,
+        gwt_core::error_ledger::ErrorKind::OperationRefusal
+    );
+    assert!(
+        rows[0]
+            .message
+            .contains("features.context_management.experimental_mode")
+            && rows[0].message.contains("parse failed"),
+        "ledger row must carry the key and the cause, got: {}",
+        rows[0].message
     );
 }
