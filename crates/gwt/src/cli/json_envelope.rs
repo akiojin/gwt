@@ -351,6 +351,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 project_root: optional_path(params, "project_root")?,
             })
         }
+        "issue.monitor.release_idle" | "issue.monitor.release-idle" => {
+            CliCommand::Issue(IssueCommand::MonitorReleaseIdle {
+                project_root: optional_path(params, "project_root")?,
+                // Issue #4084 AC-5: no `number` means every idle row.
+                number: optional_u64(params, "number")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+            })
+        }
         "issue.monitor.reconcile" => CliCommand::Issue(IssueCommand::MonitorReconcile {
             project_root: optional_path(params, "project_root")?,
         }),
