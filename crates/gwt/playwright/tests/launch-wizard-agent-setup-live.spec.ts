@@ -11,7 +11,8 @@
  *     no setup affordance is shown.
  *
  * Like the other live specs, the suite is gated on GWT_PLAYWRIGHT_BASE_URL and
- * never submits a launch.
+ * never submits a launch. Since SPEC-3245 Stage E removed the deprecated Intake
+ * route, the wizard is opened through the normal branch Launch Wizard fixture.
  */
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -19,7 +20,9 @@ import {
   clearLiveLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
+  openLiveLaunchWizardForBranch,
   sendLiveGwtEvent,
+  type LiveLaunchWizardFixture,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
@@ -34,6 +37,7 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
   test.setTimeout(120_000);
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
+  let wizardFixture: LiveLaunchWizardFixture | undefined;
 
   test.beforeEach(async ({ page }, testInfo) => {
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
@@ -47,7 +51,9 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
     if (!releaseBackendLock) return;
     try {
       await clearLiveLaunchWizard(page);
+      await wizardFixture?.cleanup();
     } finally {
+      wizardFixture = undefined;
       await releaseBackendLock();
       releaseBackendLock = undefined;
     }
@@ -57,10 +63,10 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
     page,
   }) => {
     const { pageErrors, consoleErrors } = collectErrors(page);
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    wizardFixture = await openLiveLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await enterIntakeSettings(page);
+    await enterManualSetupSettings(page);
 
     await selectWizardAgent(page, "agy");
 
@@ -90,10 +96,10 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
     page,
   }) => {
     const { pageErrors, consoleErrors } = collectErrors(page);
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    wizardFixture = await openLiveLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await enterIntakeSettings(page);
+    await enterManualSetupSettings(page);
 
     await selectWizardAgent(page, NPM_AGENT);
 
@@ -144,7 +150,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   });
 }
 
-async function enterIntakeSettings(page: Page): Promise<void> {
+async function enterManualSetupSettings(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const target = wizard.getByRole("radiogroup", { name: "Target" });
   if (await target.isVisible().catch(() => false)) {
