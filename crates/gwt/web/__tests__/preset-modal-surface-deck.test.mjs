@@ -128,6 +128,7 @@ test("Surface Deck — no forbidden presets leak into the modal", () => {
     "branches",
     "agent_kanban",
     "issue_monitor",
+    "intake",
     "spec",
     // SPEC-3671 FR-016 (T-029): the Work window left ADD WINDOW once every
     // Work information item moved to the Issue row.
