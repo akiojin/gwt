@@ -5,6 +5,7 @@
 //! this ledger; a GUI toast is not a source of truth on its own.
 
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     path::PathBuf,
@@ -49,6 +50,11 @@ pub struct ErrorRecord {
     pub message: String,
     #[serde(default)]
     pub target: ErrorTarget,
+    /// Kind-specific structured detail (Issue #3541: hook failures carry
+    /// `event`, `handler`, `exit_status`, `fail_open`). Values are sanitized
+    /// like `message`; older rows without the field still deserialize.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: BTreeMap<String, String>,
 }
 
 impl ErrorRecord {
@@ -60,7 +66,17 @@ impl ErrorRecord {
             kind,
             message: sanitize_error_message(&message.into()),
             target: sanitize_target(target),
+            context: BTreeMap::new(),
         }
+    }
+
+    /// Attach sanitized structured detail to the row.
+    pub fn with_context(mut self, context: BTreeMap<String, String>) -> Self {
+        self.context = context
+            .into_iter()
+            .map(|(key, value)| (key, sanitize_error_message(&value)))
+            .collect();
+        self
     }
 }
 
@@ -100,9 +116,12 @@ fn ledger_path_for_date(date: NaiveDate) -> PathBuf {
     ledger_dir().join(format!("{LEDGER_FILE_PREFIX}.{date}.jsonl"))
 }
 
-fn sanitize_error_message(message: &str) -> String {
+/// Strip terminal escapes, redact credentials, and bound the length of a
+/// message before it reaches the ledger or a user-visible error line.
+pub fn sanitize_error_message(message: &str) -> String {
     const MAX_CHARS: usize = 1_000;
-    let mut redacted = redact_secrets(message);
+    let stripped = crate::process_console::strip_ansi::strip_ansi(message);
+    let mut redacted = redact_secrets(&crate::process_console::redact::redact_line(&stripped));
     redacted = redacted
         .chars()
         .filter(|ch| !ch.is_control() || *ch == '\n' || *ch == '\t')
@@ -299,6 +318,45 @@ mod tests {
         assert_eq!(json, "\"hook_failure\"");
         let json = serde_json::to_string(&ErrorKind::DaemonFault).expect("json");
         assert_eq!(json, "\"daemon_fault\"");
+    }
+
+    #[test]
+    fn context_values_roundtrip_and_are_sanitized() {
+        let (_dir, _home) = isolated_home();
+        let mut context = std::collections::BTreeMap::new();
+        context.insert("event".to_string(), "PreToolUse".to_string());
+        context.insert(
+            "detail".to_string(),
+            "Bearer ghp_secret0123456789abcdef \u{1b}[31mred\u{1b}[0m".to_string(),
+        );
+        let recorded = record(
+            ErrorRecord::new(ErrorKind::HookFailure, "hook", ErrorTarget::default())
+                .with_context(context),
+        )
+        .expect("record");
+
+        let listed = list_since(None).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, recorded.id);
+        assert_eq!(
+            listed[0].context.get("event").map(String::as_str),
+            Some("PreToolUse")
+        );
+        let detail = listed[0].context.get("detail").expect("detail");
+        assert!(!detail.contains("ghp_secret"), "{detail}");
+        assert!(!detail.contains('\u{1b}'), "{detail}");
+        assert!(
+            !detail.contains("[31m"),
+            "ANSI remnants must be stripped: {detail}"
+        );
+        assert!(detail.contains("red"), "{detail}");
+    }
+
+    #[test]
+    fn rows_without_context_still_deserialize() {
+        let raw = r#"{"schema_version":1,"id":"row-1","recorded_at":"2026-08-30T00:00:00Z","kind":"hook_failure","message":"legacy","target":{}}"#;
+        let record: ErrorRecord = serde_json::from_str(raw).expect("legacy row");
+        assert!(record.context.is_empty());
     }
 
     #[test]

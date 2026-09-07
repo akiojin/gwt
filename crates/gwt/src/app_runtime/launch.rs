@@ -875,37 +875,16 @@ pub(crate) fn heal_lost_generation_publication_best_effort(
 /// generation. When a holder Session dies without settling, every later fresh
 /// launch (Issue Monitor retries included) collides here, so the refusal names
 /// the blocking generation, its holder and durable state, and both recovery
-/// routes. Diagnostics are best effort: an unreadable holder Session degrades
-/// the detail, never the refusal.
+/// routes. Issue #4042 AC-1: the holder is read through the same
+/// `OwnerGenerationHold` projection the Issue Monitor reclaim uses, so the
+/// refusal and the reclaim can never describe one holder differently.
 fn existing_generation_conflict_detail(
     sessions_dir: &Path,
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
 ) -> String {
-    let status = ledger
-        .current_effective_status()
-        .map_or("unknown", |status| match status {
-            gwt::cli::execution_state::ExecutionControlStatus::Active => "active",
-            gwt::cli::execution_state::ExecutionControlStatus::Completed => "completed",
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked => "blocked",
-        });
-    let holder = ledger.current_generation().map(|generation| {
-        let session_id = generation.identity.initial_session_id.clone();
-        let session_state =
-            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).map_or_else(
-                |_| "durable Session unreadable".to_string(),
-                |session| format!("{:?}", session.status),
-            );
-        format!(" held by Session {session_id} ({session_state})")
-    });
-    format!(
-        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
-        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
-        owner.kind.as_str(),
-        owner.number,
-        status,
-        holder.unwrap_or_default(),
-    )
+    let hold = gwt::cli::execution_state::owner_generation_hold_from_ledger(sessions_dir, ledger);
+    gwt::cli::execution_state::execution_generation_conflict_refusal(owner, hold.as_ref())
 }
 
 struct FinalizedAgentCapabilityLaunch<'a> {
@@ -2713,11 +2692,12 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                     codex_config_path.display()
                 )
             })?;
-            if !report.untrusted_gwt_hooks.is_empty() {
-                return Err(format!(
-                    "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}",
-                    report.untrusted_gwt_hooks.join(", ")
-                ));
+            // Issue #4071 AC-2: the reason says whether any trust state was
+            // written and what each hooks file was compared against, so a
+            // skipped registration and a trusted_hash / path-form mismatch
+            // are told apart in the launch failure record.
+            if let Some(reason) = report.hooks_need_review_reason() {
+                return Err(reason);
             }
             Ok(Some(report))
         }

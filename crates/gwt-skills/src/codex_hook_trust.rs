@@ -34,6 +34,19 @@ pub struct CodexHookTrustEntry {
     pub trusted_hash: String,
 }
 
+/// Issue #4071 AC-2: what the scan compared one hooks file against. A
+/// `Hooks need review` refusal quotes it so the reader can tell a command /
+/// trusted_hash mismatch from a registration that never ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexHookTrustExpectation {
+    /// The hooks file in the same form the trust keys use.
+    pub hooks_path: PathBuf,
+    /// The fallback binary the generator was allowed to write into this file:
+    /// [`crate::CANONICAL_HOOK_BIN`] for a git-tracked config, the absolute
+    /// install path otherwise (#3567).
+    pub expected_gwt_bin: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHookTrustReport {
     pub config_path: PathBuf,
@@ -44,6 +57,58 @@ pub struct CodexHookTrustReport {
     /// loudly instead of launching an unattended agent into it. User hooks are
     /// never listed here — reviewing those is the user's own business.
     pub untrusted_gwt_hooks: Vec<String>,
+    /// Issue #4071 AC-2: one entry per hooks file the scan read.
+    pub expectations: Vec<CodexHookTrustExpectation>,
+    /// Issue #4071 AC-2: whether `config_path` was written. False when no gwt
+    /// hook could be vouched for — gwt 9.91.0 then left the config untouched
+    /// and the failure read as if registration had never run.
+    pub wrote_trust_state: bool,
+}
+
+impl CodexHookTrustReport {
+    /// Issue #4071 AC-2: the launch-blocking reason for the gwt hooks Codex
+    /// would still ask a human about, or `None` when every gwt hook is
+    /// trusted. It states whether any trust state was written and which
+    /// fallback binary each hooks file was compared against, so a skipped
+    /// registration and a command / path-form mismatch read differently in
+    /// the failure record.
+    pub fn hooks_need_review_reason(&self) -> Option<String> {
+        if self.untrusted_gwt_hooks.is_empty() {
+            return None;
+        }
+        let mut reason = format!(
+            "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}. ",
+            self.untrusted_gwt_hooks.join(", ")
+        );
+        if self.wrote_trust_state {
+            reason.push_str(&format!(
+                "gwt wrote {} trusted entries to {}; the listed hooks were skipped because their command does not match what gwt generates (trusted_hash mismatch, not a missing registration). ",
+                self.trusted_entries.len(),
+                self.config_path.display()
+            ));
+        } else {
+            reason.push_str(&format!(
+                "gwt wrote no trust entry to {}: none of the gwt hooks matched what gwt generates, so registration was skipped. ",
+                self.config_path.display()
+            ));
+        }
+        let expectations = self
+            .expectations
+            .iter()
+            .map(|expectation| {
+                format!(
+                    "{} => `{}`",
+                    expectation.hooks_path.display(),
+                    expectation.expected_gwt_bin
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        reason.push_str(&format!(
+            "Expected fallback binary per hooks file: {expectations}."
+        ));
+        Some(reason)
+    }
 }
 
 pub fn collect_codex_managed_hook_trust_entries(
@@ -88,6 +153,7 @@ fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
 struct CodexHookTrustScan {
     trusted: Vec<CodexHookTrustEntry>,
     untrusted_gwt_hooks: Vec<String>,
+    expectations: Vec<CodexHookTrustExpectation>,
 }
 
 fn scan_codex_hook_trust_for_mode(
@@ -101,6 +167,7 @@ fn scan_codex_hook_trust_for_mode(
         scan.trusted.extend(path_scan.trusted);
         scan.untrusted_gwt_hooks
             .extend(path_scan.untrusted_gwt_hooks);
+        scan.expectations.extend(path_scan.expectations);
     }
     Ok(scan)
 }
@@ -129,7 +196,12 @@ fn scan_codex_hook_trust_from_path(
     );
     let expected_gwt_bin = Some(sanitized_expected_gwt_bin.as_str());
 
-    let key_source = fs::canonicalize(hooks_path)?;
+    // Issue #4071: Codex derives this key from the hooks path it discovered,
+    // normalized but never canonicalized — on Windows that is the plain
+    // `E:\...` form. `std::fs::canonicalize` yields the `\\?\` verbatim
+    // form there, and an entry under that key is inert: Codex still stops on
+    // `Hooks need review`. `dunce` strips the prefix and is a no-op elsewhere.
+    let key_source = dunce::canonicalize(hooks_path)?;
     let content = fs::read_to_string(hooks_path)?;
     let root: Value = serde_json::from_str(&content).map_err(|err| {
         io::Error::new(
@@ -142,7 +214,13 @@ fn scan_codex_hook_trust_from_path(
         return Ok(CodexHookTrustScan::default());
     };
 
-    let mut scan = CodexHookTrustScan::default();
+    let mut scan = CodexHookTrustScan {
+        expectations: vec![CodexHookTrustExpectation {
+            hooks_path: key_source.clone(),
+            expected_gwt_bin: sanitized_expected_gwt_bin.clone(),
+        }],
+        ..CodexHookTrustScan::default()
+    };
     for (event_json_name, event_snake_name) in MANAGED_EVENTS {
         let Some(groups) = hooks_by_event
             .get(*event_json_name)
@@ -213,12 +291,15 @@ pub fn register_codex_managed_hook_trust_for_mode(
     let CodexHookTrustScan {
         trusted: trusted_entries,
         untrusted_gwt_hooks,
+        expectations,
     } = scan_codex_hook_trust_for_mode(worktree, mode, None)?;
     if trusted_entries.is_empty() {
         return Ok(CodexHookTrustReport {
             config_path: config_path.to_path_buf(),
             trusted_entries,
             untrusted_gwt_hooks,
+            expectations,
+            wrote_trust_state: false,
         });
     }
 
@@ -249,6 +330,8 @@ pub fn register_codex_managed_hook_trust_for_mode(
         config_path: config_path.to_path_buf(),
         trusted_entries,
         untrusted_gwt_hooks,
+        expectations,
+        wrote_trust_state: true,
     })
 }
 
@@ -486,7 +569,7 @@ mod tests {
     fn generated_codex_hooks_produce_five_trust_entries() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
-        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let hooks_path = dunce::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries(dir.path()).unwrap();
 
@@ -531,7 +614,7 @@ mod tests {
         )
         .unwrap();
         generate_codex_hooks(&worktree).unwrap();
-        let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
+        let root_hooks_path = dunce::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
         let worktree_hooks_prefix = worktree.join(".codex/hooks.json").display().to_string();
 
         let entries = collect_codex_managed_hook_trust_entries(&worktree).unwrap();
@@ -570,7 +653,7 @@ mod tests {
         )
         .unwrap();
         generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal).unwrap();
-        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_path = dunce::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries_for_mode(
             &worktree,
@@ -604,8 +687,8 @@ mod tests {
         )
         .unwrap();
         generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both).unwrap();
-        let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
-        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let root_hooks_path = dunce::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_path = dunce::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries_for_mode(
             &worktree,
@@ -919,7 +1002,7 @@ mod tests {
             serde_json::to_string_pretty(&hooks_json).unwrap(),
         )
         .unwrap();
-        let canonical = fs::canonicalize(&hooks_path).unwrap();
+        let canonical = dunce::canonicalize(&hooks_path).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries(dir.path()).unwrap();
 
@@ -1190,7 +1273,7 @@ enabled = false
                 .is_none(),
             "unrelated hook state must not receive a trusted hash"
         );
-        let hooks_path = fs::canonicalize(&hooks_path).unwrap();
+        let hooks_path = dunce::canonicalize(&hooks_path).unwrap();
         assert!(
             parsed["hooks"]["state"]
                 .get(format!("{}:pre_tool_use:1:0", hooks_path.display()))
@@ -1199,16 +1282,26 @@ enabled = false
         );
     }
 
+    /// Also Issue #4071 AC-3 (existing worktree): a regenerated, machine-local
+    /// hooks file is registered under the plain absolute path Codex reads.
     #[test]
     fn registration_enables_generated_managed_hooks() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
-        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let hooks_path = dunce::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
         let config_path = dir.path().join("codex-config.toml");
 
         let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
 
         assert_eq!(report.trusted_entries.len(), 5);
+        assert!(
+            report
+                .trusted_entries
+                .iter()
+                .all(|entry| !entry.key.starts_with(r"\\?\")),
+            "Codex keys hooks by the plain absolute path; verbatim keys are inert: {:?}",
+            report.trusted_entries
+        );
         let config = fs::read_to_string(&config_path).unwrap();
         let parsed: toml::Value = toml::from_str(&config).unwrap();
         for event_name in [
@@ -1238,7 +1331,7 @@ enabled = false
     fn registration_preserves_explicit_managed_hook_opt_out() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
-        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let hooks_path = dunce::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
         let pre_tool_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
         let pre_tool_key_toml = pre_tool_key.replace('\\', "\\\\").replace('"', "\\\"");
         let config_path = dir.path().join("codex-config.toml");
@@ -1296,7 +1389,7 @@ enabled = false
             serde_json::to_string_pretty(&hooks_json).unwrap(),
         )
         .unwrap();
-        let hooks_path = fs::canonicalize(&hooks_path).unwrap();
+        let hooks_path = dunce::canonicalize(&hooks_path).unwrap();
         let config_path = dir.path().join("codex-config.toml");
 
         let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
@@ -1376,5 +1469,228 @@ enabled = false
             entries.iter().all(|entry| !entry.key.contains(":stop:")),
             "path-modified Stop hook must not be trusted; got {entries:?}"
         );
+    }
+
+    /// The five managed hooks exactly as a repository that tracks
+    /// `.codex/hooks.json` commits them: the canonical portable fallback in the
+    /// POSIX shape (#3567). A fresh linked worktree starts with these bytes.
+    fn tracked_canonical_managed_hooks_json() -> String {
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": codex_event_hook_commands_with_bin(
+                                    crate::CANONICAL_HOOK_BIN,
+                                    event,
+                                )
+                                .into_iter()
+                                .next()
+                                .unwrap(),
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]),
+            );
+        }
+        serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap()
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
+        assert!(status.success(), "git {args:?} failed with {status}");
+    }
+
+    /// Issue #4071 AC-1 / AC-3: the exact shape of a Monitor launch into a fresh
+    /// linked worktree. The launch refreshes only the workspace-home copy for a
+    /// current Codex, so the worktree-local `.codex/hooks.json` is still the
+    /// tracked canonical bytes git checked out — and every one of its hooks must
+    /// be registered under the key Codex itself derives from the hooks path:
+    /// the plain absolute path, never the `\\?\` verbatim form that
+    /// `std::fs::canonicalize` produces on Windows. gwt 9.91.0 left all five
+    /// untrusted (and, with nothing trusted, wrote nothing at all).
+    #[test]
+    fn fresh_linked_worktree_launch_trusts_tracked_hooks_under_codex_readable_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".codex")).unwrap();
+        fs::write(
+            repo.join(".codex/hooks.json"),
+            tracked_canonical_managed_hooks_json(),
+        )
+        .unwrap();
+        git(&repo, &["init", "-q", "--initial-branch=develop"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "hooks"]);
+        let worktree = dir.path().join("work").join("issue-4071");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work/issue-4071",
+                worktree.to_str().unwrap(),
+                "develop",
+            ],
+        );
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorkspaceHome).unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust_for_mode(
+            &worktree,
+            &config_path,
+            CodexHookDiscoveryMode::Both,
+        )
+        .unwrap();
+
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "a fresh worktree's tracked canonical hooks must be trusted: {report:?}"
+        );
+        let worktree_hooks_path = dunce::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let parsed: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        for event_name in [
+            "session_start",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "stop",
+        ] {
+            let key = format!("{}:{event_name}:0:0", worktree_hooks_path.display());
+            let state = parsed["hooks"]["state"].get(&key).unwrap_or_else(|| {
+                panic!(
+                    "missing Codex-readable trust key {key}; state keys: {:?}",
+                    parsed["hooks"]["state"]
+                        .as_table()
+                        .map(|table| table.keys().collect::<Vec<_>>())
+                )
+            });
+            assert!(
+                state["trusted_hash"].as_str().is_some(),
+                "fresh worktree hook must carry trusted_hash: {key}"
+            );
+        }
+        assert!(
+            report
+                .trusted_entries
+                .iter()
+                .all(|entry| !entry.key.starts_with(r"\\?\")),
+            "Codex keys hooks by the plain absolute path; verbatim keys are inert: {:?}",
+            report.trusted_entries
+        );
+    }
+
+    fn tamper_managed_hook_commands(hooks_path: &std::path::Path, events: &[&str]) {
+        let mut hooks_json: Value =
+            serde_json::from_str(&fs::read_to_string(hooks_path).unwrap()).unwrap();
+        for event in events {
+            hooks_json["hooks"][*event][0]["hooks"][0]["command"] =
+                Value::String(format!("'/tmp/attacker/gwtd' hook event {event}"));
+        }
+        fs::write(
+            hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Issue #4071 AC-2: the launch failure must say whether trust state was
+    /// written at all. gwt 9.91.0 reported "trust is incomplete" for five
+    /// hooks while the config had never been touched, and the report read as
+    /// if registration had not run.
+    #[test]
+    fn hooks_need_review_reason_separates_skipped_registration_from_hash_mismatch() {
+        // Every gwt hook mismatches: nothing can be vouched for, nothing is written.
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        tamper_managed_hook_commands(
+            &hooks_path,
+            &[
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+            ],
+        );
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert!(
+            !report.wrote_trust_state,
+            "nothing trusted, nothing written: {report:?}"
+        );
+        assert!(
+            !config_path.exists(),
+            "config must stay untouched when nothing is trusted"
+        );
+        let reason = report
+            .hooks_need_review_reason()
+            .expect("untrusted gwt hooks must produce a launch-blocking reason");
+        assert!(
+            reason.contains("Hooks need review") && reason.contains("wrote no trust entry"),
+            "reason must say registration was skipped: {reason}"
+        );
+        let key_source = dunce::canonicalize(&hooks_path).unwrap();
+        let expected_bin = crate::settings_local::managed_hook_bin_for_config_path(&hooks_path);
+        assert!(
+            reason.contains(&format!("{} => `{expected_bin}`", key_source.display())),
+            "reason must name the fallback binary each hooks file was compared against: {reason}"
+        );
+
+        // One gwt hook mismatches: four entries are written, the fifth is a hash mismatch.
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        tamper_managed_hook_commands(&hooks_path, &["Stop"]);
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert!(
+            report.wrote_trust_state,
+            "four trusted hooks must be written: {report:?}"
+        );
+        let reason = report
+            .hooks_need_review_reason()
+            .expect("one untrusted gwt hook must still block the launch");
+        assert!(
+            reason.contains("wrote 4 trusted entries")
+                && reason.contains("trusted_hash mismatch")
+                && reason.contains(":stop:0:0"),
+            "reason must separate a hash mismatch from a skipped registration: {reason}"
+        );
+
+        // Everything trusted: no reason, the launch proceeds.
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let report =
+            register_codex_managed_hook_trust(dir.path(), &dir.path().join("codex-config.toml"))
+                .unwrap();
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
     }
 }
