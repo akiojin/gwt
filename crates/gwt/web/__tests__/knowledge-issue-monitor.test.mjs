@@ -344,6 +344,13 @@ test("Issue rows render monitor projections and send controls from the full cano
     kind: "set_issue_monitor_autonomous_mode",
     enabled: true,
   });
+  // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
+  // toggle and flips the effective value the backend reported.
+  body.querySelector('[data-action="monitor-auto-apply"]').click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_auto_apply_updates",
+    enabled: true,
+  });
   body.querySelector('[data-action="monitor-settings"]').click();
   assert.deepEqual(sent.at(-1), { kind: "issue_monitor_configure_profile" });
 
@@ -367,6 +374,19 @@ test("Issue rows render monitor projections and send controls from the full cano
     body.querySelector('[data-action="monitor-autonomous"]').getAttribute("aria-checked"),
     "false",
   );
+  assert.equal(
+    body.querySelector('[data-action="monitor-auto-apply"]').textContent,
+    "Auto-apply updates: OFF",
+  );
+  surface.applyIssueMonitorStatus({ autonomous_mode: true, auto_apply_updates: true });
+  const autoApply = body.querySelector('[data-action="monitor-auto-apply"]');
+  assert.equal(autoApply.textContent, "Auto-apply updates: ON");
+  assert.equal(autoApply.dataset.enabled, "true");
+  autoApply.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_auto_apply_updates",
+    enabled: false,
+  });
   assert.equal(document.querySelector(".issue-monitor-card"), null);
 });
 

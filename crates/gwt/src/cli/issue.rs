@@ -253,6 +253,11 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorQuotaHoldList { project_root } => {
             run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
         }
+        IssueCommand::MonitorReleaseIdle {
+            project_root,
+            number,
+            dry_run,
+        } => run_monitor_release_idle(env, project_root.as_deref(), number, dry_run, out)?,
         IssueCommand::MonitorReconcile { project_root } => {
             run_monitor_reconcile(env, project_root.as_deref(), out)?
         }
@@ -290,6 +295,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent,
             update_drain,
         } => run_monitor_config_set(
@@ -299,6 +305,7 @@ pub(super) fn run<E: CliEnv>(
             autonomous_mode,
             max_active,
             auto_close_merged_issues,
+            auto_apply_updates,
             launch_agent.as_deref(),
             update_drain,
             out,
@@ -796,6 +803,114 @@ fn run_monitor_reconcile<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #4084 AC-5: release the idle launched windows the live classification
+/// found, or report them without touching anything (`dry_run`).
+///
+/// The classification lives with the driver that observes the canvas — a scan
+/// is the only thing that can see which panes exist and what state they are
+/// in — so this operation reads that live projection and asks the driver to
+/// act. It never invents a classification of its own: without a live monitor
+/// projection nothing is released, because a release decided from stale state
+/// is exactly the mistaken teardown AC-6 forbids.
+fn run_monitor_release_idle<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: Option<u64>,
+    dry_run: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let status = crate::daemon_publisher::read_issue_monitor_status(&project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+        .map(serde_json::from_value::<crate::IssueMonitorAgentStatus>)
+        .transpose()
+        .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    let Some(status) = status else {
+        out.push_str(
+            &serde_json::json!({
+                "status": "refused",
+                "reason": "no_live_classification",
+                "detail": "no live Issue Monitor driver is publishing the window classification; \
+                           start the GWT app for this project and retry",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    };
+    let targets = status
+        .idle_windows
+        .iter()
+        .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
+        .map(|idle| {
+            serde_json::json!({
+                "window_id": idle.window_id,
+                "issue_number": idle.issue_number,
+                "idle_kind": idle.idle_kind.as_str(),
+                "idle_since": idle.idle_since,
+                "bound": idle.bound,
+                "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+            })
+        })
+        .collect::<Vec<_>>();
+    if dry_run {
+        out.push_str(
+            &serde_json::json!({
+                "status": "dry_run",
+                "number": number,
+                "targets": targets,
+                "idle_window_counts": status.idle_window_counts,
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(0);
+    }
+    let reason = match number {
+        Some(number) => format!("released by the operator for Issue #{number}"),
+        None => "released by the operator".to_string(),
+    };
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "idle_release": {
+                "number": number,
+                "reason": reason,
+            }
+        }),
+        std::process::id(),
+    );
+    match publish_monitor_config_set(&project_root, payload) {
+        Ok(()) => {
+            out.push_str(
+                &serde_json::json!({
+                    "status": "requested",
+                    "number": number,
+                    "reason": reason,
+                    "targets": targets,
+                    "detail": "the next scan releases these windows and closes their panes; \
+                               a stuck_unknown row is reported, never released",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        Err(error) => {
+            out.push_str(
+                &serde_json::json!({
+                    "status": "refused",
+                    "reason": "control_publish_failed",
+                    "detail": error.to_string(),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            Ok(1)
+        }
+    }
 }
 
 /// Issue #3923 AC-1 / Issue #3961 AC-4: release one provider's quota
@@ -1504,16 +1619,18 @@ fn apply_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     validate_monitor_config_set(
         enabled,
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
-        update_drain,
+        update_drain.as_ref(),
     )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -1535,6 +1652,9 @@ fn apply_monitor_config_set(
             .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
+    if let Some(auto_apply_updates) = auto_apply_updates {
+        candidate.set_auto_apply_updates(Some(auto_apply_updates));
+    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
@@ -1550,15 +1670,20 @@ fn apply_monitor_config_set(
 /// surface's question (#3906 wires that); the drain only pauses admission.
 pub(crate) fn apply_update_drain(
     monitor: &mut crate::IssueMonitorState,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
 ) {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     match update_drain {
-        Some(true) => monitor.set_update_drain(
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)) => monitor.set_update_drain(
             crate::IssueMonitorUpdateDrainReason::Manual,
             env!("CARGO_PKG_VERSION"),
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &now,
         ),
-        Some(false) => monitor.clear_update_drain(),
+        // Issue #3906 AC-3: the update mechanism names the staged version.
+        Some(crate::IssueMonitorUpdateDrainControl::Raise { reason, version }) => {
+            monitor.set_update_drain(reason, &version, &now)
+        }
+        Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)) => monitor.clear_update_drain(),
         None => {}
     }
 }
@@ -1568,8 +1693,9 @@ fn validate_monitor_config_set(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<&crate::IssueMonitorUpdateDrainControl>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
         return Err(io::Error::new(
@@ -1581,6 +1707,7 @@ fn validate_monitor_config_set(
         && autonomous_mode.is_none()
         && max_active.is_none()
         && auto_close_merged_issues.is_none()
+        && auto_apply_updates.is_none()
         && launch_agent.is_none()
         && update_drain.is_none()
     {
@@ -1617,8 +1744,9 @@ fn run_monitor_config_set<E: CliEnv>(
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
     auto_close_merged_issues: Option<bool>,
+    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
-    update_drain: Option<bool>,
+    update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -1627,8 +1755,9 @@ fn run_monitor_config_set<E: CliEnv>(
         autonomous_mode,
         max_active,
         auto_close_merged_issues,
+        auto_apply_updates,
         launch_agent,
-        update_drain,
+        update_drain.as_ref(),
     )
     .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
@@ -1655,6 +1784,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
                 "auto_close_merged_issues": auto_close_merged_issues,
+                "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
                 "update_drain": update_drain,
             }
@@ -1674,8 +1804,9 @@ fn run_monitor_config_set<E: CliEnv>(
                 autonomous_mode,
                 max_active,
                 auto_close_merged_issues,
+                auto_apply_updates,
                 launch_agent,
-                update_drain,
+                update_drain.clone(),
             )
         })
         .map_err(io_as_api_error)?;
@@ -1692,6 +1823,10 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues": prefs.auto_close_merged_issues,
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
+                .unwrap_or(prefs.autonomous_mode),
+            "auto_apply_updates": prefs.auto_apply_updates,
+            "auto_apply_updates_effective": prefs
+                .auto_apply_updates
                 .unwrap_or(prefs.autonomous_mode),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
@@ -3687,6 +3822,8 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
         };
         merge_board_escalations_into_needs_human(&repo, &mut published);
         assert!(published.queue.is_empty());
@@ -3726,12 +3863,16 @@ mod tests {
                 delivery_id: None,
                 waiting: None,
                 steering: None,
+                idle_kind: None,
+                idle_since: None,
             }],
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
         };
         merge_board_escalations_into_needs_human(&repo, &mut live_open);
         assert_eq!(live_open.queue, vec![2338]);
@@ -3822,12 +3963,16 @@ mod tests {
                     delivery_id: None,
                     waiting: None,
                     steering: None,
+                    idle_kind: None,
+                    idle_since: None,
                 }],
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                idle_windows: Vec::new(),
+                idle_window_counts: std::collections::BTreeMap::new(),
             };
             merge_board_escalations_into_needs_human(&repo, &mut status);
             assert_eq!(
@@ -3880,6 +4025,8 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
         };
 
         merge_board_escalations_into_needs_human(&repo, &mut published);
@@ -4547,7 +4694,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(true),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -4577,7 +4725,8 @@ mod tests {
                 max_active: None,
                 auto_close_merged_issues: None,
                 launch_agent: None,
-                update_drain: Some(false),
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -4617,6 +4766,7 @@ mod tests {
                 autonomous_mode: Some(false),
                 max_active: Some(3),
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -4641,6 +4791,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -4883,6 +5034,7 @@ mod tests {
                     autonomous_mode,
                     max_active: None,
                     auto_close_merged_issues: None,
+                    auto_apply_updates: None,
                     launch_agent: None,
                     update_drain: None,
                 },
@@ -5941,6 +6093,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             },
@@ -5981,6 +6134,7 @@ mod tests {
                 autonomous_mode: None,
                 max_active: None,
                 auto_close_merged_issues: None,
+                auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),
                 update_drain: None,
             },
