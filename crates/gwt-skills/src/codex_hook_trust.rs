@@ -344,7 +344,7 @@ fn command_hook_trusted_hash_for_test(
     command_hook_trusted_hash(event_name_snake, matcher, command)
 }
 
-fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
+pub(crate) fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
     if !path.exists() {
         return Ok(toml::Value::Table(toml::Table::new()));
     }
@@ -362,7 +362,7 @@ fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
     })
 }
 
-fn ensure_child_table<'a>(
+pub(crate) fn ensure_child_table<'a>(
     table: &'a mut toml::Table,
     key: &str,
 ) -> io::Result<&'a mut toml::Table> {

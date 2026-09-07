@@ -494,6 +494,8 @@ impl AppRuntime {
                 events: Vec::new(),
             };
         }
+        // Issue #4084: the review-dispatch marker dies with its window.
+        self.issue_monitor_review_dispatch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
         // runs in one detached finalizer and cannot delay PaneCloseResult.
