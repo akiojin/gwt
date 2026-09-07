@@ -508,6 +508,11 @@ pub struct SessionRuntimeState {
     pub child_started_at: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
+    /// When the most recent managed hook event finished successfully,
+    /// protocol output included (Issue #3541). `hook.health` compares it with
+    /// the newest hook failure to tell "recovered" from "unresolved".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completed_hook_event_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
@@ -1577,6 +1582,7 @@ impl SessionRuntimeState {
             child_pid: None,
             child_started_at: None,
             source_event: None,
+            last_completed_hook_event_at: None,
             pending_discussion: None,
         }
     }

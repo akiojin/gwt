@@ -98,6 +98,34 @@ pub fn is_host_process_alive(pid: u32) -> bool {
     }
 }
 
+/// Issue #3906 AC-8: whether `pid` runs somewhere under `ancestor` in the
+/// process tree (an agent pane's `gwtd verify.run`, for example). Walks the
+/// parent chain through `sysinfo`; a missing process or a chain longer than
+/// 64 hops counts as "not ours" so the drain never blocks on a stranger.
+pub fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+    if pid == 0 || ancestor == 0 || pid == ancestor {
+        return false;
+    }
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let mut current = sysinfo::Pid::from_u32(pid);
+    for _ in 0..64 {
+        let Some(parent) = system.process(current).and_then(sysinfo::Process::parent) else {
+            return false;
+        };
+        if parent.as_u32() == ancestor {
+            return true;
+        }
+        if parent.as_u32() <= 1 {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
 /// Return the OS-reported start time for one host process.
 ///
 /// A PID by itself is not a durable process identity because operating

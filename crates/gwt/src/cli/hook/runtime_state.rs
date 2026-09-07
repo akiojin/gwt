@@ -110,10 +110,54 @@ fn write_state_with_status(
                 serde_json::to_value(incarnation)?,
             );
         }
+        if let Some(completed_at) = previous.last_completed_hook_event_at {
+            object.insert(
+                "last_completed_hook_event_at".to_string(),
+                serde_json::to_value(completed_at)?,
+            );
+        }
     }
     let bytes = serde_json::to_vec_pretty(&value)?;
     gwt_github::cache::write_atomic(path, &bytes)?;
     Ok(())
+}
+
+/// Issue #3541: stamp the session runtime state once a managed hook event has
+/// finished, protocol output included. `hook.health` compares this with the
+/// newest hook failure to tell "recovered" from "unresolved". Fail-open: a
+/// missing or unreadable sidecar simply leaves the failure unresolved.
+pub(crate) fn record_hook_event_completed_from_env() {
+    let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
+        return;
+    };
+    let runtime_path = PathBuf::from(runtime_path);
+    let Ok(raw) = std::fs::read_to_string(&runtime_path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "last_completed_hook_event_at".to_string(),
+        serde_json::Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
+    );
+    if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
+        let _ = gwt_github::cache::write_atomic(&runtime_path, &bytes);
+    }
+}
+
+/// The Issue linked to the current managed session, when its metadata is
+/// readable. Used to name the report target of a hook failure (Issue #3541).
+pub(crate) fn linked_issue_from_env() -> Option<u64> {
+    let gwt_session_id = GwtSessionId::from_env()?;
+    let sessions_dir = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .map(PathBuf::from)
+        .map(|path| sessions_dir_for_runtime_path(&path))
+        .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
+    current_session_for_id(&sessions_dir, &gwt_session_id)?.linked_issue_number
 }
 
 fn pending_discussion_for_session(
