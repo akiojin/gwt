@@ -2713,11 +2713,12 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                     codex_config_path.display()
                 )
             })?;
-            if !report.untrusted_gwt_hooks.is_empty() {
-                return Err(format!(
-                    "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}",
-                    report.untrusted_gwt_hooks.join(", ")
-                ));
+            // Issue #4071 AC-2: the reason says whether any trust state was
+            // written and what each hooks file was compared against, so a
+            // skipped registration and a trusted_hash / path-form mismatch
+            // are told apart in the launch failure record.
+            if let Some(reason) = report.hooks_need_review_reason() {
+                return Err(reason);
             }
             Ok(Some(report))
         }
