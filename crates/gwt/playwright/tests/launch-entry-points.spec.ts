@@ -1,26 +1,15 @@
-/* Issue #3192 / SPEC #3214 — clicking the left-rail "Intake" button must open
- * the Launch Wizard pending modal ("Preparing Intake session...").
- *
- * Regression of commit 1fdbe25c0 ("fix: show launch materialization
- * progress"): renderLaunchWizard() dereferenced `launchWizard` before the
- * opening/error early-returns, so the intake pending state (launchWizard
- * === null, launchWizardOpening set) threw a TypeError and the modal never
- * received its `.open` class. The crash is synchronous inside the click
- * handler, so it also blocked the `open_intake_session` WS send — the button
- * silently did nothing.
- *
- * This spec boots the embedded frontend with a deterministic WebSocket stub
- * (no live gwt process), clicks the rail button, and asserts the pending
- * modal opens without a page error. It needs no backend round-trip because
- * the pending modal is rendered client-side before any send.
+/* Issue #3571 / SPEC #3245 Stage E — the deprecated Intake launch route is
+ * absent from every frontend entry surface. Normal Workspace and Add Window
+ * actions remain available, and even a stale internal command cannot emit the
+ * removed open_intake_session wire.
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Intake launch-pending modal", () => {
+test.describe("Launch entry points", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("clicking Intake opens the Preparing Intake modal", async ({
+  test("deprecated Intake surfaces are absent while Workspace and Add Window remain", async ({
     page,
   }) => {
     const pageErrors: string[] = [];
@@ -30,33 +19,42 @@ test.describe("Intake launch-pending modal", () => {
     await installOpenProjectBackend(page);
     await page.goto(APP_URL);
 
-    // App boots to an open git project; the operator rail is interactive.
-    const intake = page.locator('.op-rail [data-cmd="intake-session"]');
-    await expect(intake).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.op-rail [data-cmd="intake-session"]')).toHaveCount(0);
+    await expect(page.locator("#canvas-empty-intake")).toHaveCount(0);
+    await expect(page.locator("#op-workspace-overview-entry")).toBeVisible();
+    await expect(page.locator("#canvas-empty-open-workspace")).toBeVisible();
+    await expect(page.locator("#canvas-empty-add-window")).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
 
-    await intake.click();
+  test("stale Intake command emits no removed wire or pending surface", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
 
-    const wizard = page.locator("#wizard-modal");
-    // The `.open` class is added at the end of renderLaunchWizard(); the
-    // regression threw before reaching it.
-    await expect(wizard).toHaveClass(/\bopen\b/, { timeout: 10_000 });
-    await expect(wizard.locator(".launch-pending-note")).toHaveText(
-      "Preparing Intake session...",
-    );
+    await installEmbeddedRoutes(page);
+    await installOpenProjectBackend(page);
+    await page.goto(APP_URL);
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
 
-    // Pin the exact regression: no null dereference of the wizard view model.
-    const wizardErrors = pageErrors.filter((message) =>
-      message.includes("launch_materialization_pending"),
-    );
-    expect(
-      wizardErrors,
-      `unexpected wizard page error(s): ${pageErrors.join("\n")}`,
-    ).toEqual([]);
+    await page.evaluate(async () => {
+      document.dispatchEvent(
+        new CustomEvent("op:command", { detail: { id: "intake-session" } }),
+      );
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    const sentKinds = await page.evaluate(() => (window as any).__sentKinds as string[]);
+    expect.soft(sentKinds).not.toContain("open_intake_session");
+    await expect.soft(page.locator("#wizard-modal")).not.toHaveClass(/\bopen\b/);
+    await expect.soft(page.locator("#wizard-modal")).toHaveAttribute("aria-hidden", "true");
+    expect(pageErrors).toEqual([]);
   });
 });
 
 async function installOpenProjectBackend(page: any): Promise<void> {
   await page.addInitScript(() => {
+    (window as any).__sentKinds = [];
     try {
       // Suppress the first-run briefing overlay so it can't intercept clicks.
       window.sessionStorage.setItem("gwt:ui:briefing", "1");
@@ -108,11 +106,10 @@ async function installOpenProjectBackend(page: any): Promise<void> {
         } catch {
           return;
         }
+        if (message?.kind) (window as any).__sentKinds.push(message.kind);
         if (message && message.kind === "frontend_ready") {
           this.emit(workspaceState);
         }
-        // open_intake_session and other sends are intentionally ignored: the
-        // pending modal is rendered client-side before this point.
       }
 
       close() {
