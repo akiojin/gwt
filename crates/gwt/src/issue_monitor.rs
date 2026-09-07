@@ -3477,6 +3477,58 @@ fn autonomous_wait_expires_at(since: &str) -> String {
     rfc3339_plus_secs(since, AUTONOMOUS_WAIT_MAX_SECS).unwrap_or_else(|| since.to_string())
 }
 
+/// SPEC #3200 T-045/FR-013: stamp one observed liveness signal onto `record`.
+pub fn record_heartbeat_on_record(record: &mut AutonomousIssueRecord, now: &str) {
+    record.last_heartbeat = Some(now.to_string());
+    // Issue #3944 AC-2: progress answers the steering request.
+    record.steering = None;
+}
+
+/// Issue #3844 / #4078 AC-2: write one wait declaration onto `record`.
+///
+/// The daemon's in-memory state machine and the CLI's durable prefs fallback
+/// both go through here, so a declaration accepted without a publish transport
+/// carries exactly the same `since` anchor, liveness stamp, and expiry as a
+/// published one. A re-declaration refreshes the text but keeps the original
+/// `since`, so the [`AUTONOMOUS_WAIT_MAX_SECS`] cap cannot be extended by
+/// renewing.
+pub fn declare_wait_on_record(
+    record: &mut AutonomousIssueRecord,
+    reason: &str,
+    resume_condition: &str,
+    now: &str,
+) -> AutonomousWaitOutcome {
+    record_heartbeat_on_record(record, now);
+    let since = record
+        .wait
+        .as_ref()
+        .map(|wait| wait.since.clone())
+        .unwrap_or_else(|| now.to_string());
+    record.wait = Some(AutonomousWaitDeclaration {
+        reason: reason.trim().to_string(),
+        resume_condition: resume_condition.trim().to_string(),
+        since: since.clone(),
+        declared_at: now.to_string(),
+    });
+    AutonomousWaitOutcome::Declared {
+        expires_at: autonomous_wait_expires_at(&since),
+        since,
+    }
+}
+
+/// Issue #3844 / #4078 AC-2: drop `record`'s wait declaration, counting the
+/// resumption itself as liveness. Same shared path as [`declare_wait_on_record`].
+pub fn clear_wait_on_record(
+    record: &mut AutonomousIssueRecord,
+    now: &str,
+) -> AutonomousWaitOutcome {
+    if record.wait.take().is_none() {
+        return AutonomousWaitOutcome::NotWaiting;
+    }
+    record_heartbeat_on_record(record, now);
+    AutonomousWaitOutcome::Cleared
+}
+
 /// Whether `record`'s wait declaration still suspends stuck detection at `now`.
 /// An unparseable anchor fails closed (not in force).
 fn autonomous_wait_in_force(record: &AutonomousIssueRecord, now: &str) -> bool {
@@ -5987,10 +6039,7 @@ impl IssueMonitorState {
     /// SPEC #3200 T-045/FR-013: record an observed liveness signal from the
     /// launched agent for `issue_number`. Resets the stuck-detection window.
     pub fn record_autonomous_heartbeat(&mut self, issue_number: u64, now: &str) {
-        let record = self.autonomous_record_mut(issue_number);
-        record.last_heartbeat = Some(now.to_string());
-        // Issue #3944 AC-2: progress answers the steering request.
-        record.steering = None;
+        record_heartbeat_on_record(self.autonomous_record_mut(issue_number), now);
     }
 
     /// Issue #3844 AC-1: record that the launched agent for `issue_number` is
@@ -6008,23 +6057,12 @@ impl IssueMonitorState {
         if !self.active_launches.contains(&issue_number) {
             return AutonomousWaitOutcome::NotLaunched;
         }
-        self.record_autonomous_heartbeat(issue_number, now);
-        let record = self.autonomous_record_mut(issue_number);
-        let since = record
-            .wait
-            .as_ref()
-            .map(|wait| wait.since.clone())
-            .unwrap_or_else(|| now.to_string());
-        record.wait = Some(AutonomousWaitDeclaration {
-            reason: reason.trim().to_string(),
-            resume_condition: resume_condition.trim().to_string(),
-            since: since.clone(),
-            declared_at: now.to_string(),
-        });
-        AutonomousWaitOutcome::Declared {
-            expires_at: autonomous_wait_expires_at(&since),
-            since,
-        }
+        declare_wait_on_record(
+            self.autonomous_record_mut(issue_number),
+            reason,
+            resume_condition,
+            now,
+        )
     }
 
     /// Issue #3844: the agent resumed; ordinary stuck detection applies again
@@ -6033,11 +6071,7 @@ impl IssueMonitorState {
         let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
             return AutonomousWaitOutcome::NotWaiting;
         };
-        if record.wait.take().is_none() {
-            return AutonomousWaitOutcome::NotWaiting;
-        }
-        self.record_autonomous_heartbeat(issue_number, now);
-        AutonomousWaitOutcome::Cleared
+        clear_wait_on_record(record, now)
     }
 
     /// Issue #3844: the current wait declaration for `issue_number`, if any.
