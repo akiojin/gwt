@@ -25101,7 +25101,6 @@ mod tests {
             autonomous_launched_cohort(&[(41, "tab-1::review-41"), (43, "tab-1::dead-43")]);
         monitor.begin_review(41, 410, "sha41");
         monitor.record_review_verdict(41, true);
-        let claim_before = monitor.prefs().launched_claims.clone();
         monitor.record_window_snapshot(idle_snapshot(
             IDLE_NOW,
             vec![idle_observation(
@@ -25145,11 +25144,19 @@ mod tests {
             )],
             "only the pane that still exists is closed"
         );
-        // AC-6: prefs stay as they were apart from the launch itself.
+        // AC-6: nothing but the launch itself moved. A release is a success,
+        // not a stop: the row is never parked for a human and no failure hold
+        // is recorded, which is what separates it from `stop_only`.
         let prefs = monitor.prefs();
         assert!(prefs.enabled);
         assert_eq!(prefs.max_active_agents, 2);
-        assert!(!claim_before.is_empty());
+        assert!(prefs.failed_issues.is_empty());
+        for number in [41, 43] {
+            assert_ne!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::NeedsHuman)
+            );
+        }
         assert!(
             prefs.launch_bindings.is_empty(),
             "a released window cannot be re-adopted into the slot it just left"

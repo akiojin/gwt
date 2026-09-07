@@ -2380,6 +2380,10 @@ fn reap_scan_defunct_active_generations(project_root: &Path) {
     }
 }
 
+// The scan's inputs are all independent facts about one tick (scope, canvas,
+// clock, client factory, and the two budgets). Grouping them into a struct
+// would only rename them, so the extra parameter is accepted here.
+#[allow(clippy::too_many_arguments)]
 fn run_scheduled_issue_monitor_scan_with_budgets(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
@@ -5964,7 +5968,6 @@ impl AppRuntime {
         let worker_now = now.to_string();
         let issue_client_factory = self.issue_client_factory.clone();
         let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
-        let window_snapshot = window_snapshot;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let vanished_window_failures =
