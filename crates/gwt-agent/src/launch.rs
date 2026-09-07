@@ -495,6 +495,52 @@ pub(crate) fn resolve_direct_runner_with_effective_env(
         .map(|candidate| candidate.display().to_string())
 }
 
+/// Re-resolve a package-runner command against a launch `PATH` that overrides
+/// the process one, or `None` when there is nothing to re-bind.
+///
+/// [`AgentLaunchBuilder::build`] picks `bunx`/`npx` before the launch profile
+/// is merged into the config, so it resolves them from the gwt process `PATH`
+/// and stores the executable that `PATH` selects. Every later step — the health
+/// probe and the spawn itself — then reuses that stored command, so neither a
+/// profile `PATH` nor a test's pinned fixture runners can redirect it
+/// (Issue #3972).
+///
+/// Only a launch `PATH` that differs from the process `PATH` re-binds:
+/// re-resolving an inherited `PATH` would repeat the builder's own lookup and
+/// rewrite every bare `bunx` into an absolute host path for no gain.
+/// Resolution keeps the runner family too — only the same file name is looked
+/// up, so a `bunx` launch never silently becomes `npx`.
+pub(crate) fn rebind_package_runner_to_effective_env(
+    command: &str,
+    env: &HashMap<String, String>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    rebind_package_runner_with_host_path(command, env, cwd, host_process_path)
+}
+
+fn rebind_package_runner_with_host_path(
+    command: &str,
+    env: &HashMap<String, String>,
+    cwd: Option<&Path>,
+    host_path: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let name = Path::new(command).file_name()?.to_str()?.to_owned();
+    let (_, launch_path) = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))?;
+    if host_path().is_some_and(|host_path| &host_path == launch_path) {
+        return None;
+    }
+    let cwd = absolute_launch_cwd(cwd);
+    let search_path = absolute_search_path(launch_path, &cwd)?;
+    let resolved = which::which_in(&name, Some(search_path), &cwd).ok()?;
+    let resolved = resolved.to_string_lossy().into_owned();
+    if resolved.contains("node_modules") || resolved == command {
+        return None;
+    }
+    Some(resolved)
+}
+
 /// Platform priority list of `npx` fallback executables consulted when the host
 /// `bunx` package-runner probe fails (Issue #2981). On Windows the `.cmd`
 /// variant is the only Windows candidate because the bare `npx` POSIX shim is
@@ -3897,6 +3943,45 @@ mod tests {
         );
         assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
         assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
+    }
+
+    /// Issue #3972: a launch `PATH` that pins its own runners re-binds the
+    /// stored package runner, while a launch that merely inherits the process
+    /// `PATH` keeps the command the builder already resolved.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn package_runner_rebinds_only_for_a_launch_path_that_overrides_the_process_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let inherited_bin = temp.path().join("inherited");
+        let pinned_bin = temp.path().join("pinned");
+        std::fs::create_dir_all(&inherited_bin).expect("create inherited bin");
+        std::fs::create_dir_all(&pinned_bin).expect("create pinned bin");
+        write_test_runner(&inherited_bin.join("npx"));
+        write_test_runner(&pinned_bin.join("npx"));
+        let host_path = || Some(inherited_bin.display().to_string());
+
+        let inherited = rebind_package_runner_with_host_path(
+            "npx",
+            &HashMap::from([("PATH".to_string(), inherited_bin.display().to_string())]),
+            Some(temp.path()),
+            host_path,
+        );
+        let pinned = rebind_package_runner_with_host_path(
+            "npx",
+            &HashMap::from([("PATH".to_string(), pinned_bin.display().to_string())]),
+            Some(temp.path()),
+            host_path,
+        );
+
+        assert_eq!(
+            inherited, None,
+            "an inherited PATH must not rewrite the resolved command"
+        );
+        assert_eq!(
+            pinned.map(PathBuf::from),
+            Some(pinned_bin.join("npx")),
+            "a pinned launch PATH must select the runner that will be probed"
+        );
     }
 
     #[cfg(not(windows))]
