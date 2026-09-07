@@ -517,6 +517,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
         }
+        FrontendEvent::CancelUpdateAutoApply => {
+            FrontendUserActionLog::new("cancel_update_auto_apply", "update")
+        }
         FrontendEvent::OpenUpdateLog { log_path } => {
             FrontendUserActionLog::new("open_update_log", "update")
                 .target(log_path.as_deref().unwrap_or_default())
@@ -657,6 +660,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {

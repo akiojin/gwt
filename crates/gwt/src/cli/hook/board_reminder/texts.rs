@@ -5,6 +5,13 @@
 //! modules stay focused on logic. SPEC-1974 FR-036 / FR-041 / FR-043 are
 //! the authoritative source for the wording, marker shape, and
 //! reminder-vs-entry separation.
+//!
+//! Issue #4080: every instruction body here is English regardless of the
+//! configured narrative language. The language setting only steers the
+//! `Use language: <lang>` directive (see [`format_language_directive`] and
+//! [`title_summary_required_reminder`]) so Board posts, Work summaries, and
+//! user-facing reports follow the setting while the injected instructions
+//! stay in one language.
 
 use chrono::Duration;
 
@@ -24,19 +31,6 @@ pub(super) fn redundancy_window() -> Duration {
 /// from any verbatim substring inside [`USER_PROMPT_REMINDER`] etc. so that
 /// reminder body and entry-line prefix never collide in test assertions.
 pub(super) const FOR_YOU_MARKER: &str = ">> ";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReminderLanguage {
-    En,
-    Ja,
-}
-
-pub(super) fn reminder_language(lang: &str) -> ReminderLanguage {
-    match lang {
-        "ja" => ReminderLanguage::Ja,
-        _ => ReminderLanguage::En,
-    }
-}
 
 pub(super) const USER_PROMPT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
@@ -103,70 +97,6 @@ Examples:\n\
   {\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"handoff\",\"mentions\":[\"agent:codex\"],\"body\":\"Current state: phase 1 is merged locally.\\n\\nNext: please run the Windows-focused verification and report failures.\"}}\n\
   JSON\n";
 
-pub(super) const USER_PROMPT_REMINDER_JA: &str = "# Board Post Reminder\n\
-\n\
-推論の節目または協調境界を越えたら、共有 Board に投稿してください。\
-他の Agent と user が衝突せずに協調できます。\n\
-\n\
-投稿前に audience を選びます。特定の返答が不要な場合だけ `params.broadcast:true` にします。\
-human user には `params.mentions` の `user:<id>`、agent type には `agent:<id>`、\
-実行中 session には `session:<id>`、workspace には `branch:<name>` を使います。\
-質問、blocker、handoff、next-step request、reply など返答が必要な投稿は mention 付きにします。\n\
-\n\
-Board 本文が human と AI agent の canonical message です。短い段落または bullet で読みやすく書き、\
-他 Agent が必要とする協調情報は metadata に隠さず本文へ直接含めます。使いやすい本文形は:\n\
-\n\
-現在の状態: <何が変わったか、何が分かったか>\n\
-\n\
-理由: <なぜ重要か、なぜその判断にしたか>\n\
-\n\
-次: <次に何をするか。なければ省略>\n\
-\n\
-**推論軸**:\n\
-- 作業 phase の遷移（例: implementation -> build check -> PR handoff）は `params.kind:\"status\"`。\n\
-- 代替案の選択と理由（例: A vs B で B を選んだ）は `params.kind:\"decision\"` または `params.kind:\"status\"`。\n\
-- 検証中の懸念や仮説（例: failure は Y 起因と見て検証中）は `params.kind:\"status\"`。\n\
-\n\
-**協調軸**:\n\
-- claim — 担当範囲を宣言して衝突を避ける。`params.kind:\"claim\"`。\n\
-- next — recipient を固定せず次の作業を共有する。`params.kind:\"next\"`。\n\
-- blocked — unblock が必要な blocker を表に出す。`params.kind:\"blocked\"`。\n\
-- handoff — 具体的な引き継ぎを渡す。`params.kind:\"handoff\"`。\n\
-- decision — 確定した判断を共有する。`params.kind:\"decision\"`。\n\
-\n\
-特定 Agent 向けの投稿には `params.targets` を指定できます。\
-targeted post は受信側 reminder injection の entry 行先頭に structured marker（現在は `>>` token）が付きます。\
-新しい投稿では typed `params.mentions` を優先し、`params.targets` は older agent 互換に使います。\
-broadcast の場合はどちらも省略します。\n\
-\n\
-**Work / Git environment guidance**:\n\
-- AGENTS.md は project-local です。対象 repository に AGENTS.md がある場合はそれを優先し、\
-gwt の AGENTS.md を他 project に適用しないでください。\n\
-- branch / worktree を手動で作成、切替、削除しないでください（`git checkout -b`、\
-`git switch -c`、`git branch -D`、`git worktree add/remove`）。Git 環境作成は gwt Start Work / \
-Launch materialization が担当します。\n\
-- Board は coordination/history log、Work は current state です。現在の task、summary、\
-next action、focus が変わったら `workspace.update` JSON envelope で Work を更新します。\n\
-- Agent/window title bar では短い purpose label と長い summary を分けます。\
-`workspace.update` の `params.purpose` を設定します。Board 投稿で purpose は更新しません。\n\
-\n\
-tool 単位の報告（例: \"running gcc\"、\"opening file X\"、\"ran test Y\"）は投稿しません。\
-diff や log で既に分かる内容も Board entry にする必要はありません。\n\
-\n\
-Examples:\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"現在の状態: focused tests が RED です。\\n\\n理由: CLI と hook output が multiline Board body をまだ collapse しています。\\n\\n次: block rendering を実装します。\"}}\n\
-  JSON\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"question\",\"mentions\":[\"user:akiojin\"],\"body\":\"現在の状態: UX option が 2 つ残っています。\\n\\n質問: reply 通知は mention された user だけにしますか、全 viewer にしますか。\"}}\n\
-  JSON\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"claim\",\"mentions\":[\"branch:feature/foo\"],\"body\":\"現在の状態: migration slice を担当します。\\n\\nBoundary: 他 Agent は crates/gwt-core/src/migration.rs を避けてください。\"}}\n\
-  JSON\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"handoff\",\"mentions\":[\"agent:codex\"],\"body\":\"現在の状態: phase 1 は local merge 済みです。\\n\\n次: Windows-focused verification を実行して failure を報告してください。\"}}\n\
-  JSON\n";
-
 pub(super) const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
@@ -186,24 +116,6 @@ manually; gwt Start Work / Launch materialization owns Git environment creation.
 Board is history; Work is current state. If the latest status, cumulative progress summary, next action, or focus changed, \
 update Work with a `workspace.update` JSON envelope. Use `params.progress_summary` for what has been done so far, and set `params.purpose` for Agent/window title bars.\n";
 
-pub(super) const USER_PROMPT_REMINDER_SHORT_JA: &str = "# Board Post Reminder\n\
-\n\
-最近 Board に投稿済みです。新しい推論の節目（phase change、alternative chosen、concern raised）\
-または協調境界（claim、next、handoff、blocked、decision）が発生した場合だけ、追加で投稿してください。\n\
-\n\
-返答が必要な場合は `params.mentions` の `user:<id>`、`agent:<id>`、\
-`session:<id>`、`branch:<name>` で宛先を指定します。\
-broadcast は `params.broadcast:true` で明示します。\n\
-\n\
-Board 本文が canonical message です。短い段落または bullet で読みやすく書き、\
-AI coordination details は必要な場合に本文へ入れてください。\n\
-\n\
-AGENTS.md は project-local です。branch / worktree を手動で作成、切替、削除しないでください。\
-Git 環境作成は gwt Start Work / Launch materialization が担当します。\n\
-\n\
-Board は history、Work は current state です。latest status、cumulative progress summary、next action、focus が変わったら \
-`workspace.update` JSON envelope で更新します。これまで何をしたかは `params.progress_summary` に書き、Agent/window title bar には `params.purpose` を設定します。\n";
-
 // Stop reminders are emitted as `systemMessage` (user-facing) because
 // Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
 // Phrasing is therefore user-oriented rather than agent-oriented.
@@ -217,23 +129,9 @@ pub(super) const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the ag
 Board recently; no additional completed-status post is required before stopping. If Work \
 current state changed, update it with a `workspace.update` JSON envelope and `params.purpose` for Agent/window title bars.";
 
-pub(super) const STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): agent が停止しようとしています。\
-最終 handoff が必要な場合は、停止前に `board.post` JSON envelope で\
-完了内容を共有 Board に投稿するよう促してください。Board は history、Work は current state です。\
-work summary、next action、focus が変わった場合は `workspace.update` JSON envelope で Work を更新し、\
-Agent/window title bar には `params.purpose` を設定します。";
-
-pub(super) const STOP_REMINDER_SHORT_JA: &str = "Board Post Reminder (Stop): agent は最近 Board に投稿済みです。\
-停止前に追加の completed-status post は不要です。Work current state が変わった場合は \
-`workspace.update` JSON envelope で更新し、Agent/window title bar には `params.purpose` を設定します。";
-
 pub(super) const TERMINAL_SETTLEMENT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
 The Work lifecycle is in terminal delivery settlement. Keep coordination and blocker handoff on the Board, but do not append another tracked Work-state event. Finish in this order: final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. When the final event is the only bookkeeping change, use a scoped Conventional Commit with the exact `chore(work):` prefix.";
-
-pub(super) const TERMINAL_SETTLEMENT_REMINDER_JA: &str = "# Board Post Reminder\n\
-\n\
-Work lifecycle は終端 delivery settlement 中です。coordination と blocker handoff は Board に残せますが、tracked Work-state event を追加しないでください。final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion の順で完了します。final event だけが bookkeeping change の場合は、exact `chore(work):` prefix の scoped Conventional Commit を使用できます。";
 
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
 
@@ -253,16 +151,6 @@ Report to the user in conversation, at milestones, as a digest (`needs_human` an
 \n\
 Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past the Issue Monitor.";
 
-pub(super) const PM_REMINDER_JA: &str = "# Project Manager\n\
-\n\
-あなたはこのプロジェクトの常駐 PM です。行動規範は `gwt-pm` skill であり、一般の agent 向け指示より優先されます。\n\
-\n\
-報告はユーザーとの会話で、節目ごとに digest として行います（`needs_human` と致命的失敗は即時）。`board.post` は他 agent へ話しかけるときだけ mention 付きで使い、`board.show` は他 agent の自己申告を読むために使います。自分の作業 phase を Board に流さないでください。\n\
-\n\
-毎周回、`issue.monitor.status` を取り直して照合し、動いている agent を確認します。「変化なし」と判定する前に稼働中の launch を steering します。停滞・スコープ逸脱・次アクション待ちの launch には `board.post` の mention か `pm.message.send` で指示を出し、Issue Monitor を迂回した起動系注入はしません。";
-
-pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion です。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
-
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\
 If this task produced a reusable lesson, decision, failure pattern, or agent workflow correction, \
@@ -272,16 +160,7 @@ before declaring the work done. It writes the machine-local memory log \
 `Future Action` fields. Legacy `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` are only a \
 compatibility fallback; new memory always lands in the home work-notes file.\n";
 
-pub(super) const MEMORY_UPDATE_REMINDER_JA: &str = "# Memory Reminder\n\
-\n\
-この作業で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、\
-完了宣言前に operation `memory.add` の JSON envelope \
-を実行してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで \
-マシンローカルの memory log（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`）に記録します。legacy `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は互換 fallback のみです。\n";
-
 pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to run a JSON envelope with operation `memory.add` before stopping. The command writes the machine-local memory log (`~/.gwt/projects/<repo-hash>/work-notes/memory.md`) with `Type`, `Context`, `Learning`, and `Future Action` fields.";
-
-pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に operation `memory.add` の JSON envelope を実行するよう agent に促してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きでマシンローカルの memory log（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`）に記録します。";
 
 pub(super) const PROGRESS_SUMMARY_MISSING_REMINDER: &str = "# Progress Summary Reminder\n\
 \n\
@@ -290,15 +169,6 @@ This Workspace has no `progress_summary` yet. Before continuing, write a cumulat
 Run:\n\
   gwtd <<'JSON'\n\
   {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"progress_summary\":\"<cumulative detail of what has happened so far>\",\"summary\":\"<latest status snapshot>\",\"current_focus\":\"<what you are doing now>\"}}\n\
-  JSON\n";
-
-pub(super) const PROGRESS_SUMMARY_MISSING_REMINDER_JA: &str = "# Progress Summary Reminder\n\
-\n\
-この Workspace にはまだ `progress_summary` がありません。続行前に、これまで調査・判断・実装・検証した内容を累積要約として書いてください。短い直近状態は `summary` に残し、2 つを混ぜないでください。\n\
-\n\
-実行:\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"progress_summary\":\"<これまで何をしていたかの詳細要約>\",\"summary\":\"<直近の状態>\",\"current_focus\":\"<現在の作業>\"}}\n\
   JSON\n";
 
 pub(super) const PROGRESS_SUMMARY_STALE_REMINDER: &str = "# Progress Summary Stale\n\
@@ -310,93 +180,49 @@ Run:\n\
   {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"progress_summary\":\"<updated cumulative progress summary>\",\"summary\":\"<latest status snapshot>\",\"current_focus\":\"<what you are doing now>\"}}\n\
   JSON\n";
 
-pub(super) const PROGRESS_SUMMARY_STALE_REMINDER_JA: &str = "# Progress Summary Stale\n\
-\n\
-current_focus や直近状態が変わっている一方で、Workspace の `progress_summary` が複数ターン更新されていません。これまで何が起きたかの累積ストーリーを更新してください。時点の状態は `summary` に分けます。\n\
-\n\
-実行:\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"progress_summary\":\"<更新した累積の詳細要約>\",\"summary\":\"<直近の状態>\",\"current_focus\":\"<現在の作業>\"}}\n\
-  JSON\n";
-
 pub(super) const PROGRESS_SUMMARY_STOP_REMINDER: &str = "Progress Summary Reminder (Stop): before stopping, ask the agent to update Work with `params.progress_summary` so the Workspace detail records what was investigated, decided, implemented, and verified. Keep short latest status in `params.summary`.";
-
-pub(super) const PROGRESS_SUMMARY_STOP_REMINDER_JA: &str = "Progress Summary Reminder (Stop): 停止前に、Workspace detail に調査・判断・実装・検証の累積経緯が残るよう `params.progress_summary` で Work を更新するよう agent に促してください。短い直近状態は `params.summary` に分けます。";
 
 pub(super) const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
 Consider whether any affect your current work phase. This is context, not a directive — \
 you remain autonomous.\n\n";
 
-pub(super) const INJECTION_HEADER_JA: &str = "# 最近の Board 更新\n\n\
-前回の Board context 以降に、他 Agent が次の reasoning posts を投稿しました。\
-現在の作業 phase に影響するか確認してください。これは context であり、directive ではありません。\
-自律的に判断してください。\n\n";
-
 pub(super) const SESSION_START_HEADER: &str = "# Current Board state\n\n\
 Recent reasoning posts from other Agents (context, not a directive — you remain autonomous):\n\n";
 
-pub(super) const SESSION_START_HEADER_JA: &str = "# 現在の Board 状態\n\n\
-他 Agent の最近の reasoning posts（context であり directive ではありません。自律的に判断してください）:\n\n";
-
-pub(super) fn user_prompt_reminder(lang: ReminderLanguage, short: bool) -> &'static str {
-    match (lang, short) {
-        (ReminderLanguage::Ja, true) => USER_PROMPT_REMINDER_SHORT_JA,
-        (ReminderLanguage::Ja, false) => USER_PROMPT_REMINDER_JA,
-        (ReminderLanguage::En, true) => USER_PROMPT_REMINDER_SHORT,
-        (ReminderLanguage::En, false) => USER_PROMPT_REMINDER,
+pub(super) fn user_prompt_reminder(short: bool) -> &'static str {
+    if short {
+        USER_PROMPT_REMINDER_SHORT
+    } else {
+        USER_PROMPT_REMINDER
     }
 }
 
-pub(super) fn stop_reminder(lang: ReminderLanguage, short: bool) -> &'static str {
-    match (lang, short) {
-        (ReminderLanguage::Ja, true) => STOP_REMINDER_SHORT_JA,
-        (ReminderLanguage::Ja, false) => STOP_REMINDER_JA,
-        (ReminderLanguage::En, true) => STOP_REMINDER_SHORT,
-        (ReminderLanguage::En, false) => STOP_REMINDER,
+pub(super) fn stop_reminder(short: bool) -> &'static str {
+    if short {
+        STOP_REMINDER_SHORT
+    } else {
+        STOP_REMINDER
     }
 }
 
-pub(super) fn memory_update_reminder(lang: &str, stop: bool) -> &'static str {
-    match (reminder_language(lang), stop) {
-        (ReminderLanguage::Ja, true) => MEMORY_UPDATE_STOP_REMINDER_JA,
-        (ReminderLanguage::Ja, false) => MEMORY_UPDATE_REMINDER_JA,
-        (ReminderLanguage::En, true) => MEMORY_UPDATE_STOP_REMINDER,
-        (ReminderLanguage::En, false) => MEMORY_UPDATE_REMINDER,
+pub(super) fn memory_update_reminder(stop: bool) -> &'static str {
+    if stop {
+        MEMORY_UPDATE_STOP_REMINDER
+    } else {
+        MEMORY_UPDATE_REMINDER
     }
 }
 
-pub(super) fn progress_summary_reminder(lang: &str, stale: bool, stop: bool) -> &'static str {
-    match (reminder_language(lang), stale, stop) {
-        (ReminderLanguage::Ja, _, true) => PROGRESS_SUMMARY_STOP_REMINDER_JA,
-        (ReminderLanguage::En, _, true) => PROGRESS_SUMMARY_STOP_REMINDER,
-        (ReminderLanguage::Ja, true, false) => PROGRESS_SUMMARY_STALE_REMINDER_JA,
-        (ReminderLanguage::Ja, false, false) => PROGRESS_SUMMARY_MISSING_REMINDER_JA,
-        (ReminderLanguage::En, true, false) => PROGRESS_SUMMARY_STALE_REMINDER,
-        (ReminderLanguage::En, false, false) => PROGRESS_SUMMARY_MISSING_REMINDER,
+pub(super) fn progress_summary_reminder(stale: bool, stop: bool) -> &'static str {
+    match (stale, stop) {
+        (_, true) => PROGRESS_SUMMARY_STOP_REMINDER,
+        (true, false) => PROGRESS_SUMMARY_STALE_REMINDER,
+        (false, false) => PROGRESS_SUMMARY_MISSING_REMINDER,
     }
 }
 
-pub(super) fn injection_header(lang: ReminderLanguage) -> &'static str {
-    match lang {
-        ReminderLanguage::Ja => INJECTION_HEADER_JA,
-        ReminderLanguage::En => INJECTION_HEADER,
-    }
-}
-
-pub(super) fn session_start_header(lang: ReminderLanguage) -> &'static str {
-    match lang {
-        ReminderLanguage::Ja => SESSION_START_HEADER_JA,
-        ReminderLanguage::En => SESSION_START_HEADER,
-    }
-}
-
-pub(super) fn no_recent_posts_line(lang: ReminderLanguage) -> &'static str {
-    match lang {
-        ReminderLanguage::Ja => "- (他 Agent からの最近の投稿はありません)\n",
-        ReminderLanguage::En => "- (no recent posts from other Agents)\n",
-    }
-}
+pub(super) const NO_RECENT_POSTS_LINE: &str = "- (no recent posts from other Agents)\n";
 
 /// Format the narrative-output language directive appended to agent-facing
 /// reminders (SessionStart / UserPromptSubmit). Stop reminders are
@@ -404,34 +230,23 @@ pub(super) fn no_recent_posts_line(lang: ReminderLanguage) -> &'static str {
 ///
 /// SPEC-1933 FR-010 / SC-003.
 pub(super) fn format_language_directive(lang: &str) -> String {
-    match reminder_language(lang) {
-        ReminderLanguage::Ja => "\n**Use language: ja** for narrative outputs（Board 投稿本文と Work summaries。gwtd subcommands、flags、code examples は English のまま）。\n".to_string(),
-        ReminderLanguage::En => "\n**Use language: en** for narrative outputs (Board post bodies and Work summaries; gwtd subcommands, flags, and code examples stay English).\n".to_string(),
+    format!(
+        "\n**Use language: {}** for narrative outputs (Board post bodies and Work summaries; \
+gwtd subcommands, flags, and code examples stay English).\n",
+        narrative_language_tag(lang)
+    )
+}
+
+/// Narrative language token carried by the directive. Unknown values fall
+/// back to `en` (SPEC-1933 FR-010).
+pub(super) fn narrative_language_tag(lang: &str) -> &'static str {
+    match lang {
+        "ja" => "ja",
+        _ => "en",
     }
 }
 
-pub(super) fn title_summary_required_reminder(lang: &str) -> &'static str {
-    match reminder_language(lang) {
-        ReminderLanguage::Ja => "# Agent Title — 応答する前に必ず設定\n\
-\n\
-この Agent window にはまだ `title-summary` が設定されていません。ユーザーへの応答を始める前に、**最初のアクションとして**この window の作業の目的を title-summary に設定してください。これは任意ではありません。\n\
-\n\
-まず最初に実行:\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<作業の目的（短い作業名）>\",\"current_focus\":\"<現在の作業内容>\"}}\n\
-  JSON\n\
-\n\
-ルール:\n\
-- title-summary には「何の作業か（作業の目的）」を書きます。状態や結果ではありません。\n\
-- 入力された生プロンプトをそのままコピーしないでください。\n\
-- 目的がまだ固まっていない場合でも、それっぽい暫定の目的を今すぐ設定し、目的が定まったら同じ title-summary を更新します（応答を遅らせないでください）。\n\
-- `browser check`・検証・マージ・サーバー起動 のような一時的な activity 名は title にしません。activity は `current_focus` に書き、既に purpose がある場合はそれを保持します。\n\
-- 例: `エージェントタイトル目的化`。不可: `…完了`、`…中`、生プロンプトのコピー。\n\
-\n\
-完了/進行中/ブロック中などの状態は `status`、`current_focus`、`summary`、または Board `body` に分けてください。設定が済むまで毎ターンこの指示を再掲します。\n\
-\n\
-**Use language: ja** for narrative outputs（Board 投稿本文、Work summaries、Agent title-summary）。gwtd subcommands、flags、code examples は English のまま。\n",
-        ReminderLanguage::En => "# Agent Title — set it before you respond\n\
+pub(super) const TITLE_SUMMARY_REQUIRED_REMINDER: &str = "# Agent Title — set it before you respond\n\
 \n\
 This Agent window has no `title-summary` yet. Before you start responding to the user, your **first action** must set this window's work purpose as its title-summary. This is not optional.\n\
 \n\
@@ -447,25 +262,19 @@ Rules:\n\
 - Never use a transient activity phase (`browser check`, verification, merging, server startup) as the purpose; put the activity in `current_focus` and keep the existing purpose if one is already set.\n\
 - Good: `Agent title purpose`. Bad: `... complete`, `... in progress`, a copy of the raw prompt.\n\
 \n\
-Keep completion/progress/blocker state in `status`, `current_focus`, `summary`, or Board `body`. This instruction repeats every turn until the title is set.\n\
-\n\
-**Use language: en** for narrative outputs (Board post bodies, Work summaries, and Agent title-summary; gwtd operation names, JSON field names, and code examples stay English).\n",
-    }
+Keep completion/progress/blocker state in `status`, `current_focus`, `summary`, or Board `body`. This instruction repeats every turn until the title is set.\n";
+
+/// Title-required reminder: English instructions plus the narrative-language
+/// directive that covers the Agent title-summary as well (Issue #4080).
+pub(super) fn title_summary_required_reminder(lang: &str) -> String {
+    format!(
+        "{TITLE_SUMMARY_REQUIRED_REMINDER}\n**Use language: {}** for narrative outputs (Board post bodies, \
+Work summaries, and Agent title-summary; gwtd operation names, JSON field names, and code examples stay English).\n",
+        narrative_language_tag(lang)
+    )
 }
 
-pub(super) fn title_summary_stale_reminder(lang: &str) -> &'static str {
-    match reminder_language(lang) {
-        ReminderLanguage::Ja => "# Agent Title Stale\n\
-\n\
-`title-summary` が複数ターン同じ値のままで、`current_focus` だけが変化しています。実装の scope が本当に変わった場合は title を更新してください。phase / activity の変化だけなら title は変えずに `params.current_focus` だけ更新する運用が正しいです。\n\
-\n\
-更新する場合のコマンド例:\n\
-  gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<新しい作業 scope>\"}}\n\
-  JSON\n\
-\n\
-`title-summary` は作業の scope です。phase / activity descriptor (`PR チェック中`、`verifying tests`、`fixing bug` 等) は `current_focus` または Board `body` に分けます。\n",
-        ReminderLanguage::En => "# Agent Title Stale\n\
+pub(super) const TITLE_SUMMARY_STALE_REMINDER: &str = "# Agent Title Stale\n\
 \n\
 The `title-summary` has stayed unchanged for several UserPromptSubmit turns while `current_focus` has shifted. If the work scope actually changed, update the title; if only the phase / activity changed, leave the title and update `params.current_focus` only.\n\
 \n\
@@ -474,6 +283,4 @@ Command to refresh the title:\n\
   {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<new work scope>\"}}\n\
   JSON\n\
 \n\
-`title-summary` is the work scope; phase / activity descriptors (`PR check in progress`, `verifying tests`, `fixing bug`, etc.) belong in `current_focus` or the Board `body`, not in the title.\n",
-    }
-}
+`title-summary` is the work scope; phase / activity descriptors (`PR check in progress`, `verifying tests`, `fixing bug`, etc.) belong in `current_focus` or the Board `body`, not in the title.\n";

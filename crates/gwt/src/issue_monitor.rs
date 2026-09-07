@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs,
+    fmt, fs,
     io::{self, Write},
     path::Path,
 };
@@ -20,7 +20,7 @@ use gwt_github::{
 
 use crate::{
     has_gwt_spec_label, knowledge_launch_target_branch_name, LaunchWizardPreviousProfile,
-    LinkedIssueKind,
+    LinkedIssueKind, WindowState,
 };
 
 const GITHUB_AUTH_SETUP_MESSAGE: &str = concat!(
@@ -164,6 +164,15 @@ pub struct AutonomousTuning {
     /// launch profile's model (still a fresh, adversarial session).
     #[serde(default)]
     pub review_model: Option<String>,
+    /// Issue #3906 AC-9: how long an update drain may last before the
+    /// "still draining" warning fires (and re-fires at the same cadence).
+    /// Elapsing never kills an agent; the drain keeps waiting.
+    #[serde(default = "default_update_drain_notify_after_secs")]
+    pub update_drain_notify_after_secs: u64,
+}
+
+fn default_update_drain_notify_after_secs() -> u64 {
+    crate::update_drain::DEFAULT_UPDATE_DRAIN_NOTIFY_AFTER_SECS
 }
 
 impl Default for AutonomousTuning {
@@ -177,6 +186,7 @@ impl Default for AutonomousTuning {
             retry_backoff_base_secs: 60,
             retry_backoff_cap_secs: 1800,
             review_model: None,
+            update_drain_notify_after_secs: default_update_drain_notify_after_secs(),
         }
     }
 }
@@ -967,6 +977,11 @@ pub struct IssueMonitorPrefs {
     /// `None` follows `autonomous_mode`; `Some` is an explicit override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: apply a staged gwt update automatically once the
+    /// host is quiescent. `None` follows `autonomous_mode` (ON while
+    /// unattended, OFF otherwise); `Some` is an explicit override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: deliveries already settled (closed / annotated), so
     /// the same merge is never settled twice after a human reopen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1044,6 +1059,7 @@ impl Default for IssueMonitorPrefs {
             closure_records: Vec::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
@@ -1457,6 +1473,15 @@ pub struct IssueMonitorGenerationReclaimSummary {
     /// When that releasing scan ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<String>,
+    /// Issue #4042 AC-2: the generation id each Issue was last released on.
+    /// Carried forward across scans; a later refusal on the same generation is
+    /// a reclaim loop, a refusal on a successor is a fresh fact.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub released_generations: BTreeMap<u64, String>,
+    /// Issue #4042 AC-2: Issues this scan held with `reclaim loop detected`
+    /// instead of releasing again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_detected: Vec<u64>,
 }
 
 /// converges on it. Kept until the same issue fails again, at which point the
@@ -1792,6 +1817,140 @@ pub struct IssueMonitorStopTarget {
     pub window_id: Option<String>,
 }
 
+/// Issue #4084 AC-1: why a launched agent window is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorIdleKind {
+    /// An independent review window whose verdict the daemon already judged.
+    ReviewVerdictPublished,
+    /// An implementation window whose execution record settled (Completed or
+    /// Blocked), whatever the state of its Draft / Ready PR.
+    ExecutionSettled,
+    /// The bound window is gone from the owning tab's canvas, or its process
+    /// exited without settling anything.
+    BindingDead,
+    /// The execution record is still Active while the pane is idle. Only a
+    /// human can tell a stall from a pause, so this stays on the steering path.
+    StuckUnknown,
+}
+
+impl IssueMonitorIdleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewVerdictPublished => "review_verdict_published",
+            Self::ExecutionSettled => "execution_settled",
+            Self::BindingDead => "binding_dead",
+            Self::StuckUnknown => "stuck_unknown",
+        }
+    }
+
+    /// Whether the Monitor may release this window without a human decision.
+    fn releasable(self) -> bool {
+        !matches!(self, Self::StuckUnknown)
+    }
+}
+
+impl fmt::Display for IssueMonitorIdleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Issue #4084: one agent window as the GUI observed it on the owning project
+/// tab's canvas. `issue_number` is the window's linked Issue;
+/// `review_dispatch` marks an independent review window (Issue #4041).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWindowObservation {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    pub status: WindowState,
+    #[serde(default)]
+    pub review_dispatch: bool,
+}
+
+/// Issue #4084: the complete set of agent windows on one project tab at
+/// `observed_at`. Absence from a fresh snapshot is what makes a binding dead,
+/// so a partial or stale snapshot must never be judged (see
+/// [`IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWindowSnapshot {
+    pub project_tab_id: String,
+    pub observed_at: String,
+    #[serde(default)]
+    pub windows: Vec<IssueMonitorWindowObservation>,
+}
+
+/// Issue #4084: the execution record state of one launched Issue, as the scan
+/// read it from the repository-scoped trusted store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorExecutionSettlement {
+    Active,
+    Completed,
+    Blocked,
+    Unknown,
+}
+
+/// Issue #4084 AC-1: one idle window and its classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorIdleWindow {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    pub idle_kind: IssueMonitorIdleKind,
+    /// When this window was first observed idle (RFC3339). Kept across scans
+    /// while the window stays idle; forgotten once it runs again.
+    pub idle_since: String,
+    /// The window holds the Issue's launch binding, and therefore a slot.
+    pub bound: bool,
+    /// The pane still exists on the canvas, so a close is possible.
+    pub pane_present: bool,
+    /// A live implementation window for the same Issue that the slot moves to
+    /// instead of being freed (AC-2, the 9.91.0 review-binding shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebind_to: Option<String>,
+}
+
+/// Issue #4084: one pane the GUI closes because the Monitor released it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorIdlePaneClose {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    pub idle_kind: IssueMonitorIdleKind,
+}
+
+/// Issue #4084 AC-5: an operator's request that the next scan release idle
+/// windows regardless of the autonomous-mode gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorIdleReleaseRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    pub reason: String,
+}
+
+/// Issue #4084: what one idle reconciliation classified and did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueMonitorIdleReconciliation {
+    /// Every idle window found this scan, released or not.
+    pub idle_windows: Vec<IssueMonitorIdleWindow>,
+    /// Issues whose slot was freed (no requeue).
+    pub released: Vec<u64>,
+    /// Issues whose slot moved to a running implementation window.
+    pub rebound: Vec<(u64, String)>,
+    /// Panes queued for the GUI to close.
+    pub pane_closes: Vec<String>,
+    /// Issues asked to be steered because their idle pane is unexplained.
+    pub steering_requested: Vec<u64>,
+    /// Idle windows an operator request could not release automatically.
+    pub skipped: Vec<(u64, IssueMonitorIdleKind)>,
+}
+
+/// Issue #4084: a canvas snapshot older than this proves nothing about the
+/// windows it omits. Two scheduled ticks plus slack.
+pub const IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS: i64 = 600;
+
 /// Issue #3927 (SPEC #3340 FR-044): the durable Monitor facts the runtime's
 /// canonical terminal predicate reads for one Issue-linked window. Read-only;
 /// the runtime decides, the Monitor only reports.
@@ -1928,13 +2087,34 @@ pub enum IssueMonitorUpdateDrainReason {
 /// `AcquireClaim` effect, exactly like a provider quota hold — but unlike
 /// `enabled:false` it never touches the launches already in flight, so the
 /// agents being drained stay attributable and are never relaunched after the
-/// restart. `version` is the gwt version that raised the drain and `since`
-/// the RFC3339 instant it was raised; re-raising keeps the original instant.
+/// restart. `version` is the gwt version the drain is about — the staged
+/// update version for an `Auto` drain (#3906 AC-3), the running gwt version
+/// for a `Manual` one — and `since` the RFC3339 instant it was raised;
+/// re-raising keeps the original instant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorUpdateDrain {
     pub version: String,
     pub since: String,
     pub reason: IssueMonitorUpdateDrainReason,
+    /// Issue #3906 AC-12: what still keeps the host from being quiescent.
+    /// Filled by the GUI process on the status view only (it is the one that
+    /// sees the panes); the persisted prefs copy stays empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<crate::update_drain::UpdateBlocker>,
+}
+
+/// Issue #3906 AC-3: how a `config_set` control asks for the drain.
+/// `true` / `false` (the #4037 operator form) raise a `Manual` drain stamped
+/// with the running gwt version or clear it; the object form lets the update
+/// mechanism raise an `Auto` drain for the staged update version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IssueMonitorUpdateDrainControl {
+    Toggle(bool),
+    Raise {
+        reason: IssueMonitorUpdateDrainReason,
+        version: String,
+    },
 }
 
 /// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
@@ -2114,6 +2294,10 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
     #[serde(default)]
     pub autonomous_mode: bool,
+    /// Issue #3906 AC-1: effective auto-apply setting (override or
+    /// `autonomous_mode`), so the GUI toggle shows what will happen.
+    #[serde(default)]
+    pub auto_apply_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
     /// Issue #4037 AC-6: the update drain, if raised.
@@ -2235,6 +2419,13 @@ pub struct IssueMonitorAgentStatus {
     /// surface from the machine-local ledger; `None` in daemon projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_budget: Option<BTreeMap<String, gwt_core::github_budget::ResourceBudgetStatus>>,
+    /// Issue #4084 AC-1: every idle window found by the last scan, bound or
+    /// not, so the PM can see what will be released and what needs a call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub idle_windows: Vec<IssueMonitorIdleWindow>,
+    /// Issue #4084 AC-1: idle windows per kind (`stuck_unknown` etc.).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub idle_window_counts: BTreeMap<String, usize>,
     /// Issue #3964 AC-4: the last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
@@ -2664,6 +2855,12 @@ pub struct IssueMonitorInboxSummary {
     /// so a silent row can be told apart from a stalled one by its reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<IssueMonitorWaitSummary>,
+    /// Issue #4084 AC-1: why the bound window is idle, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_kind: Option<IssueMonitorIdleKind>,
+    /// Issue #4084 AC-1: when the bound window was first seen idle (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
     /// Issue #3944 AC-2: the Monitor's open request that the PM steer this
     /// launch (stuck with a live window, attempts exhausted, or a held gate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2766,6 +2963,9 @@ pub struct IssueMonitorState {
     /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
     #[serde(default)]
     auto_close_merged_issues: Option<bool>,
+    /// Issue #3906 AC-1: auto-apply override; `None` follows `autonomous_mode`.
+    #[serde(default)]
+    auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: settled deliveries keyed by Issue number.
     #[serde(default)]
     merged_issue_settlements: BTreeMap<u64, MergedIssueSettlement>,
@@ -2821,6 +3021,27 @@ pub struct IssueMonitorState {
     /// intercepting hook and driven to `AwaitingHuman` / `Resumed` here.
     #[serde(default)]
     autonomous_handoffs: Vec<AutonomousQuestionHandoff>,
+    /// Issue #4084: the latest canvas observation the GUI published for this
+    /// project tab. In-memory only; a restart simply waits for the next tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_snapshot: Option<IssueMonitorWindowSnapshot>,
+    /// Issue #4084 AC-1: idle windows keyed by window id, carrying the first
+    /// scan at which each was seen idle.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    idle_windows: BTreeMap<String, IssueMonitorIdleWindow>,
+    /// Issue #4084 AC-2/AC-3: panes released this scan, drained by the
+    /// daemon→GUI payload builder (or the local fallback scan's completion).
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pending_idle_pane_closes: VecDeque<IssueMonitorIdlePaneClose>,
+    /// Issue #4084 AC-5: an operator asked the next scan to release idle rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_idle_release: Option<IssueMonitorIdleReleaseRequest>,
+    /// Issue #4084: windows a close was already requested for. A pane the GUI
+    /// has not finished closing is still on the next snapshot, and asking
+    /// again every scan would spam the close path for a decision already made.
+    /// An id leaves the set once the window is gone from the canvas.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    idle_pane_closes_requested: BTreeSet<String>,
 }
 
 /// Issue #3478 (AC-5): one answered handoff ready to be delivered back to the
@@ -4490,6 +4711,7 @@ impl IssueMonitorState {
             closure_reopen_tombstones: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
+            auto_apply_updates: None,
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
@@ -4509,6 +4731,11 @@ impl IssueMonitorState {
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
             autonomous_handoffs: Vec::new(),
+            window_snapshot: None,
+            idle_windows: BTreeMap::new(),
+            pending_idle_pane_closes: VecDeque::new(),
+            pending_idle_release: None,
+            idle_pane_closes_requested: BTreeSet::new(),
         }
     }
 
@@ -4676,6 +4903,7 @@ impl IssueMonitorState {
         }
         state.autonomous_mode = prefs.autonomous_mode;
         state.auto_close_merged_issues = prefs.auto_close_merged_issues;
+        state.auto_apply_updates = prefs.auto_apply_updates;
         for settlement in prefs.merged_issue_settlements {
             state
                 .merged_issue_settlements
@@ -4763,6 +4991,7 @@ impl IssueMonitorState {
             closure_records: self.closure_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
             auto_close_merged_issues: self.auto_close_merged_issues,
+            auto_apply_updates: self.auto_apply_updates,
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
@@ -6817,6 +7046,7 @@ impl IssueMonitorState {
         // commit to disk, so disk owns it like the other config switches.
         self.update_drain = disk.update_drain.clone();
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
+        self.auto_apply_updates = disk.auto_apply_updates;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
@@ -7828,6 +8058,7 @@ impl IssueMonitorState {
             version: version.to_string(),
             since: now.to_string(),
             reason,
+            blocking: Vec::new(),
         });
     }
 
@@ -7916,6 +8147,7 @@ impl IssueMonitorState {
                 &self.launch_profiles,
             ),
             autonomous_mode: self.autonomous_mode,
+            auto_apply_updates: self.auto_apply_updates_enabled(),
             quota_hold,
             update_drain: self.update_drain.clone(),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
@@ -7990,6 +8222,25 @@ impl IssueMonitorState {
         self.agent_status_without_scan_at(&now)
     }
 
+    /// Issue #4084 AC-1: the idle classification of the window bound to
+    /// `issue_number`, if that window is idle.
+    fn bound_idle_window(&self, issue_number: u64) -> Option<&IssueMonitorIdleWindow> {
+        self.idle_windows
+            .values()
+            .find(|idle| idle.bound && idle.issue_number == Some(issue_number))
+    }
+
+    /// Issue #4084 AC-1: idle windows per kind, for the status CTA and notices.
+    pub fn idle_window_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for idle in self.idle_windows.values() {
+            *counts
+                .entry(idle.idle_kind.as_str().to_string())
+                .or_insert(0) += 1;
+        }
+        counts
+    }
+
     fn agent_status_without_scan_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         IssueMonitorAgentStatus {
@@ -8062,6 +8313,12 @@ impl IssueMonitorState {
                         steering: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| record.steering.clone()),
+                        idle_kind: self
+                            .bound_idle_window(item.issue.number)
+                            .map(|idle| idle.idle_kind),
+                        idle_since: self
+                            .bound_idle_window(item.issue.number)
+                            .map(|idle| idle.idle_since.clone()),
                     }
                 })
                 .collect(),
@@ -8070,6 +8327,8 @@ impl IssueMonitorState {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: self.generation_reclaim.clone(),
+            idle_windows: self.idle_windows(),
+            idle_window_counts: self.idle_window_counts(),
         }
     }
 
@@ -8171,6 +8430,25 @@ impl IssueMonitorState {
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
         self.auto_close_merged_issues = value;
         Some(next_epoch)
+    }
+
+    /// Issue #3906 AC-1: the explicit auto-apply override, if any.
+    pub fn auto_apply_updates(&self) -> Option<bool> {
+        self.auto_apply_updates
+    }
+
+    /// Issue #3906 AC-1: whether a staged gwt update is applied by gwt itself
+    /// once the host is quiescent. Without an override this follows
+    /// `autonomous_mode`, so unattended operation defaults to ON and attended
+    /// operation keeps the manual update button.
+    pub fn auto_apply_updates_enabled(&self) -> bool {
+        self.auto_apply_updates.unwrap_or(self.autonomous_mode)
+    }
+
+    /// Change the auto-apply override. Unlike the auto-close override this
+    /// authorizes no remote effect, so no authority epoch advances.
+    pub fn set_auto_apply_updates(&mut self, value: Option<bool>) {
+        self.auto_apply_updates = value;
     }
 
     /// Issue #3917: the settlement recorded for `issue_number`, if any.
@@ -11274,6 +11552,7 @@ impl IssueMonitorState {
             summary.released = previous.released.clone();
             summary.released_by_holder_state = previous.released_by_holder_state.clone();
             summary.released_at = previous.released_at.clone();
+            summary.released_generations = previous.released_generations.clone();
         }
         let mut released = Vec::new();
         let mut released_by_holder_state = BTreeMap::<String, usize>::new();
@@ -11292,12 +11571,37 @@ impl IssueMonitorState {
                     .pending_launch_deliveries
                     .iter()
                     .any(|delivery| delivery.issue_number == issue_number);
-            match hold.map(|hold| hold.status) {
-                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed)
-                    if !launch_live =>
+            match hold {
+                Some(hold)
+                    if matches!(
+                        hold.status,
+                        ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed
+                    ) && !launch_live =>
                 {
+                    // Issue #4042 AC-2: this generation was already released
+                    // and the launch that followed was refused on it anyway.
+                    // The two readings disagree; releasing again would only
+                    // repeat the refusal once a minute (#3885), so hold the
+                    // row and say so once.
+                    if summary.released_generations.get(&issue_number) == Some(&hold.generation_id)
+                    {
+                        let reason = format!(
+                            "reclaim loop detected: the Issue Monitor released generation {} of issue #{issue_number} (holder Session {} {holder_state}) and the next launch was refused on the same generation; holding the row instead of requeueing again. Run the execution.status JSON operation for the exact recovery route",
+                            hold.generation_id, hold.holder_session_id
+                        );
+                        if self.replace_failed_issue_message(issue_number, &reason) {
+                            self.push_autonomous_notice(
+                                "warn",
+                                issue_number,
+                                format!("Issue #{issue_number} held: {reason}"),
+                            );
+                        }
+                        summary.loop_detected.push(issue_number);
+                        continue;
+                    }
                     let reason = format!(
-                        "stranded execution generation released (holder Session {holder_state}); returned to the queue by the Issue Monitor"
+                        "stranded execution generation {} released (holder Session {holder_state}); returned to the queue by the Issue Monitor",
+                        hold.generation_id
                     );
                     if matches!(
                         self.release_failed_issue_hold(issue_number, &reason, now),
@@ -11310,6 +11614,9 @@ impl IssueMonitorState {
                         );
                         released.push(issue_number);
                         *released_by_holder_state.entry(holder_state).or_default() += 1;
+                        summary
+                            .released_generations
+                            .insert(issue_number, hold.generation_id);
                     }
                 }
                 Some(_) | None => {
@@ -11328,12 +11635,44 @@ impl IssueMonitorState {
         }
         if summary.stranded.is_empty()
             && summary.released.is_empty()
+            && summary.loop_detected.is_empty()
             && self.generation_reclaim.is_none()
         {
             return summary;
         }
         self.generation_reclaim = Some(summary.clone());
         summary
+    }
+
+    /// Issue #4042 AC-2: keep a failed row held but replace what it says.
+    ///
+    /// Unlike [`Self::record_failed_issue`] this never re-enters the failure
+    /// lifecycle (attempt accounting, autonomous retry, window bookkeeping):
+    /// the row already failed, only its explanation changes. Returns whether
+    /// the message actually changed, so a repeated scan stays silent.
+    fn replace_failed_issue_message(&mut self, issue_number: u64, message: &str) -> bool {
+        let Some(current) = self.failed_issues.get(&issue_number) else {
+            return false;
+        };
+        if current == message {
+            return false;
+        }
+        let previous_banner = format!("issue #{issue_number}: {current}");
+        self.failed_issues.insert(issue_number, message.to_string());
+        // A hold that supersedes the release must not be erased by it on the
+        // next cross-process rebase, exactly like a newer failure.
+        self.released_failures.remove(&issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = Some(message.to_string());
+        }
+        if self.last_error.as_deref() == Some(previous_banner.as_str()) {
+            self.last_error = Some(format!("issue #{issue_number}: {message}"));
+        }
+        true
     }
 
     /// Issue #3959 AC-5: return every row still held by a pre-#3930
@@ -11596,8 +11935,22 @@ impl IssueMonitorState {
         for entry in incoming {
             by_version.insert(entry.release_version, entry);
         }
-        let drop_count = by_version.len().saturating_sub(REQUEUE_AUDIT_CAP);
-        self.requeue_audit = by_version.into_values().skip(drop_count).collect();
+        // Issue #4042 AC-3: a run of releases of one Issue for one reason is
+        // one fact repeating, not history worth the cap; keep its latest
+        // occurrence so the audit stays bounded by content as well as count.
+        let mut compressed = Vec::<IssueMonitorReleasedFailure>::with_capacity(by_version.len());
+        for entry in by_version.into_values() {
+            match compressed.last_mut() {
+                Some(last)
+                    if last.issue_number == entry.issue_number && last.reason == entry.reason =>
+                {
+                    *last = entry;
+                }
+                _ => compressed.push(entry),
+            }
+        }
+        let drop_count = compressed.len().saturating_sub(REQUEUE_AUDIT_CAP);
+        self.requeue_audit = compressed.into_iter().skip(drop_count).collect();
     }
 
     /// Restore the invariant that one issue is never both failed and released.
@@ -11833,6 +12186,407 @@ impl IssueMonitorState {
         }
         self.queue.retain(|queued| *queued != issue_number);
         Ok(issue_number)
+    }
+
+    /// Issue #4084: record the GUI's canvas observation for the next scan.
+    pub fn record_window_snapshot(&mut self, snapshot: IssueMonitorWindowSnapshot) {
+        self.window_snapshot = Some(snapshot);
+    }
+
+    /// Issue #4084 AC-5: ask the next scan to release idle windows on the
+    /// operator's authority (`number: None` releases every releasable row).
+    pub fn request_idle_release(&mut self, number: Option<u64>, reason: impl Into<String>) {
+        self.pending_idle_release = Some(IssueMonitorIdleReleaseRequest {
+            number,
+            reason: reason.into(),
+        });
+    }
+
+    /// Issue #4084 AC-1: the idle windows found by the last reconciliation,
+    /// ordered by Issue then window id.
+    pub fn idle_windows(&self) -> Vec<IssueMonitorIdleWindow> {
+        let mut idle = self.idle_windows.values().cloned().collect::<Vec<_>>();
+        idle.sort_by(|a, b| {
+            a.issue_number
+                .cmp(&b.issue_number)
+                .then_with(|| a.window_id.cmp(&b.window_id))
+        });
+        idle
+    }
+
+    /// Issue #4084: drain the panes the GUI should close.
+    pub fn take_pending_idle_pane_closes(&mut self) -> Vec<IssueMonitorIdlePaneClose> {
+        self.pending_idle_pane_closes.drain(..).collect()
+    }
+
+    fn fresh_window_snapshot(&self, now: &str) -> Option<&IssueMonitorWindowSnapshot> {
+        let snapshot = self.window_snapshot.as_ref()?;
+        let age = rfc3339_elapsed_secs(&snapshot.observed_at, now)?;
+        (age <= IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS).then_some(snapshot)
+    }
+
+    fn review_verdict_published(&self, issue_number: u64) -> bool {
+        self.autonomous_records
+            .get(&issue_number)
+            .is_some_and(|record| record.review_passed.is_some())
+    }
+
+    /// Issue #4084 AC-1: classify every idle launched window against the last
+    /// fresh canvas snapshot. Pure: nothing is mutated, and a missing, stale,
+    /// or foreign-tab snapshot classifies nothing (a binding is judged dead
+    /// only against the complete canvas of its own tab, as
+    /// [`Self::vanished_launched_windows`] judges it).
+    ///
+    /// `settlements` is the execution record state per launched Issue, read by
+    /// the caller from the trusted store; an absent entry is `Unknown`.
+    pub fn classify_idle_windows(
+        &self,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        now: &str,
+    ) -> Vec<IssueMonitorIdleWindow> {
+        let Some(snapshot) = self.fresh_window_snapshot(now) else {
+            return Vec::new();
+        };
+        let observation = |window_id: &str| {
+            snapshot
+                .windows
+                .iter()
+                .find(|observed| issue_monitor_window_ids_match(window_id, &observed.window_id))
+        };
+        let idle_since = |window_id: &str| {
+            self.idle_windows
+                .get(window_id)
+                .map(|idle| idle.idle_since.clone())
+                .unwrap_or_else(|| now.to_string())
+        };
+        let mut classified = Vec::new();
+        for (issue_number, window_id) in &self.launched_windows {
+            let owned_here = issue_monitor_qualified_window_id(window_id)
+                .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
+            if !owned_here {
+                continue;
+            }
+            let (idle_kind, pane_present, rebind_to) = match observation(window_id) {
+                None => (IssueMonitorIdleKind::BindingDead, false, None),
+                Some(observed) => match observed.status {
+                    WindowState::Stopped => (IssueMonitorIdleKind::BindingDead, true, None),
+                    WindowState::Idle => {
+                        if observed.review_dispatch && self.review_verdict_published(*issue_number)
+                        {
+                            let rebind_to = snapshot
+                                .windows
+                                .iter()
+                                .find(|other| {
+                                    other.issue_number == Some(*issue_number)
+                                        && !other.review_dispatch
+                                        && idle_window_is_alive(other.status)
+                                        && !issue_monitor_window_ids_match(
+                                            window_id,
+                                            &other.window_id,
+                                        )
+                                })
+                                .map(|other| other.window_id.clone());
+                            (
+                                IssueMonitorIdleKind::ReviewVerdictPublished,
+                                true,
+                                rebind_to,
+                            )
+                        } else if matches!(
+                            settlements.get(issue_number),
+                            Some(
+                                IssueMonitorExecutionSettlement::Completed
+                                    | IssueMonitorExecutionSettlement::Blocked
+                            )
+                        ) {
+                            (IssueMonitorIdleKind::ExecutionSettled, true, None)
+                        } else {
+                            (IssueMonitorIdleKind::StuckUnknown, true, None)
+                        }
+                    }
+                    // Running / Starting / Waiting / Error are never idle
+                    // (AC-6); an Error pane is a diagnostic to keep.
+                    WindowState::Running
+                    | WindowState::Starting
+                    | WindowState::Waiting
+                    | WindowState::Error => continue,
+                },
+            };
+            classified.push(IssueMonitorIdleWindow {
+                window_id: window_id.clone(),
+                issue_number: Some(*issue_number),
+                idle_kind,
+                idle_since: idle_since(window_id),
+                bound: true,
+                pane_present,
+                rebind_to,
+            });
+        }
+        // Issue #4041 shape: the review window is not the launch binding, so
+        // it holds no slot; once its verdict is judged the pane is just idle.
+        for observed in &snapshot.windows {
+            if !observed.review_dispatch
+                || !matches!(observed.status, WindowState::Idle | WindowState::Stopped)
+            {
+                continue;
+            }
+            let Some(issue_number) = observed.issue_number else {
+                continue;
+            };
+            if !self.review_verdict_published(issue_number) {
+                continue;
+            }
+            let bound = self
+                .launched_windows
+                .values()
+                .any(|bound| issue_monitor_window_ids_match(bound, &observed.window_id));
+            if bound {
+                continue;
+            }
+            classified.push(IssueMonitorIdleWindow {
+                window_id: observed.window_id.clone(),
+                issue_number: Some(issue_number),
+                idle_kind: IssueMonitorIdleKind::ReviewVerdictPublished,
+                idle_since: idle_since(&observed.window_id),
+                bound: false,
+                pane_present: true,
+                rebind_to: None,
+            });
+        }
+        classified
+    }
+
+    /// Issue #4084 AC-2/AC-3/AC-4: classify the idle windows, then act.
+    ///
+    /// Automatic release runs only under autonomous mode — the same fail-closed
+    /// gate as [`Self::recover_stuck_autonomous`], so the default human-gated
+    /// flow observes but never tears anything down — or when an operator
+    /// asked through [`Self::request_idle_release`]. `stuck_unknown` is never
+    /// released here; past twice `stuck_timeout_secs` of idleness it asks the
+    /// PM for a decision instead. Release frees the slot and unbinds the window
+    /// without spending an attempt or requeueing the Issue (AC-2/AC-3): the row
+    /// stays `Launched` out of the queue, exactly as
+    /// [`Self::settle_exact_terminal_delivery`] leaves it, until the ordinary
+    /// completion probe or the PM ends it. Nothing here changes `enabled`,
+    /// `max_active_agents`, or any claim (AC-6).
+    pub fn reconcile_idle_windows(
+        &mut self,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        now: &str,
+    ) -> IssueMonitorIdleReconciliation {
+        let classified = self.classify_idle_windows(settlements, now);
+        // A close request lives exactly as long as the window it named. Once
+        // the pane is gone the id may be issued again, so nothing is retained.
+        if let Some(snapshot) = self.fresh_window_snapshot(now) {
+            let live = snapshot
+                .windows
+                .iter()
+                .map(|observed| observed.window_id.clone())
+                .collect::<BTreeSet<_>>();
+            self.idle_pane_closes_requested.retain(|window_id| {
+                live.iter()
+                    .any(|observed| issue_monitor_window_ids_match(window_id, observed))
+            });
+        }
+        self.idle_windows = classified
+            .iter()
+            .map(|idle| (idle.window_id.clone(), idle.clone()))
+            .collect();
+        let mut outcome = IssueMonitorIdleReconciliation {
+            idle_windows: classified,
+            ..IssueMonitorIdleReconciliation::default()
+        };
+        match self.pending_idle_release.take() {
+            Some(request) => {
+                self.apply_idle_release(&mut outcome, request.number, &request.reason, true);
+            }
+            None if self.autonomous_mode => {
+                self.apply_idle_release(
+                    &mut outcome,
+                    None,
+                    "released automatically by the Issue Monitor",
+                    false,
+                );
+                self.notify_stuck_idle_windows(&mut outcome, now);
+            }
+            None => {}
+        }
+        outcome
+    }
+
+    /// Issue #4084 AC-5: release the idle windows found by the last
+    /// reconciliation on the operator's authority, whatever the mode. A
+    /// `stuck_unknown` row is reported as skipped, never released.
+    pub fn release_idle_windows(
+        &mut self,
+        number: Option<u64>,
+        reason: &str,
+        _now: &str,
+    ) -> IssueMonitorIdleReconciliation {
+        let mut outcome = IssueMonitorIdleReconciliation {
+            idle_windows: self.idle_windows(),
+            ..IssueMonitorIdleReconciliation::default()
+        };
+        self.apply_idle_release(&mut outcome, number, reason, true);
+        outcome
+    }
+
+    fn apply_idle_release(
+        &mut self,
+        outcome: &mut IssueMonitorIdleReconciliation,
+        number: Option<u64>,
+        reason: &str,
+        forced: bool,
+    ) {
+        let targets = self
+            .idle_windows()
+            .into_iter()
+            .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
+            .collect::<Vec<_>>();
+        for idle in targets {
+            if !idle.idle_kind.releasable() {
+                if forced {
+                    if let Some(issue_number) = idle.issue_number {
+                        outcome.skipped.push((issue_number, idle.idle_kind));
+                    }
+                }
+                continue;
+            }
+            if idle.bound {
+                let Some(issue_number) = idle.issue_number else {
+                    continue;
+                };
+                match idle.rebind_to.as_deref() {
+                    Some(to) => {
+                        self.rebind_launch_window(
+                            issue_number,
+                            &idle.window_id,
+                            to,
+                            idle.idle_kind,
+                        );
+                        outcome.rebound.push((issue_number, to.to_string()));
+                    }
+                    None => {
+                        self.release_idle_launch(
+                            issue_number,
+                            &idle.window_id,
+                            idle.idle_kind,
+                            reason,
+                        );
+                        outcome.released.push(issue_number);
+                    }
+                }
+            }
+            if idle.pane_present
+                && self
+                    .idle_pane_closes_requested
+                    .insert(idle.window_id.clone())
+            {
+                self.pending_idle_pane_closes
+                    .push_back(IssueMonitorIdlePaneClose {
+                        window_id: idle.window_id.clone(),
+                        issue_number: idle.issue_number,
+                        idle_kind: idle.idle_kind,
+                    });
+                outcome.pane_closes.push(idle.window_id.clone());
+            }
+            self.idle_windows.remove(&idle.window_id);
+        }
+    }
+
+    /// Free the slot held by `window_id` for `issue_number` without spending an
+    /// attempt or requeueing. Mirrors [`Self::settle_exact_terminal_delivery`],
+    /// plus dropping the binding ledger entry so a pane that survives its close
+    /// cannot be re-adopted into the slot it just left.
+    fn release_idle_launch(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        idle_kind: IssueMonitorIdleKind,
+        reason: &str,
+    ) {
+        self.clear_active_tracking(issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        self.launch_bindings
+            .retain(|bound, _| !issue_monitor_window_ids_match(bound, window_id));
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: released idle window {window_id} ({idle_kind}) — {reason}"
+            ),
+        );
+    }
+
+    /// AC-2: the review window held the binding while the implementation
+    /// window kept running (9.91.0 shape); move the slot to the running window.
+    fn rebind_launch_window(
+        &mut self,
+        issue_number: u64,
+        from: &str,
+        to: &str,
+        idle_kind: IssueMonitorIdleKind,
+    ) {
+        self.launched_windows.insert(issue_number, to.to_string());
+        self.launch_bindings
+            .retain(|bound, _| !issue_monitor_window_ids_match(bound, from));
+        self.launch_bindings.insert(to.to_string(), issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = Some(to.to_string());
+        }
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: launch binding moved from idle window {from} ({idle_kind}) to running window {to}"
+            ),
+        );
+    }
+
+    /// AC-4: an Active record whose pane has been idle for twice
+    /// `stuck_timeout_secs` needs a human; ask the PM, naming the count.
+    fn notify_stuck_idle_windows(
+        &mut self,
+        outcome: &mut IssueMonitorIdleReconciliation,
+        now: &str,
+    ) {
+        let threshold = i64::try_from(self.autonomous_tuning.stuck_timeout_secs.saturating_mul(2))
+            .unwrap_or(i64::MAX);
+        let stuck = self
+            .idle_windows()
+            .into_iter()
+            .filter(|idle| idle.bound && idle.idle_kind == IssueMonitorIdleKind::StuckUnknown)
+            .collect::<Vec<_>>();
+        let count = stuck.len();
+        for idle in stuck {
+            let Some(issue_number) = idle.issue_number else {
+                continue;
+            };
+            let overdue = rfc3339_elapsed_secs(&idle.idle_since, now)
+                .is_some_and(|elapsed| elapsed >= threshold);
+            if !overdue {
+                continue;
+            }
+            self.request_autonomous_steering(
+                issue_number,
+                format!(
+                    "stuck_unknown: window {} has been idle since {} while the execution record is still Active; {count} idle window(s) need a decision",
+                    idle.window_id, idle.idle_since
+                ),
+                now,
+            );
+            outcome.steering_requested.push(issue_number);
+        }
     }
 
     /// [`Self::requeue_window`] with an injected clock for the backoff floor.
@@ -12150,6 +12904,14 @@ fn expiry_from_now_lexical(now: &str, ttl_secs: u64) -> String {
         .unwrap_or_else(|_| now.to_string())
 }
 
+/// Issue #4084: a pane whose process can still make progress or answer.
+fn idle_window_is_alive(status: WindowState) -> bool {
+    matches!(
+        status,
+        WindowState::Running | WindowState::Starting | WindowState::Idle | WindowState::Waiting
+    )
+}
+
 fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
     if stored == incoming {
         return true;
@@ -12390,6 +13152,8 @@ mod tests {
                     delivery_id: None,
                     waiting: None,
                     steering: None,
+                    idle_kind: None,
+                    idle_since: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -12398,6 +13162,8 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                idle_windows: Vec::new(),
+                idle_window_counts: BTreeMap::new(),
             }
         );
     }
@@ -14532,6 +15298,7 @@ mod tests {
                 version: "9.91.0".to_string(),
                 since: now.to_string(),
                 reason: IssueMonitorUpdateDrainReason::Manual,
+                blocking: Vec::new(),
             })
         );
         // Re-raising an already raised drain keeps the original instant.
@@ -17556,6 +18323,170 @@ mod tests {
         )
     }
 
+    /// Issue #4042 AC-2 / AC-4: production looped on #3885 once a minute —
+    /// the reclaim read the generation as Blocked with an Idle holder and
+    /// released the row, the launch that followed was refused on the very
+    /// same generation as Active with a Running holder, and the row failed
+    /// again. Releasing the same generation twice can never help: the second
+    /// refusal proves the two readings disagree, so the row is held with a
+    /// `reclaim loop detected` failure instead, and three scans on the
+    /// divergent fixture grow the audit by exactly one entry.
+    #[test]
+    fn release_stranded_generation_failures_stops_after_the_same_generation_is_refused_again() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-06T16:44:00Z");
+        let divergent_probe = |_: u64| {
+            Some(crate::cli::execution_state::OwnerGenerationHold {
+                status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                generation_id: "gen-3885".to_string(),
+                holder_session_id: "holder-42".to_string(),
+                holder_session_state: "Idle".to_string(),
+            })
+        };
+
+        // Scan 1: the release itself is legitimate and audited once.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let first =
+            monitor.release_stranded_generation_failures("2026-09-06T16:45:26Z", divergent_probe);
+        assert_eq!(first.released, vec![42]);
+        assert_eq!(
+            first.released_generations,
+            BTreeMap::from([(42, "gen-3885".to_string())]),
+            "the reclaim remembers which generation it released"
+        );
+        assert!(first.loop_detected.is_empty());
+        assert!(monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+
+        // Scan 2: the launch was refused on the same generation. Do not
+        // release again; hold the row and say why.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let second =
+            monitor.release_stranded_generation_failures("2026-09-06T16:46:09Z", divergent_probe);
+        assert_eq!(second.loop_detected, vec![42]);
+        assert!(second.stranded.is_empty());
+        assert_eq!(
+            second.released_at.as_deref(),
+            Some("2026-09-06T16:45:26Z"),
+            "a loop scan releases nothing"
+        );
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+        let held_message = monitor
+            .prefs()
+            .failed_issues
+            .into_iter()
+            .find(|failed| failed.issue_number == 42)
+            .map(|failed| failed.message)
+            .expect("the row stays held");
+        assert!(
+            held_message.contains("reclaim loop detected")
+                && held_message.contains("gen-3885")
+                && held_message.contains("holder-42"),
+            "unexpected hold message: {held_message}"
+        );
+        assert!(
+            !crate::cli::execution_state::is_execution_generation_conflict(&held_message),
+            "the hold must not read as a fresh generation conflict, or the next scan probes it again"
+        );
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+
+        // Scan 3: a stale process re-stamps the same refusal. Still one audit
+        // entry, still held, same message.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let third =
+            monitor.release_stranded_generation_failures("2026-09-06T16:47:08Z", divergent_probe);
+        assert_eq!(third.loop_detected, vec![42]);
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.prefs().requeue_audit.len(),
+            1,
+            "three scans on the divergent fixture must not grow the audit past the first release"
+        );
+        assert_eq!(
+            monitor
+                .prefs()
+                .failed_issues
+                .into_iter()
+                .find(|failed| failed.issue_number == 42)
+                .map(|failed| failed.message),
+            Some(held_message)
+        );
+
+        // A successor generation is a different fact: releasing it is legitimate.
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let successor =
+            monitor.release_stranded_generation_failures("2026-09-06T16:48:00Z", |_| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                    generation_id: "gen-successor".to_string(),
+                    holder_session_id: "holder-42-successor".to_string(),
+                    holder_session_state: "Idle".to_string(),
+                })
+            });
+        assert_eq!(successor.released, vec![42]);
+        assert!(successor.loop_detected.is_empty());
+        assert_eq!(
+            successor.released_generations,
+            BTreeMap::from([(42, "gen-successor".to_string())])
+        );
+        assert!(monitor.queued_issue_numbers().contains(&42));
+    }
+
+    /// Issue #4042 AC-3: the audit is bounded by content, not only by count.
+    /// Consecutive releases of one Issue for one reason collapse to the latest
+    /// occurrence, so a repeating release cannot push distinct history out of
+    /// the cap.
+    #[test]
+    fn requeue_audit_compresses_consecutive_entries_with_the_same_issue_and_reason() {
+        let entry =
+            |release_version: u64, issue_number: u64, reason: &str| IssueMonitorReleasedFailure {
+                issue_number,
+                release_version,
+                released_at: format!("2026-09-06T16:{release_version:02}:00Z"),
+                reason: reason.to_string(),
+                attempts_before: 1,
+                attempts_after: 0,
+            };
+        let stranded = "stranded execution generation released (holder Session Idle); returned to the queue by the Issue Monitor";
+        let monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                failure_release_version: 7,
+                requeue_audit: vec![
+                    entry(1, 3885, stranded),
+                    entry(2, 3885, stranded),
+                    entry(3, 3885, "operator recovery"),
+                    entry(4, 3885, stranded),
+                    entry(5, 3885, stranded),
+                    entry(6, 3885, stranded),
+                    entry(7, 3886, stranded),
+                ],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        let audit = monitor.prefs().requeue_audit;
+        assert_eq!(
+            audit
+                .iter()
+                .map(|entry| (entry.release_version, entry.issue_number))
+                .collect::<Vec<_>>(),
+            vec![(2, 3885), (3, 3885), (6, 3885), (7, 3886)],
+            "runs collapse to their latest entry; a different reason or Issue breaks the run"
+        );
+        assert_eq!(
+            audit
+                .iter()
+                .find(|entry| entry.release_version == 6)
+                .map(|entry| entry.released_at.as_str()),
+            Some("2026-09-06T16:06:00Z")
+        );
+    }
+
     /// Issue #3964 AC-1: the generation reaper releases the owner's
     /// generation, but the Monitor row that failed on that generation stayed
     /// `agent_failed` until a human ran `issue.monitor.requeue` — 29 of the 45
@@ -17580,11 +18511,15 @@ mod tests {
             monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
                 match issue_number {
                     42 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        generation_id: "gen-fixture".to_string(),
+                        holder_session_id: "holder-fixture".to_string(),
                         status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
                         holder_session_state: "Interrupted".to_string(),
                     }),
                     43 => panic!("a row that did not fail on a generation is never probed"),
                     44 => Some(crate::cli::execution_state::OwnerGenerationHold {
+                        generation_id: "gen-fixture".to_string(),
+                        holder_session_id: "holder-fixture".to_string(),
                         status: crate::cli::execution_state::ExecutionControlStatus::Completed,
                         holder_session_state: "Idle".to_string(),
                     }),
@@ -17660,6 +18595,8 @@ mod tests {
         let first =
             monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |issue_number| {
                 Some(crate::cli::execution_state::OwnerGenerationHold {
+                    generation_id: "gen-fixture".to_string(),
+                    holder_session_id: "holder-fixture".to_string(),
                     status: crate::cli::execution_state::ExecutionControlStatus::Active,
                     holder_session_state: if issue_number == 42 {
                         "Running".to_string()
@@ -17688,6 +18625,8 @@ mod tests {
         let second =
             monitor.release_stranded_generation_failures("2026-09-05T00:10:00Z", |issue_number| {
                 Some(crate::cli::execution_state::OwnerGenerationHold {
+                    generation_id: "gen-fixture".to_string(),
+                    holder_session_id: "holder-fixture".to_string(),
                     status: if issue_number == 43 {
                         crate::cli::execution_state::ExecutionControlStatus::Blocked
                     } else {
@@ -17707,6 +18646,8 @@ mod tests {
         // A quiet scan keeps the last release visible instead of blanking it.
         let third = monitor.release_stranded_generation_failures("2026-09-05T00:15:00Z", |_| {
             Some(crate::cli::execution_state::OwnerGenerationHold {
+                generation_id: "gen-fixture".to_string(),
+                holder_session_id: "holder-fixture".to_string(),
                 status: crate::cli::execution_state::ExecutionControlStatus::Active,
                 holder_session_state: "Running".to_string(),
             })
@@ -17737,6 +18678,8 @@ mod tests {
 
         let summary = monitor.release_stranded_generation_failures("2026-09-05T00:05:00Z", |_| {
             Some(crate::cli::execution_state::OwnerGenerationHold {
+                generation_id: "gen-fixture".to_string(),
+                holder_session_id: "holder-fixture".to_string(),
                 status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
                 holder_session_state: "Interrupted".to_string(),
             })
@@ -23504,6 +24447,87 @@ mod tests {
     }
 
     #[test]
+    fn update_drain_blocking_defaults_empty_and_control_accepts_both_shapes() {
+        // Issue #3906 AC-3 / AC-12: a #4037-era drain without `blocking`
+        // still loads, and the control accepts the operator bool as well as
+        // the auto-drain object.
+        let legacy = r#"{"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}"#;
+        let drain: IssueMonitorUpdateDrain = serde_json::from_str(legacy).expect("legacy drain");
+        assert!(drain.blocking.is_empty());
+        assert_eq!(
+            serde_json::to_value(&drain).expect("serialize"),
+            serde_json::json!({"version":"9.91.0","since":"2026-09-06T00:00:00Z","reason":"manual"}),
+            "an empty blocking list is not persisted"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(serde_json::json!(true))
+                .expect("bool control"),
+            IssueMonitorUpdateDrainControl::Toggle(true)
+        );
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+                serde_json::json!({"reason":"auto","version":"9.99.0"})
+            )
+            .expect("object control"),
+            IssueMonitorUpdateDrainControl::Raise {
+                reason: IssueMonitorUpdateDrainReason::Auto,
+                version: "9.99.0".to_string(),
+            }
+        );
+        assert!(serde_json::from_value::<IssueMonitorUpdateDrainControl>(
+            serde_json::json!({"reason":"auto"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auto_apply_updates_defaults_to_autonomous_mode_and_round_trips() {
+        // Issue #3906 AC-1: no override follows autonomous_mode (ON while
+        // unattended, OFF otherwise); an override persists and the effective
+        // value is what the status view reports.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(monitor.auto_apply_updates(), None);
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert!(!monitor.status_view().auto_apply_updates);
+        assert!(monitor
+            .set_autonomous_mode_with_effect_revocation(true)
+            .is_some());
+        assert!(
+            monitor.auto_apply_updates_enabled(),
+            "autonomous mode turns auto-apply on by default"
+        );
+        assert!(monitor.status_view().auto_apply_updates);
+
+        let epoch = monitor.effect_authority_epoch();
+        monitor.set_auto_apply_updates(Some(false));
+        assert!(!monitor.auto_apply_updates_enabled());
+        assert_eq!(
+            monitor.effect_authority_epoch(),
+            epoch,
+            "the override authorizes no remote effect, so no grant is revoked"
+        );
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.auto_apply_updates, Some(false));
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.auto_apply_updates(), Some(false));
+        assert!(restored.autonomous_mode());
+        assert!(!restored.auto_apply_updates_enabled());
+        assert!(!restored.status_view().auto_apply_updates);
+    }
+
+    #[test]
+    fn autonomous_tuning_without_update_drain_notify_after_secs_uses_1800() {
+        // Issue #3906 AC-9: pre-#3906 tuning objects (every other field
+        // present, this one absent) deserialize with the documented default.
+        let legacy = r#"{"max_attempts":3,"stuck_timeout_secs":1800,"heartbeat_interval_secs":120,"merge_watch_timeout_secs":3600,"deliver_fix_loop_cap":5,"retry_backoff_base_secs":60,"retry_backoff_cap_secs":1800}"#;
+        let tuning: AutonomousTuning = serde_json::from_str(legacy).expect("legacy tuning");
+        assert_eq!(tuning.update_drain_notify_after_secs, 1800);
+        assert_eq!(tuning, AutonomousTuning::default());
+    }
+
+    #[test]
     fn auto_close_merged_issues_defaults_to_autonomous_mode_and_round_trips() {
         // Issue #3917 AC-5: the override defaults to following autonomous_mode.
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
@@ -24316,6 +25340,556 @@ mod tests {
         assert_eq!(
             monitor.inbox_item(3928).map(|item| item.state),
             Some(MonitorInboxState::AgentFailed)
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #4084: idle-window classification and automatic release.
+    // ------------------------------------------------------------------
+
+    const IDLE_NOW: &str = "2026-09-07T04:00:00Z";
+
+    fn idle_observation(
+        window_id: &str,
+        issue_number: Option<u64>,
+        status: WindowState,
+        review_dispatch: bool,
+    ) -> IssueMonitorWindowObservation {
+        IssueMonitorWindowObservation {
+            window_id: window_id.to_string(),
+            issue_number,
+            status,
+            review_dispatch,
+        }
+    }
+
+    fn idle_snapshot(
+        observed_at: &str,
+        windows: Vec<IssueMonitorWindowObservation>,
+    ) -> IssueMonitorWindowSnapshot {
+        IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: observed_at.to_string(),
+            windows,
+        }
+    }
+
+    fn settlements(
+        entries: &[(u64, IssueMonitorExecutionSettlement)],
+    ) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
+        entries.iter().copied().collect()
+    }
+
+    /// An autonomous cohort of launched Issues, each bound to a window on
+    /// `tab-1`, with the launch profile and slot cap the Issue's incident had.
+    fn autonomous_launched_cohort(bindings: &[(u64, &str)]) -> IssueMonitorState {
+        let mut monitor = launched_cohort(bindings);
+        monitor.set_autonomous_mode(true);
+        monitor
+    }
+
+    fn idle_kind_of(monitor: &IssueMonitorState, window_id: &str) -> Option<IssueMonitorIdleKind> {
+        monitor
+            .idle_windows()
+            .iter()
+            .find(|idle| idle.window_id == window_id)
+            .map(|idle| idle.idle_kind)
+    }
+
+    #[test]
+    fn idle_windows_are_classified_per_launched_row() {
+        // AC-1: four launched rows, one per classification.
+        let mut monitor = autonomous_launched_cohort(&[
+            (41, "tab-1::review-41"),
+            (42, "tab-1::impl-42"),
+            (43, "tab-1::dead-43"),
+            (44, "tab-1::stuck-44"),
+        ]);
+        // #41: the bound window is the review dispatch and its verdict landed.
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, true);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::review-41", Some(41), WindowState::Idle, true),
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Idle, false),
+                // #43's window is gone from the canvas entirely.
+                idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+            ],
+        ));
+        let classified = monitor.classify_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Blocked),
+                (44, IssueMonitorExecutionSettlement::Active),
+            ]),
+            IDLE_NOW,
+        );
+        let kinds = classified
+            .iter()
+            .map(|idle| (idle.issue_number, idle.idle_kind, idle.bound))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                (Some(41), IssueMonitorIdleKind::ReviewVerdictPublished, true),
+                (Some(42), IssueMonitorIdleKind::ExecutionSettled, true),
+                (Some(43), IssueMonitorIdleKind::BindingDead, true),
+                (Some(44), IssueMonitorIdleKind::StuckUnknown, true),
+            ]
+        );
+        assert!(
+            classified.iter().all(|idle| idle.idle_since == IDLE_NOW),
+            "first observation stamps idle_since with the scan time"
+        );
+
+        // The status projection carries the classification per inbox row.
+        monitor.reconcile_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Blocked),
+                (44, IssueMonitorExecutionSettlement::Active),
+            ]),
+            IDLE_NOW,
+        );
+        let status = monitor.agent_status_at(IDLE_NOW);
+        let row = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .expect("row present")
+        };
+        assert_eq!(
+            row(44).idle_kind,
+            Some(IssueMonitorIdleKind::StuckUnknown),
+            "an unreleased row keeps its classification on the status row"
+        );
+        assert_eq!(row(44).idle_since.as_deref(), Some(IDLE_NOW));
+        assert_eq!(
+            status.idle_windows.len(),
+            1,
+            "released windows leave the idle list; only the stuck row remains"
+        );
+        assert_eq!(
+            status.idle_window_counts.get("stuck_unknown").copied(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn idle_since_is_carried_across_scans_and_cleared_when_the_window_wakes_up() {
+        let mut monitor = autonomous_launched_cohort(&[(44, "tab-1::stuck-44")]);
+        let active = settlements(&[(44, IssueMonitorExecutionSettlement::Active)]);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::stuck-44",
+                Some(44),
+                WindowState::Idle,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(&active, IDLE_NOW);
+        assert_eq!(
+            idle_kind_of(&monitor, "tab-1::stuck-44"),
+            Some(IssueMonitorIdleKind::StuckUnknown)
+        );
+
+        let later = "2026-09-07T04:10:00Z";
+        monitor.record_window_snapshot(idle_snapshot(
+            later,
+            vec![idle_observation(
+                "tab-1::stuck-44",
+                Some(44),
+                WindowState::Idle,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(&active, later);
+        assert_eq!(
+            monitor.idle_windows()[0].idle_since,
+            IDLE_NOW,
+            "a window that stays idle keeps its first idle_since"
+        );
+
+        let awake = "2026-09-07T04:20:00Z";
+        monitor.record_window_snapshot(idle_snapshot(
+            awake,
+            vec![idle_observation(
+                "tab-1::stuck-44",
+                Some(44),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(&active, awake);
+        assert!(
+            monitor.idle_windows().is_empty(),
+            "a running window is not idle and its idle_since is forgotten"
+        );
+    }
+
+    #[test]
+    fn review_verdict_published_and_binding_dead_release_the_slot_without_requeue() {
+        // AC-2: both kinds free the slot in one reconcile; the row leaves
+        // `launched` but is not requeued; the review pane is closed.
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::review-41"), (43, "tab-1::dead-43")]);
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, true);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::review-41",
+                Some(41),
+                WindowState::Idle,
+                true,
+            )],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert_eq!(outcome.released, vec![41, 43]);
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "both slots are free after one scan"
+        );
+        assert_eq!(monitor.launched_window_id(41), None);
+        assert_eq!(monitor.launched_window_id(43), None);
+        assert!(
+            monitor.queued_issue_numbers().is_empty(),
+            "release is not a requeue"
+        );
+        for number in [41, 43] {
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::Launched),
+                "the row stays out of the queue until the completion probe ends it"
+            );
+            assert_eq!(monitor.inbox_item(number).unwrap().launched_window_id, None);
+        }
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| (close.window_id, close.issue_number, close.idle_kind))
+                .collect::<Vec<_>>(),
+            vec![(
+                "tab-1::review-41".to_string(),
+                Some(41),
+                IssueMonitorIdleKind::ReviewVerdictPublished
+            )],
+            "only the pane that still exists is closed"
+        );
+        // AC-6: nothing but the launch itself moved. A release is a success,
+        // not a stop: the row is never parked for a human and no failure hold
+        // is recorded, which is what separates it from `stop_only`.
+        let prefs = monitor.prefs();
+        assert!(prefs.enabled);
+        assert_eq!(prefs.max_active_agents, 2);
+        assert!(prefs.failed_issues.is_empty());
+        for number in [41, 43] {
+            assert_ne!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::NeedsHuman)
+            );
+        }
+        assert!(
+            prefs.launch_bindings.is_empty(),
+            "a released window cannot be re-adopted into the slot it just left"
+        );
+        // A second reconcile is a no-op.
+        let again = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(again.released.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+    }
+
+    #[test]
+    fn review_verdict_published_rebinds_the_slot_to_a_running_implementation_window() {
+        // AC-2: 9.91.0 shape — the review window overwrote the binding while
+        // the implementation window keeps running in another pane.
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::review-41")]);
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, false);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::review-41", Some(41), WindowState::Idle, true),
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert_eq!(outcome.rebound, vec![(41, "tab-1::impl-41".to_string())]);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 1, "the slot moves, it is not freed");
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("tab-1::impl-41"),
+            Some(&41)
+        );
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::review-41".to_string()]
+        );
+    }
+
+    #[test]
+    fn unbound_idle_review_window_with_a_verdict_is_closed_without_touching_the_slot() {
+        // #4041 shape: the review window is not the launch binding.
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.begin_review(41, 410, "sha41");
+        monitor.record_review_verdict(41, true);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Idle, true),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::review-41".to_string()]
+        );
+    }
+
+    #[test]
+    fn execution_settled_releases_the_slot_regardless_of_pr_state_and_closes_the_pane() {
+        // AC-3: Completed and Blocked both settle; the Issue is not closed
+        // and not relaunched by the monitor.
+        for settlement in [
+            IssueMonitorExecutionSettlement::Completed,
+            IssueMonitorExecutionSettlement::Blocked,
+        ] {
+            let mut monitor = autonomous_launched_cohort(&[(42, "tab-1::impl-42")]);
+            monitor.record_window_snapshot(idle_snapshot(
+                IDLE_NOW,
+                vec![idle_observation(
+                    "tab-1::impl-42",
+                    Some(42),
+                    WindowState::Idle,
+                    false,
+                )],
+            ));
+            let outcome =
+                monitor.reconcile_idle_windows(&settlements(&[(42, settlement)]), IDLE_NOW);
+            assert_eq!(outcome.released, vec![42], "{settlement:?}");
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::Launched)
+            );
+            assert_eq!(
+                monitor
+                    .take_pending_idle_pane_closes()
+                    .into_iter()
+                    .map(|close| close.window_id)
+                    .collect::<Vec<_>>(),
+                vec!["tab-1::impl-42".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn stuck_unknown_stays_on_the_steering_path_and_notifies_after_twice_the_timeout() {
+        // AC-4: an Active record with an idle pane is never released; past
+        // 2 × stuck_timeout_secs the PM is asked for a decision with the count.
+        let mut monitor =
+            autonomous_launched_cohort(&[(44, "tab-1::stuck-44"), (45, "tab-1::stuck-45")]);
+        monitor.autonomous_tuning.stuck_timeout_secs = 600;
+        let active = settlements(&[
+            (44, IssueMonitorExecutionSettlement::Active),
+            (45, IssueMonitorExecutionSettlement::Active),
+        ]);
+        let observe = |monitor: &mut IssueMonitorState, at: &str| {
+            monitor.record_window_snapshot(idle_snapshot(
+                at,
+                vec![
+                    idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+                    idle_observation("tab-1::stuck-45", Some(45), WindowState::Idle, false),
+                ],
+            ));
+        };
+        observe(&mut monitor, IDLE_NOW);
+        let outcome = monitor.reconcile_idle_windows(&active, IDLE_NOW);
+        assert!(outcome.released.is_empty());
+        assert!(outcome.steering_requested.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+
+        // 19 minutes later: under 2 × 600 s, still quiet.
+        let before = "2026-09-07T04:19:00Z";
+        observe(&mut monitor, before);
+        let outcome = monitor.reconcile_idle_windows(&active, before);
+        assert!(outcome.steering_requested.is_empty());
+        assert!(monitor.autonomous_record(44).unwrap().steering.is_none());
+
+        // 21 minutes later: both rows ask the PM, naming the count.
+        let after = "2026-09-07T04:21:00Z";
+        observe(&mut monitor, after);
+        let outcome = monitor.reconcile_idle_windows(&active, after);
+        assert_eq!(outcome.steering_requested, vec![44, 45]);
+        assert_eq!(monitor.active_count(), 2, "steering never frees the slot");
+        let steering = monitor
+            .autonomous_record(44)
+            .unwrap()
+            .steering
+            .clone()
+            .unwrap();
+        assert!(
+            steering.reason.contains("2 idle window"),
+            "reason names the idle count: {}",
+            steering.reason
+        );
+        assert!(steering.reason.contains("stuck_unknown"));
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.level == "warn" && notice.message.contains("2 idle window")),
+            "a PM-facing notice carries the count: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn idle_release_never_touches_running_or_starting_panes_or_monitor_config() {
+        // AC-6: a settled record with a live pane is not idle; nothing moves.
+        let mut monitor =
+            autonomous_launched_cohort(&[(42, "tab-1::impl-42"), (46, "tab-1::impl-46")]);
+        monitor.begin_review(42, 420, "sha42");
+        monitor.record_review_verdict(42, true);
+        let before = monitor.prefs();
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Running, true),
+                idle_observation("tab-1::impl-46", Some(46), WindowState::Starting, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Completed),
+                (46, IssueMonitorExecutionSettlement::Blocked),
+            ]),
+            IDLE_NOW,
+        );
+        assert!(outcome.idle_windows.is_empty());
+        assert!(outcome.released.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        let after = monitor.prefs();
+        assert_eq!(after.enabled, before.enabled);
+        assert_eq!(after.max_active_agents, before.max_active_agents);
+        assert_eq!(after.launched_claims, before.launched_claims);
+        assert_eq!(after.launched_issues, before.launched_issues);
+        assert_eq!(after.launch_bindings, before.launch_bindings);
+    }
+
+    #[test]
+    fn idle_release_is_inert_outside_autonomous_mode_but_the_operator_can_force_it() {
+        // Fail-closed like `recover_stuck_autonomous`: the default human-gated
+        // flow classifies but never releases on its own. AC-5's manual path
+        // applies the same actions on request.
+        let mut monitor = launched_cohort(&[(42, "tab-1::impl-42"), (44, "tab-1::stuck-44")]);
+        assert!(!monitor.autonomous_mode());
+        let settled = settlements(&[
+            (42, IssueMonitorExecutionSettlement::Completed),
+            (44, IssueMonitorExecutionSettlement::Active),
+        ]);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Idle, false),
+                idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settled, IDLE_NOW);
+        assert_eq!(outcome.idle_windows.len(), 2, "classification still runs");
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+
+        // The operator asks for one Issue: the stuck row is reported, not released.
+        let forced = monitor.release_idle_windows(Some(44), "operator", IDLE_NOW);
+        assert!(forced.released.is_empty());
+        assert_eq!(
+            forced.skipped,
+            vec![(44, IssueMonitorIdleKind::StuckUnknown)]
+        );
+        assert_eq!(monitor.active_count(), 2);
+
+        // Without a filter every releasable row goes.
+        let forced = monitor.release_idle_windows(None, "operator", IDLE_NOW);
+        assert_eq!(forced.released, vec![42]);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::impl-42".to_string()]
+        );
+    }
+
+    #[test]
+    fn stale_or_foreign_snapshots_never_produce_a_dead_binding() {
+        // A snapshot older than the freshness window, or from another tab,
+        // proves nothing about this tab's windows.
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        let stale = "2026-09-07T03:00:00Z";
+        monitor.record_window_snapshot(idle_snapshot(stale, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(outcome.idle_windows.is_empty(), "stale snapshot is ignored");
+        assert_eq!(monitor.active_count(), 1);
+
+        monitor.record_window_snapshot(IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-2".to_string(),
+            observed_at: IDLE_NOW.to_string(),
+            windows: Vec::new(),
+        });
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert!(
+            outcome.idle_windows.is_empty(),
+            "another tab cannot see tab-1"
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        // A pane that exists but whose process exited is a dead binding too.
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::dead-43",
+                Some(43),
+                WindowState::Stopped,
+                false,
+            )],
+        ));
+        let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::dead-43".to_string()],
+            "the exited pane is closed once the slot is released"
         );
     }
 }

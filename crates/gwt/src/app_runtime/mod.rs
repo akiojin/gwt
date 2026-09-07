@@ -35,6 +35,29 @@ impl AppEventProxy {
     }
 }
 
+/// Issue #3906 AC-2: the client id the automatic apply commits under; no
+/// frontend client owns it, so failures are broadcast, never replied.
+pub(crate) const UPDATE_AUTO_APPLY_CLIENT_ID: &str = "update-auto-apply";
+
+/// Why [`AppRuntime::release_update_auto_apply_events`] released the drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateAutoApplyRelease {
+    /// The user cancelled during the grace (AC-7).
+    Cancelled,
+    /// The persisted manifest for the drained version is gone.
+    PayloadMissing,
+}
+
+/// A notification-center record about the self-update (AC-12), broadcast to
+/// every client through the Issue Monitor toast channel.
+fn update_notice(level: &str, message: String) -> OutboundEvent {
+    OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        level: level.to_string(),
+        message,
+        issue_number: None,
+    })
+}
+
 #[cfg(test)]
 pub(crate) type BlockingTestTask = Box<dyn FnOnce() + Send + 'static>;
 #[cfg(test)]
@@ -1193,6 +1216,11 @@ pub struct AppRuntime {
     /// apply began. Their sessions bypass the 24h startup auto-resume
     /// freshness gate on the launch that settles the resume marker.
     pub(crate) update_resume_tab_ids: HashSet<String>,
+    /// Issue #3906 AC-2 / AC-7 / AC-8: the automatic apply's pure state
+    /// (quiescence streak, long-drain notice cadence, cancel grace) for the
+    /// active project's `Auto` update drain. Advanced by
+    /// [`AppRuntime::update_drain_tick_events`].
+    pub(crate) update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner,
     /// Issue #4038 (AC-4 / AC-5): project hashes whose `update_drain` hold
     /// (#4037) the settling bootstrap released. The Issue Monitor hold itself
     /// lands with #4037; this is the seam it reads.
@@ -1211,6 +1239,11 @@ pub struct AppRuntime {
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
     /// terminal close, keyed by combined window id. Process-local only.
+    /// Issue #4084: agent windows launched as independent review dispatches
+    /// (Issue #4041), so an idle one with a published verdict can be told from
+    /// an idle implementation window. Process-local: a window whose runtime
+    /// restarted classifies as unknown and is never released automatically.
+    pub(crate) issue_monitor_review_dispatch_windows: HashSet<String>,
     pub(crate) terminal_close_candidates:
         HashMap<String, terminal_convergence::TerminalCloseCandidate>,
     /// One background terminal-convergence scan at a time.
@@ -2280,6 +2313,7 @@ fn run_scheduled_issue_monitor_scan(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
     live_window_ids: Option<&std::collections::BTreeSet<String>>,
+    window_snapshot: Option<&gwt::IssueMonitorWindowSnapshot>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
@@ -2287,11 +2321,39 @@ fn run_scheduled_issue_monitor_scan(
         project_root,
         expected_project_tab_id,
         live_window_ids,
+        window_snapshot,
         now,
         issue_client_factory,
         ISSUE_MONITOR_SCAN_BUDGET,
         ISSUE_MONITOR_COMMIT_BUDGET,
     )
+}
+
+/// Issue #4084 AC-1: hand the canvas snapshot to the live daemon, which owns
+/// the scan in production. Failure is not an error: without a daemon this
+/// process is the driver and classifies against the same snapshot itself.
+fn publish_issue_monitor_window_snapshot(
+    project_root: &Path,
+    snapshot: &gwt::IssueMonitorWindowSnapshot,
+) {
+    #[cfg(unix)]
+    {
+        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "window_snapshot": snapshot }),
+            std::process::id(),
+        );
+        if let Err(error) =
+            gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+        {
+            tracing::debug!(
+                %error,
+                "Issue Monitor window snapshot stayed local; no daemon accepted it"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (project_root, snapshot);
 }
 
 /// The read/probe phase's own budget. Exceeding it degrades the scan's
@@ -2346,10 +2408,15 @@ fn reap_scan_defunct_active_generations(project_root: &Path) {
     }
 }
 
+// The scan's inputs are all independent facts about one tick (scope, canvas,
+// clock, client factory, and the two budgets). Grouping them into a struct
+// would only rename them, so the extra parameter is accepted here.
+#[allow(clippy::too_many_arguments)]
 fn run_scheduled_issue_monitor_scan_with_budgets(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
     live_window_ids: Option<&std::collections::BTreeSet<String>>,
+    window_snapshot: Option<&gwt::IssueMonitorWindowSnapshot>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
     scan_budget: std::time::Duration,
@@ -2362,6 +2429,13 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // `env_test_lock()` and repoint `HOME` instead. The rule is enforced by
     // `crates/gwt/tests/bin_gwt_home_isolation_contract_test.rs`.
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+
+    // Issue #4084 AC-1: publish the canvas before the authority probe. A live
+    // daemon owns the scan in production and would otherwise never see the
+    // window statuses this process is the only one able to read.
+    if let Some(snapshot) = window_snapshot {
+        publish_issue_monitor_window_snapshot(project_root, snapshot);
+    }
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
         .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
@@ -2398,6 +2472,11 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     }
 
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    // Issue #4084: this process is the local driver, so it classifies against
+    // the canvas it just observed.
+    if let Some(snapshot) = window_snapshot {
+        monitor.record_window_snapshot(snapshot.clone());
+    }
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
     let mut completion_probe_error = None;
@@ -2459,6 +2538,18 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             Err(error) => monitor.record_scan_error(now, error.to_string()),
         }
     }
+
+    // Issue #4084: read every launched Issue's execution record before taking
+    // the prefs lock. The classification itself is pure; only this read is
+    // I/O, and an unreadable record fails closed to `stuck_unknown`.
+    let idle_settlements = window_snapshot
+        .map(|_| {
+            gwt::issue_monitor_worker::read_execution_settlements(
+                project_root,
+                &monitor.active_issue_numbers(),
+            )
+        })
+        .unwrap_or_default();
 
     // A daemon may have started while the side-effect-free scan was running.
     // The second lease acquisition is the commit-time authority decision; the
@@ -2527,6 +2618,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         observations,
                     );
                 }
+            }
+            // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
+            // same transaction that persists this scan, after re-adoption has
+            // restored every binding a live window still owns.
+            if window_snapshot.is_some() {
+                latest.reconcile_idle_windows(&idle_settlements, now);
             }
             record_issue_monitor_scan_failures(latest, now, merge_reconciliation_error, Vec::new());
             if let Some(error) = completion_probe_error {
@@ -2689,6 +2786,7 @@ impl AppRuntime {
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             update_resume_tab_ids: HashSet::new(),
+            update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             pending_launch_feedback_contexts: HashMap::new(),
@@ -2706,6 +2804,7 @@ impl AppRuntime {
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             terminal_close_grace: std::time::Duration::from_secs(
@@ -4879,6 +4978,7 @@ impl AppRuntime {
                 }) {
                     let mut status = monitor.status_view();
                     self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
+                    self.fill_update_drain_blocking(&mut status, &monitor);
                     events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorStatus {
                         status: Box::new(status),
                     }));
@@ -5752,12 +5852,19 @@ impl AppRuntime {
                     )
                 })
                 .collect();
+            // Issue #4084 AC-1: the same canvas, with the per-window facts the
+            // idle classifier needs (linked Issue, runtime status, and whether
+            // the window is a review dispatch). Ids are qualified with the
+            // owning tab so a released binding keeps its provenance.
+            let window_snapshot =
+                self.issue_monitor_window_snapshot_for_tab(&expected_project_tab_id, now);
             match self.enqueue_issue_monitor_scan_worker(
                 &project_root,
                 &prefs_path,
                 &expected_project_tab_id,
                 now,
                 live_windows_per_tab,
+                window_snapshot,
             ) {
                 Ok(()) | Err(IssueMonitorScanEnqueueError::AlreadyInFlight) => {}
                 Err(IssueMonitorScanEnqueueError::WorkerUnavailable(error)) => {
@@ -5828,6 +5935,47 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #4084 AC-1: the complete agent-window canvas of one project tab.
+    ///
+    /// Absence from this snapshot is what makes a launch binding dead, so it
+    /// must describe the whole tab: a partial list would release live work.
+    pub(crate) fn issue_monitor_window_snapshot_for_tab(
+        &self,
+        project_tab_id: &str,
+        now: &str,
+    ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        let tab = self.tab(project_tab_id)?;
+        let windows = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset.requires_process())
+            .map(|window| {
+                let window_id = combined_window_id(&tab.id, &window.id);
+                let issue_number = window.linked_issue_number.or_else(|| {
+                    let session_id = window.session_id.as_deref()?;
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number)
+                });
+                gwt::IssueMonitorWindowObservation {
+                    review_dispatch: self
+                        .issue_monitor_review_dispatch_windows
+                        .contains(&window_id),
+                    window_id,
+                    issue_number,
+                    status: window.status,
+                }
+            })
+            .collect();
+        Some(gwt::IssueMonitorWindowSnapshot {
+            project_tab_id: project_tab_id.to_string(),
+            observed_at: now.to_string(),
+            windows,
+        })
+    }
+
     fn enqueue_issue_monitor_scan_worker(
         &mut self,
         project_root: &Path,
@@ -5835,6 +5983,7 @@ impl AppRuntime {
         expected_project_tab_id: &str,
         now: &str,
         live_windows_per_tab: Vec<(String, std::collections::BTreeSet<String>)>,
+        window_snapshot: Option<gwt::IssueMonitorWindowSnapshot>,
     ) -> Result<(), IssueMonitorScanEnqueueError> {
         if !self
             .issue_monitor_scheduled_scans_in_flight
@@ -5868,6 +6017,7 @@ impl AppRuntime {
                     &worker_project_root,
                     Some(&worker_expected_project_tab_id),
                     expected_live_windows,
+                    window_snapshot.as_ref(),
                     &worker_now,
                     &issue_client_factory,
                 );
@@ -5959,12 +6109,17 @@ impl AppRuntime {
             }
         }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // Issue #4084: an on-demand scan classifies idle windows too, so the
+        // PM's `scan_now` frees a slot the same way the periodic tick does.
+        let window_snapshot =
+            self.issue_monitor_window_snapshot_for_tab(&expected_project_tab_id, &now);
         match self.enqueue_issue_monitor_scan_worker(
             &worker_project_root,
             &prefs_path,
             &expected_project_tab_id,
             &now,
             Vec::new(),
+            window_snapshot,
         ) {
             Ok(()) => reply(true, None),
             Err(error) => reply(false, Some(error.reason())),
@@ -6044,6 +6199,18 @@ impl AppRuntime {
         if let Ok(latest) = gwt::load_issue_monitor_prefs(prefs_path) {
             monitor.rebase_gui_observer_prefs(&latest);
         }
+        // Issue #4084 AC-2/AC-3: the scan already committed the release, so the
+        // pane is closed without publishing a second `window_closed` control.
+        for close in monitor.take_pending_idle_pane_closes() {
+            tracing::info!(
+                target: "gwt.pane.teardown",
+                window_id = %close.window_id,
+                issue_number = ?close.issue_number,
+                idle_kind = close.idle_kind.as_str(),
+                "closing an idle agent window whose Issue Monitor launch was released"
+            );
+            events.extend(self.close_window_after_issue_monitor_finalize_events(&close.window_id));
+        }
         events.extend(self.issue_monitor_snapshot_events_for(
             None,
             Some(&project_root),
@@ -6051,6 +6218,24 @@ impl AppRuntime {
         ));
         events.extend(self.pm_periodic_wake_events_for_monitor_at(&project_root, &monitor, now));
         events
+    }
+
+    /// Issue #4084 AC-2/AC-3: close one pane the daemon released. The daemon
+    /// committed the lifecycle edge, so this must not publish another one.
+    pub(crate) fn issue_monitor_idle_pane_close_events(
+        &mut self,
+        window_id: &str,
+        issue_number: Option<u64>,
+        idle_kind: &str,
+    ) -> Vec<OutboundEvent> {
+        tracing::info!(
+            target: "gwt.pane.teardown",
+            window_id,
+            ?issue_number,
+            idle_kind,
+            "closing an idle agent window released by the Issue Monitor daemon"
+        );
+        self.close_window_after_issue_monitor_finalize_events(window_id)
     }
 
     fn issue_monitor_snapshot_events_for(
@@ -6092,6 +6277,7 @@ impl AppRuntime {
         }
         let mut status = monitor.status_view();
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
+        self.fill_update_drain_blocking(&mut status, &monitor);
         let status_event = BackendEvent::IssueMonitorStatus {
             status: Box::new(status),
         };
@@ -6141,6 +6327,412 @@ impl AppRuntime {
         } else if status.state == "settings_required" {
             status.launch_profile_summary = "configure before auto start".to_string();
         }
+    }
+
+    /// Issue #3906 AC-12: while an update drain is raised, the status view
+    /// names what still keeps the host from being quiescent. Only this
+    /// process sees the panes, so the daemon's copy stays empty. Computed
+    /// only while a drain is up; every other status stays IO-free.
+    fn fill_update_drain_blocking(
+        &self,
+        status: &mut gwt::IssueMonitorStatusView,
+        monitor: &gwt::IssueMonitorState,
+    ) {
+        if let Some(drain) = status.update_drain.as_mut() {
+            drain.blocking = self.update_drain_blockers(monitor);
+        }
+    }
+
+    /// Issue #3906 AC-8: the blockers of [`gwt::update_drain::update_quiescence`]
+    /// as this process observes them: agent panes that are Running / Starting
+    /// (the resident PM pane excluded), pending `AcquireClaim` effects,
+    /// Active execution records under live agent worktrees, and a
+    /// verification lease held under this process tree.
+    fn update_drain_blockers(
+        &self,
+        monitor: &gwt::IssueMonitorState,
+    ) -> Vec<gwt::update_drain::UpdateBlocker> {
+        let snapshot = self.update_quiescence_snapshot(monitor);
+        gwt::update_drain::update_quiescence(&snapshot)
+            .err()
+            .unwrap_or_default()
+    }
+
+    fn update_quiescence_snapshot(
+        &self,
+        monitor: &gwt::IssueMonitorState,
+    ) -> gwt::update_drain::UpdateQuiescenceSnapshot {
+        let mut window_ids: Vec<&String> = self.window_lookup.keys().collect();
+        window_ids.sort();
+        let panes = window_ids
+            .into_iter()
+            .filter_map(|window_id| {
+                let address = self.window_lookup.get(window_id)?;
+                let tab = self.tab(&address.tab_id)?;
+                let window = tab.workspace.window(&address.raw_id)?;
+                if !gwt::window_state::uses_agent_hook_state(window.preset) {
+                    return None;
+                }
+                let resident_pm =
+                    self.pm_sessions
+                        .get(&tab.project_root)
+                        .is_some_and(|pm_session| {
+                            window.session_id.as_deref() == Some(pm_session.as_str())
+                        });
+                Some(gwt::update_drain::PaneObservation {
+                    window_id: window_id.clone(),
+                    label: window
+                        .purpose_title
+                        .clone()
+                        .unwrap_or_else(|| window.title.clone()),
+                    state: self.window_status(window_id).unwrap_or(window.status),
+                    resident_pm,
+                })
+            })
+            .collect();
+        let pending_acquire_claims = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                    Some(*issue_number)
+                }
+                _ => None,
+            })
+            .collect();
+        let mut active_executions: Vec<String> = self
+            .active_agent_sessions
+            .values()
+            .filter(|session| {
+                matches!(
+                    gwt::cli::execution_state::load(&session.worktree_path),
+                    Ok(Some(record))
+                        if record.status == gwt::cli::execution_state::ExecutionControlStatus::Active
+                )
+            })
+            .map(|session| session.worktree_path.to_string_lossy().to_string())
+            .collect();
+        active_executions.sort();
+        active_executions.dedup();
+        let held_verification_leases =
+            gwt_core::index_coordinator::IndexCoordinator::open_default()
+                .ok()
+                .and_then(|coordinator| coordinator.heavy_lease_status().ok())
+                .filter(|lease| lease.held && !lease.expired)
+                .filter(|lease| {
+                    lease.owner.as_ref().is_some_and(|owner| {
+                        gwt::process::is_descendant_of(owner.pid, std::process::id())
+                    })
+                })
+                .and_then(|lease| lease.lease_id)
+                .into_iter()
+                .collect();
+        gwt::update_drain::UpdateQuiescenceSnapshot {
+            panes,
+            pending_acquire_claims,
+            active_executions,
+            held_verification_leases,
+        }
+    }
+
+    /// Issue #3906 AC-3: a staged update (manifest persisted) raises the
+    /// `Auto` update drain when the Issue Monitor runs unattended and
+    /// auto-apply is on (the default while autonomous). Attended mode keeps
+    /// the manual update button and raises nothing. AC-5 / AC-6: an install
+    /// that needs elevation, or a version whose apply already failed, is
+    /// refused unattended and falls back to the manual button with a notice.
+    pub(crate) fn update_staged_events(&mut self, version: &str) -> Vec<OutboundEvent> {
+        let last_failed_version = gwt_core::update::load_update_apply_result()
+            .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
+            .map(|result| result.to_version);
+        let refusal = gwt::update_drain::auto_apply_refusal(
+            gwt_core::update::install_requires_elevation(),
+            last_failed_version.as_deref(),
+            version,
+        );
+        self.update_staged_events_with(version, refusal)
+    }
+
+    /// The drain rides the same `config_set` control the operator uses, so
+    /// daemon and local fallback agree; nothing about launches in flight
+    /// changes (#4037). Sends nothing to the event loop: the only automatic
+    /// route to a restart is [`Self::update_drain_tick_events`] (#4076 AC-2).
+    pub(crate) fn update_staged_events_with(
+        &mut self,
+        version: &str,
+        refusal: Option<gwt::update_drain::UpdateAutoApplyRefusal>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return Vec::new();
+        };
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let auto_apply = prefs.auto_apply_updates.unwrap_or(prefs.autonomous_mode);
+        if !(prefs.autonomous_mode && auto_apply) {
+            return Vec::new();
+        }
+        if let Some(refusal) = refusal {
+            tracing::warn!(
+                target: "gwt::update",
+                version,
+                ?refusal,
+                "staged update is not applied automatically; manual update button kept"
+            );
+            return vec![update_notice("warn", refusal.notice(version))];
+        }
+        tracing::info!(
+            target: "gwt::update",
+            version,
+            "staged update raises the Issue Monitor update drain (autonomous auto-apply)"
+        );
+        self.update_auto_apply.reset();
+        let version = version.to_string();
+        let publication = self.publish_active_issue_monitor_control(serde_json::json!({
+            "config_set": {
+                "update_drain": { "reason": "auto", "version": version },
+            }
+        }));
+        let mut events = match publication {
+            Ok(()) => Vec::new(),
+            Err(error) if error.allows_local_fallback() => {
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                match self.commit_local_issue_monitor_control(|monitor| {
+                    monitor.set_update_drain(
+                        gwt::IssueMonitorUpdateDrainReason::Auto,
+                        &version,
+                        &now,
+                    );
+                }) {
+                    Ok((monitor, ())) => {
+                        self.issue_monitor_snapshot_events_for(None, Some(&project_root), monitor)
+                    }
+                    Err(local_error) => {
+                        return self.issue_monitor_control_error_events(
+                            None,
+                            local_error,
+                            "update-drain",
+                            None,
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                return self.issue_monitor_control_error_events(None, error, "update-drain", None)
+            }
+        };
+        // AC-12: drain start is a notification-center record.
+        events.push(update_notice(
+            "info",
+            format!(
+                "Update v{version} staged — draining agents before applying automatically; new launches are held."
+            ),
+        ));
+        events
+    }
+
+    /// Issue #3906 AC-2 / AC-7 / AC-8 / AC-9 (#4076 AC-2 / AC-5): one drain
+    /// tick. While the active project holds an `Auto` update drain, observe
+    /// the host, and act on the planner's step: warn with the blockers when
+    /// the drain has lasted `update_drain_notify_after_secs`, announce the
+    /// cancel grace once the host is quiescent, and request the graceful
+    /// apply through `ApplyUpdateDrained` when the grace elapsed. Agents are
+    /// never stopped here.
+    pub(crate) fn update_drain_tick_events(&mut self) -> Vec<OutboundEvent> {
+        self.update_drain_tick_events_at(chrono::Utc::now())
+    }
+
+    pub(crate) fn update_drain_tick_events_at(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let Some((prefs, drain)) = self.active_auto_update_drain() else {
+            self.update_auto_apply.reset();
+            return Vec::new();
+        };
+        let monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
+        let snapshot = self.update_quiescence_snapshot(&monitor);
+        let drained_for_secs = chrono::DateTime::parse_from_rfc3339(&drain.since)
+            .ok()
+            .map(|since| {
+                (now - since.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0) as u64
+            })
+            .unwrap_or(0);
+        let step = self
+            .update_auto_apply
+            .tick(gwt::update_drain::UpdateAutoApplyObservation {
+                version: &drain.version,
+                now_secs: now.timestamp().max(0) as u64,
+                drained_for_secs,
+                outcome: gwt::update_drain::update_quiescence(&snapshot),
+                notify_after_secs: prefs.autonomous_tuning.update_drain_notify_after_secs,
+                grace_secs: gwt::update_drain::DEFAULT_AUTO_APPLY_GRACE_SECS,
+            });
+        let version = drain.version.clone();
+        let blocker_list = |blockers: &[gwt::update_drain::UpdateBlocker]| {
+            blockers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match step {
+            gwt::update_drain::UpdateAutoApplyStep::Idle => Vec::new(),
+            gwt::update_drain::UpdateAutoApplyStep::StillDraining(blockers) => {
+                vec![update_notice(
+                    "warn",
+                    format!(
+                        "Update v{version} still pending after {} min — waiting for: {}. Agents are never stopped automatically.",
+                        drained_for_secs / 60,
+                        blocker_list(&blockers)
+                    ),
+                )]
+            }
+            gwt::update_drain::UpdateAutoApplyStep::Scheduled { .. } => {
+                let grace = gwt::update_drain::DEFAULT_AUTO_APPLY_GRACE_SECS;
+                vec![
+                    update_notice(
+                        "info",
+                        format!(
+                            "Update v{version} applies in {grace} s — the host is quiet. Cancel from the update banner to keep this gwt running."
+                        ),
+                    ),
+                    OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                        version,
+                        phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                        grace_secs: Some(grace),
+                    }),
+                ]
+            }
+            gwt::update_drain::UpdateAutoApplyStep::Postponed(blockers) => vec![
+                update_notice(
+                    "info",
+                    format!(
+                        "Update v{version} automatic apply postponed — waiting for: {}.",
+                        blocker_list(&blockers)
+                    ),
+                ),
+                OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                    version,
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Postponed,
+                    grace_secs: None,
+                }),
+            ],
+            gwt::update_drain::UpdateAutoApplyStep::Apply => {
+                tracing::info!(
+                    target: "gwt::update",
+                    version,
+                    "host quiescent and grace elapsed; requesting graceful update apply"
+                );
+                self.proxy.send(UserEvent::ApplyUpdateDrained {
+                    version: version.clone(),
+                });
+                vec![
+                    update_notice(
+                        "info",
+                        format!("Update v{version} applying now — gwt restarts and resumes."),
+                    ),
+                    OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                        version,
+                        phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                        grace_secs: None,
+                    }),
+                ]
+            }
+        }
+    }
+
+    /// The active project's prefs and its `Auto` update drain, if raised.
+    fn active_auto_update_drain(
+        &self,
+    ) -> Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)> {
+        let project_root = self.active_project_root()?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .ok()?;
+        let drain = prefs
+            .update_drain
+            .clone()
+            .filter(|drain| drain.reason == gwt::IssueMonitorUpdateDrainReason::Auto)?;
+        Some((prefs, drain))
+    }
+
+    /// Issue #3906 AC-7 / AC-13 (#4076 AC-2): the user cancelled the
+    /// automatic apply from the update banner.
+    fn cancel_update_auto_apply_events(&mut self) -> Vec<OutboundEvent> {
+        let Some((_, drain)) = self.active_auto_update_drain() else {
+            return vec![update_notice(
+                "info",
+                "No automatic update apply is pending.".to_string(),
+            )];
+        };
+        self.release_update_auto_apply_events(&drain.version, UpdateAutoApplyRelease::Cancelled)
+    }
+
+    /// Release the `Auto` update drain for `version` without applying: the
+    /// planner forgets the version, the hold is cleared through the same
+    /// control the operator uses (launches resume), and the CTA plus the
+    /// notification center learn why. The staged payload, when still on
+    /// disk, stays available to the manual update button.
+    pub(crate) fn release_update_auto_apply_events(
+        &mut self,
+        version: &str,
+        release: UpdateAutoApplyRelease,
+    ) -> Vec<OutboundEvent> {
+        self.update_auto_apply.cancel(version);
+        let project_root = self.active_project_root().map(Path::to_path_buf);
+        let publication = self.publish_active_issue_monitor_control(
+            serde_json::json!({ "config_set": { "update_drain": false } }),
+        );
+        let mut events = match publication {
+            Ok(()) => Vec::new(),
+            Err(error) if error.allows_local_fallback() => {
+                match self
+                    .commit_local_issue_monitor_control(|monitor| monitor.clear_update_drain())
+                {
+                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
+                        None,
+                        project_root.as_deref(),
+                        monitor,
+                    ),
+                    Err(local_error) => self.issue_monitor_control_error_events(
+                        None,
+                        local_error,
+                        "update-drain",
+                        None,
+                    ),
+                }
+            }
+            Err(error) => {
+                self.issue_monitor_control_error_events(None, error, "update-drain", None)
+            }
+        };
+        let (level, message) = match release {
+            UpdateAutoApplyRelease::Cancelled => (
+                "info",
+                format!(
+                    "Update v{version} automatic apply cancelled — the update stays staged; use the update button when ready."
+                ),
+            ),
+            UpdateAutoApplyRelease::PayloadMissing => (
+                "error",
+                format!(
+                    "Update v{version} is no longer staged on disk — the drain was released; download it again from the update button."
+                ),
+            ),
+        };
+        events.push(update_notice(level, message));
+        events.push(OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+            version: version.to_string(),
+            phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
+            grace_secs: None,
+        }));
+        events
     }
 
     pub(crate) fn register_agent_backend_connection_probe(
@@ -6748,6 +7340,7 @@ impl AppRuntime {
                                 &mut status,
                                 Some(project_root.as_path()),
                             );
+                            self.fill_update_drain_blocking(&mut status, &monitor);
                             events.push(OutboundEvent::reply(
                                 client_id.clone(),
                                 BackendEvent::IssueMonitorStatus {
@@ -6786,6 +7379,21 @@ impl AppRuntime {
                             .set_autonomous_mode_with_effect_revocation(enabled)
                             .ok_or_else(|| "authority epoch exhausted".to_string())?;
                         Ok(())
+                    },
+                )
+            }
+            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+                // Issue #3906 AC-1: the override rides the same `config_set`
+                // control the CLI uses, so daemon and local fallback agree.
+                let publication = self.publish_active_issue_monitor_control(
+                    serde_json::json!({ "config_set": { "auto_apply_updates": enabled } }),
+                );
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "auto-apply-updates",
+                    |monitor| {
+                        monitor.set_auto_apply_updates(Some(enabled));
                     },
                 )
             }
@@ -6860,6 +7468,7 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
             }

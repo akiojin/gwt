@@ -311,6 +311,13 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
 `autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
+`review_verdict_published` / `execution_settled` / `binding_dead` /
+`stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
+前 3 種は Issue を requeue せずに解放して pane を閉じます。実行レコードが Active の
+まま idle な `stuck_unknown` だけは人の判断に残り、stuck タイムアウトの 2 倍を超えると
+判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
+または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
 プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
 で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
@@ -437,6 +444,26 @@ Board reminders、discussion/plan/build Stop checks、coordination-event summari
   （worktree ローカルの `.codex/hooks.json` と repo root 側の workspace-home
   コピー）所有します。hook health の報告と self-heal は常に同じファイル集合を
   対象にします。
+
+### Codex 推奨設定
+
+gwt は GUI 起動のたびに、ホストの Codex 設定（`$CODEX_HOME/config.toml`、
+既定は `~/.codex/config.toml`）に gwt 推奨の
+`features.context_management.experimental_mode = true` が入っていることを
+保証します。この設定は、コンテキストを単一の要約へ繰り返し圧縮する代わりに、
+メモと検索可能な履歴として蓄積された詳細を保持します。gwt が書き込むのは
+キーが未設定の場合だけで、ファイル内の他の table はすべて保持され、既に
+キーを持つ config は書き換えられません。無効化したい場合は `config.toml` に
+明示的に記述してください:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt は明示された値（`true` / `false` を問わず）を尊重し、変更しません。
+config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
+error ledger（`errors.list`）に記録されます。
 
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に
