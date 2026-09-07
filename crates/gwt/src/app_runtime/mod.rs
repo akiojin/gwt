@@ -2234,6 +2234,7 @@ fn local_completion_probe(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
+    batch: Option<&gwt::issue_monitor_worker::LinkedPrProbeBatch>,
 ) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure> {
     #[cfg(test)]
     {
@@ -2244,7 +2245,29 @@ fn local_completion_probe(
             return hook(issue.number);
         }
     }
-    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified_with(
+        owner, repo, issue, batch,
+    )
+}
+
+/// The bulk linked-PR read of one GUI-local scan (SPEC #4093 FR-005). Under a
+/// test probe hook the batch stays empty so the hook answers every probe.
+fn local_probe_batch<'a>(
+    owner: &str,
+    repo: &str,
+    issues: impl Iterator<Item = &'a gwt::IssueMonitorIssue>,
+) -> gwt::issue_monitor_worker::LinkedPrProbeBatch {
+    #[cfg(test)]
+    {
+        let hooked = local_completion_probe_test_hook()
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false);
+        if hooked {
+            return gwt::issue_monitor_worker::LinkedPrProbeBatch::default();
+        }
+    }
+    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues)
 }
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
@@ -2278,6 +2301,15 @@ fn observe_local_claim_candidates(
         0
     };
     let (available, candidates) = monitor.claim_probe_plan(claimable_cap);
+    // SPEC #4093 FR-005: one bulk linked-PR read for the whole frontier.
+    let batch = local_probe_batch(
+        owner,
+        repo,
+        loaded
+            .issues
+            .iter()
+            .filter(|issue| candidates.contains(&issue.number)),
+    );
     let observations =
         claim_candidate_completion_observations(available, candidates, |issue_number| {
             let Some(issue) = loaded
@@ -2287,7 +2319,7 @@ fn observe_local_claim_candidates(
             else {
                 return Ok(false);
             };
-            observe_claim_candidate_completion(owner, repo, issue)
+            observe_claim_candidate_completion(owner, repo, issue, &batch)
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
@@ -2311,10 +2343,11 @@ fn observe_claim_candidate_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
+    batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
 ) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
-    match local_completion_probe(owner, repo, issue) {
+    match local_completion_probe(owner, repo, issue, Some(batch)) {
         Ok(completed) => Ok(completed),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {

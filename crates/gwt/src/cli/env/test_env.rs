@@ -309,7 +309,7 @@ impl CliEnv for TestEnv {
         options: &gwt_git::PrInventoryOptions,
     ) -> io::Result<gwt_git::PrInventoryRead> {
         self.pr_list_call_count += 1;
-        self.pr_list_options = Some(*options);
+        self.pr_list_options = Some(options.clone());
         Ok(gwt_git::PrInventoryRead {
             items: self.pr_list.clone(),
             source: "github",

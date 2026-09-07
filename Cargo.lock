@@ -1384,6 +1384,7 @@ dependencies = [
  "dunce",
  "flate2",
  "fs2",
+ "gwt-config",
  "hex",
  "ignore",
  "libc",

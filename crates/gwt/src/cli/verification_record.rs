@@ -2278,6 +2278,11 @@ pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
 /// `std::process::Command` cannot launch, …) is recorded as a failed result
 /// (exit `-1`) instead of aborting the run — the record must be written even
 /// when commands fail, and the partial transcript must survive.
+/// Live GitHub opt-in must never cross the `verify.run` child boundary
+/// (SPEC #4093 FR-008, Issue #3850): a `cargo test` child that inherits it
+/// spends the real budget from every fixture-free test.
+const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
+
 fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
     execute_command_with_isolation(worktree, command, false)
 }
@@ -2289,7 +2294,10 @@ fn execute_command_with_isolation(
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
     let mut process = gwt_core::process::hidden_command(&args[0]);
-    process.args(&args[1..]).current_dir(worktree);
+    process
+        .args(&args[1..])
+        .current_dir(worktree)
+        .env_remove(LIVE_GITHUB_OPT_IN_ENV);
     if isolated_baseline {
         gwt_core::process::scrub_git_env(&mut process);
         process.env_remove("CARGO_TARGET_DIR");
@@ -2558,6 +2566,11 @@ where
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
     transcript.push_str(quarantine_diagnostics);
+    if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
+        transcript.push_str(
+            "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
+        );
+    }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let (exit_code, tail) = execute_command(worktree, command)?;
@@ -4451,6 +4464,50 @@ mod tests {
     }
 
     // T-110: verify.run executes real commands, records exit codes, and the
+    /// SPEC #4093 AC-11 (Issue #3850): the live GitHub opt-in set in the
+    /// operator's shell must not reach the `cargo test` child, whose fixtures
+    /// rely on the gh guard failing closed. The child re-enters this test
+    /// binary and checks its own environment.
+    #[test]
+    fn verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once() {
+        const CHILD_PROBE: &str = "GWT_VERIFY_LIVE_GH_CHILD_PROBE";
+        const TEST_NAME: &str =
+            "cli::verification_record::tests::verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once";
+
+        if std::env::var_os(CHILD_PROBE).is_some() {
+            assert!(
+                std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
+                "verify.run must not expose its live GitHub opt-in to a test child"
+            );
+            return;
+        }
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let current_exe = std::env::current_exe().unwrap();
+        let command = format!(
+            r#""{}" --exact {TEST_NAME} --nocapture"#,
+            current_exe.display()
+        );
+        let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
+        let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+
+        let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(
+            transcript.matches("GWT_ALLOW_REAL_GH").count(),
+            1,
+            "one warning names the ignored opt-in: {transcript}"
+        );
+        assert_eq!(
+            std::env::var_os("GWT_ALLOW_REAL_GH").as_deref(),
+            Some("1".as_ref()),
+            "the operator's own environment is left alone"
+        );
+    }
+
     // record is written even when a command fails.
     #[test]
     fn run_verification_records_pass_and_fail() {
