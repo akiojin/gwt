@@ -358,6 +358,48 @@ pub fn load_update_apply_result_in(dir: &Path) -> Option<UpdateApplyResult> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Issue #3906 AC-6: whether applying an update needs elevated permissions —
+/// the install location of the running executable is not writable by this
+/// user (an administrator install). Decided by a write probe on the install
+/// root, never by parsing OS ACLs; an unknown executable path counts as
+/// writable so a dev build is never held back.
+pub fn install_requires_elevation() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| install_root_for(&exe))
+        .is_some_and(|root| !dir_writable(&root))
+}
+
+/// The directory an update replaces: the executable's directory, or on macOS
+/// the parent of the `.app` bundle (the dmg install swaps the whole bundle).
+pub fn install_root_for(exe: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        if let Some(bundle) = exe
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+        {
+            return bundle.parent().map(Path::to_path_buf);
+        }
+    }
+    exe.parent().map(Path::to_path_buf)
+}
+
+/// Whether this user can create a file in `dir` (probe file, removed again).
+pub fn dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".gwt-write-probe-{}", std::process::id()));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 fn write_json_atomically<T: Serialize>(
     dir: &Path,
     file_name: &str,
@@ -4728,6 +4770,47 @@ mod tests {
                 .contains("9.31.0"),
             "failure message names the expected version: {result:?}"
         );
+    }
+
+    // Issue #3906 AC-6: the elevation probe is a write test on the install
+    // root — the bundle's parent on macOS, the executable's directory
+    // elsewhere — so an administrator install falls back to the manual path.
+    #[test]
+    fn install_root_and_writability_probe_decide_elevation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let exe = temp.path().join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let root = install_root_for(&exe).expect("root");
+        if cfg!(target_os = "macos") {
+            let bundled = temp
+                .path()
+                .join("Applications")
+                .join("GWT.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("gwt");
+            assert_eq!(
+                install_root_for(&bundled).expect("bundle root"),
+                temp.path().join("Applications")
+            );
+        }
+        assert_eq!(root, exe.parent().unwrap());
+        assert!(dir_writable(&root));
+        assert!(
+            !dir_writable(&temp.path().join("missing")),
+            "a directory that cannot take a file is not writable"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = temp.path().join("locked");
+            fs::create_dir_all(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+            let writable = dir_writable(&locked);
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            // root ignores mode bits; everyone else is refused.
+            assert_eq!(writable, unsafe { libc::geteuid() } == 0);
+        }
     }
 
     #[test]
