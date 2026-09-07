@@ -15,6 +15,15 @@ test.describe("Agent-prioritized focus cycling", () => {
   test("cycles only Agents by runtime priority and activates hidden tabs before focus", async ({
     page,
   }) => {
+    // Issue #4069 AC-2: the headed run must finish with zero console / page
+    // errors in both themes, not just the right focus targets.
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
     await installEmbeddedRoutes(page);
     await installFocusCycleBackend(page);
     await page.goto(APP_URL);
@@ -138,6 +147,9 @@ test.describe("Agent-prioritized focus cycling", () => {
         .map((message) => message.kind ?? "")
         .filter((kind) => !navigationKinds.has(kind)),
     ).toEqual([]);
+
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
   });
 });
 
