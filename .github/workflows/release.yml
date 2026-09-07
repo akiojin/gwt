@@ -5,6 +5,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Issue #4119: serialize release runs without cancelling one. A release creates
+# a tag and uploads assets, so cancel-in-progress would leave a partial release;
+# a second push to main waits for the first run instead. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
