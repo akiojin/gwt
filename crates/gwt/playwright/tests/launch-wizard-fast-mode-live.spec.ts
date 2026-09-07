@@ -81,13 +81,18 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     await expect(submit).toHaveText("Continue");
     await submit.click();
 
-    await expect(submit).toHaveText(/^(Continue|Launch)$/);
+    // Runtime resolution and launch materialization surface transient
+    // "Preparing..." / "Launching..." labels; on a loaded host they outlast the
+    // default expect timeout, so wait for the settled label explicitly.
+    await expect(submit).toHaveText(/^(Continue|Launch)$/, { timeout: 30_000 });
     await expect(fastModeSummaryValue(page)).toHaveText("on");
     if ((await submit.textContent())?.trim() === "Continue") {
       await submit.click();
     }
 
-    await expect(submit).toHaveText(/^(Launch|Create and launch)$/);
+    await expect(submit).toHaveText(/^(Launch|Create and launch)$/, {
+      timeout: 30_000,
+    });
     await expect(fastModeSummaryValue(page)).toHaveText("on");
   });
 
