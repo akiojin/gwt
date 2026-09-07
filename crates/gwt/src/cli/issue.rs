@@ -2077,17 +2077,55 @@ fn monitor_launch_is_live(
 fn publish_monitor_wait_control(
     project_root: &std::path::Path,
     wait: serde_json::Value,
-) -> Result<(), String> {
+) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({ "wait": wait }),
         std::process::id(),
     );
-    crate::daemon_publisher::publish_event(
-        project_root,
-        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
-        payload,
-    )
+    crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+}
+
+/// Issue #4078 AC-2: commit the wait declaration straight to the durable Issue
+/// Monitor prefs when no daemon is reachable to publish it to.
+///
+/// Only reached for a definitely-unsent publish. The prefs writer re-checks the
+/// daemon authority fence under its own lock, so a daemon that appears between
+/// the publish attempt and the commit refuses the write rather than racing the
+/// daemon's own copy of the record.
+fn record_monitor_wait_in_prefs(
+    project_root: &std::path::Path,
+    number: u64,
+    reason: &str,
+    resume_condition: &str,
+    clear: bool,
+    now: &str,
+) -> Result<(), String> {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+        let position = prefs
+            .autonomous_records
+            .iter()
+            .position(|record| record.issue_number == number);
+        let index = match position {
+            Some(index) => index,
+            None => {
+                prefs
+                    .autonomous_records
+                    .push(crate::AutonomousIssueRecord::new(number));
+                prefs.autonomous_records.len() - 1
+            }
+        };
+        let record = &mut prefs.autonomous_records[index];
+        if clear {
+            crate::clear_wait_on_record(record, now);
+        } else {
+            crate::declare_wait_on_record(record, reason, resume_condition, now);
+        }
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 /// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
@@ -2145,28 +2183,41 @@ fn run_monitor_wait<E: CliEnv>(
             "at": now,
         })
     };
-    match publish_monitor_wait_control(&project_root, wait) {
-        Ok(()) => {
-            let mut response = serde_json::json!({
-                "number": number,
-                "status": if clear { "cleared" } else { "waiting" },
-                "at": now,
-            });
-            if !clear {
-                response["reason"] = serde_json::Value::from(reason.unwrap_or_default());
-                response["resume_condition"] =
-                    serde_json::Value::from(resume_condition.unwrap_or_default());
-                response["max_wait_secs"] =
-                    serde_json::Value::from(crate::AUTONOMOUS_WAIT_MAX_SECS);
-                response["detail"] = serde_json::Value::from(
-                    "stuck detection is suspended for this launch until the wait is cleared or max_wait_secs elapses; clear it with params.clear:true when you resume",
+    // Issue #4078 AC-2: publishing is how a *running* daemon learns about the
+    // wait, not what makes the declaration true. Where no daemon is reachable —
+    // the shape a platform without a publish transport produces — the
+    // declaration is committed to the durable prefs the offline
+    // `issue.monitor.status` projection already reads, so an agent is never
+    // left unable to say it is waiting.
+    let transport = match publish_monitor_wait_control(&project_root, wait) {
+        Ok(()) => "daemon",
+        Err(error) if error.allows_local_fallback() => {
+            if let Err(commit_error) = record_monitor_wait_in_prefs(
+                &project_root,
+                number,
+                reason.unwrap_or_default(),
+                resume_condition.unwrap_or_default(),
+                clear,
+                &now,
+            ) {
+                out.push_str(
+                    &serde_json::json!({
+                        "number": number,
+                        "status": "failed",
+                        "detail": format!(
+                            "wait declaration could not be published ({error}) or recorded locally: {commit_error}"
+                        ),
+                    })
+                    .to_string(),
                 );
+                out.push('\n');
+                return Ok(1);
             }
-            out.push_str(&response.to_string());
-            out.push('\n');
-            Ok(0)
+            "local"
         }
         Err(error) => {
+            // Ambiguous or rejected: a second writer here could contradict the
+            // daemon's own copy of the record, so this stays fail-closed.
             out.push_str(
                 &serde_json::json!({
                     "number": number,
@@ -2176,9 +2227,27 @@ fn run_monitor_wait<E: CliEnv>(
                 .to_string(),
             );
             out.push('\n');
-            Ok(1)
+            return Ok(1);
         }
+    };
+    let mut response = serde_json::json!({
+        "number": number,
+        "status": if clear { "cleared" } else { "waiting" },
+        "at": now,
+        "transport": transport,
+    });
+    if !clear {
+        response["reason"] = serde_json::Value::from(reason.unwrap_or_default());
+        response["resume_condition"] =
+            serde_json::Value::from(resume_condition.unwrap_or_default());
+        response["max_wait_secs"] = serde_json::Value::from(crate::AUTONOMOUS_WAIT_MAX_SECS);
+        response["detail"] = serde_json::Value::from(
+            "stuck detection is suspended for this launch until the wait is cleared or max_wait_secs elapses; clear it with params.clear:true when you resume",
+        );
     }
+    out.push_str(&response.to_string());
+    out.push('\n');
+    Ok(0)
 }
 
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
@@ -4074,6 +4143,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            review_windows: Vec::new(),
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4123,6 +4193,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            review_windows: Vec::new(),
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4223,6 +4294,7 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                review_windows: Vec::new(),
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -4277,6 +4349,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            review_windows: Vec::new(),
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -5501,6 +5574,136 @@ mod tests {
         assert!(
             prefs.failed_issues.is_empty(),
             "a failover is not a failure and must not leave a hold behind"
+        );
+    }
+
+    /// Issue #4078 AC-1/AC-2: accepting a wait declaration must not depend on
+    /// a daemon being reachable. With no daemon at all (the shape a platform
+    /// without a publish transport produces) the declaration is still recorded
+    /// in the durable prefs and `issue.monitor.status` shows the row waiting.
+    #[test]
+    fn monitor_wait_records_the_declaration_durably_without_a_publish_transport() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(42),
+                title: "Waiting on the host lease".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                updated_at: UpdatedAt::new("2026-09-07T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write cache candidate");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWait {
+                project_root: Some(repo.clone()),
+                number: Some(42),
+                reason: Some("host 排他の順番待ち".to_string()),
+                resume_condition: Some("verify lease の解放".to_string()),
+                clear: false,
+            },
+            &mut out,
+        )
+        .expect("wait runs");
+        assert_eq!(code, 0, "{out}");
+        let declared: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("declare json: {out}");
+        assert_eq!(declared["status"], "waiting", "{out}");
+        assert_eq!(declared["reason"], "host 排他の順番待ち", "{out}");
+        assert_eq!(declared["resume_condition"], "verify lease の解放", "{out}");
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("autonomous record for 42");
+        let wait = record.wait.as_ref().expect("durable wait declaration");
+        assert_eq!(wait.reason, "host 排他の順番待ち");
+        assert_eq!(wait.resume_condition, "verify lease の解放");
+        assert!(
+            record.last_heartbeat.is_some(),
+            "declaring is itself a liveness signal"
+        );
+
+        let mut status_out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus {
+                project_root: Some(repo.clone()),
+            },
+            &mut status_out,
+        )
+        .expect("status runs");
+        let status: serde_json::Value =
+            serde_json::from_str(status_out.trim()).expect("status json: {status_out}");
+        let row = status["inbox"]
+            .as_array()
+            .expect("inbox array")
+            .iter()
+            .find(|row| row["issue_number"] == 42)
+            .expect("inbox row 42");
+        assert_eq!(
+            row["waiting"]["reason"], "host 排他の順番待ち",
+            "{status_out}"
+        );
+        assert_eq!(
+            row["waiting"]["resume_condition"], "verify lease の解放",
+            "{status_out}"
+        );
+        assert_eq!(row["waiting"]["since"], wait.since, "{status_out}");
+        assert!(
+            row["waiting"]["expires_at"].is_string(),
+            "{status_out}: the PM reads when the declaration stops protecting the row"
+        );
+
+        let mut clear_out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWait {
+                project_root: Some(repo.clone()),
+                number: Some(42),
+                reason: None,
+                resume_condition: None,
+                clear: true,
+            },
+            &mut clear_out,
+        )
+        .expect("clear runs");
+        assert_eq!(code, 0, "{clear_out}");
+        assert!(clear_out.contains("\"status\":\"cleared\""), "{clear_out}");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(
+            persisted
+                .autonomous_records
+                .iter()
+                .find(|record| record.issue_number == 42)
+                .expect("autonomous record for 42")
+                .wait
+                .is_none(),
+            "clearing must be durable too, or the row stays protected forever"
         );
     }
 

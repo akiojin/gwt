@@ -1078,6 +1078,7 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
     let request_fingerprint = pending_delivery_request_fingerprint(event, journal_entry)?;
     if let Some(record) = load_work_event_settlement_record_from_resolved_dir(trusted_dir)?
         .filter(|record| record.obligation_open)
+        .filter(|record| !open_obligation_is_superseded(worktree, record))
     {
         if let Some(delivery) = pending_delivery_for_record(&record) {
             let same_event_identity = delivery.event_id == event.id
@@ -1137,6 +1138,53 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
     Ok(record)
 }
 
+/// #4011: an open obligation left behind by a legacy or predecessor
+/// generation can never be retried by the current generation — its request
+/// fingerprint carries the predecessor Session — so it would pin the receipt
+/// forever. The current generation's own terminal update supersedes it; an
+/// undelivered predecessor shard still dirties the tracked store, so no
+/// delivery pressure is lost. An unreadable authority keeps the obligation.
+fn open_obligation_is_superseded(worktree: &Path, record: &WorkEventSettlementRecord) -> bool {
+    match work_event_receipt_authorizes_current_generation(worktree, record) {
+        Ok(authorized) => !authorized,
+        Err(error) => {
+            tracing::warn!(%error, "open Work event obligation authority is unreadable");
+            false
+        }
+    }
+}
+
+/// #4011 (AC-6): the pending shard is not on disk, so whatever Git state the
+/// record captured earlier is stale. The honest fact is the unpersisted
+/// terminal mutation itself. A record that already reports that mutation is
+/// left byte-identical, so legacy receipts keep their own journal identity.
+fn refresh_unpersisted_pending_record(
+    worktree: &Path,
+    trusted_dir: &Path,
+    record: &WorkEventSettlementRecord,
+    delivery: &PendingWorkEventDelivery,
+) -> io::Result<WorkEventSettlementRecord> {
+    if matches!(
+        &record.status,
+        WorkEventSettlementStatus::PendingMutation { event_id, .. } if *event_id == delivery.event_id
+    ) {
+        return Ok(record.clone());
+    }
+    let refreshed = WorkEventSettlementRecord {
+        status: WorkEventSettlementStatus::PendingMutation {
+            event_id: delivery.event_id.clone(),
+            work_id: delivery.work_id.clone(),
+            journal_entry_id: delivery.journal_entry_id.clone(),
+            event_session_id: delivery.event_session_id.clone(),
+        },
+        updated_at: Utc::now(),
+        ..record.clone()
+    };
+    require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
+    persist_work_event_settlement_record_to_resolved_dir(trusted_dir, &refreshed)?;
+    Ok(refreshed)
+}
+
 /// Evaluate and atomically persist the machine-local settlement status.
 /// Setting `open_obligation` records a new terminal-update obligation. A
 /// previous open obligation remains open across refreshes until the exact
@@ -1162,7 +1210,14 @@ pub fn save_work_event_settlement_record(
                     &delivery.event_session_id,
                 ) {
                     Ok(true) => {}
-                    Ok(false) => return Ok(record.clone()),
+                    Ok(false) => {
+                        return refresh_unpersisted_pending_record(
+                            worktree,
+                            &trusted_dir,
+                            record,
+                            &delivery,
+                        );
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1727,11 +1782,18 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
     match receipt.as_ref() {
         Some(record) => match work_event_receipt_authorizes_current_generation(worktree, record) {
             Ok(true) => {}
+            // #4011: the receipt is minted only by a terminal `workspace.update`,
+            // and that update refuses a terminal canonical Work, so once the
+            // Work is terminal no generation can ever re-mint a stale receipt.
+            // Treat it like a missing one (#3459) and let the delivery
+            // evaluation below decide; it still fails closed on an undelivered
+            // event log.
+            Ok(false) if canonical_work_for_worktree_is_terminal(worktree) => {}
             Ok(false) => {
-                return Some(
-                    "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation. Settle and push the current generation's own Work event before retrying."
-                        .to_string(),
-                );
+                return Some(stale_work_event_receipt_description(
+                    record,
+                    current_binding.as_ref(),
+                ));
             }
             Err(error) => {
                 tracing::warn!(%error, "work event settlement receipt authority is unreadable");
@@ -1816,6 +1878,25 @@ pub(crate) fn work_event_receipt_authorizes_current_generation(
         ),
         None => Ok(execution_state::current_execution_binding(worktree, owner)?.is_none()),
     }
+}
+
+/// #4011: a stale-generation receipt on a live canonical Work is repairable
+/// only by this generation's own terminal update, never by committing or
+/// pushing what the predecessor left behind. Name both generations so the
+/// agent can tell which one the receipt came from.
+fn stale_work_event_receipt_description(
+    receipt: &WorkEventSettlementRecord,
+    current_binding: Option<&ExecutionBindingIdentity>,
+) -> String {
+    let receipt_generation = receipt
+        .execution_binding
+        .as_ref()
+        .map_or("legacy (unbound)", |binding| binding.generation_id.as_str());
+    let current_generation =
+        current_binding.map_or("unknown", |binding| binding.generation_id.as_str());
+    format!(
+        "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
+    )
 }
 
 pub(crate) fn work_event_settlement_pending_description(
@@ -6887,6 +6968,122 @@ mod tests {
             refusal.contains("generation") && refusal.contains("predecessor"),
             "generation mismatch must be actionable without leaking secrets: {refusal}"
         );
+        // #4011: a live canonical Work can still receive this generation's own
+        // terminal update, so the refusal must name that exact step instead of
+        // a generic "settle and push" that the agent cannot map to an operation.
+        assert!(
+            refusal.contains("workspace.update") && refusal.contains("current generation"),
+            "a live Work refusal must name the terminal workspace.update the current generation still owes: {refusal}"
+        );
+    }
+
+    // #4011: the receipt is generation-bound, but once the canonical Work is
+    // terminal no later generation can mint its own — `workspace.update`
+    // refuses terminal targets. A predecessor receipt therefore has to behave
+    // like a missing one (#3459): the delivered event log is the only fact left
+    // to check, while the status projection keeps the generation gap visible.
+    #[test]
+    fn terminal_canonical_work_with_predecessor_receipt_does_not_refuse_delivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "session-predecessor-terminal-work";
+
+        let predecessor =
+            initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        seed_canonical_work(&fixture, predecessor_session, true);
+        fixture.stage_events();
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): deliver the terminalized Work events");
+        fixture.push();
+        let receipt = save_work_event_settlement_record(&fixture.repo, predecessor_session, true)
+            .expect("persist the predecessor generation's settled receipt");
+        assert!(receipt.status.is_settled());
+        assert!(!receipt.obligation_open);
+        assert_eq!(receipt.execution_binding.as_ref(), Some(&predecessor));
+
+        // Relaunch: the Active predecessor is continued by a fresh generation,
+        // exactly the SPEC #3885 Phase 2b shape (no open obligation, clean and
+        // pushed branch, receipt left behind by the predecessor).
+        let mut request = generation_scoped_successor_request(
+            "successor-terminal-work",
+            "session-successor-terminal-work",
+        );
+        request.source = "execution-continue".to_string();
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare continuation successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate continuation successor");
+
+        let status = crate::cli::execution_state::diagnose(&fixture.repo, None);
+        assert_eq!(
+            status.work_event_receipt_generation_id.as_deref(),
+            Some(predecessor.generation_id.as_str())
+        );
+        assert_ne!(
+            status.generation_id.as_deref(),
+            Some(predecessor.generation_id.as_str()),
+            "the status projection must expose which generation is current"
+        );
+        assert_eq!(
+            status.work_event_receipt_matches_current_generation,
+            Some(false),
+            "the status projection must keep the generation gap observable"
+        );
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "a terminal canonical Work can never re-mint the receipt, so a predecessor              receipt must not refuse a delivered event log",
+        );
+    }
+
+    #[test]
+    fn terminal_canonical_work_with_predecessor_receipt_still_refuses_undelivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "session-predecessor-undelivered";
+
+        initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        let receipt = save_work_event_settlement_record(&fixture.repo, predecessor_session, true)
+            .expect("persist the predecessor generation's receipt");
+        assert!(receipt.status.is_settled());
+        seed_canonical_work(&fixture, predecessor_session, true);
+
+        let mut request = generation_scoped_successor_request(
+            "successor-undelivered",
+            "session-successor-undelivered",
+        );
+        request.source = "execution-continue".to_string();
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare continuation successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate continuation successor");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("undelivered Work events must still fail closed behind a predecessor receipt");
+        assert!(
+            refusal.contains("dirty") && refusal.contains("push"),
+            "the refusal must name the delivery step the agent can still perform: {refusal}"
+        );
     }
 
     /// Drive this worktree's canonical Work to the requested lifecycle so the
@@ -7909,6 +8106,178 @@ mod tests {
             "a later valid shard commit must not substitute for the exact shard's provenance"
         );
         assert!(refreshed.obligation_open);
+    }
+
+    // #4011: a predecessor generation's undelivered terminal event must not pin
+    // the receipt forever. The current generation's own terminal update
+    // supersedes it; an undelivered predecessor shard still dirties the store,
+    // so no delivery pressure is lost.
+    #[test]
+    fn prepare_work_event_settlement_supersedes_a_predecessor_generation_obligation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "session-predecessor-open";
+        let successor_session = "session-successor-open";
+
+        let predecessor =
+            initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        let updated_at = Utc::now();
+        let mut first = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-superseded-obligation",
+            updated_at,
+        );
+        first.agent_session_id = Some(predecessor_session.to_string());
+        let first_journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-predecessor-open".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(predecessor_session.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            predecessor_session,
+            &first,
+            &first_journal,
+        )
+        .expect("prepare the predecessor generation's terminal update");
+        assert_eq!(prepared.execution_binding.as_ref(), Some(&predecessor));
+        assert!(prepared.obligation_open);
+
+        let mut request =
+            generation_scoped_successor_request("successor-open-obligation", successor_session);
+        request.source = "execution-continue".to_string();
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare continuation successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate continuation successor");
+        let current = crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+            .expect("load successor binding")
+            .expect("successor binding exists");
+        assert_ne!(current.generation_id, predecessor.generation_id);
+
+        let mut second = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-superseded-obligation",
+            updated_at,
+        );
+        second.agent_session_id = Some(successor_session.to_string());
+        let mut second_journal = first_journal.clone();
+        second_journal.id = "journal-successor-open".to_string();
+        second_journal.agent_session_id = Some(successor_session.to_string());
+
+        let superseded = prepare_work_event_settlement_record(
+            &fixture.repo,
+            successor_session,
+            &second,
+            &second_journal,
+        )
+        .expect(
+            "the current generation's own terminal update must supersede a predecessor obligation",
+        );
+        assert_eq!(superseded.execution_binding.as_ref(), Some(&current));
+        assert_eq!(superseded.session_id, successor_session);
+        assert!(superseded.obligation_open);
+        assert!(
+            matches!(
+                &superseded.status,
+                WorkEventSettlementStatus::PendingMutation { event_id, .. } if *event_id == second.id
+            ),
+            "{:?}",
+            superseded.status
+        );
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload superseding receipt")
+                .expect("superseding receipt exists"),
+            superseded
+        );
+    }
+
+    // #4011 (AC-6): when the pending shard is gone, a refresh must not keep
+    // reporting the Git state it saw earlier. The honest fact on a clean
+    // worktree is that the terminal event has not been persisted yet.
+    #[test]
+    fn refresh_reports_pending_mutation_when_the_pending_shard_is_missing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let session_id = "session-shard-lost";
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-shard-lost",
+            updated_at,
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-shard-lost".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(session_id.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared =
+            prepare_work_event_settlement_record(&fixture.repo, session_id, &event, &journal)
+                .expect("prepare the terminal update");
+
+        // A previous refresh observed the store while it was dirty; the shard
+        // has since vanished (fresh materialization) and the worktree is clean.
+        let mut stale = prepared.clone();
+        stale.status = WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+            states: vec![WorkEventPathState::Unstaged],
+        });
+        persist_work_event_settlement_record(&fixture.repo, &stale)
+            .expect("persist the stale settlement view");
+
+        let refreshed = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("refresh the settlement view");
+        assert!(refreshed.obligation_open);
+        assert!(
+            matches!(
+                &refreshed.status,
+                WorkEventSettlementStatus::PendingMutation { event_id, .. } if *event_id == event.id
+            ),
+            "a clean worktree must not keep reporting path_dirty: {:?}",
+            refreshed.status
+        );
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("an unpersisted terminal event still fails closed");
+        assert!(
+            !refusal.contains("dirty") && refusal.contains("has not been persisted"),
+            "{refusal}"
+        );
     }
 
     #[test]
