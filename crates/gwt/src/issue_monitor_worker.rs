@@ -850,6 +850,38 @@ pub fn try_issue_completed_by_merged_pr(
     repo: &str,
     issue: &IssueMonitorIssue,
 ) -> Result<bool, IssueMonitorScanFailure> {
+    try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+        .map_err(IssueMonitorCompletionProbeFailure::into_failure)
+}
+
+/// Issue #3528 (SPEC #3200 FR-059): how a completion probe failed. The two
+/// arms carry different contracts — an expired observation deadline is
+/// fail-closed for the whole claim proposal, an ordinary readback error keeps
+/// #3165's fail-open compatibility — so a caller must be able to tell them
+/// apart without parsing the failure text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorCompletionProbeFailure {
+    /// The observation deadline expired before or right after the readback.
+    Deadline(IssueMonitorScanFailure),
+    /// The readback itself failed while the deadline was still valid.
+    Operation(IssueMonitorScanFailure),
+}
+
+impl IssueMonitorCompletionProbeFailure {
+    pub fn into_failure(self) -> IssueMonitorScanFailure {
+        match self {
+            Self::Deadline(failure) | Self::Operation(failure) => failure,
+        }
+    }
+}
+
+/// [`try_issue_completed_by_merged_pr`] with the deadline expiry told apart
+/// from an ordinary readback failure.
+pub fn try_issue_completed_by_merged_pr_classified(
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+) -> Result<bool, IssueMonitorCompletionProbeFailure> {
     let is_spec = issue
         .labels
         .iter()
@@ -857,13 +889,20 @@ pub fn try_issue_completed_by_merged_pr(
     if !is_spec {
         return Ok(issue.state == IssueMonitorIssueState::Closed);
     }
-    let prs = run_scan_stage(IssueMonitorScanStage::ClaimCompletionReadback, || {
-        crate::cli::issue::fetch_linked_prs_via_gh(
-            owner,
-            repo,
-            gwt_github::IssueNumber(issue.number),
-        )
+    let stage = IssueMonitorScanStage::ClaimCompletionReadback;
+    ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
+    let prs = crate::cli::issue::fetch_linked_prs_via_gh(
+        owner,
+        repo,
+        gwt_github::IssueNumber(issue.number),
+    )
+    .map_err(|error| {
+        IssueMonitorCompletionProbeFailure::Operation(IssueMonitorScanFailure::new(
+            stage,
+            error.to_string(),
+        ))
     })?;
+    ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
     Ok(linked_pr_completion_is_fresh_for_issue(issue, &prs))
 }
 

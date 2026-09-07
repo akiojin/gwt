@@ -6088,6 +6088,8 @@
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
             window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
+            // Issue #3906 AC-12: the update CTA shows the drain progress.
+            updateCtaController.handleIssueMonitorStatus(event.status || {});
             break;
           case "issue_monitor_inbox":
             scheduleIssueMonitorProjectionRefresh();
@@ -6358,6 +6360,14 @@
           case "update_apply_pending_persisted":
             updateCtaController.handleUpdateApplyPendingPersisted({
               version: event.version,
+            });
+            break;
+          case "update_auto_apply":
+            // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
+            updateCtaController.handleUpdateAutoApply({
+              version: event.version,
+              phase: event.phase,
+              grace_secs: event.grace_secs,
             });
             break;
           case "custom_agent_list":
