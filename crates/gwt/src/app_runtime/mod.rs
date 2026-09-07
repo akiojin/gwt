@@ -1444,6 +1444,60 @@ pub(crate) const TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT: std::time::Duration
 
 #[cfg(test)]
 thread_local! {
+    /// Per-test budget for the GUI-local prefs helpers (Issue #4045).
+    ///
+    /// The same shape as the daemon's Issue #4033 seam: thread-local rather
+    /// than an environment variable, because sibling tests hold the prefs
+    /// lock and depend on the *default* budget expiring quickly without
+    /// taking the process-wide env lock. One test per thread keeps the
+    /// override exact.
+    static LOCAL_ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Pin the GUI-local prefs helper budget for the current test thread until
+/// dropped.
+#[cfg(test)]
+pub(crate) struct ScopedLocalIssueMonitorPrefsTimeout {
+    previous: Option<std::time::Duration>,
+}
+
+#[cfg(test)]
+impl ScopedLocalIssueMonitorPrefsTimeout {
+    pub(crate) fn set(timeout: std::time::Duration) -> Self {
+        Self {
+            previous: LOCAL_ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE
+                .with(|current| current.replace(Some(timeout))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedLocalIssueMonitorPrefsTimeout {
+    fn drop(&mut self) {
+        LOCAL_ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(|current| current.set(self.previous));
+    }
+}
+
+/// The single seam for the budget of the GUI-local prefs helpers below
+/// (initial load, observer rebase, and the fenced fallback commit).
+///
+/// Issue #4045: these helpers used to hard-code 250 ms each, so a test that
+/// asserted on a transaction's outcome was asserting on how fast the runner's
+/// fsync happened to be that minute. A saturated Windows runner expired the
+/// durable rename and the helper silently kept an in-memory proposal that
+/// disk never saw. Production keeps the fallback commit budget; tests pin
+/// it through `ScopedLocalIssueMonitorPrefsTimeout`.
+fn local_issue_monitor_prefs_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(timeout) = LOCAL_ISSUE_MONITOR_PREFS_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return timeout;
+    }
+    ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT
+}
+
+#[cfg(test)]
+thread_local! {
     static LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -1506,7 +1560,7 @@ fn load_mutate_and_persist_issue_monitor_state<T: Default>(
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
 ) -> (gwt::IssueMonitorState, T) {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        std::time::Instant::now() + std::time::Duration::from_millis(250),
+        std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
     );
     let mut mutation = Some(mutation);
     let mut monitor = None;
@@ -1530,6 +1584,11 @@ fn load_mutate_and_persist_issue_monitor_state<T: Default>(
             error = %error,
             "issue monitor GUI prefs transaction failed"
         );
+        // Issue #4045: the closure may already have run when the durable
+        // write expired the budget. Nothing reached disk, so drop the
+        // snapshot together with its result instead of rendering it as won.
+        monitor = None;
+        result = None;
     }
     let monitor = monitor.unwrap_or_else(|| {
         let prefs = gwt::load_issue_monitor_prefs(prefs_path)
@@ -1542,13 +1601,21 @@ fn load_mutate_and_persist_issue_monitor_state<T: Default>(
     (monitor, result.unwrap_or_default())
 }
 
-fn rebase_mutate_and_persist_issue_monitor_state<T: Default>(
+/// Rebase the GUI observer on the latest committed prefs, apply `mutation`,
+/// and durably commit the result under the GUI-local budget.
+///
+/// Issue #4045: a failed commit — whether the budget expired while waiting
+/// for the lock (the closure never ran) or during the durable rename (the
+/// closure already ran) — restores `monitor` from canonical disk state and
+/// returns the error. The caller never keeps a mutation disk never saw, and
+/// decides whether to retry (scans simply pick it up on the next tick).
+fn rebase_mutate_and_persist_issue_monitor_state<T>(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
-) -> T {
+) -> std::io::Result<T> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        std::time::Instant::now() + std::time::Duration::from_millis(250),
+        std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
     );
     let mut mutation = Some(mutation);
     let mut result = None;
@@ -1562,18 +1629,17 @@ fn rebase_mutate_and_persist_issue_monitor_state<T: Default>(
             result = Some(apply(monitor));
             *disk = monitor.prefs();
         });
-    if let Err(error) = transaction {
-        tracing::warn!(
-            error = %error,
-            "issue monitor GUI prefs transaction failed"
-        );
+    match transaction {
+        Ok(_) => result
+            .ok_or_else(|| std::io::Error::other("issue monitor GUI prefs mutation did not run")),
+        Err(error) => {
+            let prefs = gwt::load_issue_monitor_prefs(prefs_path)
+                .unwrap_or_else(|_| recovery_baseline.clone());
+            *monitor =
+                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            Err(error)
+        }
     }
-    if result.is_none() {
-        let prefs =
-            gwt::load_issue_monitor_prefs(prefs_path).unwrap_or_else(|_| recovery_baseline.clone());
-        *monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-    }
-    result.unwrap_or_default()
 }
 
 /// Commit one GUI-local fallback transition only while daemon authority is
@@ -1586,7 +1652,7 @@ fn try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence<T>(
 ) -> std::io::Result<T> {
     let _deadline = gwt_core::operation_deadline::current().is_none().then(|| {
         gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
         )
     });
     let recovery_baseline = monitor.prefs();
@@ -5265,15 +5331,25 @@ impl AppRuntime {
                         .map(|error| error.to_string());
                 (cached_issues, cache_error, origin_error)
             };
-            rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
-                gwt::scan_issue_monitor_candidates(monitor, &cached_issues, &now);
-                if monitor.config.enabled {
-                    monitor.set_gui_connected(true);
-                }
-                if let Some(error) = cache_error.as_deref().or(origin_error.as_deref()) {
-                    monitor.record_scan_error(&now, error);
-                }
-            });
+            let persisted = rebase_mutate_and_persist_issue_monitor_state(
+                &prefs_path,
+                &mut monitor,
+                |monitor| {
+                    gwt::scan_issue_monitor_candidates(monitor, &cached_issues, &now);
+                    if monitor.config.enabled {
+                        monitor.set_gui_connected(true);
+                    }
+                    if let Some(error) = cache_error.as_deref().or(origin_error.as_deref()) {
+                        monitor.record_scan_error(&now, error);
+                    }
+                },
+            );
+            if let Err(error) = persisted {
+                tracing::warn!(
+                    error = %error,
+                    "issue monitor GUI cache-only scan was not persisted; the next scan retries"
+                );
+            }
             return self.issue_monitor_snapshot_events_for(client_id, Some(&project_root), monitor);
         }
         #[cfg(test)]
@@ -5365,33 +5441,40 @@ impl AppRuntime {
         // Persist the refreshed read model only. Remote-effect proposals are
         // produced by the daemon scan and executed only after its durable
         // Prepared -> Attempting fence.
-        rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
-            if let Some(loaded) = &loaded_for_commit {
-                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
-                    monitor,
-                    loaded,
-                    &project_root,
-                    expected_project_tab_id.as_deref(),
-                    &now,
-                );
-                #[cfg(not(unix))]
-                if let Some((monitor_owner, completed_issues)) = &local_claim_proposal {
-                    prepare_local_issue_monitor_claim_proposals(
+        let persisted =
+            rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+                if let Some(loaded) = &loaded_for_commit {
+                    gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         monitor,
                         loaded,
-                        monitor_owner,
+                        &project_root,
+                        expected_project_tab_id.as_deref(),
                         &now,
-                        completed_issues,
                     );
+                    #[cfg(not(unix))]
+                    if let Some((monitor_owner, completed_issues)) = &local_claim_proposal {
+                        prepare_local_issue_monitor_claim_proposals(
+                            monitor,
+                            loaded,
+                            monitor_owner,
+                            &now,
+                            completed_issues,
+                        );
+                    }
                 }
-            }
-            record_issue_monitor_scan_failures(
-                monitor,
-                now.as_str(),
-                merge_reconciliation_error,
-                Vec::new(),
+                record_issue_monitor_scan_failures(
+                    monitor,
+                    now.as_str(),
+                    merge_reconciliation_error,
+                    Vec::new(),
+                );
+            });
+        if let Err(error) = persisted {
+            tracing::warn!(
+                error = %error,
+                "issue monitor GUI scan was not persisted; the next scan retries"
             );
-        });
+        }
         #[cfg(not(unix))]
         let mut launch_events = local_repo_identity
             .map(|(owner, repo)| {
