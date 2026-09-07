@@ -1440,3 +1440,101 @@ fn refresh_broker_promotes_priority_while_inspect_remains_read_only() {
         "inspect and promotion must not bypass another target's quiet period"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #4086 AC-5: the #4071 chronology — index-issues, then files-docs, then
+// index-issues again claim the heavy lease back to back — must admit a
+// verification claimant that was refused once before the second index job.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refused_verification_is_admitted_before_the_next_background_index_job() {
+    use gwt_core::index_coordinator::{CoordinatorError, VERIFICATION_RESERVATION_TTL};
+
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let non_blocking = Duration::from_millis(250);
+    let index_wait = Duration::from_millis(400);
+
+    let own = |key: &TargetKey, priority: JobPriority| match coordinator
+        .request_job(key, priority, Duration::from_secs(5))
+        .expect("request job")
+    {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("{} must be free", key.file_stem()),
+    };
+
+    // 02:26Z — index-issues (background, full) takes the heavy lease.
+    let issues_key = TargetKey::repo_shared("99a8660247f5bc49", "issues");
+    let index_issues = own(&issues_key, JobPriority::Background);
+    let issues_lease = index_issues
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("first index job owns an idle host");
+
+    // The agent's `verify.lease.acquire` is refused (non-blocking) and leaves
+    // its intent behind as a reservation instead of vanishing.
+    let verify_key = TargetKey::verification("99a8660247f5bc49", "0bdb8556929a0889");
+    let verify = own(&verify_key, JobPriority::ManualRebuild);
+    match verify.acquire_heavy_with_ttl(non_blocking, Duration::from_secs(600)) {
+        Err(CoordinatorError::Timeout { .. }) => {}
+        Ok(_) => panic!("verification must be refused while the index runs"),
+        Err(err) => panic!("unexpected coordinator error: {err}"),
+    }
+    coordinator
+        .reserve_heavy(
+            &verify_key,
+            JobPriority::ManualRebuild,
+            VERIFICATION_RESERVATION_TTL,
+            Some("Issue 4071 verify"),
+        )
+        .expect("reserve");
+
+    // 02:50Z — index-issues completes and the host immediately queues
+    // files-docs. Before this fix it won the lease here.
+    drop(issues_lease);
+    index_issues.complete(JobOutcome::Completed).unwrap();
+    let docs_key = TargetKey::worktree("99a8660247f5bc49", "files-docs", "0bdb8556929a0889");
+    let files_docs = own(&docs_key, JobPriority::Background);
+    match files_docs.acquire_heavy(index_wait) {
+        Err(CoordinatorError::Timeout { .. }) => {}
+        Ok(_) => panic!("files-docs must defer to the reserved verification"),
+        Err(err) => panic!("unexpected coordinator error: {err}"),
+    }
+
+    // The agent's next retry (3 minutes later in production) is admitted.
+    let verify_lease = verify
+        .acquire_heavy_with_ttl(non_blocking, Duration::from_secs(600))
+        .expect("verification wins the freed lease");
+    let status = coordinator.heavy_lease_status().unwrap();
+    assert_eq!(
+        status.pending, 0,
+        "the granted verification consumes its own reservation"
+    );
+    assert_eq!(
+        status.target.as_deref(),
+        Some(verify_key.file_stem().as_str())
+    );
+
+    // Only once verification is done do the queued index jobs run, in order.
+    match files_docs.acquire_heavy(index_wait) {
+        Err(CoordinatorError::Timeout { .. }) => {}
+        Ok(_) => panic!("index jobs stay excluded while verification holds"),
+        Err(err) => panic!("unexpected coordinator error: {err}"),
+    }
+    drop(verify_lease);
+    verify.complete(JobOutcome::Completed).unwrap();
+
+    let docs_lease = files_docs
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("files-docs resumes after verification");
+    drop(docs_lease);
+    files_docs.complete(JobOutcome::Completed).unwrap();
+
+    // 03:03Z — the second index-issues (full) is now unobstructed.
+    let index_issues = own(&issues_key, JobPriority::Background);
+    let issues_lease = index_issues
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("second index job runs once nothing is reserved");
+    drop(issues_lease);
+    index_issues.complete(JobOutcome::Completed).unwrap();
+}

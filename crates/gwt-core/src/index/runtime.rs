@@ -972,7 +972,10 @@ fn run_coordinated_issue_index(
                 emit_issue_runner_end(spawn_id, label, true);
                 return;
             }
-            let heavy = match guard.acquire_heavy(ISSUE_INDEX_HEAVY_TIMEOUT) {
+            let heavy = match guard.acquire_heavy_with_ttl(
+                ISSUE_INDEX_HEAVY_TIMEOUT,
+                crate::index_coordinator::INDEX_HEAVY_LEASE_TTL,
+            ) {
                 Ok(heavy) => heavy,
                 Err(err) => {
                     tracing::warn!(

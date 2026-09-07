@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    CoordinatorError, HeavyLease, IndexCoordinator, JobAdmission, JobOutcome, JobPriority,
-    TargetJobGuard,
+    CoordinatorError, HeavyHolderKind, HeavyLease, IndexCoordinator, JobAdmission, JobOutcome,
+    JobPriority, TargetJobGuard, VERIFICATION_RESERVATION_TTL,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -384,14 +384,24 @@ fn describe_foreign(list: &[ForeignHeavyProcess]) -> String {
 fn describe_holder(coordinator: &IndexCoordinator) -> String {
     match coordinator.heavy_lease_status() {
         Ok(status) if status.held => format!(
-            "verification lease held by {} (pid {}, {}s left)",
+            "verification lease held by {} {} (pid {}, {}s left{})",
+            status
+                .holder_kind
+                .unwrap_or(HeavyHolderKind::Other)
+                .as_str(),
             status.target.as_deref().unwrap_or("unknown target"),
             status
                 .owner
                 .as_ref()
                 .map(|owner| owner.pid.to_string())
                 .unwrap_or_else(|| "?".to_string()),
-            status.remaining_ms.unwrap_or(0) / 1000
+            status.remaining_ms.unwrap_or(0) / 1000,
+            match (status.remaining_batches, status.estimated_remaining_ms) {
+                (Some(batches), Some(estimate)) => {
+                    format!(", {batches} batches ≈ {}s", estimate / 1000)
+                }
+                _ => String::new(),
+            }
         ),
         Ok(_) => "verification lease was contended".to_string(),
         Err(err) => format!("verification lease status unavailable: {err}"),
@@ -516,6 +526,14 @@ pub(crate) fn admit<E: CliEnv>(
                     let _ = guard.complete(JobOutcome::Failed {
                         message: "host admission deferred".to_string(),
                     });
+                    // Issue #4086 AC-1: the rerun must be admitted before any
+                    // background index job that queues in the meantime.
+                    let _ = coordinator.reserve_heavy(
+                        &key,
+                        JobPriority::ManualRebuild,
+                        VERIFICATION_RESERVATION_TTL,
+                        Some("verify.run deferred"),
+                    );
                     return Err(deferred(started, max_wait, &holder));
                 }
                 notice.maybe_post(env, started, max_wait, &holder);
@@ -1030,6 +1048,18 @@ mod tests {
         assert!(
             message.contains(&other.file_stem()),
             "the refusal must name the holder: {message}"
+        );
+        // Issue #4086: a deferred run leaves its turn reserved so the rerun
+        // is admitted before any background index job.
+        let key = verification_lease::verification_key(&mut env).unwrap();
+        assert!(
+            lease_root.coordinator.heavy_reservation_path(&key).exists(),
+            "a deferred admission must reserve the next turn — {}",
+            lease_root.describe()
+        );
+        assert_eq!(
+            lease_root.coordinator.heavy_lease_status().unwrap().pending,
+            1
         );
     }
 

@@ -29,7 +29,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    coordinator_root, HeavyLeaseStatus, IndexCoordinator, JobAdmission, JobPriority, TargetKey,
+    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, IndexCoordinator, JobAdmission,
+    JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -104,7 +105,7 @@ pub(super) fn run<E: CliEnv>(
             reason,
         } => acquire(env, ttl_minutes, reason, out),
         VerificationLeaseCommand::Release { lease_id, reason } => {
-            release(&lease_id, reason.as_deref(), out)
+            release(env, &lease_id, reason.as_deref(), out)
         }
         VerificationLeaseCommand::Extend {
             lease_id,
@@ -170,14 +171,26 @@ fn acquire<E: CliEnv>(
     if !outcome.granted {
         out.push_str(
             "note: the current holder finishes its run before the lease is released; \
-             re-run verify.lease.acquire after it reports done\n",
+             re-run verify.lease.acquire after it reports done. Your turn is reserved: \
+             background index jobs defer to this worktree until the retry is granted \
+             or the reservation lapses\n",
         );
     }
     Ok(0)
 }
 
-fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32, SpecOpsError> {
-    let control = control_dir_for(lease_id).ok_or_else(|| missing_lease(lease_id))?;
+fn release<E: CliEnv>(
+    env: &mut E,
+    lease_id: &str,
+    reason: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let Some(control) = control_dir_for(lease_id) else {
+        if held_index_lease(lease_id)? {
+            return request_index_yield(env, lease_id, reason, out);
+        }
+        return Err(missing_lease(lease_id));
+    };
     fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
         .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
     await_settled(lease_id)?;
@@ -265,6 +278,15 @@ fn hold<E: CliEnv>(
     let mut lease = match guard.acquire_heavy_with_ttl(NON_BLOCKING, ttl) {
         Ok(lease) => lease,
         Err(_) => {
+            // Issue #4086 AC-1: the refusal answers immediately, but the
+            // claimant's turn stays reserved so background index jobs defer
+            // to this worktree between retries.
+            let _ = coordinator.reserve_heavy(
+                &key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                reason,
+            );
             publish_outcome(control, &LeaseOutcome::refused(status()?));
             return Ok(0);
         }
@@ -482,6 +504,12 @@ struct LeaseStatusSnapshot {
     expired: bool,
     #[serde(default)]
     pending: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remaining_batches: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    estimated_remaining_ms: Option<u64>,
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
@@ -496,6 +524,9 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             remaining_ms: status.remaining_ms,
             expired: status.expired,
             pending: status.pending,
+            holder_kind: status.holder_kind.map(|kind| kind.as_str().to_string()),
+            remaining_batches: status.remaining_batches,
+            estimated_remaining_ms: status.estimated_remaining_ms,
         }
     }
 }
@@ -581,6 +612,50 @@ fn render(out: &mut String, held_label: &str, free_label: &str, status: &LeaseSt
     push_status_fields(out, status);
 }
 
+/// The live lease named by `lease_id` when it belongs to an index job
+/// (Issue #4086): such a lease has no verification control directory, so
+/// release requests are arbitrated through the coordinator instead.
+fn held_index_lease(lease_id: &str) -> Result<bool, SpecOpsError> {
+    let status = status()?;
+    Ok(status.held
+        && status.lease_id.as_deref() == Some(lease_id)
+        && status.holder_kind.as_deref() == Some(HeavyHolderKind::Index.as_str()))
+}
+
+/// PM arbitration of an index lease (Issue #4086): leave a verification-
+/// priority reservation for the caller's worktree. The runner observes it at
+/// its next batch boundary and yields; the host then defers to the
+/// reservation instead of re-taking the lease.
+fn request_index_yield<E: CliEnv>(
+    env: &mut E,
+    lease_id: &str,
+    reason: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let key = verification_key(env)?;
+    open_coordinator()?
+        .reserve_heavy(
+            &key,
+            JobPriority::ManualRebuild,
+            VERIFICATION_RESERVATION_TTL,
+            Some(reason.unwrap_or("verify.lease.release arbitration")),
+        )
+        .map_err(|err| unexpected(format!("failed to reserve the heavy lease: {err}")))?;
+    out.push_str("verification lease: yield requested\n");
+    out.push_str(&format!("lease_id: {lease_id}\n"));
+    if let Some(reason) = reason {
+        out.push_str(&format!("reason: {reason}\n"));
+    }
+    push_status_fields(out, &status()?);
+    out.push_str(&format!(
+        "note: an index job holds this lease; it releases at its next batch boundary \
+         (at most {}s after this request when progress is published) and background index \
+         jobs defer to the reservation left for this worktree\n",
+        VERIFICATION_RESERVATION_TTL.as_secs()
+    ));
+    Ok(0)
+}
+
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     if let Some(lease_id) = &status.lease_id {
         out.push_str(&format!("lease_id: {lease_id}\n"));
@@ -602,6 +677,15 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if status.held {
         out.push_str(&format!("expired: {}\n", status.expired));
+    }
+    if let Some(kind) = &status.holder_kind {
+        out.push_str(&format!("holder_kind: {kind}\n"));
+    }
+    if let Some(batches) = status.remaining_batches {
+        out.push_str(&format!("remaining_batches: {batches}\n"));
+    }
+    if let Some(estimate) = status.estimated_remaining_ms {
+        out.push_str(&format!("estimated_remaining_ms: {estimate}\n"));
     }
     out.push_str(&format!("pending: {}\n", status.pending));
 }
@@ -684,6 +768,9 @@ mod tests {
                 remaining_ms: Some(60_000),
                 expired: false,
                 pending: 2,
+                holder_kind: Some("verification".to_string()),
+                remaining_batches: None,
+                estimated_remaining_ms: Some(60_000),
             },
         );
         assert_eq!(
@@ -696,6 +783,8 @@ mod tests {
              expires_at_ms: 61000\n\
              remaining_ms: 60000\n\
              expired: false\n\
+             holder_kind: verification\n\
+             estimated_remaining_ms: 60000\n\
              pending: 2\n"
         );
     }

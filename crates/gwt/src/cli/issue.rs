@@ -2306,16 +2306,12 @@ pub(super) fn load_or_refresh_issue<E: CliEnv>(
     number: IssueNumber,
     refresh: bool,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    load_or_refresh_issue_with_index_rebuild(env, number, refresh, |repo_path| {
-        if crate::index_worker::detect_repo_hash(repo_path).is_none() {
-            return Ok(());
-        }
-        crate::index_worker::default_rebuild_runner(
-            repo_path,
-            crate::index_worker::IndexRebuildScope::Issues,
-            None,
-        )
-    })
+    load_or_refresh_issue_with_index_rebuild(
+        env,
+        number,
+        refresh,
+        crate::index_worker::queue_issue_index_refresh,
+    )
 }
 
 fn cache_resource_is_fresh(path: &Path) -> bool {
@@ -2330,16 +2326,11 @@ pub(super) fn refresh_issue_cache<E: CliEnv>(
     env: &mut E,
     number: IssueNumber,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    refresh_issue_cache_with_index_rebuild(env, number, |repo_path| {
-        if crate::index_worker::detect_repo_hash(repo_path).is_none() {
-            return Ok(());
-        }
-        crate::index_worker::default_rebuild_runner(
-            repo_path,
-            crate::index_worker::IndexRebuildScope::Issues,
-            None,
-        )
-    })
+    refresh_issue_cache_with_index_rebuild(
+        env,
+        number,
+        crate::index_worker::queue_issue_index_refresh,
+    )
 }
 
 pub(super) fn refresh_issue_cache_with_index_rebuild<E, F>(
