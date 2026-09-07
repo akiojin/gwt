@@ -376,6 +376,10 @@ impl AppRuntime {
             .iter()
             .flat_map(|(_, plan)| plan.detached_worktree_paths().iter().cloned())
             .collect::<HashSet<_>>();
+        // Issue #4038 (AC-4 / AC-5): if this launch is the tail of an update
+        // apply, settle the resume marker first so the auto-resume queue below
+        // can bypass the freshness gate for the projects that were open.
+        self.settle_update_resume_marker_at_bootstrap(now);
         self.queue_startup_auto_resume_sessions(&planned_orphan_intake_paths);
         // SPEC-2359 W-37 / Issue #3735: restore selection is the protection
         // producer. Complete it before reaping repository owner ledgers, and
@@ -468,7 +472,14 @@ impl AppRuntime {
                 if !session.exact_auto_resume_candidate() {
                     continue;
                 }
-                if !startup_auto_resume_is_fresh(&session, now) {
+                // Issue #4038 (AC-4): sessions of a project that was open when
+                // the update apply began resume regardless of age — the gap
+                // was the update, not the operator walking away.
+                let resumes_after_update = !self.update_resume_tab_ids.is_empty()
+                    && self
+                        .auto_resume_tab_id_for_session(&session)
+                        .is_some_and(|tab_id| self.update_resume_tab_ids.contains(&tab_id));
+                if !resumes_after_update && !startup_auto_resume_is_fresh(&session, now) {
                     continue;
                 }
             }
@@ -726,13 +737,17 @@ impl AppRuntime {
         &mut self,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        // Issue #4038 (AC-4 / AC-5): the notification center is a frontend
+        // sink, so the bootstrap-time settle is recorded here, on the first
+        // canvas-ready round trip, where a client is guaranteed to listen.
+        let mut events = self.update_resume_notice_events();
         if self.pending_startup_auto_resume_sessions.is_empty() {
-            return self.startup_pm_ensure_ready_events();
+            events.extend(self.startup_pm_ensure_ready_events());
+            return events;
         }
 
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
         let total = pending.len();
-        let mut events = Vec::new();
         for (index, pending_session) in pending.into_iter().enumerate() {
             let fallback_geometry =
                 startup_auto_resume_window_geometry(index, total, bounds.clone());
@@ -1102,6 +1117,135 @@ impl AppRuntime {
                         == session_scope
             })
             .map(|tab| tab.id.clone())
+    }
+
+    /// Issue #4038 (AC-3): the projects to record in the resume marker when an
+    /// update apply begins. `update_drain` reports whether the Issue Monitor
+    /// of that project holds new launches (#4037), read from the disk-owned
+    /// prefs so the settling bootstrap releases exactly the holds that were
+    /// raised.
+    pub(crate) fn update_resume_projects(&self) -> Vec<gwt_core::update::UpdateResumeProject> {
+        let mut seen = HashSet::new();
+        self.tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+            .filter_map(|tab| {
+                let hash = gwt_core::paths::project_scope_hash(&tab.project_root).to_string();
+                let update_drain = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root),
+                )
+                .map(|prefs| prefs.update_drain.is_some())
+                .unwrap_or(false);
+                seen.insert(hash.clone())
+                    .then_some(gwt_core::update::UpdateResumeProject { hash, update_drain })
+            })
+            .collect()
+    }
+
+    /// Issue #4038 (AC-4 / AC-5): clear the `update_drain` hold (#4037) of
+    /// every marker project that raised one, through the same disk-owned
+    /// prefs transaction the monitor controls use, so the Issue Monitor
+    /// admits launches again whether or not the update actually applied.
+    /// Returns the hashes whose hold was released.
+    fn release_update_drain_holds(
+        &self,
+        projects: &[gwt_core::update::UpdateResumeProject],
+    ) -> Vec<String> {
+        let recovery_baseline = gwt::IssueMonitorPrefs::recovery_default();
+        let mut released = Vec::new();
+        for project in projects.iter().filter(|project| project.update_drain) {
+            let Some(tab) = self.tabs.iter().find(|tab| {
+                tab.kind == gwt::ProjectKind::Git
+                    && gwt_core::paths::project_scope_hash(&tab.project_root).as_str()
+                        == project.hash
+            }) else {
+                tracing::warn!(
+                    target: "gwt::startup",
+                    project_hash = %project.hash,
+                    "update resume marker names a drained project that is no longer open; \
+                     its update_drain hold is left for issue.monitor.config.set"
+                );
+                continue;
+            };
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+            match gwt::mutate_issue_monitor_prefs_recovering(
+                &prefs_path,
+                &recovery_baseline,
+                |prefs| prefs.update_drain = None,
+            ) {
+                Ok(_) => released.push(project.hash.clone()),
+                Err(error) => tracing::warn!(
+                    target: "gwt::startup",
+                    project_hash = %project.hash,
+                    %error,
+                    "failed to release the update_drain hold after the update restart"
+                ),
+            }
+        }
+        released
+    }
+
+    /// Issue #4038 (AC-4 / AC-5): consume `~/.gwt/update-resume/marker.json`.
+    /// Success (running `to_version`) and version mismatch (#3807) both
+    /// release the projects' `update_drain` holds and queue a notice; only
+    /// success bypasses the auto-resume freshness gate. Idempotent: a settled
+    /// marker is gone, a mismatched one is re-read with `attempt` bumped.
+    fn settle_update_resume_marker_at_bootstrap(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        let Some(settlement) =
+            gwt_core::update::settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now)
+        else {
+            return;
+        };
+        let marker_projects = settlement
+            .marker
+            .projects
+            .iter()
+            .map(|project| project.hash.clone())
+            .collect::<HashSet<_>>();
+        self.update_drain_released_projects =
+            self.release_update_drain_holds(&settlement.marker.projects);
+        let applied = matches!(
+            settlement.outcome,
+            gwt_core::update::UpdateResumeOutcome::Applied
+        );
+        self.update_resume_tab_ids = if applied {
+            self.tabs
+                .iter()
+                .filter(|tab| {
+                    marker_projects
+                        .contains(gwt_core::paths::project_scope_hash(&tab.project_root).as_str())
+                })
+                .map(|tab| tab.id.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let level = if applied { "info" } else { "error" };
+        tracing::info!(
+            target: "gwt::startup",
+            outcome = ?settlement.outcome,
+            to_version = %settlement.marker.to_version,
+            attempt = settlement.marker.attempt,
+            released_projects = self.update_drain_released_projects.len(),
+            resumed_tabs = self.update_resume_tab_ids.len(),
+            "settled update resume marker"
+        );
+        self.pending_update_resume_notice = Some((level.to_string(), settlement.notice()));
+    }
+
+    fn update_resume_notice_events(&mut self) -> Vec<OutboundEvent> {
+        self.pending_update_resume_notice
+            .take()
+            .map(|(level, message)| {
+                vec![OutboundEvent::broadcast(
+                    gwt::BackendEvent::IssueMonitorToast {
+                        level,
+                        message,
+                        issue_number: None,
+                    },
+                )]
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {

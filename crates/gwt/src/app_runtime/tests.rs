@@ -3714,6 +3714,9 @@ fn sample_runtime_with_events(
         continue_work_waiters: HashMap::new(),
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
+        update_resume_tab_ids: HashSet::new(),
+        update_drain_released_projects: Vec::new(),
+        pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
@@ -52193,7 +52196,7 @@ fn quit_migration_events_requests_app_quit_without_repository_changes() {
     let recorded_events = recorded_events.lock().expect("recorded events");
     assert!(recorded_events
         .iter()
-        .any(|event| matches!(event, UserEvent::QuitApp)));
+        .any(|event| matches!(event, UserEvent::QuitApp { .. })));
     assert!(matches!(
         gwt_git::detect_repo_type(&project),
         gwt_git::RepoType::Normal {
@@ -64918,5 +64921,256 @@ fn launch_worker_installs_the_execution_binding_before_the_process_launch() {
     assert!(
         install < process_launch,
         "the execution binding must be installed before the PTY process launch is built"
+    );
+}
+
+// Issue #4038 (AC-4 / AC-7): a resume marker whose `to_version` matches the
+// running build settles at bootstrap — the apply result is recorded, sessions
+// of the marker's projects bypass the 24h freshness gate, the frontend gets a
+// notification-center record once the canvas is ready, and the marker is
+// gone so a second bootstrap is a no-op.
+fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
+    let repo = temp.join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.join("worktrees").join(branch.replace('/', "-"));
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab(
+        "tab-update",
+        "Update Resume",
+        worktree.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let runtime = sample_runtime(temp, vec![tab], Some("tab-update"));
+    let mut session = gwt_agent::Session::new(&worktree, branch, gwt_agent::AgentId::Codex);
+    session.id = "session-update-resume".to_string();
+    session.agent_session_id = Some("native-update-resume".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    // Older than the 24h startup auto-resume window: skipped on a normal
+    // launch, resumed when the launch is the tail of an update apply.
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save stale resumable session");
+    // Issue #4037: the apply raised the update drain for this project; the
+    // settling bootstrap must release it whether or not the update landed.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&worktree);
+    fs::create_dir_all(prefs_path.parent().expect("prefs dir")).expect("create prefs dir");
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
+    prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+        version: "9.99.0".to_string(),
+        since: "2026-09-07T00:00:00Z".to_string(),
+        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+    });
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed update_drain hold");
+    (worktree, runtime)
+}
+
+fn update_drain_is_raised(worktree: &Path) -> bool {
+    gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(worktree))
+        .map(|prefs| prefs.update_drain.is_some())
+        .unwrap_or(false)
+}
+
+fn update_resume_marker_for(
+    worktree: &Path,
+    to_version: &str,
+) -> gwt_core::update::UpdateResumeMarker {
+    gwt_core::update::UpdateResumeMarker {
+        from_version: "0.0.0".to_string(),
+        to_version: to_version.to_string(),
+        started_at: "2026-09-07T00:00:00Z".to_string(),
+        restart_args: Vec::new(),
+        projects: vec![gwt_core::update::UpdateResumeProject {
+            hash: gwt_core::paths::project_scope_hash(worktree).to_string(),
+            update_drain: true,
+        }],
+        attempt: 1,
+    }
+}
+
+fn update_resume_toasts(events: &[OutboundEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast { level, message, .. } if message.contains("Updat") => {
+                Some((level.clone(), message.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (worktree, mut runtime) = update_resume_fixture(temp.path(), "work/update-resume");
+    let current_version = env!("CARGO_PKG_VERSION");
+    let marker = update_resume_marker_for(&worktree, current_version);
+    assert_eq!(
+        runtime.update_resume_projects(),
+        marker.projects,
+        "the marker written at apply time records the raised drain per project"
+    );
+    gwt_core::update::persist_update_resume_marker(&marker).expect("persist marker");
+    assert!(update_drain_is_raised(&worktree));
+
+    runtime.bootstrap();
+
+    assert!(
+        !update_drain_is_raised(&worktree),
+        "the settling bootstrap releases the update_drain hold on disk"
+    );
+
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "sessions of a marker project bypass the 24h freshness gate"
+    );
+    assert!(
+        gwt_core::update::load_update_resume_marker().is_none(),
+        "a successful settle removes the marker"
+    );
+    let result = gwt_core::update::load_update_apply_result().expect("apply result recorded");
+    assert_eq!(
+        result.outcome,
+        gwt_core::update::UpdateApplyOutcome::Success
+    );
+    assert_eq!(result.to_version, current_version);
+    assert_eq!(
+        runtime.update_drain_released_projects,
+        vec![marker.projects[0].hash.clone()],
+        "the drained project is released for the Issue Monitor (#4037 seam)"
+    );
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "exactly one resume notice: {toasts:?}");
+    assert_eq!(toasts[0].0, "info");
+    assert!(
+        toasts[0]
+            .1
+            .contains(&format!("Updated to v{current_version}"))
+            && toasts[0].1.contains("execution resumed"),
+        "notice names the version and the resumption: {}",
+        toasts[0].1
+    );
+    let agent_windows = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+    assert_eq!(
+        agent_windows, 1,
+        "the stale session restarted after the update"
+    );
+
+    // Second bootstrap: no marker, no notice, no drain release (idempotent).
+    let tab = sample_project_tab(
+        "tab-update",
+        "Update Resume",
+        worktree.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-update"));
+    restarted.bootstrap();
+    assert!(restarted.update_drain_released_projects.is_empty());
+    assert!(!update_drain_is_raised(&worktree));
+    let events = restarted.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    assert!(
+        update_resume_toasts(&events).is_empty(),
+        "no marker means no update notice"
+    );
+    assert_eq!(
+        gwt_core::update::load_update_apply_result().expect("apply result kept"),
+        result,
+        "the recorded result must not be rewritten by a plain launch"
+    );
+}
+
+// Issue #4038 (AC-5 / AC-7): when the restarted binary is not `to_version`
+// (#3807 no-op apply), bootstrap still releases the drain, records a failure,
+// notifies, bumps `attempt`, and keeps the marker. Sessions keep the normal
+// freshness gate because nothing was actually applied.
+#[test]
+fn bootstrap_records_failed_update_resume_when_version_mismatches() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (worktree, mut runtime) = update_resume_fixture(temp.path(), "work/update-mismatch");
+    let marker = update_resume_marker_for(&worktree, "0.0.1-never-installed");
+    gwt_core::update::persist_update_resume_marker(&marker).expect("persist marker");
+    assert!(update_drain_is_raised(&worktree));
+
+    runtime.bootstrap();
+
+    assert!(
+        runtime.pending_startup_auto_resume_sessions.is_empty(),
+        "a failed apply does not bypass the freshness gate"
+    );
+    assert!(
+        !update_drain_is_raised(&worktree),
+        "a failed apply still releases the update_drain hold (AC-5)"
+    );
+    let remaining = gwt_core::update::load_update_resume_marker().expect("marker kept");
+    assert_eq!(remaining.attempt, 2);
+    let result = gwt_core::update::load_update_apply_result().expect("apply result recorded");
+    assert_eq!(
+        result.outcome,
+        gwt_core::update::UpdateApplyOutcome::Failure
+    );
+    assert_eq!(result.observed_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        runtime.update_drain_released_projects,
+        vec![marker.projects[0].hash.clone()],
+        "the Issue Monitor must not stay drained after a failed apply"
+    );
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "exactly one failure notice: {toasts:?}");
+    assert_eq!(toasts[0].0, "error");
+    assert!(
+        toasts[0].1.contains("0.0.1-never-installed") && toasts[0].1.contains("failed"),
+        "notice names the expected version and the failure: {}",
+        toasts[0].1
     );
 }
