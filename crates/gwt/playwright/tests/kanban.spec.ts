@@ -265,10 +265,9 @@ test.describe("Issue Bridge load recovery", () => {
     });
     await expect(autonomous).toHaveAttribute("aria-checked", "true");
     await expect(autonomousState).toHaveText("On");
-    const onTrackColor = await autonomousTrack.evaluate(
-      (element) => getComputedStyle(element).backgroundColor,
-    );
-    expect(onTrackColor).not.toBe(offTrackColor);
+    // The track color animates (motion-fast transition), so poll until the
+    // computed value has left the Off color instead of sampling once.
+    await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
     await issueSurface.locator('[data-action="monitor-settings"]').click();
     await issueSurface.locator(".knowledge-monitor-quick-title").fill(
       "Investigate flaky release gate",
