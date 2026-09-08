@@ -249,11 +249,21 @@ class SearchClassificationBranchTests(unittest.TestCase):
             "healthy": True,
             "ttl_remaining_seconds": 120,
         }
+        # Issue #4132: the store trails the Issue cache but agrees with its
+        # own manifest — serve it and queue a refresh instead of blocking.
         source_drift = {
             "exists": True,
             "healthy": False,
             "repair_required": True,
+            "source_drift": True,
             "reason": "source_cache_changed",
+        }
+        store_contradicts_meta = {
+            "exists": True,
+            "healthy": False,
+            "repair_required": True,
+            "source_drift": False,
+            "reason": "count_mismatch",
         }
         broken_meta = {
             "exists": True,
@@ -262,7 +272,8 @@ class SearchClassificationBranchTests(unittest.TestCase):
         }
         for health, expected in [
             (healthy_fresh, "fresh"),
-            (source_drift, "corrupt"),
+            (source_drift, "stale"),
+            (store_contradicts_meta, "corrupt"),
             (broken_meta, "corrupt"),
         ]:
             with mock.patch.object(runner, "_issue_status_v2", return_value=health):

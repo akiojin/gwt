@@ -169,7 +169,11 @@ fn handle_at(
     // escalations wait, or failures sit undigested, the park counter holds —
     // matching the Stop text's "repeated empty cycles" instead of retiring a
     // PM that plainly has supervision work.
-    let has_unconsumed_observations = monitor_prefs
+    // SPEC #4093 FR-008 (Issue #3879): those observations only hold the park
+    // while they change. A snapshot identical to the previous cycle's carries
+    // no new information, so the cycle is empty even with launches running,
+    // and the PM is told not to spend live GitHub reads on it.
+    let (has_unconsumed_observations, snapshot_fingerprint) = monitor_prefs
         .as_ref()
         .map(|prefs| {
             let monitor = crate::IssueMonitorState::with_prefs(
@@ -177,12 +181,16 @@ fn handle_at(
                 prefs.clone(),
             );
             let status = monitor.agent_status();
-            !status.active_launches.is_empty()
+            let unconsumed = !status.active_launches.is_empty()
                 || !status.needs_human.is_empty()
-                || status.inbox.iter().any(|row| row.error_message.is_some())
+                || status.inbox.iter().any(|row| row.error_message.is_some());
+            (unconsumed, Some(pm_cycle_snapshot_fingerprint(&status)))
         })
-        .unwrap_or(false);
+        .unwrap_or((false, None));
     let mut state = pm_registry::load_pm_loop_state(&state_path).unwrap_or_default();
+    let snapshot_unchanged =
+        snapshot_fingerprint.is_some() && snapshot_fingerprint == state.last_snapshot_fingerprint;
+    let has_unconsumed_observations = has_unconsumed_observations && !snapshot_unchanged;
     // A `stop_hook_active` chain the loop did not start belongs to another
     // Stop gate — riding it would stack this loop's directive on top of that
     // gate's forced continuation. The loop's own chain carries the marker set
@@ -263,10 +271,18 @@ fn handle_at(
     }
     state.last_continued_at = Some(now.to_string());
     state.pending_own_block = true;
+    state.last_snapshot_fingerprint = snapshot_fingerprint;
     let _ = pm_registry::save_pm_loop_state(&state_path, &state);
     let refresh_context = refresh_context
         .map(|context| format!(" Worktree status: {context}."))
         .unwrap_or_default();
+    let unchanged_clause = if snapshot_unchanged {
+        " The monitor snapshot is unchanged since the previous cycle: do not spend live GitHub \
+         reads on it (no `pr.list refresh:true`, no `issue.view refresh:true`); reuse the cached \
+         inventory and end the cycle unless the stalled-item inventory names an action."
+    } else {
+        ""
+    };
     HookOutput::stop_block(format!(
         "Resident PM loop: run one cycle before stopping. Try JSON operation `daemon.subscribe` \
          on the `issue_monitor` channel with `params.timeout_seconds:{interval_secs}`; if the \
@@ -292,12 +308,36 @@ fn handle_at(
          example. Only an empty stalled-item inventory may end silently. \
          {steering_clause} {execution_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
-         after repeated empty cycles (cycles with running launches, escalations, or undigested \
-         failures do not count as empty).{refresh_context}",
+         after repeated empty cycles (a cycle whose monitor snapshot changed — new launches, \
+         escalations, or undigested failures — does not count as empty; an unchanged snapshot \
+         counts as empty even while launches run).{unchanged_clause}{refresh_context}",
         steering_clause = pm_registry::PM_STEERING_CLAUSE,
         execution_clause = pm_registry::PM_GWTD_EXECUTION_CLAUSE,
         clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
     ))
+}
+
+/// SPEC #4093 FR-008 (Issue #3879): what a PM cycle can act on, reduced to a
+/// fingerprint. Two cycles with the same fingerprint saw the same launches,
+/// escalations, holds, queue, and inbox states, so the second learned nothing.
+fn pm_cycle_snapshot_fingerprint(status: &crate::IssueMonitorAgentStatus) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("queue={}", status.queue.len()));
+    lines.push(format!("active={:?}", status.active_launches));
+    lines.push(format!("needs_human={:?}", status.needs_human));
+    for hold in &status.provider_quota_holds {
+        lines.push(format!("hold={}@{}", hold.provider, hold.reset_at));
+    }
+    for row in &status.inbox {
+        lines.push(format!(
+            "inbox={}:{:?}:{}:{}",
+            row.issue_number,
+            row.state,
+            row.error_message.is_some(),
+            row.launched_window_id.as_deref().unwrap_or("")
+        ));
+    }
+    pm_registry::pm_delivery_prompt_sha256(&lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1297,12 +1337,24 @@ mod tests {
         assert_eq!(state.last_continued_at, None);
     }
 
+    fn fixture_issue(number: u64) -> crate::IssueMonitorIssue {
+        crate::IssueMonitorIssue {
+            number,
+            title: format!("Issue {number}"),
+            labels: vec!["auto-merge".to_string()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        }
+    }
+
     /// FR-110 (T-204): unconsumed observations hold the park — while the
-    /// durable monitor state still shows work a supervisor must look at
-    /// (running launches, failures, needs-human), empty-cycle counting must
-    /// not retire the PM.
+    /// durable monitor state keeps changing (a running launch plus a queue
+    /// that grows every cycle), empty-cycle counting must not retire the PM.
     #[test]
-    fn park_counting_holds_while_unconsumed_observations_remain() {
+    fn park_counting_holds_while_unconsumed_observations_keep_changing() {
         let (_env_lock, home, _repo, worktree) = pm_fixture();
         let _guard = set_fixture_gwt_home(&home);
         let state_path =
@@ -1319,39 +1371,114 @@ mod tests {
         );
         crate::scan_issue_monitor_candidates(
             &mut monitor,
-            &[crate::IssueMonitorIssue {
-                number: 42,
-                title: "Issue 42".to_string(),
-                labels: vec!["auto-merge".to_string()],
-                state: crate::IssueMonitorIssueState::Open,
-                body: None,
-                url: None,
-                readiness: crate::IssueMonitorReadiness::NotApplicable,
-                updated_at: None,
-            }],
+            &[fixture_issue(42)],
             "2026-08-10T00:00:00Z",
         );
         monitor.complete_active_launch(42, "tab-1::agent-1");
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
 
-        // Far past the cap: with a live launch the loop must keep driving.
+        // Far past the cap: with a live launch and a snapshot that changes
+        // every cycle (a new queued Issue), the loop must keep driving.
         let mut minute = 0;
-        for _ in 0..20 {
+        for cycle in 0..20u64 {
             let now = format!("2026-08-10T01:{minute:02}:00Z");
+            // A new escalation arrives every cycle, so the snapshot the PM
+            // looks at is never the one it saw last time.
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
+            );
+            monitor.escalate_to_needs_human(
+                100 + cycle,
+                crate::NeedsHumanKind::UserChoiceRequired,
+                "a decision only the user can make",
+            );
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
             assert!(
                 matches!(
                     handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
                     HookOutput::StopBlock { .. }
                 ),
-                "a supervising PM must not park while a launch is live (cycle at {now})"
+                "a supervising PM must not park while the snapshot keeps changing (cycle at {now})"
             );
             minute += 2;
         }
         let state = pm_registry::load_pm_loop_state(&state_path).expect("state");
         assert_eq!(
             state.consecutive_continuations, 0,
-            "cycles with unconsumed observations are not empty cycles"
+            "cycles with changing unconsumed observations are not empty cycles"
         );
+    }
+
+    /// SPEC #4093 AC-12 (Issue #3879): a running launch whose snapshot never
+    /// changes is not supervision work. Each identical cycle counts as empty,
+    /// the directive tells the PM to skip live GitHub reads, and the cap parks
+    /// the loop instead of burning quota on the same snapshot forever.
+    #[test]
+    fn unchanged_snapshot_counts_as_empty_even_while_a_launch_runs() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+        let state_path =
+            pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).expect("pm loop state path");
+        let prefs_path = state_path
+            .parent()
+            .expect("project state dir")
+            .join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
+        );
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[fixture_issue(42)],
+            "2026-08-10T00:00:00Z",
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
+
+        let first = handle_at(
+            &worktree,
+            "2026-08-10T01:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        assert!(
+            matches!(first, HookOutput::StopBlock { .. }),
+            "the first look at a snapshot is a cycle"
+        );
+        let second = handle_at(
+            &worktree,
+            "2026-08-10T01:02:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        match &second {
+            HookOutput::StopBlock { reason, .. } => assert!(
+                reason.contains("snapshot is unchanged since the previous cycle"),
+                "the PM is told to skip live GitHub reads: {reason}"
+            ),
+            other => panic!("second identical cycle still continues once: {other:?}"),
+        }
+        let state = pm_registry::load_pm_loop_state(&state_path).expect("state");
+        assert_eq!(
+            state.consecutive_continuations, 1,
+            "the identical cycle spent one unit of the park budget"
+        );
+
+        let mut minute = 4;
+        let mut parked = false;
+        for _ in 0..PM_LOOP_MAX_CONSECUTIVE + 2 {
+            let now = format!("2026-08-10T01:{minute:02}:00Z");
+            if matches!(
+                handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
+                HookOutput::Silent
+            ) {
+                parked = true;
+                break;
+            }
+            minute += 2;
+        }
+        assert!(parked, "identical cycles reach the cap and park the loop");
     }
 
     /// FR-110 (T-204): with nothing unconsumed the cap still parks the PM —

@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    codex_hook_trust::{ensure_child_table, read_codex_config},
+    codex_hook_trust::{ensure_child_table, read_codex_config, with_codex_config_lock},
     settings_local::write_text_atomically,
 };
 
@@ -47,30 +47,33 @@ pub struct CodexManagedConfigReport {
 pub fn ensure_codex_context_management_experimental_mode(
     config_path: &Path,
 ) -> io::Result<CodexManagedConfigReport> {
-    let mut root = read_codex_config(config_path)?;
-    let root_table = root.as_table_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Codex config root must be a TOML table",
-        )
-    })?;
-    let features = ensure_child_table(root_table, "features")?;
-    let context_management = ensure_child_table(features, "context_management")?;
-    if context_management.contains_key("experimental_mode") {
-        return Ok(CodexManagedConfigReport {
-            config_path: config_path.to_path_buf(),
-            outcome: CodexManagedConfigOutcome::Preserved,
-        });
-    }
-    context_management.insert("experimental_mode".to_string(), toml::Value::Boolean(true));
+    // Issue #4071: the hook trust registration mutates this same shared file,
+    // so both writers take the same lock or one of them loses its update.
+    let outcome = with_codex_config_lock(config_path, || {
+        let mut root = read_codex_config(config_path)?;
+        let root_table = root.as_table_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Codex config root must be a TOML table",
+            )
+        })?;
+        let features = ensure_child_table(root_table, "features")?;
+        let context_management = ensure_child_table(features, "context_management")?;
+        if context_management.contains_key("experimental_mode") {
+            return Ok(CodexManagedConfigOutcome::Preserved);
+        }
+        context_management.insert("experimental_mode".to_string(), toml::Value::Boolean(true));
 
-    let rendered = toml::to_string_pretty(&root)
-        .map_err(|err| io::Error::other(format!("Codex config TOML serialize failed: {err}")))?;
-    write_text_atomically(config_path, &rendered)?;
+        let rendered = toml::to_string_pretty(&root).map_err(|err| {
+            io::Error::other(format!("Codex config TOML serialize failed: {err}"))
+        })?;
+        write_text_atomically(config_path, &rendered)?;
+        Ok(CodexManagedConfigOutcome::Written)
+    })?;
 
     Ok(CodexManagedConfigReport {
         config_path: config_path.to_path_buf(),
-        outcome: CodexManagedConfigOutcome::Written,
+        outcome,
     })
 }
 
