@@ -1483,6 +1483,42 @@ fn live_migration_removes_absent_or_closed_failed_rows_without_queueing() {
     }
 }
 
+/// Issue #4087 AC-5: a cache fallback pass (GitHub unreachable, cache entry
+/// missing) is not authoritative. The last observed queued row stays until a
+/// complete live snapshot says otherwise, so a transient cache gap cannot make
+/// the queue and `priority_order` disagree.
+#[test]
+fn cache_fallback_scan_keeps_the_last_observed_queued_row_when_its_cache_entry_is_missing() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[issue(4080, &["bug", "auto-merge"])],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-09-07T03:47:00Z",
+    );
+    assert_eq!(
+        monitor.inbox_item(4080).map(|item| item.state),
+        Some(MonitorInboxState::Queued)
+    );
+
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[],
+        IssueMonitorCandidateSource::Cache,
+        repo.path(),
+        "2026-09-07T04:02:00Z",
+    );
+
+    assert_eq!(
+        monitor.inbox_item(4080).map(|item| item.state),
+        Some(MonitorInboxState::Queued),
+        "a cache gap must not erase the last observed row"
+    );
+    assert!(monitor.agent_status().queue.contains(&4080));
+}
+
 #[test]
 fn explicit_closed_candidate_removes_all_current_needs_human_state() {
     let repo = tempfile::tempdir().expect("tempdir");

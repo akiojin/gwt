@@ -386,6 +386,21 @@ fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
     ));
 }
 
+/// Issue #4087 AC-1: the Issue cache full-refresh cadence, read from the
+/// cache on disk at status time so a stopped refresh is visible next to
+/// `scan_stall` in the one snapshot the PM already reads.
+fn attach_issue_cache_status(
+    project_root: &std::path::Path,
+    status: &mut crate::IssueMonitorAgentStatus,
+) {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+    status.issue_cache = Some(crate::issue_cache::issue_cache_refresh_status(
+        &cache_root,
+        crate::issue_cache::ISSUE_CACHE_TTL,
+        chrono::Utc::now(),
+    ));
+}
+
 fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
@@ -496,6 +511,7 @@ fn run_monitor_status<E: CliEnv>(
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
         merge_board_escalations_into_needs_human(&project_root, &mut status);
         attach_github_budget(&mut status);
+        attach_issue_cache_status(&project_root, &mut status);
         out.push_str(
             &serde_json::to_string(&status)
                 .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -528,6 +544,7 @@ fn run_monitor_status<E: CliEnv>(
     let mut status = monitor.agent_status_at(&now);
     merge_board_escalations_into_needs_human(&project_root, &mut status);
     attach_github_budget(&mut status);
+    attach_issue_cache_status(&project_root, &mut status);
     out.push_str(
         &serde_json::to_string(&status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -2710,9 +2727,28 @@ where
     let after = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
     if force_rebuild || crate::issue_cache::issue_cache_source_changed(&before, &after) {
-        rebuild_issue_index(env.repo_path()).map_err(|err| {
-            SpecOpsError::from(ApiError::Network(format!("rebuild issue index: {err}")))
-        })?;
+        // Issue #4087 AC-3: the snapshot is already committed; the index is a
+        // derived artifact. A runner failure (deadline kill, exit 143) used to
+        // fail this read and withhold the receipt, so every following read
+        // re-fetched and re-ran the same failing rebuild. Record it for the
+        // PM and let the index catch up through its own fingerprint check.
+        if let Err(error) = rebuild_issue_index(env.repo_path()) {
+            let message = format!("rebuild issue index: {error}");
+            tracing::warn!(
+                issue = number.0,
+                %message,
+                "issue cache written; index rebuild failed"
+            );
+            gwt_core::error_ledger::record_fail_open(
+                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+                message,
+                gwt_core::error_ledger::ErrorTarget {
+                    issue: Some(number.0),
+                    project_root: Some(env.repo_path().display().to_string()),
+                    ..gwt_core::error_ledger::ErrorTarget::default()
+                },
+            );
+        }
     }
     if !cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))? {
         return Err(SpecOpsError::from(ApiError::Network(format!(
@@ -4157,6 +4193,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            issue_cache: None,
             review_windows: Vec::new(),
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
@@ -4207,6 +4244,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            issue_cache: None,
             review_windows: Vec::new(),
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
@@ -4308,6 +4346,7 @@ mod tests {
                 scan_stall: None,
                 github_budget: None,
                 generation_reclaim: None,
+                issue_cache: None,
                 review_windows: Vec::new(),
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
@@ -4363,6 +4402,7 @@ mod tests {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: None,
+            issue_cache: None,
             review_windows: Vec::new(),
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
@@ -4478,15 +4518,18 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(out.trim()).expect("status json");
         // Issue #3928 AC-4: the GitHub budget block is read from the live
         // ledger at call time and has its own test; the queue projection is
-        // compared without it.
-        assert!(
-            status
-                .as_object_mut()
-                .expect("status object")
-                .remove("github_budget")
-                .is_some(),
-            "the offline fallback reports the GitHub budget too: {out}"
-        );
+        // compared without it. Issue #4087 AC-1: the same goes for the Issue
+        // cache refresh block, read from the cache on disk.
+        for attached in ["github_budget", "issue_cache"] {
+            assert!(
+                status
+                    .as_object_mut()
+                    .expect("status object")
+                    .remove(attached)
+                    .is_some(),
+                "the offline fallback reports {attached} too: {out}"
+            );
+        }
         assert_eq!(
             status,
             serde_json::json!({
@@ -4569,6 +4612,51 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
             "a scan that last ran in 2020 must read as stalled: {status}"
+        );
+    }
+
+    /// Issue #4087 AC-1: the PM reads from the status snapshot that the full
+    /// refresh has stopped, and by how much, instead of inferring it from
+    /// Issues that never arrive.
+    #[test]
+    fn issue_monitor_status_reports_the_issue_cache_refresh_state() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        std::fs::create_dir_all(cache_root.join("7")).expect("cache entry");
+        let last_full_refresh = (chrono::Utc::now() - chrono::Duration::minutes(65)).to_rfc3339();
+        std::fs::write(
+            cache_root.join("refresh-meta.json"),
+            serde_json::json!({
+                "last_full_refresh": last_full_refresh,
+                "ttl_minutes": 15,
+            })
+            .to_string(),
+        )
+        .expect("write stale refresh meta");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        let issue_cache = &status["issue_cache"];
+        assert_eq!(issue_cache["last_full_refresh"], last_full_refresh);
+        assert_eq!(issue_cache["ttl_minutes"], 15);
+        assert_eq!(issue_cache["stale"], true);
+        assert!(
+            issue_cache["stale_by_secs"]
+                .as_u64()
+                .is_some_and(|secs| (2990..=3010).contains(&secs)),
+            "50 minutes past the TTL: {status}"
         );
     }
 
@@ -6516,9 +6604,14 @@ mod tests {
         assert_eq!(rebuild_calls, vec![env.repo_path().to_path_buf()]);
     }
 
+    /// Issue #4087 AC-3: the cache write and its validation receipt do not
+    /// depend on the index rebuild. A runner failure (deadline kill, exit 143)
+    /// is recorded for the PM as `cache_refresh_failure`, the entry is served,
+    /// and the next read is a warm hit instead of another fetch plus rebuild.
     #[test]
-    fn index_rebuild_failure_keeps_receipt_absent_and_next_read_retries() {
+    fn index_rebuild_failure_publishes_receipt_and_records_the_failure() {
         let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
         let mut cached = sample_issue_snapshot();
         cached.title = "old cache".to_string();
@@ -6537,32 +6630,42 @@ mod tests {
                 rebuild_calls += 1;
                 Err("injected rebuild failure".to_string())
             })
-            .expect_err("first index rebuild should fail");
-        assert!(first.to_string().contains("injected rebuild failure"));
-        assert!(!Cache::new(env.cache_root())
-            .validation_receipt_path(remote.number)
-            .exists());
+            .expect("an index rebuild failure must not fail the cache write");
+        assert_eq!(first.snapshot.title, remote.title);
+        assert!(
+            Cache::new(env.cache_root())
+                .validation_receipt_path(remote.number)
+                .exists(),
+            "the receipt is published regardless of the index outcome"
+        );
 
         let second =
             load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, |_| {
                 rebuild_calls += 1;
                 Ok(())
             })
-            .expect("unvalidated cache must retry index rebuild");
-        assert_eq!(second.snapshot.title, remote.title);
-
-        let third =
-            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, |_| {
-                rebuild_calls += 1;
-                Ok(())
-            })
             .expect("validated cache should be a warm hit");
-        assert_eq!(third.snapshot.title, remote.title);
-        assert_eq!(rebuild_calls, 2);
+        assert_eq!(second.snapshot.title, remote.title);
         assert_eq!(
-            env.client.call_log(),
-            vec!["fetch:#42".to_string(), "fetch:#42".to_string()]
+            rebuild_calls, 1,
+            "the index is not retried through the cache read"
         );
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+
+        let rows = gwt_core::error_ledger::list_since(None).expect("read ledger");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].kind,
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+        );
+        assert!(
+            rows[0]
+                .message
+                .contains("rebuild issue index: injected rebuild failure"),
+            "{}",
+            rows[0].message
+        );
+        assert_eq!(rows[0].target.issue, Some(42));
     }
 
     #[test]
