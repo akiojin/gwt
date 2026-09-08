@@ -6126,6 +6126,7 @@ mod tests {
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
             generation_reclaim: None,
+            disk_space: None,
             review_windows: Vec::new(),
             issue_cache: None,
         };
