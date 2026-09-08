@@ -514,19 +514,26 @@ fn broken_scopes_still_unhealthy(
         return Ok(true);
     };
     let status = payload.get("status").cloned().unwrap_or(Value::Null);
-    Ok(broken.iter().any(|(scope, _)| {
-        let ready = status
-            .get(scope.as_str())
-            .map(|entry| {
-                let healthy = entry
-                    .get("healthy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                healthy
-            })
-            .unwrap_or(false);
-        !ready
-    }))
+    Ok(broken
+        .iter()
+        .any(|(scope, _)| !scope_probe_reports_ready(status.get(scope.as_str()))))
+}
+
+/// Decide whether one `status` entry proves the scope can be searched again.
+///
+/// Issue #4132: `healthy` alone is too strict. The issues scope reports
+/// `healthy: false` as soon as the Issue cache moves ahead of the built index,
+/// which every `issue.create` / `issue.comment` on the host does — including
+/// ones that land while this repair is running. Such a store is internally
+/// consistent and search classifies it `stale` (serve it, queue a refresh), so
+/// waiting for `healthy` again would burn the whole repair deadline and return
+/// `INDEX_NOT_READY` for an index that answers queries.
+fn scope_probe_reports_ready(entry: Option<&Value>) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    let flag = |name: &str| entry.get(name).and_then(Value::as_bool).unwrap_or(false);
+    flag("healthy") || flag("source_drift")
 }
 
 fn repair_status_probe_args(
@@ -2027,6 +2034,42 @@ mod tests {
                 ("files".to_string(), "missing".to_string()),
                 ("files-docs".to_string(), "corrupt".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn repaired_scope_is_ready_even_when_the_source_cache_already_moved_on() {
+        // Issue #4132: the repair wait polls `status`, whose `healthy` flag
+        // goes false the moment the Issue cache outgrows the rebuilt index —
+        // which a concurrent `issue.create` does within seconds on a busy
+        // host. The scope is searchable again (search classifies it `stale`),
+        // so the wait must end instead of burning the deadline and returning
+        // INDEX_NOT_READY for a store that answers queries.
+        assert!(
+            scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": true,
+                "reason": "count_mismatch",
+            }))),
+            "a rebuilt index that merely trails its source is ready to search"
+        );
+        assert!(
+            !scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": false,
+                "reason": "count_mismatch",
+            }))),
+            "a store that contradicts its own manifest is still unrepaired"
+        );
+        assert!(
+            scope_probe_reports_ready(Some(&json!({"healthy": true}))),
+            "a healthy scope is ready"
+        );
+        assert!(
+            !scope_probe_reports_ready(None),
+            "a scope the probe did not report has not been proven repaired"
         );
     }
 
