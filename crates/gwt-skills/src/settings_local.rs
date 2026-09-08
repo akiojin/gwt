@@ -684,10 +684,11 @@ fn posix_coordination_hook_command(event: &str) -> String {
     format!("{bin} hook coordination-event {event}")
 }
 
-/// Emit the PowerShell form of the runtime-state hook. Windows Claude
-/// Code runs the hook through `powershell -NoProfile -Command`, so we
-/// keep that wrapper, then invoke the gwtd binary via `& '...'` call
-/// operator.
+/// Emit the PowerShell form of the event hook. This is the Codex form only:
+/// Codex's own hook runner is host-native, so on Windows the command must be
+/// a PowerShell wrapper that invokes the gwtd binary via the `& '...'` call
+/// operator. Claude Code takes the POSIX form on every platform — see
+/// `managed_hook_shell` (Issue #3966).
 fn powershell_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
     let bin = powershell_quote(bin);
     format!(
