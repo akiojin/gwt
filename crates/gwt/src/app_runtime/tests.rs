@@ -49084,6 +49084,167 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     assert!(profile.skip_permissions);
 }
 
+fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
+    gwt::IssueMonitorLaunchProfile {
+        agent_id: agent_id.to_string(),
+        model: None,
+        reasoning: None,
+        version: None,
+        session_mode: Default::default(),
+        skip_permissions: false,
+        codex_fast_mode: false,
+        runtime_target: Default::default(),
+        docker_service: None,
+        docker_lifecycle_intent: Default::default(),
+        windows_shell: None,
+        prefer_for: Vec::new(),
+    }
+}
+
+#[test]
+fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
+    // Issue #4079 AC-1: with `[claude, codex]` saved, an Agent Settings save
+    // for codex must make codex candidate 1 — and the `launch_profile` mirror
+    // the Monitor launches from. The pre-#4079 upsert rewrote the index-1
+    // codex entry and left claude launching.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+    let request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("develop")
+            .model("gpt-6-astra")
+            .build(),
+    ));
+
+    runtime.save_issue_monitor_profile_from_launch_request(
+        session,
+        IssueMonitorProfileSaveContext {
+            client_id: "client-1".to_string(),
+            issue_number: None,
+            pool: seeded.launch_profile_pool(),
+        },
+        request,
+    );
+
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    let pool = prefs.launch_profile_pool();
+    assert_eq!(
+        pool.iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["codex"],
+        "the chosen agent takes candidate 1"
+    );
+    assert_eq!(pool[0].model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(
+        prefs.launch_profile.as_ref().map(|p| p.agent_id.as_str()),
+        Some("codex"),
+        "the compatibility mirror follows the head"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_previews_the_pool_head_replacement() {
+    // Issue #4079 AC-2: with more than one provider in the pool the form must
+    // say which candidate the save writes, and its preview of the resulting
+    // pool summary must be what the Monitor reports afterwards.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    let impact = view
+        .issue_monitor_pool_impact
+        .as_ref()
+        .expect("Agent Settings must preview its effect on the candidate pool");
+    assert_eq!(impact.action, "replace_head");
+    assert_eq!(impact.agent_id, "codex");
+    assert_eq!(
+        impact.replaced_agent_id.as_deref(),
+        Some("claude"),
+        "the operator must see which candidate is switched out"
+    );
+    assert!(
+        impact.detail.contains(&impact.resulting_summary),
+        "the note states the summary the Monitor will report: {impact:?}"
+    );
+    let previewed_summary = impact.resulting_summary.clone();
+
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    wait_for_recorded_event(
+        "issue monitor settings runtime resolution",
+        &recorded_events,
+        |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        },
+    );
+    let resolved_event = {
+        let mut events = recorded_events.lock().expect("event log");
+        events
+            .iter()
+            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .map(|index| events.remove(index))
+            .expect("runtime resolved event")
+    };
+    let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+        unreachable!("matched above")
+    };
+    runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    let saved_summary =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+            .status_view()
+            .launch_profile_summary;
+    assert_eq!(
+        saved_summary, previewed_summary,
+        "the previewed summary must be the one the Monitor reports after the save"
+    );
+}
+
 #[test]
 fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_launching() {
     let _env_lock = env_test_lock()
@@ -49251,6 +49412,7 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
             issue_number: None,
+            pool: Vec::new(),
         },
         request,
     );
@@ -49551,9 +49713,11 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
 }
 
 #[test]
-fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
-    // SPEC #3914 FR-003 / US-7: saving a second provider from Agent settings
-    // appends it to the pool instead of replacing the saved profile.
+fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider() {
+    // SPEC #3914 FR-003 / US-7, amended by Issue #4079 AC-1: saving another
+    // provider from Agent settings is a switch, so it takes candidate 1 and the
+    // `launch_profile` mirror. Appending a candidate is a `profiles.set`
+    // operation, not something the settings form does behind the operator.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -49582,6 +49746,7 @@ fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
             issue_number: None,
+            pool: Vec::new(),
         },
         request,
     );
@@ -49597,15 +49762,16 @@ fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
         pool.iter()
             .map(|profile| profile.agent_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["claude", "codex"]
+        vec!["codex"],
+        "the chosen provider replaces candidate 1"
     );
     assert_eq!(
         persisted
             .launch_profile
             .as_ref()
             .map(|profile| profile.agent_id.as_str()),
-        Some("claude"),
-        "the compatibility mirror keeps the pool head"
+        Some("codex"),
+        "the compatibility mirror follows the pool head"
     );
 }
 
