@@ -342,12 +342,16 @@ fn spawn_holder<E: CliEnv>(
     })
     .to_string();
 
+    // The holder must not inherit our stdout/stderr: the caller reads our
+    // output to EOF, and an inherited pipe would keep it open for the whole
+    // lease. Redirecting the holder's stdio to NUL is only half of that on
+    // Windows, where `CreateProcess` also copies every inheritable handle
+    // into the child; `hidden_command` clears the inherit flag on our own
+    // standard handles so the pipe does not travel that way either (Issue
+    // #4105).
     let mut child = gwt_core::process::hidden_command(exe)
         .current_dir(env.repo_path())
         .stdin(Stdio::piped())
-        // The holder must not inherit our stdout/stderr: the caller reads our
-        // output to EOF, and an inherited pipe would keep it open for the
-        // whole lease.
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

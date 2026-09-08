@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use gwt_core::process::hidden_command;
 use tempfile::TempDir;
@@ -104,7 +105,45 @@ impl Arena {
 }
 
 const ACQUIRE_2M: &str = r#"{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":2,"reason":"round-trip test"}}"#;
+const ACQUIRE_1M: &str = r#"{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":1,"reason":"eof test"}}"#;
 const STATUS: &str = r#"{"schema_version":1,"operation":"verify.lease.status","params":{}}"#;
+
+/// Issue #4105 (AC-1 / AC-2): the detached holder must not keep the caller's
+/// stdout / stderr open. `gwtd()` reads the acquiring invocation to EOF, so a
+/// holder that inherited those pipe handles would park this call until it
+/// exits at TTL — which is exactly what happened on Windows, where
+/// `CreateProcess` copies every inheritable handle into the child.
+#[test]
+fn acquire_answers_with_eof_while_the_holder_is_still_alive() {
+    let arena = Arena::new();
+
+    let started = Instant::now();
+    let granted = arena.run(ACQUIRE_1M);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        headline(&granted),
+        "verification lease: granted",
+        "an uncontended host must grant the lease:\n{granted}"
+    );
+    // The handshake itself is bounded by the 30s holder startup timeout; the
+    // TTL is 60s, so a call that only returned once the holder died shows up
+    // here as well as in the `free` status below.
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "acquire must return as soon as the lease is granted, not when the holder exits: took {elapsed:?}"
+    );
+
+    let held = arena.run(STATUS);
+    assert_eq!(
+        headline(&held),
+        "verification lease: held",
+        "the holder must still be alive after the acquiring invocation returned:\n{held}"
+    );
+    let lease_id = field(&held, "lease_id").to_string();
+    arena.run(&format!(
+        r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{lease_id}"}}}}"#
+    ));
+}
 
 #[test]
 fn verification_lease_round_trips_across_gwtd_invocations() {

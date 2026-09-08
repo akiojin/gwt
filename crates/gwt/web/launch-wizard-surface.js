@@ -225,6 +225,27 @@ export function createLaunchWizardSurface({
         return note;
       }
 
+      // Issue #4079 AC-2: the Issue Monitor Agent Settings form always writes
+      // candidate 1 of the launch pool, so the backend derives which candidate
+      // that replaces and the pool summary the save will produce. Rendering it
+      // here is what stops a switch from looking like it did nothing when the
+      // chosen agent already sat further down the pool.
+      function appendIssueMonitorPoolImpactNote(parent, impact) {
+        if (!impact) return null;
+        const note = createNode("div", "launch-note launch-pool-impact");
+        note.dataset.poolAction = impact.action || "";
+        note.dataset.agentId = impact.agent_id || "";
+        note.setAttribute("role", "note");
+        note.appendChild(
+          createNode("div", "launch-pool-impact__title", impact.title || ""),
+        );
+        note.appendChild(
+          createNode("div", "launch-pool-impact__detail", impact.detail || ""),
+        );
+        parent.appendChild(note);
+        return note;
+      }
+
       function appendChoiceField(
         parent,
         label,
@@ -1725,6 +1746,10 @@ export function createLaunchWizardSurface({
           section.appendChild(grid);
           if (launchWizard.show_agent_settings) {
             appendAgentSetupNote(section, launchWizard.agent_setup);
+            appendIssueMonitorPoolImpactNote(
+              section,
+              launchWizard.issue_monitor_pool_impact,
+            );
           }
           panel.appendChild(section);
         }

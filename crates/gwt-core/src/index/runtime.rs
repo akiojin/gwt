@@ -924,6 +924,16 @@ impl RunnerSpawner for PythonRunnerSpawner {
 const ISSUE_INDEX_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 const ISSUE_INDEX_HEAVY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ISSUE_INDEX_SHARED_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Issue #4140: the longest this job may keep the host-wide heavy lease.
+///
+/// The runner used to hold it for its entire run — 30 minutes and more when a
+/// corrupt index forced a full rebuild — and every agent's `verify.run` was
+/// refused with `host busy` for that whole time. The cap is the backstop for
+/// claimants that never register (a raw `cargo test`); a claimant that does
+/// register is served within one [`ISSUE_INDEX_HEAVY_YIELD_POLL`] instead.
+const ISSUE_INDEX_HEAVY_MAX_HOLD: Duration = Duration::from_secs(10 * 60);
+/// How fast the job notices a verification claimant queueing behind it.
+const ISSUE_INDEX_HEAVY_YIELD_POLL: Duration = Duration::from_millis(200);
 
 fn run_coordinated_issue_index(
     repo_hash: &str,
@@ -972,10 +982,16 @@ fn run_coordinated_issue_index(
                 emit_issue_runner_end(spawn_id, label, true);
                 return;
             }
-            let heavy = match guard.acquire_heavy_with_ttl(
-                ISSUE_INDEX_HEAVY_TIMEOUT,
-                crate::index_coordinator::INDEX_HEAVY_LEASE_TTL,
-            ) {
+            // The TTL is what makes the hold visible to everyone else: it is
+            // published in the heavy ticket, so `verify.lease.status` and the
+            // `verify.run` refusal can quote a real deadline instead of the
+            // `0s left` an untimed lease used to report (Issue #4140 AC-3).
+            // The cap stays the 10-minute one from #4140 rather than the
+            // generic `INDEX_HEAVY_LEASE_TTL`: this job is the holder that
+            // starved verification, so it gets the tighter bound.
+            let heavy = match guard
+                .acquire_heavy_with_ttl(ISSUE_INDEX_HEAVY_TIMEOUT, ISSUE_INDEX_HEAVY_MAX_HOLD)
+            {
                 Ok(heavy) => heavy,
                 Err(err) => {
                     tracing::warn!(
@@ -991,7 +1007,51 @@ fn run_coordinated_issue_index(
                     return;
                 }
             };
-            let outcome = match cmd.spawn().and_then(|child| child.wait_with_output()) {
+            // Drain the runner on a worker thread so this thread can keep
+            // watching the lease. `wait_with_output` has to own the child to
+            // pump both pipes, so polling it here instead would risk filling
+            // a pipe and deadlocking the very job we are timing.
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let runner_flag = std::sync::Arc::clone(&running);
+            let runner = std::thread::Builder::new()
+                .name("gwt-index-issues-runner".to_string())
+                .spawn(move || {
+                    let result = cmd.spawn().and_then(|child| child.wait_with_output());
+                    runner_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    result
+                });
+            let runner = match runner {
+                Ok(runner) => runner,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        error = %err,
+                        "issue index runner thread spawn failed"
+                    );
+                    drop(heavy);
+                    let _ = guard.complete(JobOutcome::Failed {
+                        message: err.to_string(),
+                    });
+                    emit_issue_runner_end(spawn_id, label, false);
+                    return;
+                }
+            };
+            if let Some(reason) = heavy.hold_while(ISSUE_INDEX_HEAVY_YIELD_POLL, || {
+                running.load(std::sync::atomic::Ordering::SeqCst)
+            }) {
+                // The runner keeps going without the lease: a background index
+                // rebuild must never be the reason an agent cannot verify.
+                tracing::info!(
+                    target: "gwt::index",
+                    spawn_id = spawn_id,
+                    reason = reason.as_str(),
+                    "issue index handed the host heavy lease back while still running"
+                );
+            }
+            let outcome = match runner.join().unwrap_or_else(|_| {
+                Err(std::io::Error::other("issue index runner thread panicked"))
+            }) {
                 Ok(output) if output.status.success() => JobOutcome::Completed,
                 Ok(output) => {
                     tracing::warn!(
@@ -1017,7 +1077,6 @@ fn run_coordinated_issue_index(
                     }
                 }
             };
-            drop(heavy);
             let completed = matches!(outcome, JobOutcome::Completed);
             let _ = guard.complete(outcome);
             tracing::info!(
