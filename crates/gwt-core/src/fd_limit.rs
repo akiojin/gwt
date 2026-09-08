@@ -104,6 +104,10 @@ mod platform {
     use super::{FdLimit, FdLimitRaise, FD_PROBE_CEILING};
 
     /// Read the process `RLIMIT_NOFILE` pair.
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "libc::rlim_t is u64 on every target gwt builds for, but POSIX only guarantees an unsigned integer type"
+    )]
     pub fn current_fd_limit() -> Option<FdLimit> {
         let mut limit = libc::rlimit {
             rlim_cur: 0,
