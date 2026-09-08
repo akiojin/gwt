@@ -10611,6 +10611,60 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "workspace.ensure",
 ];
 
+/// Recoveries that need no session identity or execution authority, so naming
+/// one is always truthful (Issue #4074 AC-3).
+///
+/// `gwt-execute` and `relaunch` are instructions to the human or the Monitor
+/// rather than gwtd operations; `verify.plan` / `verify.run` are accepted from
+/// any session in the worktree. Everything else must be probe-gated — see
+/// [`PROTECTED_RECOVERY_OPERATIONS`].
+#[cfg(test)]
+const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 4] =
+    ["gwt-execute", "relaunch", "verify.plan", "verify.run"];
+
+/// The recoveries a diagnosis names before the probes decide which of them the
+/// caller would actually be allowed to run.
+///
+/// Split out so the enumeration is testable on its own: Issue #4029 shipped a
+/// list that named operations the caller's session could never execute, and
+/// #4074 AC-3 keeps that from coming back.
+fn base_execution_recoveries(
+    binding_state: ExecutionBindingState,
+    ecr_status: ExecutionDiagnosisState,
+    workspace_update_applicable: Option<bool>,
+    workspace_update_applicability_reason: Option<&str>,
+) -> Vec<String> {
+    let mut recoveries = if binding_state == ExecutionBindingState::Corrupt {
+        vec!["execution.repair".to_string()]
+    } else {
+        match ecr_status {
+            ExecutionDiagnosisState::Missing => vec!["gwt-execute".to_string()],
+            ExecutionDiagnosisState::Corrupt => vec!["execution.repair".to_string()],
+            ExecutionDiagnosisState::Blocked => vec![
+                "verify.plan".to_string(),
+                "verify.run".to_string(),
+                "execution.reopen".to_string(),
+            ],
+            ExecutionDiagnosisState::Completed => vec!["gwt-execute".to_string()],
+            ExecutionDiagnosisState::Active if binding_state != ExecutionBindingState::Bound => {
+                vec!["execution.continue".to_string()]
+            }
+            ExecutionDiagnosisState::Active => Vec::new(),
+        }
+    };
+    if workspace_update_applicable == Some(true) {
+        recoveries.push("workspace.update".to_string());
+    } else if let Some(reason) = workspace_update_applicability_reason {
+        let recovery = if reason == "workspace_ensure_required" {
+            "workspace.ensure"
+        } else {
+            "relaunch"
+        };
+        recoveries.push(recovery.to_string());
+    }
+    recoveries
+}
+
 /// Collect the current operation-local diagnosis without mutating trusted state.
 #[must_use]
 pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosisSnapshot {
@@ -11128,36 +11182,12 @@ fn diagnose_with_mode(
         }
     }
 
-    let mut execution_recoveries = if snapshot.binding_state == ExecutionBindingState::Corrupt {
-        vec!["execution.repair".to_string()]
-    } else {
-        match snapshot.ecr_status {
-            ExecutionDiagnosisState::Missing => vec!["gwt-execute".to_string()],
-            ExecutionDiagnosisState::Corrupt => vec!["execution.repair".to_string()],
-            ExecutionDiagnosisState::Blocked => vec![
-                "verify.plan".to_string(),
-                "verify.run".to_string(),
-                "execution.reopen".to_string(),
-            ],
-            ExecutionDiagnosisState::Completed => vec!["gwt-execute".to_string()],
-            ExecutionDiagnosisState::Active
-                if snapshot.binding_state != ExecutionBindingState::Bound =>
-            {
-                vec!["execution.continue".to_string()]
-            }
-            ExecutionDiagnosisState::Active => Vec::new(),
-        }
-    };
-    if snapshot.workspace_update_applicable == Some(true) {
-        execution_recoveries.push("workspace.update".to_string());
-    } else if let Some(reason) = snapshot.workspace_update_applicability_reason.as_deref() {
-        let recovery = if reason == "workspace_ensure_required" {
-            "workspace.ensure"
-        } else {
-            "relaunch"
-        };
-        execution_recoveries.push(recovery.to_string());
-    }
+    let mut execution_recoveries = base_execution_recoveries(
+        snapshot.binding_state,
+        snapshot.ecr_status,
+        snapshot.workspace_update_applicable,
+        snapshot.workspace_update_applicability_reason.as_deref(),
+    );
     execution_recoveries.sort();
     execution_recoveries.dedup();
     snapshot.available_recoveries = execution_recoveries;
@@ -13748,6 +13778,89 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    /// Issue #4074 AC-3 (regression contract for #4029): `execution.status`
+    /// must not name a recovery the caller's session and authority would
+    /// refuse. Every operation the enumeration can produce is therefore either
+    /// probe-gated — the probe re-checks acceptance and drops it when the
+    /// answer is no — or independent of session and authority altogether.
+    #[test]
+    fn every_enumerated_recovery_is_probe_gated_or_session_independent() {
+        let states = [
+            ExecutionDiagnosisState::Active,
+            ExecutionDiagnosisState::Completed,
+            ExecutionDiagnosisState::Blocked,
+            ExecutionDiagnosisState::Missing,
+            ExecutionDiagnosisState::Corrupt,
+        ];
+        let bindings = [
+            ExecutionBindingState::Bound,
+            ExecutionBindingState::Missing,
+            ExecutionBindingState::Stale,
+            ExecutionBindingState::Terminal,
+            ExecutionBindingState::HostUnreachable,
+            ExecutionBindingState::Unknown,
+            ExecutionBindingState::Corrupt,
+        ];
+        let workspace_cases = [
+            (Some(true), None),
+            (Some(false), Some("workspace_ensure_required")),
+            (Some(false), Some("session_unbound")),
+            (None, None),
+        ];
+        let mut observed = std::collections::BTreeSet::new();
+        for state in states {
+            for binding in bindings {
+                for (applicable, reason) in workspace_cases {
+                    for operation in base_execution_recoveries(binding, state, applicable, reason) {
+                        assert!(
+                            PROTECTED_RECOVERY_OPERATIONS.contains(&operation.as_str())
+                                || SESSION_INDEPENDENT_RECOVERY_OPERATIONS
+                                    .contains(&operation.as_str()),
+                            "{state:?}/{binding:?} names `{operation}`, which is neither \
+                             probe-gated nor session-independent: it can be advertised to a \
+                             caller that cannot run it"
+                        );
+                        observed.insert(operation);
+                    }
+                }
+            }
+        }
+        // The guard is only meaningful while the enumeration actually reaches
+        // both halves of the contract.
+        assert!(
+            observed
+                .iter()
+                .any(|op| PROTECTED_RECOVERY_OPERATIONS.contains(&op.as_str())),
+            "no probe-gated recovery was exercised: {observed:?}"
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|op| SESSION_INDEPENDENT_RECOVERY_OPERATIONS.contains(&op.as_str())),
+            "no session-independent recovery was exercised: {observed:?}"
+        );
+    }
+
+    /// The probe set and the probe-gated operation list are one contract: an
+    /// operation listed as protected but never probed would be stripped from
+    /// every projection and never re-advertised, and a probed operation missing
+    /// from the list would leak into projections unchecked.
+    #[test]
+    fn every_protected_recovery_operation_has_a_probe() {
+        let source = include_str!("execution_state.rs");
+        let probes = source
+            .split_once("let probes = if recovery_context.is_some_and(Result::is_ok) {")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("};").map(|(block, _)| block))
+            .expect("probe construction block");
+        for operation in PROTECTED_RECOVERY_OPERATIONS {
+            assert!(
+                probes.contains(&format!("\"{operation}\"")),
+                "protected recovery `{operation}` has no probe backing it"
+            );
+        }
+    }
 
     #[test]
     fn app_runtime_exact_cleanup_never_acquires_owner_from_a_session_callback() {
