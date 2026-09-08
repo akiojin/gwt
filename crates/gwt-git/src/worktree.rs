@@ -1340,16 +1340,44 @@ fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
         return true;
     }
 
-    // gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
-    // collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
-    if entry.starts_with(".claude/skills/gwt-")
-        || entry.starts_with(".claude/commands/gwt-")
-        || entry.starts_with(".codex/skills/gwt-")
-    {
+    if is_gwt_materialized_asset_entry(entry) {
         return true;
     }
 
     entry == ".DS_Store" || entry.ends_with("/.DS_Store")
+}
+
+/// gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
+/// collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
+fn is_gwt_materialized_asset_entry(entry: &str) -> bool {
+    entry.starts_with(".claude/skills/gwt-")
+        || entry.starts_with(".claude/commands/gwt-")
+        || entry.starts_with(".codex/skills/gwt-")
+}
+
+/// Whether a `git status --porcelain` entry names something gwt itself wrote
+/// into the worktree: its own `.gwt/` namespace, or a materialized managed
+/// asset. Issue #4009.
+///
+/// Deliberately broader than [`is_disposable_worktree_entry`], which fails
+/// closed on durable Work shards because the ephemeral-intake reaper
+/// force-removes a worktree the moment it decides and a just-written shard may
+/// not be ingested yet. This predicate serves the Workspace cleanup-readiness
+/// scan, which only ever looks at branches already merged or change-free; by
+/// then the 30-second Work events ingest has long folded those appends into
+/// the home projection. Counting them as user work is what made
+/// `CLEAN UP READY` report 0 on a host where 92 of 129 worktrees differed from
+/// HEAD only by gwt's own writes.
+///
+/// The merged hook configs (`.codex/hooks.json`,
+/// `.claude/settings.local.json`) are *not* covered here: whether they hold
+/// user content needs `gwt-skills`, which this crate cannot depend on
+/// (codex #3237), so callers layer that check on top.
+pub fn status_entry_is_gwt_runtime_write(entry: &str) -> bool {
+    let entry = entry.trim().trim_matches('"');
+    let entry = entry.strip_prefix("./").unwrap_or(entry);
+
+    entry == ".gwt" || entry.starts_with(".gwt/") || is_gwt_materialized_asset_entry(entry)
 }
 
 fn is_durable_gwt_work_entry(entry: &str) -> bool {

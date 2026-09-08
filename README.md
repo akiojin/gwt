@@ -368,6 +368,13 @@ are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
 
+The Workspace panel's `Clean Up Ready` count uses the same idea for whole
+worktrees: a merged or change-free Workspace stays cleanup-ready when its only
+uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,
+the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
+`.claude/settings.local.json` that still carries no hand-written content.
+Anything else you have not committed keeps the Workspace out of the count.
+
 ### Autonomous mode (opt-in)
 
 Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →

@@ -55688,6 +55688,108 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     );
 }
 
+/// Issue #4009: gwt rewrites `.codex/hooks.json` on every materialization and
+/// appends to its own `.gwt/` namespace on every Work event, so a naive
+/// "any status entry means dirty" verdict marked practically every worktree
+/// dirty and left `CLEAN UP READY` reporting 0. Only changes outside gwt's own
+/// namespaces count as work the user could lose.
+#[test]
+fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join(".codex")).expect("create repo");
+    run_git(&repo, &["init", "-q", "-b", "develop"]);
+    run_git(&repo, &["config", "user.name", "Codex"]);
+    run_git(&repo, &["config", "user.email", "codex@example.com"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    fs::write(repo.join(".codex/hooks.json"), "{\n  \"hooks\": {}\n}\n").expect("seed hooks");
+    run_git(&repo, &["add", "README.md", ".codex/hooks.json"]);
+    run_git(&repo, &["commit", "-qm", "seed"]);
+    run_git(&repo, &["branch", "work/gwt-writes"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "develop"],
+    );
+    // The materialization rewrite every launch performs: same managed shape,
+    // different bytes, so git reports a tracked modification.
+    fs::write(repo.join(".codex/hooks.json"), "{ \"hooks\": {} }\n").expect("rewrite hooks");
+
+    // Recording the Work event is what writes `.gwt/work/`, exactly as the
+    // runtime does in a real worktree.
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-gwt-writes-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("gwt writes only".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/gwt-writes".to_string()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+
+    // Guard the premise: the naive verdict this replaces saw a dirty worktree
+    // here, which is exactly why `CLEAN UP READY` reported 0.
+    let status = gwt_git::diff::get_status(&repo).expect("status");
+    assert!(
+        !status.is_empty(),
+        "fixture must leave gwt's own writes uncommitted"
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.spawn_work_merge_status_scan(repo.clone());
+
+    wait_for_recorded_event("gwt-write work merge status", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::WorkMergeStatus {
+                    project_root,
+                    ..
+                } if project_root == &repo
+            )
+        })
+    });
+
+    let snapshot = events.lock().expect("event log").clone();
+    let (cleanup_ready_branches, dirty_branches) = snapshot
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::WorkMergeStatus {
+                project_root,
+                cleanup_ready_branches,
+                dirty_branches,
+                ..
+            } if project_root == &repo => Some((cleanup_ready_branches, dirty_branches)),
+            _ => None,
+        })
+        .expect("work merge status event");
+
+    assert!(
+        dirty_branches.is_empty(),
+        "gwt's own runtime writes must not make a branch dirty: {dirty_branches:?}"
+    );
+    assert!(
+        cleanup_ready_branches.contains_key("work/gwt-writes"),
+        "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
+         {cleanup_ready_branches:?}"
+    );
+}
+
 #[test]
 fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
     let _env_lock = env_test_lock()

@@ -9039,9 +9039,30 @@ fn work_merge_scan_needs_dirty_check(
 fn work_branch_has_dirty_worktree(target: &WorkBranchScanTarget) -> bool {
     target.worktree_paths.iter().any(|path| {
         gwt_git::diff::get_status(path)
-            .map(|entries| !entries.is_empty())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| !work_branch_status_entry_is_gwt_write(path, entry))
+            })
+            // Cannot prove the worktree is clean — fail closed (dirty).
             .unwrap_or(true)
     })
+}
+
+/// Issue #4009: gwt rewrites the merged hook configs on every materialization
+/// and appends to `.gwt/` on every Work event, so counting those entries as
+/// user work marked nearly every worktree dirty and starved `CLEAN UP READY`.
+/// Only the hook configs that still hold *no* user content are discounted, so
+/// a hand-edited one keeps its worktree.
+fn work_branch_status_entry_is_gwt_write(
+    worktree: &Path,
+    entry: &gwt_git::diff::FileEntry,
+) -> bool {
+    let Some(relative) = entry.path.to_str() else {
+        return false;
+    };
+    gwt_git::worktree::status_entry_is_gwt_runtime_write(relative)
+        || crate::runtime_support::intake_hook_config_is_disposable(worktree, relative)
 }
 
 fn work_branches_with_live_processes(targets: &[WorkBranchScanTarget]) -> HashSet<String> {

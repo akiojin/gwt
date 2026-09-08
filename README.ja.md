@@ -343,6 +343,12 @@ Priority の変更と daemon 不在時の設定変更は、実行中 instance �
 場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
 実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
+Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
+マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
+（`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない
+`.codex/hooks.json` / `.claude/settings.local.json`）だけであれば cleanup-ready のまま
+数えられます。それ以外の未コミット変更があれば、その Workspace は件数から外れます。
+
 ### Autonomous モード（opt-in）
 
 Autonomous モードはループ全体を無人で実行します: 適格 Issue → 自動起動 → 実装 →
