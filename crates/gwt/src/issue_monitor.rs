@@ -2623,6 +2623,13 @@ pub struct IssueMonitorAgentStatus {
     /// in daemon projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_space: Option<crate::disk_space::DiskSpaceStatus>,
+    /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
+    /// completed and how far past its TTL it is — so a stopped refresh is
+    /// read from the same snapshot as `scan_stall` instead of inferred from
+    /// Issues that never arrive. Filled in by the `issue.monitor.status`
+    /// surface from the cache on disk; `None` in daemon projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_cache: Option<crate::issue_cache::IssueCacheRefreshStatus>,
     /// Issue #4117 AC-2/AC-3: live independent review windows. Each holds a
     /// `max_active` slot beside the implementation launch it reviews.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -8618,6 +8625,7 @@ impl IssueMonitorState {
             scan_stall: None,
             github_budget: None,
             generation_reclaim: self.generation_reclaim.clone(),
+            issue_cache: None,
             review_windows: self.review_windows(),
             idle_windows: self.idle_windows(),
             idle_window_counts: self.idle_window_counts(),
@@ -13627,6 +13635,7 @@ mod tests {
                 github_budget: None,
                 generation_reclaim: None,
                 disk_space: None,
+                issue_cache: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: BTreeMap::new(),
                 review_windows: Vec::new(),
