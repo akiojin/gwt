@@ -429,6 +429,14 @@ impl Pane {
                 };
                 self.log_child_exit(&exit);
                 self.last_exit = Some(exit);
+                // Issue #4142: the exited-transition is the last moment the
+                // master and writer descriptors mean anything. A pane kept on
+                // screen for recovery diagnostics renders from `parser` and
+                // `scrollback`, not from the PTY, so holding them only spends
+                // the process-wide `RLIMIT_NOFILE` budget every other pane
+                // needs. The output thread's reader clone is separate and
+                // still drains to EOF.
+                self.pty.release_descriptors();
             }
         }
         Ok(&self.status)
@@ -1796,5 +1804,90 @@ mod tests {
         assert_eq!(completed, PaneStatus::Completed(0));
         assert_ne!(PaneStatus::Completed(0), PaneStatus::Completed(1));
         assert_eq!(error, PaneStatus::Error("fail".to_string()));
+    }
+
+    /// PTY masters are the only terminals these tests open beyond the harness
+    /// stdio, so the delta of this count is the `/dev/ptmx` count Issue #4142
+    /// measures with `lsof`. Every PTY test in this binary holds
+    /// [`lock_pty_test`], so the counts below are not raced by a sibling.
+    #[cfg(unix)]
+    fn open_tty_fds() -> usize {
+        gwt_core::fd_limit::open_tty_fd_count().expect("unix exposes an fd table")
+    }
+
+    /// Poll `check_status` until the child is reaped, without attaching a
+    /// reader — a reader clone is a descriptor of its own and would mask what
+    /// these tests measure.
+    #[cfg(unix)]
+    fn wait_for_exit_without_reader(pane: &mut Pane, within: Duration) {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if pane
+                .check_status()
+                .is_ok_and(|status| *status != PaneStatus::Running)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not exit within {within:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Issue #4142 AC-1.
+    #[cfg(unix)]
+    #[test]
+    fn child_exit_releases_the_pty_descriptors_within_five_seconds() {
+        let _pty_guard = lock_pty_test();
+        let baseline = open_tty_fds();
+
+        let mut pane = test_pane("fd-exit", success_command());
+        let while_running = open_tty_fds();
+        assert!(
+            while_running > baseline,
+            "spawning a pane must open PTY descriptors: {baseline} -> {while_running}"
+        );
+
+        wait_for_exit_without_reader(&mut pane, Duration::from_secs(5));
+
+        assert_eq!(
+            open_tty_fds(),
+            baseline,
+            "the exited pane still holds PTY descriptors while it stays on screen"
+        );
+        // The pane is still alive and still reports its exit receipt.
+        assert_ne!(pane.status(), &PaneStatus::Running);
+        assert!(pane.last_exit().is_some());
+    }
+
+    /// Issue #4142 AC-4: the descriptor cost of a spawn/exit cycle must not
+    /// accumulate. 300 cycles is past the launchd soft `RLIMIT_NOFILE` of 256,
+    /// so a one-descriptor-per-cycle leak cannot stay invisible here.
+    #[cfg(unix)]
+    #[test]
+    fn repeated_spawn_and_exit_cycles_do_not_accumulate_descriptors() {
+        const CYCLES: usize = 300;
+        const SAMPLE_EVERY: usize = 50;
+
+        let _pty_guard = lock_pty_test();
+        let baseline = open_tty_fds();
+        let mut samples = Vec::new();
+
+        for cycle in 0..CYCLES {
+            let mut pane = test_pane(&format!("fd-cycle-{cycle}"), success_command());
+            wait_for_exit_without_reader(&mut pane, Duration::from_secs(5));
+            drop(pane);
+            if cycle % SAMPLE_EVERY == SAMPLE_EVERY - 1 {
+                samples.push((cycle + 1, open_tty_fds()));
+            }
+        }
+
+        assert!(
+            samples.iter().all(|(_, open)| *open == baseline),
+            "PTY descriptors grew across {CYCLES} spawn/exit cycles \
+             (baseline {baseline}, samples {samples:?})"
+        );
     }
 }
