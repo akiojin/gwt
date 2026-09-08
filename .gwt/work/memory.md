@@ -7624,3 +7624,10 @@ Type: workflow
 Context: Issue #3253: owner-unlinked workflow-policy blocked gwtd JSON envelope discovery/linking commands because heredoc command segmentation normalized them to a lone gwtd segment and the owner guard did not classify the envelope operation.
 Learning: Classify standalone gwtd JSON envelopes from the original command before segment allowlists, but run shell output redirection detection first so control-plane transport cannot mask worktree writes.
 Future Action: When changing hook workflow policies, add RED tests for both allowed standalone JSON envelope commands and adversarial variants such as chained shell mutation or output redirection.
+
+## 2026-07-09 — Unset force-new-instance for tray lock verification
+
+Type: failure-pattern
+Context: Issue #3233 verification: `cargo test -p gwt-core -p gwt --all-features` failed in `cli::tray::lock::tests::second_acquire_for_same_user_reports_already_running` because this agent environment had `GWT_FORCE_NEW_INSTANCE=1` set.
+Learning: The tray lock test uses the public acquire path, so an inherited `GWT_FORCE_NEW_INSTANCE` changes the lock path to PID-scoped forced mode and makes the canonical lock-file assertion fail even when the code is healthy.
+Future Action: For CI-equivalent local verification of gwt tests, check inherited `GWT_FORCE_NEW_INSTANCE` when tray lock tests fail; rerun broad cargo tests with `env -u GWT_FORCE_NEW_INSTANCE ...` before treating it as a product regression.
