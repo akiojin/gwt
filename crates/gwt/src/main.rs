@@ -1314,6 +1314,8 @@ enum UserEvent {
         id: String,
         incarnation: u64,
         data: Vec<u8>,
+        /// Pane stream position after this chunk was parsed (Issue #4095).
+        seq: u64,
     },
     /// A submit-terminated choice or standalone Escape is about to be written
     /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
@@ -2498,6 +2500,7 @@ mod tests {
             tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         }
     }
@@ -2919,7 +2922,7 @@ mod tests {
                 WindowProcessStatus::Ready,
                 "Shell ready".to_string(),
             )],
-            vec![("tab-1::shell-1".to_string(), snapshot)],
+            vec![("tab-1::shell-1".to_string(), snapshot, None)],
             None,
             Some(UpdateState::UpToDate { checked_at: None }),
         );
@@ -3387,7 +3390,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 Vec::new(),
             ),
@@ -3507,7 +3509,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
@@ -5619,7 +5620,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 sample_wizard_stale_agent_options(),
                 Vec::new(),
@@ -9000,8 +9000,9 @@ fn main() -> std::io::Result<()> {
                 id,
                 incarnation,
                 data,
+                seq,
             }) => {
-                let events = app.handle_runtime_output_event(id, incarnation, data);
+                let events = app.handle_runtime_output_event(id, incarnation, data, seq);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {

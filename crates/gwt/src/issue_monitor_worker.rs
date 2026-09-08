@@ -958,6 +958,135 @@ pub fn try_issue_completed_by_merged_pr(
         .map_err(IssueMonitorCompletionProbeFailure::into_failure)
 }
 
+/// SPEC #4093 FR-005: the linked PRs of a whole candidate set, read in one
+/// bulk query per scan so the completion probe costs a constant number of
+/// GraphQL calls instead of one per candidate.
+///
+/// A candidate the batch does not hold (the bulk read failed, was refused,
+/// or the issue was not returned) falls back to the single-issue probe, so
+/// a partial batch degrades to today's behaviour instead of a wrong answer.
+#[derive(Debug, Default)]
+pub struct LinkedPrProbeBatch {
+    linked: BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
+    /// Why the bulk read failed, when it did. A refused bulk read is the
+    /// candidates' refusal too: re-probing them one by one would spend the
+    /// same budget again and hide GitHub's own wording behind the local gate.
+    failure: Option<String>,
+}
+
+impl LinkedPrProbeBatch {
+    /// Read the linked PRs of every gwt-spec issue in `issues` in bulk.
+    pub fn prefetch<'a>(
+        owner: &str,
+        repo: &str,
+        issues: impl IntoIterator<Item = &'a IssueMonitorIssue>,
+    ) -> Self {
+        let numbers: Vec<u64> = issues
+            .into_iter()
+            .filter(|issue| is_spec_candidate(issue))
+            .map(|issue| issue.number)
+            .collect();
+        Self::prefetch_with(&numbers, |numbers| {
+            crate::cli::issue::fetch_linked_prs_bulk_via_gh(owner, repo, numbers)
+        })
+    }
+
+    /// Injectable core of [`Self::prefetch`].
+    pub fn prefetch_with<F>(numbers: &[u64], fetch: F) -> Self
+    where
+        F: FnOnce(&[u64]) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>,
+    {
+        if numbers.is_empty()
+            || ensure_scan_deadline(IssueMonitorScanStage::ClaimCompletionReadback).is_err()
+        {
+            return Self::default();
+        }
+        match fetch(numbers) {
+            Ok(linked) => Self {
+                linked,
+                failure: None,
+            },
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "bulk linked-PR read failed; its candidates report that failure"
+                );
+                Self {
+                    linked: BTreeMap::new(),
+                    failure: Some(error.to_string()),
+                }
+            }
+        }
+    }
+
+    /// The bulk read's failure, when the batch holds nothing because of it.
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Whether the batch answers `issue`, and how.
+    pub fn completed(&self, issue: &IssueMonitorIssue) -> Option<bool> {
+        if !is_spec_candidate(issue) {
+            return Some(issue.state == IssueMonitorIssueState::Closed);
+        }
+        self.linked
+            .get(&issue.number)
+            .map(|prs| linked_pr_completion_is_fresh_for_issue(issue, prs))
+    }
+
+    /// How many candidates the batch holds.
+    pub fn len(&self) -> usize {
+        self.linked.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.linked.is_empty()
+    }
+}
+
+fn is_spec_candidate(issue: &IssueMonitorIssue) -> bool {
+    issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+}
+
+/// [`try_issue_completed_by_merged_pr`] answered from `batch` when it holds
+/// the issue, otherwise by the single-issue probe.
+pub fn try_issue_completed_by_merged_pr_with(
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+    batch: Option<&LinkedPrProbeBatch>,
+) -> Result<bool, IssueMonitorScanFailure> {
+    try_issue_completed_by_merged_pr_classified_with(owner, repo, issue, batch)
+        .map_err(IssueMonitorCompletionProbeFailure::into_failure)
+}
+
+/// [`try_issue_completed_by_merged_pr_classified`] answered from `batch`
+/// when it holds the issue, otherwise by the single-issue probe.
+pub fn try_issue_completed_by_merged_pr_classified_with(
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+    batch: Option<&LinkedPrProbeBatch>,
+) -> Result<bool, IssueMonitorCompletionProbeFailure> {
+    if let Some(batch) = batch {
+        if let Some(completed) = batch.completed(issue) {
+            return Ok(completed);
+        }
+        if let Some(failure) = batch.failure().filter(|_| is_spec_candidate(issue)) {
+            return Err(IssueMonitorCompletionProbeFailure::Operation(
+                IssueMonitorScanFailure::new(
+                    IssueMonitorScanStage::ClaimCompletionReadback,
+                    failure.to_string(),
+                ),
+            ));
+        }
+    }
+    try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+}
+
 /// Issue #3528 (SPEC #3200 FR-059): how a completion probe failed. The two
 /// arms carry different contracts — an expired observation deadline is
 /// fail-closed for the whole claim proposal, an ordinary readback error keeps
@@ -1085,11 +1214,14 @@ pub fn reconcile_issue_monitor_merges(
         );
     }
 
-    for issue in monitor.untracked_merged_branch_candidates(&merged_branches) {
+    let untracked = monitor.untracked_merged_branch_candidates(&merged_branches);
+    // SPEC #4093 FR-005: one bulk read for every nominated candidate.
+    let batch = LinkedPrProbeBatch::prefetch(owner, repo, untracked.iter());
+    for issue in untracked {
         let issue_number = issue.number;
         // A probe failure keeps the issue launchable, matching the claim-path
         // policy: an unreachable GitHub must never mint a terminal completion.
-        match try_issue_completed_by_merged_pr(owner, repo, &issue) {
+        match try_issue_completed_by_merged_pr_with(owner, repo, &issue, Some(&batch)) {
             Ok(true) => {
                 if monitor.record_untracked_completion(issue_number) {
                     tracing::info!(
@@ -1604,6 +1736,20 @@ fn advance_one_autonomous_issue(
             // inventory (the readback degraded) and no row (no open PR) both
             // leave the phase where the last successful readback put it.
             if let Some(pr) = open_prs.and_then(|index| index.get(&branch).copied()) {
+                // Issue #4117 AC-1/AC-2: admission before the readbacks. A PR
+                // whose review window is already live, or a full `max_active`,
+                // keeps the record Implementing so the next scan retries; the
+                // reason lands on the record for `issue.monitor.status`.
+                if let Some(hold) = monitor.review_dispatch_hold(issue_number, pr, now) {
+                    tracing::info!(
+                        issue = issue_number,
+                        pr,
+                        reason = %hold.reason,
+                        "issue monitor: review dispatch held"
+                    );
+                    monitor.hold_review_dispatch(issue_number, hold);
+                    return Ok(());
+                }
                 if let Some(sha) =
                     run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
                         gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
@@ -1628,21 +1774,37 @@ fn advance_one_autonomous_issue(
                             gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
                         })?
                         .unwrap_or_default();
-                    monitor.begin_review(issue_number, pr, &sha);
                     let linked_issue_kind = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
                         .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
                         .unwrap_or_default();
-                    monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
-                        issue_number,
-                        pr_number: pr,
-                        reviewed_sha: sha,
-                        required_criteria: criteria,
-                        diff,
-                        linked_issue_kind,
-                    });
+                    // Issue #4117: `dispatch_review` binds the PR (`begin_review`),
+                    // enters the review window into its own ledger, and queues
+                    // the GUI spawn — or refuses and records why.
+                    if let Err(hold) = monitor.dispatch_review(
+                        crate::AutonomousReviewDispatch {
+                            issue_number,
+                            pr_number: pr,
+                            reviewed_sha: sha,
+                            required_criteria: criteria,
+                            diff,
+                            linked_issue_kind,
+                        },
+                        now,
+                    ) {
+                        tracing::info!(
+                            issue = issue_number,
+                            pr,
+                            reason = %hold.reason,
+                            "issue monitor: review dispatch held"
+                        );
+                    }
                 }
+            } else if open_prs.is_some() {
+                // Issue #4117: the inventory is fresh and shows no open PR for
+                // this branch, so a hold about an earlier PR no longer applies.
+                monitor.clear_review_dispatch_hold(issue_number);
             }
         }
         crate::AutonomousPhase::Reviewing => {
@@ -1965,6 +2127,75 @@ fn has_supported_github_remote_prefix(remote_url: &str) -> bool {
 
 #[allow(dead_code)]
 fn _assert_inbox_item_is_send_sync(_: IssueMonitorInboxItem) {}
+
+#[cfg(test)]
+mod linked_pr_batch_tests {
+    use super::*;
+
+    fn spec_issue(number: u64) -> IssueMonitorIssue {
+        IssueMonitorIssue {
+            number,
+            title: format!("SPEC {number}"),
+            labels: vec!["gwt-spec".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: IssueMonitorReadiness::ReadyWithCompletedTasks,
+            updated_at: Some("2026-09-01T00:00:00Z".to_string()),
+        }
+    }
+
+    /// SPEC #4093 AC-7: the batch is one bulk read for the whole candidate
+    /// set; every candidate it holds is answered without another call, and a
+    /// candidate it does not hold falls back (answered `None` here).
+    #[test]
+    fn batch_reads_all_spec_candidates_once_and_answers_from_memory() {
+        let issues = [spec_issue(1), spec_issue(2), spec_issue(3)];
+        let mut reads = 0;
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], |numbers| {
+            reads += 1;
+            assert_eq!(numbers, [1, 2, 3]);
+            let mut linked = BTreeMap::new();
+            linked.insert(
+                1,
+                vec![crate::cli::LinkedPrSummary {
+                    number: 101,
+                    title: "fix #1".to_string(),
+                    state: "MERGED".to_string(),
+                    url: String::new(),
+                    will_close_target: true,
+                    merged_at: Some("2026-09-02T00:00:00Z".to_string()),
+                }],
+            );
+            linked.insert(2, Vec::new());
+            Ok(linked)
+        });
+        assert_eq!(reads, 1);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.completed(&issues[0]), Some(true));
+        assert_eq!(batch.completed(&issues[1]), Some(false));
+        assert_eq!(
+            batch.completed(&issues[2]),
+            None,
+            "an unreturned candidate falls back to the single probe"
+        );
+
+        let refused = LinkedPrProbeBatch::prefetch_with(&[1], |_| {
+            Err(std::io::Error::other(
+                "gh api graphql failed: API rate limit already exceeded",
+            ))
+        });
+        assert!(refused.is_empty());
+        assert!(refused.failure().is_some_and(|f| f.contains("rate limit")));
+        let error =
+            try_issue_completed_by_merged_pr_classified_with("o", "r", &issues[0], Some(&refused))
+                .expect_err("a refused bulk read is the candidate's refusal");
+        assert!(
+            error.into_failure().detail.contains("rate limit"),
+            "GitHub's own wording is preserved"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

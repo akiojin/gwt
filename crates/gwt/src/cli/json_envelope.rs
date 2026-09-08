@@ -479,6 +479,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .contains_key("include")
                 .then(|| parse_pr_inventory_include(&optional_string_vec(params, "include")?))
                 .transpose()?,
+            force_reason: optional_string(params, "force_reason")?,
         }),
         // Issue #3891 AC-3: GitHub API budget observation.
         "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
@@ -3375,6 +3376,7 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
+                force_reason: None,
             })
         ));
         assert!(matches!(
@@ -3387,6 +3389,7 @@ mod tests {
                 escalate_after_cycles: Some(2),
                 refresh: false,
                 include: None,
+                force_reason: None,
             })
         ));
         // Issue #3891: refresh bypasses the TTL cache / throttle; include

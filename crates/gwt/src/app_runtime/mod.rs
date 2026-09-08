@@ -157,6 +157,10 @@ pub struct WindowRuntime {
     /// reused by a successor, so background events must carry this value and
     /// prove they still belong to the runtime currently stored for the id.
     incarnation: u64,
+    /// SPEC-3885 T-020: when this runtime started, in milliseconds since the
+    /// Unix epoch. It is the Issue row's elapsed-time source, so it must not
+    /// move when the agent merely changes state.
+    started_at_ms: u64,
     pane: Arc<Mutex<Pane>>,
     /// Lock-free process lifecycle handle captured before the reader/status
     /// workers can contend on `pane`. GUI-thread teardown must never acquire
@@ -180,6 +184,10 @@ impl WindowRuntime {
             .shared_pty();
         Self {
             incarnation,
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis() as u64)
+                .unwrap_or_default(),
             pane,
             pty,
             output_thread: None,
@@ -418,6 +426,11 @@ pub struct OutboundEvent {
     /// Keeping it outside the public `BackendEvent` preserves the baseline
     /// Rust construction/destructuring shape.
     pub(crate) knowledge_wire_metadata: Option<KnowledgeWireMetadata>,
+    /// Issue #4095: pane stream position for `terminal_output` (the chunk's
+    /// own position) and `terminal_snapshot` (the position the snapshot was
+    /// serialized at). Never serialized; the client queue uses it to skip
+    /// streamed chunks that a queued snapshot already contains.
+    pub(crate) terminal_stream_seq: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -476,6 +489,7 @@ impl OutboundEvent {
             target: DispatchTarget::Broadcast,
             event,
             knowledge_wire_metadata: None,
+            terminal_stream_seq: None,
         }
     }
 
@@ -484,6 +498,7 @@ impl OutboundEvent {
             target: DispatchTarget::Client(client_id.into()),
             event,
             knowledge_wire_metadata: None,
+            terminal_stream_seq: None,
         }
     }
 
@@ -500,6 +515,7 @@ impl OutboundEvent {
             target: DispatchTarget::Client(client_id.into()),
             event,
             knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
+            terminal_stream_seq: None,
         }
     }
 
@@ -522,7 +538,16 @@ impl OutboundEvent {
             target: DispatchTarget::Client(client_id.into()),
             event,
             knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
+            terminal_stream_seq: None,
         }
+    }
+
+    /// Attach the pane stream position of a `terminal_output` /
+    /// `terminal_snapshot` event (Issue #4095). Private to the process; the
+    /// client queue reads it, the wire never carries it.
+    pub(crate) fn with_terminal_stream_seq(mut self, seq: Option<u64>) -> Self {
+        self.terminal_stream_seq = seq;
+        self
     }
 }
 
@@ -530,7 +555,7 @@ pub fn build_frontend_sync_events(
     client_id: &str,
     workspace: gwt::AppStateView,
     terminal_statuses: Vec<(String, WindowProcessStatus, String)>,
-    terminal_snapshots: Vec<(String, Vec<u8>)>,
+    terminal_snapshots: Vec<(String, Vec<u8>, Option<u64>)>,
     launch_wizard: Option<gwt::LaunchWizardView>,
     pending_update: Option<gwt_core::update::UpdateState>,
 ) -> Vec<OutboundEvent> {
@@ -567,14 +592,17 @@ pub fn build_frontend_sync_events(
     // SPEC-2359 W-17 (FR-397): bulky terminal snapshots go last so a
     // reconnect replay delivers lightweight state (wizard, statuses, update)
     // before scrollback payloads, instead of burying it behind them.
-    for (id, snapshot) in terminal_snapshots {
-        events.push(OutboundEvent::reply(
-            client_id,
-            BackendEvent::TerminalSnapshot {
-                id,
-                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-            },
-        ));
+    for (id, snapshot, stream_seq) in terminal_snapshots {
+        events.push(
+            OutboundEvent::reply(
+                client_id,
+                BackendEvent::TerminalSnapshot {
+                    id,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                },
+            )
+            .with_terminal_stream_seq(stream_seq),
+        );
     }
 
     events
@@ -2214,6 +2242,7 @@ fn local_completion_probe(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
+    batch: Option<&gwt::issue_monitor_worker::LinkedPrProbeBatch>,
 ) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure> {
     #[cfg(test)]
     {
@@ -2224,7 +2253,29 @@ fn local_completion_probe(
             return hook(issue.number);
         }
     }
-    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified_with(
+        owner, repo, issue, batch,
+    )
+}
+
+/// The bulk linked-PR read of one GUI-local scan (SPEC #4093 FR-005). Under a
+/// test probe hook the batch stays empty so the hook answers every probe.
+fn local_probe_batch<'a>(
+    owner: &str,
+    repo: &str,
+    issues: impl Iterator<Item = &'a gwt::IssueMonitorIssue>,
+) -> gwt::issue_monitor_worker::LinkedPrProbeBatch {
+    #[cfg(test)]
+    {
+        let hooked = local_completion_probe_test_hook()
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false);
+        if hooked {
+            return gwt::issue_monitor_worker::LinkedPrProbeBatch::default();
+        }
+    }
+    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues)
 }
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
@@ -2258,6 +2309,15 @@ fn observe_local_claim_candidates(
         0
     };
     let (available, candidates) = monitor.claim_probe_plan(claimable_cap);
+    // SPEC #4093 FR-005: one bulk linked-PR read for the whole frontier.
+    let batch = local_probe_batch(
+        owner,
+        repo,
+        loaded
+            .issues
+            .iter()
+            .filter(|issue| candidates.contains(&issue.number)),
+    );
     let observations =
         claim_candidate_completion_observations(available, candidates, |issue_number| {
             let Some(issue) = loaded
@@ -2267,7 +2327,7 @@ fn observe_local_claim_candidates(
             else {
                 return Ok(false);
             };
-            observe_claim_candidate_completion(owner, repo, issue)
+            observe_claim_candidate_completion(owner, repo, issue, &batch)
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
@@ -2291,10 +2351,11 @@ fn observe_claim_candidate_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
+    batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
 ) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
-    match local_completion_probe(owner, repo, issue) {
+    match local_completion_probe(owner, repo, issue, Some(batch)) {
         Ok(completed) => Ok(completed),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
@@ -7262,7 +7323,6 @@ impl AppRuntime {
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
-            FrontendEvent::OpenIntakeSession => self.open_intake_session(&client_id),
             FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
                 self.open_start_work_in_agent_kanban(&client_id, &board_id, lane_id)
             }
@@ -8130,11 +8190,13 @@ impl AppRuntime {
                 .launch_error_terminal_details
                 .get(&id)
                 .filter(|_| self.window_status(&id) == Some(WindowProcessStatus::Error));
+            let mut stream_seq = None;
             let snapshot = match self.runtimes.get(&id) {
                 Some(runtime) => match runtime.pane.try_lock() {
                     Ok(pane) => {
                         let snapshot_started = Instant::now();
                         let snapshot = pane.snapshot_bytes();
+                        stream_seq = Some(pane.output_seq());
                         let snapshot_elapsed_ms =
                             u64::try_from(snapshot_started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX);
@@ -8186,13 +8248,16 @@ impl AppRuntime {
                 None => launch_error.map(|detail| Self::launch_error_terminal_bytes(detail)),
             };
             if let Some(snapshot) = snapshot {
-                events.push(OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::TerminalSnapshot {
-                        id,
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-                    },
-                ));
+                events.push(
+                    OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::TerminalSnapshot {
+                            id,
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                        },
+                    )
+                    .with_terminal_stream_seq(stream_seq),
+                );
             } else if !busy_window_ids.contains(&id) && !failed_window_ids.contains(&id) {
                 if self.runtimes.contains_key(&id) {
                     empty_window_ids.push(id);
@@ -8259,23 +8324,27 @@ impl AppRuntime {
                 // must preserve the current formatted screen and enough
                 // scrollback history for a fresh xterm.js instance to scroll
                 // immediately after reconnect.
-                let snapshot = runtime
+                let (snapshot, seq) = runtime
                     .pane
                     .lock()
-                    .map(|pane| pane.snapshot_bytes())
+                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
                     .unwrap_or_default();
-                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
+                (!snapshot.is_empty()).then_some((id.clone(), snapshot, Some(seq)))
             })
             .collect::<Vec<_>>();
         let runtime_snapshot_ids = terminal_snapshots
             .iter()
-            .map(|(id, _)| id.clone())
+            .map(|(id, _, _)| id.clone())
             .collect::<std::collections::HashSet<_>>();
         for (id, detail) in &self.launch_error_terminal_details {
             if !runtime_snapshot_ids.contains(id)
                 && self.window_status(id) == Some(WindowProcessStatus::Error)
             {
-                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
+                terminal_snapshots.push((
+                    id.clone(),
+                    Self::launch_error_terminal_bytes(detail),
+                    None,
+                ));
             }
         }
 
@@ -8377,6 +8446,13 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
+                    // SPEC-3885 T-020: the live PTY runtime owns the agent's
+                    // start time, so the Issue row's elapsed time survives a
+                    // frontend reload. A window with no runtime reports none.
+                    window.runtime_started_at_ms = self
+                        .runtimes
+                        .get(&window.id)
+                        .map(|runtime| runtime.started_at_ms);
                     if worktree_form_projection == WorktreeFormProjection::Resolve {
                         window.worktree_form = self
                             .active_agent_sessions

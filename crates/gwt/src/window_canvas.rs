@@ -384,6 +384,7 @@ impl WindowCanvasState {
             tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         };
         self.persisted.next_z_index += 1;
@@ -1586,6 +1587,7 @@ mod tests {
                 tab_group_active: false,
                 session_id: None,
                 linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             }],
             next_z_index: 2,

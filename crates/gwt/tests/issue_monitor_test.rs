@@ -2363,6 +2363,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         wait: None,
         needs_human_kind: None,
         steering: None,
+        review_dispatch_hold: None,
     });
     let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
     scan_issue_monitor_candidates(

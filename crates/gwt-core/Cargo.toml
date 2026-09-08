@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+gwt-config = { path = "../gwt-config" }
 thiserror = { workspace = true }
 dirs = "6"
 which = "8"

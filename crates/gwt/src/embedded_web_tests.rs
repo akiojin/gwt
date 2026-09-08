@@ -1818,17 +1818,19 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*runtimeState\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
         )
         .expect("valid regex");
 
     assert!(
-        js.contains("const windowRuntimeStateMap = new Map();"),
-        "expected embedded js to keep a shared runtime-state map for badges and the window list",
+        js.contains("const windowRuntimeStateMap = new Map();")
+            && js.contains("return normalizeWindowRuntimeState(sourceState, windowData.preset);")
+            && js.contains("function runtimeStateForAgentFocus(windowData)"),
+        "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
             apply_status.is_match(js),
-            "expected applyStatus to normalize runtime state once, update the shared map, and re-render the window list",
+            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
         );
 }
 
@@ -3165,16 +3167,16 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
-// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
-// global entry that drives the shared wizard renderer.
+// SPEC-3245 Stage E: the Intake-only command route is retired while the shared
+// Launch Wizard renderer and its generic controls remain available.
 #[test]
-fn embedded_web_intake_session_uses_shared_wizard_renderer() {
+fn embedded_web_has_no_legacy_intake_route_and_keeps_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"case "intake-session":"#)
-            && html.contains(r#"kind: "open_intake_session""#),
-        "expected Intake session to use a global command instead of a Branches window action",
+        !html.contains(r#"case "intake-session":"#)
+            && !html.contains(r#"kind: "open_intake_session""#),
+        "legacy Intake-only command and event routes must be absent from the embedded bundle",
     );
     assert!(
         !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
