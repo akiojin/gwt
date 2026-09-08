@@ -298,6 +298,23 @@ pub struct LaunchWizardAgentSetupView {
     pub action_label: Option<String>,
 }
 
+/// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
+/// candidate pool. Absent for every other wizard.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolImpactView {
+    /// `replace_head` — the save overwrites candidate index 0. Agent Settings
+    /// never appends; adding a candidate is a `profiles.set` operation.
+    pub action: String,
+    /// Provider this save writes to index 0.
+    pub agent_id: String,
+    /// Provider currently at index 0, when the save switches it out.
+    pub replaced_agent_id: Option<String>,
+    pub title: String,
+    pub detail: String,
+    /// The `launch_profile_summary` the Monitor will report after the save.
+    pub resulting_summary: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
@@ -377,6 +394,11 @@ pub struct LaunchWizardView {
     /// selected built-in (install when no `Installed` / `latest` route exists,
     /// configure when first-time setup is missing). `None` when launchable.
     pub agent_setup: Option<LaunchWizardAgentSetupView>,
+    /// Issue #4079 AC-2: filled by the app runtime when this wizard is the
+    /// Issue Monitor Agent Settings form, so the operator sees which candidate
+    /// the save writes before committing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_monitor_pool_impact: Option<LaunchWizardIssueMonitorPoolImpactView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
