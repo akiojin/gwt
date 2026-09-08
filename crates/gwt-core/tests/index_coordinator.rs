@@ -923,6 +923,10 @@ fn issues_index_job_yields_the_heavy_lease_to_a_waiting_verification_run() {
     // The index job is still running: it released the lease rather than
     // finishing, which is the whole point of the yield.
     assert!(!stop.exists(), "the index job must still be running");
+    // The lease is released before the reason is written, so the winner can
+    // be here first; the reason is what the assertion is about, not the
+    // ordering of two independent writes.
+    wait_for_file(&result, Duration::from_secs(10));
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::Preempted.as_str(),
