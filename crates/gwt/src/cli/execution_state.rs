@@ -8274,15 +8274,14 @@ pub struct BlockingPreparedTransaction {
 impl BlockingPreparedTransaction {
     /// Whether this fence can no longer clear itself.
     ///
-    /// A launch prepares its successor before persisting the candidate
-    /// Session, so an absent Session is also what a launch in flight looks
-    /// like for a moment. Past `PREPARED_TRANSACTION_RELEASE_GRACE` that
-    /// launch has had every chance to activate or abort, and a Session that
-    /// still does not exist is never going to.
+    /// A launch in flight holds a Prepared transaction too, and that one is
+    /// about to become an Activated generation or an Aborted attempt on its
+    /// own. Past `PREPARED_TRANSACTION_RELEASE_GRACE` no launch is still
+    /// materializing, so a transaction that is still Prepared belongs to one
+    /// that never finished and will fence the owner until something clears it.
     #[must_use]
     pub fn is_stale_at(&self, now: DateTime<Utc>) -> bool {
-        self.candidate_session_state == "missing"
-            && now.signed_duration_since(self.prepared_at) >= PREPARED_TRANSACTION_RELEASE_GRACE
+        now.signed_duration_since(self.prepared_at) >= PREPARED_TRANSACTION_RELEASE_GRACE
     }
 }
 
@@ -8307,15 +8306,15 @@ pub struct PreparedTransactionReleaseOutcome {
     pub retained: Vec<PreparedTransactionReleaseEntry>,
 }
 
-/// How long a Prepared attempt whose candidate Session never materialized is
-/// left alone before a blanket release may abort it.
+/// How long a still-Prepared transaction is left alone before a blanket
+/// release may abort it.
 ///
-/// A launch prepares its successor before persisting the candidate Session, so
-/// "the Session is missing" is also what an in-flight launch looks like for a
-/// moment. That moment is bounded by pane creation; a launch still holding a
-/// Prepared attempt long after it is one that is never coming back. Naming an
-/// exact `operation_id` bypasses the wait, because the operator then releases
-/// something they read out of `execution.status` themselves.
+/// Preparing a successor and settling it are two steps of one launch, so a
+/// Prepared transaction is indistinguishable from a launch that is simply
+/// mid-materialization. That window is bounded by pane creation; a transaction
+/// still Prepared long after it belongs to a launch that is never coming back.
+/// Naming an exact `operation_id` bypasses the wait, because the operator then
+/// releases something they read out of `execution.status` themselves.
 const PREPARED_TRANSACTION_RELEASE_GRACE: chrono::Duration = chrono::Duration::minutes(10);
 
 fn describe_candidate_session(sessions_dir: &Path, session_id: &str) -> String {
@@ -8375,11 +8374,13 @@ pub fn blocking_prepared_transactions(
 /// Release the Prepared successors/takeovers that fence `owner`'s current
 /// generation, so a fresh launch can mint its successor again (Issue #4161).
 ///
-/// A transaction is released only while its candidate Session is genuinely
-/// absent, proven under that Session's own path lease so a launch cannot
-/// materialize it between the check and the commit. Releasing is always safe
-/// for a launch that does come back: an Aborted attempt fails its own
-/// activation CAS instead of corrupting the owner.
+/// Without `operation_id` this releases every fence past
+/// [`BlockingPreparedTransaction::is_stale_at`] and reports the rest as
+/// retained, so a launch that is materializing right now is left to finish.
+/// With `operation_id` it releases exactly the transaction the caller read out
+/// of the diagnosis. Releasing is always safe for a launch that does come
+/// back: an Aborted attempt fails its own activation CAS instead of corrupting
+/// the owner.
 pub fn release_blocking_prepared_transactions(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -8446,14 +8447,13 @@ pub fn release_blocking_prepared_transactions(
             }
             let aborted = release_one_prepared_transaction_in_context(
                 context,
-                sessions_dir,
                 &generation_id,
                 &transaction,
                 reason,
             )?;
             let entry = PreparedTransactionReleaseEntry {
                 transaction,
-                retained_because: (!aborted).then_some("candidate_session_present"),
+                retained_because: (!aborted).then_some("no_longer_prepared"),
             };
             if aborted {
                 released.push(entry);
@@ -8479,67 +8479,61 @@ pub fn release_blocking_prepared_transactions(
     })
 }
 
-/// Abort one still-Prepared transaction while its candidate Session is proven
-/// absent under that Session's path lease. `Ok(false)` means the Session was
-/// there after all and the transaction was left alone.
+/// Abort one still-Prepared transaction under the owner lease this runs
+/// inside. `Ok(false)` means the transaction stopped being the operation's
+/// latest Prepared event before the abort, so there was nothing to release.
+///
+/// The candidate Session's existence deliberately does not gate this. A
+/// Session that materialized but whose successor was never activated is the
+/// exact shape a half-finished launch leaves behind, and refusing to release
+/// it would leave the owner fenced by the one case that most needs clearing.
+/// Nothing downstream can be corrupted by the abort either: the owner lease
+/// serializes this against `with_prepared_successor_exact_session_activation`,
+/// so a launch is either already Activated (out of scope here) or, if it comes
+/// back afterwards, fails its own activation CAS with "an Aborted successor
+/// cannot be activated".
 fn release_one_prepared_transaction_in_context(
     context: &GenerationTransactionContext,
-    sessions_dir: &Path,
     generation_id: &str,
     transaction: &BlockingPreparedTransaction,
     reason: &str,
 ) -> io::Result<bool> {
-    gwt_agent::with_session_path_lease(sessions_dir, &transaction.candidate_session_id, |state| {
-        match state {
-            gwt_agent::SessionPathState::Present(_) => Ok(false),
-            gwt_agent::SessionPathState::Error(error) => Err(error),
-            gwt_agent::SessionPathState::Missing => {
-                let ledger =
-                    load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
-                        io::Error::new(
-                            ErrorKind::NotFound,
-                            "owner generation ledger is not initialized",
-                        )
-                    })?;
-                if transaction.kind == "successor" {
-                    let Some(attempt) =
-                        latest_prepared_successors_for_generation(&ledger, generation_id)
-                            .into_iter()
-                            .find(|attempt| {
-                                attempt.request.operation_id == transaction.operation_id
-                            })
-                            .cloned()
-                    else {
-                        return Ok(false);
-                    };
-                    abort_successor_bound_to(
-                        context,
-                        &attempt.request,
-                        &attempt.worktree_binding_hash,
-                        reason,
-                    )?;
-                } else {
-                    let Some(attempt) =
-                        latest_prepared_takeovers_for_generation(&ledger, generation_id)
-                            .into_iter()
-                            .find(|attempt| {
-                                attempt.request.operation_id == transaction.operation_id
-                            })
-                            .cloned()
-                    else {
-                        return Ok(false);
-                    };
-                    abort_generation_takeover_bound_to(
-                        context,
-                        &attempt.request,
-                        &attempt.worktree_binding_hash,
-                        reason,
-                    )?;
-                }
-                Ok(true)
-            }
-        }
-    })
+    let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "owner generation ledger is not initialized",
+        )
+    })?;
+    if transaction.kind == "successor" {
+        let Some(attempt) = latest_prepared_successors_for_generation(&ledger, generation_id)
+            .into_iter()
+            .find(|attempt| attempt.request.operation_id == transaction.operation_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        abort_successor_bound_to(
+            context,
+            &attempt.request,
+            &attempt.worktree_binding_hash,
+            reason,
+        )?;
+    } else {
+        let Some(attempt) = latest_prepared_takeovers_for_generation(&ledger, generation_id)
+            .into_iter()
+            .find(|attempt| attempt.request.operation_id == transaction.operation_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        abort_generation_takeover_bound_to(
+            context,
+            &attempt.request,
+            &attempt.worktree_binding_hash,
+            reason,
+        )?;
+    }
+    Ok(true)
 }
 
 /// Commit the successor CAS. This is the only operation in this module that
@@ -15683,6 +15677,10 @@ mod tests {
         );
         prepare_exact_manual_launch_successor(dir.path(), owner, &leaked, predecessor)
             .expect("the dead launch prepared its successor");
+        // The launch got as far as persisting its candidate Session and then
+        // never activated the successor — the shape production actually leaves
+        // behind, and the one a Session-existence gate would refuse to clear.
+        persist_recovery_session_snapshot(dir.path(), owner, &leaked.initial_session_id);
 
         let fenced = diagnose_owner(dir.path(), owner);
         assert_eq!(fenced.recommended_recovery, "execution.release_prepared");
@@ -15690,7 +15688,7 @@ mod tests {
         let blocking = &fenced.blocking_prepared_transactions[0];
         assert_eq!(blocking.kind, "successor");
         assert_eq!(blocking.operation_id, leaked.operation_id);
-        assert_eq!(blocking.candidate_session_state, "missing");
+        assert_ne!(blocking.candidate_session_state, "missing");
 
         let now = Utc::now();
         let held = release_blocking_prepared_transactions(
