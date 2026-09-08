@@ -20,7 +20,6 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
     time::Instant,
 };
 
@@ -33,38 +32,6 @@ use super::{
     ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime, UserEvent, Uuid,
     WindowCanvasState,
 };
-
-/// Issue #4145 AC-1: opening a project spans a synchronous reserve, a
-/// blocking-pool prepare and an event-loop commit, so the route's start instant
-/// is parked here keyed by navigation request id. Threading it through
-/// [`ProjectNavigationRequest`] is not an option: that value is cloned into the
-/// worker and compared for identity, and an `Instant` is neither meaningful to
-/// compare nor to send across the boundary twice.
-///
-/// One navigation is in flight at a time (`pending_project_navigation` is a
-/// single slot), so a single slot here matches the domain exactly.
-static PROJECT_OPEN_STARTED: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
-
-fn mark_project_open_started(request_id: u64) {
-    if let Ok(mut slot) = PROJECT_OPEN_STARTED.lock() {
-        *slot = Some((request_id, Instant::now()));
-    }
-}
-
-fn record_project_open_route(request_id: u64) {
-    let Ok(mut slot) = PROJECT_OPEN_STARTED.lock() else {
-        return;
-    };
-    let Some((pending_id, started)) = *slot else {
-        return;
-    };
-    if pending_id != request_id {
-        return;
-    }
-    *slot = None;
-    drop(slot);
-    gwt::perf::record_route(gwt::perf::PerfRoute::ProjectOpen, started.elapsed());
-}
 
 pub(crate) fn initial_project_tab_incarnations(
     tabs: &[ProjectTabRuntime],
@@ -443,7 +410,9 @@ impl AppRuntime {
         source: ProjectNavigationSource,
     ) -> Vec<OutboundEvent> {
         let request = self.reserve_project_navigation(source, None);
-        mark_project_open_started(request.id);
+        // Issue #4145 AC-1: start of the project-open route; closed in
+        // `handle_project_navigation_prepared` once the tab is committed.
+        self.project_open_started = Some((request.id, Instant::now()));
         let request_for_worker = request.clone();
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -502,6 +471,20 @@ impl AppRuntime {
         })
     }
 
+    /// Issue #4145 AC-1: close the project-open route when the committed
+    /// navigation matches the request that opened it. A superseded request
+    /// leaves the slot alone so the newer open still gets its own sample.
+    fn record_project_open_route(&mut self, request_id: u64) {
+        let Some((pending_id, started)) = self.project_open_started else {
+            return;
+        };
+        if pending_id != request_id {
+            return;
+        }
+        self.project_open_started = None;
+        gwt::perf::record_route(gwt::perf::PerfRoute::ProjectOpen, started.elapsed());
+    }
+
     pub(crate) fn handle_project_navigation_prepared(
         &mut self,
         prepared: ProjectNavigationPrepared,
@@ -523,7 +506,7 @@ impl AppRuntime {
                 }
                 self.pending_project_navigation = None;
                 let events = self.commit_prepared_project_open(open, prepared.request.source);
-                record_project_open_route(prepared.request.id);
+                self.record_project_open_route(prepared.request.id);
                 events
             }
             Ok(ProjectNavigationPayload::Switch(switch)) => {
