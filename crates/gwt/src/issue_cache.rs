@@ -1504,7 +1504,7 @@ exit 1\n",
         );
         assert!(
             rows[0].message.contains("issue cache full refresh")
-                && rows[0].message.contains("gh issue list"),
+                && rows[0].message.contains("gh api issues"),
             "the row names the stage and carries the refusal: {}",
             rows[0].message
         );
