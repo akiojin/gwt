@@ -11724,10 +11724,6 @@ impl IssueMonitorState {
         }
     }
 
-    /// Apply one released hold. Shared by [`Self::requeue_failed_issue`] and by
-    /// the cross-process adoption of a release another process committed, so a
-    /// converged process cannot land in a different state than the one that
-    /// issued the recovery.
     /// Issue #4077 AC-1: plan the release of the confirmed GitHub claim this
     /// Issue's last launch holds.
     ///
@@ -11753,6 +11749,10 @@ impl IssueMonitorState {
         );
     }
 
+    /// Apply one released hold. Shared by [`Self::requeue_failed_issue`] and by
+    /// the cross-process adoption of a release another process committed, so a
+    /// converged process cannot land in a different state than the one that
+    /// issued the recovery.
     fn apply_failure_release(&mut self, issue_number: u64, revoke_claims: bool) {
         let removed_banner = self
             .failed_issues
