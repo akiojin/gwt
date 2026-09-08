@@ -229,6 +229,10 @@ pub(crate) fn search_project_index_attempt(
     if query.is_empty() {
         return Ok(ProjectIndexSearchOutcome::default());
     }
+    // Issue #4145 AC-1: both the GUI blocking-pool caller and the `search`
+    // JSON operation funnel through here, so one guard measures the search
+    // route end to end, early returns included.
+    let _perf_route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::Search);
     // One absolute attempt budget covers runtime ensure/provisioning, its
     // cross-process lock, every health probe, repair polling, and the final
     // runner. Nested callers retain an earlier ambient deadline.

@@ -900,6 +900,11 @@ pub struct IssueMonitorPrefs {
     /// daemon) still sees it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
+    /// Issue #4150 AC-3: duplicate launch attempts refused while the Issue's
+    /// launch kept running, keyed by Issue. Durable so the refusal survives the
+    /// commit that records it and the process boundary after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_launch_refusals: Vec<IssueMonitorDuplicateLaunchRefusal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     /// Issue #3883 AC-4: the driver of the last scan, so the next one can tell
@@ -1064,6 +1069,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_hold_releases: BTreeMap::new(),
             update_drain: None,
             generation_reclaim: None,
+            duplicate_launch_refusals: Vec::new(),
             launched_issues: Vec::new(),
             last_scan_driver: None,
             last_prefs_reset: None,
@@ -1530,6 +1536,29 @@ pub struct IssueMonitorGenerationReclaimSummary {
     /// instead of releasing again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_detected: Vec<u64>,
+}
+
+/// Issue #4150 AC-3: a duplicate launch the execution generation guard refused
+/// while the Issue's original launch was still running.
+///
+/// The refusal is real and worth reading — a second attempt was made and cost
+/// a materialization — but it says nothing about the launch that is running,
+/// so it is recorded beside the row instead of inside its state. That
+/// separation is the whole point: a reader has to be able to tell "a duplicate
+/// attempt was refused" from "this launch died", and the row's `state` /
+/// `error_message` are how the second one is said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorDuplicateLaunchRefusal {
+    pub issue_number: u64,
+    /// How many duplicate attempts this launch has refused.
+    pub attempts: u32,
+    /// When the most recent one was refused (RFC3339).
+    pub last_refused_at: String,
+    /// The guard's refusal, verbatim, so the holder it names stays readable.
+    pub message: String,
+    /// The window that held the launch when the duplicate was refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_window_id: Option<String>,
 }
 
 /// converges on it. Kept until the same issue fails again, at which point the
@@ -3142,6 +3171,12 @@ pub struct IssueMonitorInboxSummary {
     /// launch (stuck with a live window, attempts exhausted, or a held gate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering: Option<AutonomousSteeringRequest>,
+    /// Issue #4150 AC-3: duplicate launch attempts the execution generation
+    /// guard refused while this row's launch kept running. Present alongside a
+    /// healthy `launched` state on purpose — it is the field that tells a
+    /// refused duplicate apart from a launch that died.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_launch_refusal: Option<IssueMonitorDuplicateLaunchRefusal>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -3209,6 +3244,10 @@ pub struct IssueMonitorState {
     /// Issue #3964 AC-4: last stranded-generation reclaim result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation_reclaim: Option<IssueMonitorGenerationReclaimSummary>,
+    /// Issue #4150 AC-3: duplicate launch attempts refused by the execution
+    /// generation guard while the Issue's launch kept running.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    duplicate_launch_refusals: BTreeMap<u64, IssueMonitorDuplicateLaunchRefusal>,
     launched_windows: BTreeMap<u64, String>,
     /// Issue #3883 AC-4: the driver of the last recorded scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5076,6 +5115,7 @@ impl IssueMonitorState {
             provider_quota_hold_releases: BTreeMap::new(),
             update_drain: None,
             generation_reclaim: None,
+            duplicate_launch_refusals: BTreeMap::new(),
             launched_windows: BTreeMap::new(),
             last_scan_driver: None,
             last_prefs_reset: None,
@@ -5137,6 +5177,11 @@ impl IssueMonitorState {
         state.enforce_provider_quota_hold_releases();
         state.update_drain = prefs.update_drain.clone();
         state.generation_reclaim = prefs.generation_reclaim;
+        state.duplicate_launch_refusals = prefs
+            .duplicate_launch_refusals
+            .into_iter()
+            .map(|refusal| (refusal.issue_number, refusal))
+            .collect();
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
         state.claim_identities = prefs
@@ -5335,6 +5380,7 @@ impl IssueMonitorState {
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
             update_drain: self.update_drain.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
+            duplicate_launch_refusals: self.duplicate_launch_refusals.values().cloned().collect(),
             launched_issues: self
                 .launched_windows
                 .iter()
@@ -8705,6 +8751,14 @@ impl IssueMonitorState {
                         idle_since: self
                             .bound_idle_window(item.issue.number)
                             .map(|idle| idle.idle_since.clone()),
+                        // Issue #4150 AC-3: the refused duplicate travels with
+                        // the row it was aimed at, so "a second attempt was
+                        // refused" and "this launch died" are two different
+                        // readings of one snapshot.
+                        duplicate_launch_refusal: self
+                            .duplicate_launch_refusals
+                            .get(&item.issue.number)
+                            .cloned(),
                     }
                 })
                 .collect(),
@@ -10669,6 +10723,8 @@ impl IssueMonitorState {
         claim_id: Option<String>,
     ) {
         self.launching_claimed_at.remove(&issue_number);
+        // Issue #4150: the refusals belonged to the launch this one replaces.
+        self.duplicate_launch_refusals.remove(&issue_number);
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -10749,7 +10805,86 @@ impl IssueMonitorState {
         self.record_autonomous_heartbeat(issue_number, &now);
     }
 
+    /// Issue #4150 AC-1 / AC-2: a launch refused because this Issue's
+    /// execution generation is already held, while the launch holding it is
+    /// still running here.
+    ///
+    /// The evidence is a bound window: [`Self::complete_active_launch`] is the
+    /// only writer of `launched_windows`, and a refused attempt never reaches
+    /// it. So a bound window plus a generation-conflict refusal can only mean
+    /// the refusal belongs to a *second* attempt — the running launch is the
+    /// thing the guard protected, not the thing that failed.
+    ///
+    /// Deliberately not `active_launches` or a pending delivery: the refused
+    /// attempt puts itself in both, so either would let a launch that genuinely
+    /// failed suppress its own failure and hold a slot forever. A window that
+    /// is bound but dead is Issue #4131's subject and is reclaimed by
+    /// [`Self::reconcile_launch_bindings`], not here.
+    fn duplicate_launch_refusal_window(&self, issue_number: u64, message: &str) -> Option<String> {
+        if !crate::cli::execution_state::is_execution_generation_conflict(message) {
+            return None;
+        }
+        self.launched_windows.get(&issue_number).cloned()
+    }
+
+    /// Issue #4150 AC-3: record the refused duplicate without touching the row,
+    /// the slot, the window, or the claim the running launch owns.
+    fn record_duplicate_launch_refusal(
+        &mut self,
+        issue_number: u64,
+        message: String,
+        window_id: String,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let attempts = self
+            .duplicate_launch_refusals
+            .get(&issue_number)
+            .map_or(0, |refusal| refusal.attempts)
+            .saturating_add(1);
+        // The refused attempt reached the launch stage, so it may already have
+        // moved the row to `launching`. Re-assert the running launch: its
+        // window is the durable fact, and the row must keep describing it.
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Launched;
+            item.launched_window_id = Some(window_id.clone());
+        }
+        if !self.active_launches.contains(&issue_number) {
+            self.active_launches.push(issue_number);
+        }
+        self.launching_claimed_at.remove(&issue_number);
+        self.queue.retain(|queued| *queued != issue_number);
+        self.pending_launches
+            .retain(|pending| pending.issue_number != issue_number);
+        self.last_error = Some(format!(
+            "issue #{issue_number}: duplicate launch refused; the running launch keeps its slot ({message})"
+        ));
+        self.duplicate_launch_refusals.insert(
+            issue_number,
+            IssueMonitorDuplicateLaunchRefusal {
+                issue_number,
+                attempts,
+                last_refused_at: now,
+                message,
+                launched_window_id: Some(window_id),
+            },
+        );
+    }
+
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
+        let message = message.into();
+        // Issue #4150: the guard refused the new attempt, not the launch that
+        // is already running. Failing the row here dropped a live agent out of
+        // `active_launches` and erased the window and claim that identify it,
+        // so the ledger counted fewer agents than were running and the monitor
+        // admitted another one over `max_active`.
+        if let Some(window_id) = self.duplicate_launch_refusal_window(issue_number, &message) {
+            self.record_duplicate_launch_refusal(issue_number, message, window_id);
+            return;
+        }
         self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
     }
 
@@ -13332,6 +13467,9 @@ impl IssueMonitorState {
         }
         self.active_launches
             .retain(|active| *active != issue_number);
+        // Issue #4150: this row really did fail, so the duplicate-attempt note
+        // beside it has nothing left to qualify.
+        self.duplicate_launch_refusals.remove(&issue_number);
         // #3165 error-window lifecycle: retain the stale agent window id so an
         // explicit Launch Now can close it before relaunching. Prefer the
         // tracked launched window; fall back to the inbox item's window id.
@@ -13804,6 +13942,7 @@ mod tests {
                     steering: None,
                     idle_kind: None,
                     idle_since: None,
+                    duplicate_launch_refusal: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -18945,6 +19084,131 @@ mod tests {
             Some(MonitorInboxState::AgentFailed)
         );
         monitor
+    }
+
+    /// The refusal the execution generation guard produces for a launch aimed
+    /// at an owner whose generation is already held.
+    fn generation_conflict_refusal(number: u64) -> String {
+        format!(
+            "{} issue #{number} (active generation gen-16af505f5b691459780f2adb held by Session 8f5acb30-5e60-4bfd-9278-be62bab6b1c8 (Running)); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+            crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
+        )
+    }
+
+    /// Issue #4150 AC-1 / AC-2 / AC-3 / AC-4 / AC-5: the generation guard
+    /// refuses the *new* attempt, not the launch that is already running.
+    ///
+    /// Recording that refusal as this Issue's launch failure dropped the live
+    /// launch out of `active_launches` and erased the window and claim that
+    /// identify it, so the ledger counted one agent fewer than were running and
+    /// the monitor admitted another one over `max_active`.
+    #[test]
+    fn duplicate_launch_refused_on_a_held_generation_keeps_the_running_launch_and_its_slot() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(4140), issue(4009), issue(4143)],
+            "2026-09-08T07:00:00Z",
+        );
+        monitor.complete_active_launch_with_claim(
+            4140,
+            "tab-1::agent-1038".to_string(),
+            Some("gwt-auto-improve:f0000000-original".to_string()),
+        );
+        monitor.complete_active_launch(4009, "tab-1::agent-1039");
+        assert_eq!(monitor.active_count(), 2);
+
+        let refusal = generation_conflict_refusal(4140);
+        monitor.record_launch_failed(4140, refusal.clone());
+
+        // AC-1: the row still describes the launch that is running.
+        let item = monitor.inbox_item(4140).expect("the row survives");
+        assert_eq!(item.state, MonitorInboxState::Launched);
+        assert_eq!(
+            item.launched_window_id.as_deref(),
+            Some("tab-1::agent-1038")
+        );
+        assert_eq!(item.error_message, None);
+        assert_eq!(
+            monitor.live_claim_id(4140).as_deref(),
+            Some("gwt-auto-improve:f0000000-original"),
+            "the refused attempt must not replace the running launch's claim"
+        );
+        assert!(!monitor.failed_issues.contains_key(&4140));
+
+        // AC-2: the slot stays with the running launch.
+        assert!(monitor.active_issue_numbers().contains(&4140));
+        assert_eq!(monitor.active_count(), 2);
+
+        // AC-3: the refusal is still observable, and it is not a dead launch.
+        let status = monitor.agent_status_at("2026-09-08T07:49:00Z");
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 4140)
+            .expect("status row");
+        assert_eq!(row.state, MonitorInboxState::Launched);
+        assert_eq!(row.error_message, None);
+        let refused = row
+            .duplicate_launch_refusal
+            .as_ref()
+            .expect("the refused duplicate attempt is recorded");
+        assert_eq!(refused.attempts, 1);
+        assert_eq!(refused.message, refusal);
+
+        // AC-5: with both slots still occupied nothing else is admitted.
+        assert_eq!(monitor.next_launch_request("2026-09-08T07:49:10Z"), None);
+
+        // A repeated refusal keeps counting without disturbing the row.
+        monitor.record_launch_failed(4140, refusal.clone());
+        assert_eq!(monitor.active_count(), 2);
+        assert_eq!(
+            monitor
+                .duplicate_launch_refusals
+                .get(&4140)
+                .map(|refused| refused.attempts),
+            Some(2)
+        );
+    }
+
+    /// Issue #4150: the refusal only protects a launch that is actually
+    /// running. A stranded hold — the generation of a Session that is gone —
+    /// still fails its row, which is what Issue #3964's reclaim reads.
+    #[test]
+    fn generation_conflict_without_a_running_launch_still_fails_the_row() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-08T07:00:00Z");
+
+        monitor.record_launch_failed(42, generation_conflict_refusal(42));
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed)
+        );
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.failed_issues.contains_key(&42));
+        assert!(monitor.duplicate_launch_refusals.is_empty());
+    }
+
+    /// Issue #4150: a confirmed relaunch clears the refusal record, so the
+    /// count belongs to the launch that is running now.
+    #[test]
+    fn a_confirmed_launch_clears_the_duplicate_refusal_record() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_launch_failed(42, generation_conflict_refusal(42));
+        assert!(monitor.duplicate_launch_refusals.contains_key(&42));
+
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+
+        assert!(monitor.duplicate_launch_refusals.is_empty());
     }
 
     /// Issue #3645 AC-1 / #3628 AC-1: an `agent_failed` row holds no live

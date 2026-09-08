@@ -31,6 +31,7 @@ pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
 mod pane;
+pub(crate) mod perf;
 mod plan;
 mod pm;
 mod pr;
@@ -190,6 +191,8 @@ pub enum CliCommand {
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` read operations.
+    Perf(perf::PerfCommand),
     /// SPEC-3431: `pm.*` PM agent diagnostics.
     Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
@@ -753,6 +756,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
         CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
