@@ -3277,6 +3277,24 @@ struct VerificationCallerAuthority {
     session_binding: Option<gwt_agent::SessionExecutionBinding>,
 }
 
+/// Render the `verify.*` entry refusal.
+///
+/// A window without execution authority cannot register a plan or a record,
+/// and saying only that leaves it with nothing to try — the window in Issue
+/// #4140 concluded it was completely stuck. The host verification queue is
+/// reachable without any execution authority, so the refusal names it.
+fn verification_entry_refusal(err: &io::Error) -> String {
+    if err.kind() == ErrorKind::PermissionDenied {
+        format!(
+            "{err}. This window cannot register a verification plan or record, but it can still \
+             take its turn in the host verification queue: `verify.lease.status` and \
+             `verify.lease.acquire` need no execution authority."
+        )
+    } else {
+        format!("failed to resolve verification authority: {err}")
+    }
+}
+
 fn verification_caller_authority_error() -> io::Error {
     io::Error::new(
         ErrorKind::PermissionDenied,
@@ -3705,13 +3723,7 @@ pub(super) fn run<E: CliEnv>(
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
     let authority =
         snapshot_verification_caller_authority(&worktree, &session_id).map_err(|err| {
-            SpecOpsError::from(ApiError::Unexpected(
-                if err.kind() == ErrorKind::PermissionDenied {
-                    err.to_string()
-                } else {
-                    format!("failed to resolve verification authority: {err}")
-                },
-            ))
+            SpecOpsError::from(ApiError::Unexpected(verification_entry_refusal(&err)))
         })?;
     let command = match command {
         VerifyCommand::Plan { commands, derive } => VerifyCommand::PlanWithOutputs {
@@ -3956,6 +3968,35 @@ pub(crate) mod tests {
             plan_derived: false,
             content_hash: String::new(),
         }
+    }
+
+    /// Issue #4140 AC-4: a window without execution authority is told both why
+    /// `verify.*` refused it and how it can still take its turn in the host
+    /// verification queue. Without that, the only observable outcome is a
+    /// permission error with no path forward, which is how the reported
+    /// window ended up with nothing left to try.
+    #[test]
+    fn verification_entry_refusal_points_at_the_authority_free_queue() {
+        let refused = verification_entry_refusal(&verification_caller_authority_error());
+        assert!(
+            refused.contains("verification authority"),
+            "the refusal must keep naming its cause: {refused}"
+        );
+        assert!(
+            refused.contains("verify.lease.acquire") && refused.contains("verify.lease.status"),
+            "the refusal must name the queue entry points that need no authority: {refused}"
+        );
+
+        let other = verification_entry_refusal(&io::Error::other("disk on fire"));
+        assert!(
+            other.contains("failed to resolve verification authority")
+                && other.contains("disk on fire"),
+            "a non-permission failure keeps its own diagnosis: {other}"
+        );
+        assert!(
+            !other.contains("verify.lease.acquire"),
+            "queue guidance belongs to the authority refusal only: {other}"
+        );
     }
 
     // T-131 core: the Coverage Map (derived surface classification) is
