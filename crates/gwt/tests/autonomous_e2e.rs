@@ -620,8 +620,11 @@ mod idle_windows {
         );
     }
 
-    /// Issue #4131: the auto-update-restart shape. The pane is killed while the
-    /// execution record is still Active, so the slot must come back *and* the
+    /// Issue #4131: the auto-update-restart shape as production actually
+    /// presents it. The restart kills the pane before the holder can settle
+    /// anything, and the generation reaper — which runs earlier in the same
+    /// scan — records `Blocked` on its behalf, so the classifier sees
+    /// `Interrupted`, never `Active`. The slot must come back *and* the
     /// interrupted Issue must become a launch candidate again — without a PM
     /// `issue.monitor.stop` and without passing through `needs_human`.
     #[test]
@@ -629,7 +632,7 @@ mod idle_windows {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
         monitor.record_window_snapshot(snapshot(Vec::new()));
         let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Active)]),
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
             NOW,
         );
         assert_eq!(outcome.released, vec![43]);
@@ -657,7 +660,7 @@ mod idle_windows {
         monitor.set_autonomous_mode(false);
         monitor.record_window_snapshot(snapshot(Vec::new()));
         let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Active)]),
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
             NOW,
         );
         assert_eq!(outcome.released, vec![43]);

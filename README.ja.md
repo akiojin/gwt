@@ -315,8 +315,10 @@ idle になったエージェント窓はスロットを自動的に解放しま
 `review_verdict_published` / `execution_settled` / `binding_dead` /
 `stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
 前 3 種は解放して pane を閉じます。解放された Issue は通常 queue に戻りませんが、
-実行レコードが settle しないまま窓が失われた場合（アプリ再起動が pane ごと落とした
-場合など）は requeue され、次の scan が既存ブランチのまま再 launch します。
+エージェントが実行を settle する前に窓が失われた場合（アプリ再起動が pane ごと落とした
+場合など）は requeue され、次の scan が既存ブランチのまま再 launch します。死んだ
+holder に代わって generation reaper が書いた blocked レコードは未 settle として扱い、
+エージェント自身が到達した settle だけが Issue を queue から外したままにします。
 `binding_dead` は pane が既に無いため Autonomous モードの有無にかかわらず解放し、
 稼働中の pane を終わらせる残り 2 種は Autonomous モードの gate 内に留まります。
 実行レコードが Active の

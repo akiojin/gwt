@@ -2077,6 +2077,11 @@ pub enum IssueMonitorExecutionSettlement {
     Active,
     Completed,
     Blocked,
+    /// Issue #4131: the record reads `Blocked`, but the Host's Active reaper
+    /// wrote it because the holder died without settling — an auto-update
+    /// restart is the usual cause. The work was interrupted, not decided, so
+    /// it must not be treated as a settled outcome.
+    Interrupted,
     Unknown,
 }
 
@@ -12808,13 +12813,21 @@ impl IssueMonitorState {
                 },
             };
             // Issue #4131: a dead binding whose execution never settled is
-            // interrupted work, not a finished launch. Completed / Blocked
-            // records finished, and an absent record proves nothing, so both
-            // stay fail-closed and are released without a requeue.
+            // interrupted work, not a finished launch. `Interrupted` is the
+            // dominant shape in production: the Active reaper runs before the
+            // settlements are read in the same scan, so a holder killed by an
+            // auto-update restart is already `Blocked` on the reaper's behalf
+            // by the time this classifies it. A settlement the agent itself
+            // reached (Completed / Blocked) finished, and an absent record
+            // proves nothing, so both stay fail-closed and are released
+            // without a requeue.
             let requeue_on_release = idle_kind == IssueMonitorIdleKind::BindingDead
                 && matches!(
                     settlements.get(issue_number),
-                    Some(IssueMonitorExecutionSettlement::Active)
+                    Some(
+                        IssueMonitorExecutionSettlement::Active
+                            | IssueMonitorExecutionSettlement::Interrupted
+                    )
                 );
             classified.push(IssueMonitorIdleWindow {
                 window_id: window_id.clone(),
@@ -26708,22 +26721,33 @@ mod tests {
         // recovery — the Issue has to become a launch candidate again on the
         // next scan instead of sitting `Launched` forever with no window.
         // `needs_human` is never involved.
-        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
-        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
-        let outcome = monitor.reconcile_idle_windows(
-            &settlements(&[(43, IssueMonitorExecutionSettlement::Active)]),
-            IDLE_NOW,
-        );
-        assert_eq!(outcome.released, vec![43]);
-        assert_eq!(outcome.requeued, vec![43]);
-        assert_eq!(monitor.active_count(), 0);
-        assert_eq!(
-            monitor.inbox_item(43).map(|item| item.state),
-            Some(MonitorInboxState::Queued),
-            "an unfinished execution goes back to the queue, not to needs_human"
-        );
-        assert!(monitor.queued_issue_numbers().contains(&43));
-        assert!(monitor.prefs().failed_issues.is_empty());
+        //
+        // Both shapes of an unfinished execution qualify: a record still
+        // Active, and one the generation reaper blocked for a holder that
+        // never settled. The reaper runs earlier in the same scan, so
+        // `Interrupted` is the shape an auto-update restart actually produces.
+        for settlement in [
+            IssueMonitorExecutionSettlement::Active,
+            IssueMonitorExecutionSettlement::Interrupted,
+        ] {
+            let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+            monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+            let outcome =
+                monitor.reconcile_idle_windows(&settlements(&[(43, settlement)]), IDLE_NOW);
+            assert_eq!(outcome.released, vec![43], "{settlement:?}");
+            assert_eq!(outcome.requeued, vec![43], "{settlement:?}");
+            assert_eq!(monitor.active_count(), 0, "{settlement:?}");
+            assert_eq!(
+                monitor.inbox_item(43).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "an unfinished execution goes back to the queue, not to needs_human: {settlement:?}"
+            );
+            assert!(
+                monitor.queued_issue_numbers().contains(&43),
+                "{settlement:?}"
+            );
+            assert!(monitor.prefs().failed_issues.is_empty(), "{settlement:?}");
+        }
     }
 
     #[test]

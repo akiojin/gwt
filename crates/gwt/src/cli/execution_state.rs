@@ -2078,6 +2078,27 @@ impl ExecutionGenerationLedger {
             .map_or(generation.status, |event| event.to_status)
     }
 
+    /// Issue #4131: whether the Host's Active reaper wrote the current
+    /// generation's effective status instead of the agent settling it.
+    ///
+    /// The status alone cannot tell interrupted work from finished work. An
+    /// auto-update restart kills the holder before it can settle anything, and
+    /// the reaper then records `Blocked` on its behalf — a record shaped
+    /// exactly like the agent's own deliberate `execution.blocked`. Readers
+    /// that decide whether the owner still has work to do need to see which
+    /// one they are looking at.
+    #[must_use]
+    pub fn current_generation_settled_by_host_reaper(&self) -> bool {
+        self.current_generation().is_some_and(|generation| {
+            self.lifecycle_events_for(&generation.identity.generation_id)
+                .max_by_key(|event| event.sequence)
+                .and_then(|event| event.operation_id.as_deref())
+                .is_some_and(|operation_id| {
+                    operation_id.starts_with(STARTUP_ACTIVE_REAPER_OPERATION_PREFIX)
+                })
+        })
+    }
+
     fn effective_projection_for<'a>(&'a self, generation: &'a ExecutionGeneration) -> &'a str {
         let lifecycle = self
             .lifecycle_events_for(&generation.identity.generation_id)
@@ -2474,6 +2495,11 @@ pub struct OwnerExecutionDiagnosis {
     pub owner_number: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ecr_status: Option<ExecutionControlStatus>,
+    /// Issue #4131: the Host's Active reaper wrote [`Self::ecr_status`], not
+    /// the agent. A `blocked` status then means the holder died mid-execution,
+    /// which is interrupted work rather than a settled outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ecr_settled_by_host_reaper: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2509,6 +2535,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         owner_kind: owner.kind,
         owner_number: owner.number,
         ecr_status: None,
+        ecr_settled_by_host_reaper: false,
         generation_id: None,
         generation_entrypoint: None,
         generation_activated_at: None,
@@ -2576,6 +2603,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     };
     let status = ledger.effective_status_for(current);
     diagnosis.ecr_status = Some(status);
+    diagnosis.ecr_settled_by_host_reaper = ledger.current_generation_settled_by_host_reaper();
     diagnosis.generation_id = Some(current.identity.generation_id.clone());
     diagnosis.generation_entrypoint = Some(current.identity.entrypoint.clone());
     diagnosis.generation_activated_at = Some(current.identity.activated_at);
@@ -16248,6 +16276,80 @@ mod tests {
         assert_eq!(released.ecr_status, Some(ExecutionControlStatus::Blocked));
         assert!(!released.reclaimable);
         assert_eq!(released.recommended_recovery, "gwt-execute");
+    }
+
+    /// Issue #4131: `blocked` alone cannot tell interrupted work from finished
+    /// work. The reaper writes it on behalf of a holder that died without
+    /// settling — an auto-update restart is the common way — while
+    /// `execution.blocked` is the agent's own deliberate terminal outcome.
+    /// Readers that act on the status need the provenance to separate them.
+    #[test]
+    fn owner_status_reports_whether_the_host_reaper_wrote_the_blocked_status() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-reaper-provenance";
+        let (candidate, identity) =
+            startup_reaper_active_fixture(worktree.path(), owner, session_id);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+        let active = diagnose_owner(worktree.path(), owner);
+        assert_eq!(active.ecr_status, Some(ExecutionControlStatus::Active));
+        assert!(
+            !active.ecr_settled_by_host_reaper,
+            "an Active generation was settled by nobody"
+        );
+
+        reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
+        let reaped = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(reaped.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(
+            reaped.ecr_settled_by_host_reaper,
+            "the holder never settled; the reaper wrote this Blocked status for it"
+        );
+    }
+
+    /// The counterpart: an agent that settles its own execution as Blocked
+    /// made a decision, and nothing may present that as interrupted work.
+    #[test]
+    fn owner_status_does_not_attribute_an_agent_settlement_to_the_host_reaper() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-agent-settlement";
+        startup_reaper_active_fixture(worktree.path(), owner, session_id);
+
+        settle(
+            worktree.path(),
+            session_id,
+            ExecutionSettlement::Blocked {
+                reason: "verification dependency unresolved".to_string(),
+                missing_verification: Some("full pre-PR matrix".to_string()),
+            },
+        )
+        .unwrap();
+        let settled = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(settled.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(
+            !settled.ecr_settled_by_host_reaper,
+            "the agent settled this itself; it is a decision, not an interruption"
+        );
     }
 
     /// A live holder is never advertised as reclaimable, whatever its durable
