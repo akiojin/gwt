@@ -25,8 +25,10 @@ pub const MIN_SOFT_FD_LIMIT: u64 = 8_192;
 /// Highest descriptor number [`open_fd_count`] and [`open_tty_fd_count`] probe.
 /// Descriptors are allocated lowest-first, so a bounded scan stays exact for
 /// any process that has not already blown past this many open files, and it
-/// keeps the probe cheap when the soft limit is in the millions.
-const FD_PROBE_CEILING: u64 = 65_536;
+/// keeps the probe cheap when the soft limit is in the millions. Public
+/// because it is the bound a caller needs to interpret the counts, and because
+/// only the unix implementation consumes it.
+pub const FD_PROBE_CEILING: u64 = 65_536;
 
 /// A process resource limit pair, in descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
