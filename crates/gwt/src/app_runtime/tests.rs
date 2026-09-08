@@ -66374,8 +66374,10 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         .find_map(|event| event.fields.get("summary").cloned())
         .expect("restore admission summary line");
     assert!(
-        summary.contains(&format!("suppressed {} window restore(s)", SETTLED + UNRESUMABLE))
-            && summary.contains(&format!("closed_issue={SETTLED}"))
+        summary.contains(&format!(
+            "suppressed {} window restore(s)",
+            SETTLED + UNRESUMABLE
+        )) && summary.contains(&format!("closed_issue={SETTLED}"))
             && summary.contains(&format!("not_resumable={UNRESUMABLE}")),
         "summary must break the suppression down by reason, got: {summary}"
     );
@@ -66430,11 +66432,8 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-failure"));
     for session_id in session_ids {
-        let mut session = gwt_agent::Session::new(
-            &worktree,
-            "work/restore-failure",
-            gwt_agent::AgentId::Codex,
-        );
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/restore-failure", gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = Some(format!("native-{session_id}"));
         session.restore_window_on_startup = true;
@@ -66444,7 +66443,11 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
     }
 
     let _ = runtime.restore_open_project_windows("tab-failure");
-    let restored: Vec<String> = runtime.pending_auto_resume_sources.keys().cloned().collect();
+    let restored: Vec<String> = runtime
+        .pending_auto_resume_sources
+        .keys()
+        .cloned()
+        .collect();
     assert_eq!(
         restored.len(),
         session_ids.len(),

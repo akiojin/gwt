@@ -464,14 +464,16 @@ impl AppRuntime {
                         session_id = source_session_id.as_deref().unwrap_or("-"),
                         "closing the restored window that failed before PTY start"
                     );
-                    events.extend(
-                        self.close_window_after_issue_monitor_finalize_events(&window_id),
-                    );
+                    events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
                 }
                 // The window is gone, so nothing keeps the Session out of the
                 // next start's restore set except the Session itself.
                 if let Some(session_id) = source_session_id.as_deref() {
-                    super::startup::mark_auto_resume_source_completed(&self.sessions_dir, session_id);
+                    super::startup::mark_auto_resume_source_completed(
+                        &self.sessions_dir,
+                        session_id,
+                    );
                 }
             }
             return events;

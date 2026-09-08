@@ -667,11 +667,9 @@ impl AppRuntime {
                 .iter()
                 .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
                 .map(|window| combined_window_id(&tab_id, &window.id));
-            if let Err(reason) = self.restore_admission(
-                &session,
-                &project_root,
-                placeholder_window_id.as_deref(),
-            ) {
+            if let Err(reason) =
+                self.restore_admission(&session, &project_root, placeholder_window_id.as_deref())
+            {
                 suppressed.record(reason);
                 tracing::info!(
                     target: "gwt.restore",
