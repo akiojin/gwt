@@ -65,10 +65,6 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
     vec![launch_wizard_open_error(client_id, "Start Work", message)]
 }
 
-fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
-    vec![launch_wizard_open_error(client_id, "Intake", message)]
-}
-
 fn manual_holder_fingerprint(
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     identity: &gwt_agent::SessionExecutionIdentity,
@@ -216,6 +212,19 @@ use super::{
 use crate::usable_worktree_path_for_branch;
 
 impl AppRuntime {
+    /// SPEC-3864 FR-006: feed the host-global "is this agent configured?"
+    /// probes into the wizard. The probes are per-agent (they read that
+    /// agent's own config home); everything downstream — the setup
+    /// affordance and its in-pane launcher — is descriptor-driven.
+    fn apply_agent_configuration_state(wizard: &mut gwt::LaunchWizardState) {
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
+        wizard.set_agent_needs_configuration("hermes", !gwt_skills::hermes_is_configured_global());
+        wizard.set_agent_needs_configuration(
+            "opencode",
+            !gwt_skills::opencode_is_configured_global(),
+        );
+    }
+
     fn launch_wizard_view_for_session(&self, session: &LaunchWizardSession) -> LaunchWizardView {
         let mut view = session.wizard.view();
         if session.issue_monitor_profile_save.is_some() {
@@ -361,15 +370,12 @@ impl AppRuntime {
                 linked_issue_kind,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         let origin = if workspace_resume_context.is_some() {
             super::LaunchWizardOrigin::WorkspaceResume
@@ -493,16 +499,13 @@ impl AppRuntime {
                 linked_issue_kind: Some(linked_issue_kind),
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             base_branch_name,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -560,54 +563,6 @@ impl AppRuntime {
             }
             Err(error) => launch_agent_open_error(client_id, error),
         }
-    }
-
-    /// SPEC-3214 Phase 3: open the Launch Wizard for an **intake session** — the
-    /// agent/profile picker is reused, but the resulting launch is ephemeral
-    /// (detached `.intake-*` worktree on the base ref, no branch). This is the
-    /// primary "start new work" entry that replaces Start Work.
-    pub(crate) fn open_intake_session(&mut self, client_id: &str) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return intake_open_error(
-                client_id,
-                "Open a project before starting an intake session",
-            );
-        };
-        let Some(tab) = self.tab(&tab_id) else {
-            return intake_open_error(client_id, "Project tab not found");
-        };
-        if tab.kind != gwt::ProjectKind::Git {
-            return intake_open_error(client_id, "An intake session requires a Git project");
-        }
-        if tab.migration_pending {
-            return intake_open_error(
-                client_id,
-                "Complete the project migration before starting an intake session",
-            );
-        }
-
-        let project_root = tab.project_root.clone();
-        match self.open_intake_session_for_project(&tab_id, &project_root) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => intake_open_error(client_id, error),
-        }
-    }
-
-    fn open_intake_session_for_project(
-        &mut self,
-        tab_id: &str,
-        project_root: &Path,
-    ) -> Result<(), String> {
-        // Reuse the Start Work wizard opener (agent/profile picker + quick-start
-        // branch fetch), then convert it to an ephemeral intake: clear the
-        // reserved branch and flag the context so `build_launch_config` yields a
-        // detached, branchless launch on the base ref.
-        self.open_start_work_for_project(tab_id, project_root)?;
-        let base_ref = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
-        if let Some(session) = self.launch_wizard.as_mut() {
-            session.wizard.mark_as_ephemeral_intake(base_ref);
-        }
-        Ok(())
     }
 
     pub(crate) fn open_start_work_in_agent_kanban(
@@ -723,9 +678,7 @@ impl AppRuntime {
         if tab_changed {
             let _ = self.persist();
             events.push(self.workspace_state_broadcast());
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         events.push(self.launch_wizard_state_outbound());
         events
@@ -1532,16 +1485,13 @@ impl AppRuntime {
                 linked_issue_kind: None,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             base_branch,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -1938,16 +1888,13 @@ impl AppRuntime {
                 linked_issue_kind: None,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             base_branch_name,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -2632,10 +2579,11 @@ impl AppRuntime {
         // SPEC-3248 P8a: the independent review agent is subordinate to the
         // implementing session's execution — it must not take over (or be
         // gated by) the Execution Control Record for the linked owner.
+        // Issue #3984: the same decision is published into the review agent's
+        // environment so its hooks apply the review contract instead of the
+        // producing-session gates it can never satisfy.
         if review_prompt.is_some() {
-            if let LaunchWizardLaunchRequest::Agent(config) = &mut launch_request {
-                config.suppress_execution_control = true;
-            }
+            launch_request.set_review_dispatch_context();
         }
         let launch_index = self
             .tab(&session.tab_id)
@@ -2662,6 +2610,9 @@ impl AppRuntime {
             issue_monitor_session_mode,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            // Issue #4041: the review window observes the Issue; it never
+            // owns the launch binding the implementation window holds.
+            issue_monitor_review_dispatch: review_prompt.is_some(),
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -3034,6 +2985,7 @@ impl AppRuntime {
             issue_monitor_session_mode: Some(config.session_mode),
             issue_monitor_autonomous_handoff: autonomous_delivery_attempt.clone(),
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         };
         let launch = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
@@ -3986,9 +3938,7 @@ impl AppRuntime {
                 let _ = self.persist();
                 let mut events = vec![self.workspace_state_broadcast()];
                 if tab_changed {
-                    if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                        events.push(event);
-                    }
+                    events.extend(self.active_project_snapshot_broadcasts());
                 }
                 events.push(self.launch_wizard_state_broadcast(None));
                 events
@@ -4126,6 +4076,7 @@ impl AppRuntime {
                             issue_monitor_session_mode: Some(config.session_mode),
                             issue_monitor_autonomous_handoff: None,
                             issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
                         });
                     if let Some(target) = session.agent_kanban_target.clone() {
                         runtime.spawn_agent_window_in_agent_kanban(

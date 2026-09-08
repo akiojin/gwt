@@ -702,8 +702,15 @@ Question tools are blocked in this session. A question tool call is converted in
 NeedsHuman handoff before it can wait, the owner Issue is parked for a human, and the Issue \
 Monitor slot is released for the next ready Issue — so asking ends this execution instead of \
 pausing it.\n\n\
-User verification, PR/merge gates, branch protection and permission boundaries are unchanged and \
-must not be bypassed.",
+**Do not ask the user to look at anything.** Visual / manual user verification is waived for this \
+launch: record `User Verification Result: n/a (autonomous)` in the evidence bundle and do not \
+prepare an instance, share a URL, or open a verification handoff. A UI change is covered instead \
+by your own automated headed run (real browser, dark and light themes, zero console / page \
+errors), recorded on its own `Agent Visual Check:` line. That line is evidence you produced; it \
+is never a User Verification Result, and `n/a (autonomous)` is never a substitute for a skip you \
+chose because verification looked hard.\n\n\
+PR/merge gates, branch protection and permission boundaries are unchanged and must not be \
+bypassed.",
         issue = context.issue_number,
     )
 }
@@ -773,5 +780,35 @@ mod tests {
         });
         assert!(policy.contains("Issue #3478"));
         assert!(policy.contains("Question tools are blocked"));
+    }
+
+    /// Issue #4001 AC-A1/AC-A2: an unattended session must never park itself
+    /// waiting for a human to look at a screen. The injected policy is the only
+    /// hook-side text that states the verification contract, so it must name the
+    /// recorded value and the automated substitute instead of telling the agent
+    /// that user verification is unchanged.
+    #[test]
+    fn decision_policy_waives_user_visual_verification_for_autonomous_runs() {
+        let policy = autonomous_decision_policy(&AutonomousExecutionContext {
+            issue_number: 4001,
+            session_id: "s".to_string(),
+        });
+        assert!(
+            policy.contains("User Verification Result: n/a (autonomous)"),
+            "{policy}"
+        );
+        assert!(
+            policy.contains("headed"),
+            "policy must name the automated headed substitute: {policy}"
+        );
+        assert!(
+            !policy.contains("User verification, PR/merge gates"),
+            "policy must not keep the human-verification requirement: {policy}"
+        );
+        // Issue #4001 AC-2: the agent's own browser-check is evidence, never the
+        // user's verification result.
+        assert!(policy.contains("Agent Visual Check"), "{policy}");
+        // The gates that are genuinely unchanged must still be named.
+        assert!(policy.contains("branch protection"), "{policy}");
     }
 }

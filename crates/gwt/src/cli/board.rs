@@ -818,6 +818,7 @@ mod tests {
 
     use crate::board_provider::post_entry;
     use crate::cli::test_support::ScopedEnvVar;
+    use gwt_core::test_support::ScopedGwtHome;
 
     use super::*;
 
@@ -862,6 +863,7 @@ mod tests {
         // SPEC-3046 受け入れシナリオ 1: GUI と同じ空 body 検証が CLI にも
         // 適用される（whitespace-only body は保存されずエラー）。
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let cmd = parse(&[s("post"), s("--kind"), s("status"), s("--body"), s("   ")]).unwrap();
         let mut out = String::new();
@@ -896,6 +898,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let cmd = parse(&[
             s("post"),
@@ -932,6 +935,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
             number: gwt_github::IssueNumber(2338),
@@ -982,6 +986,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.fail_create_comment_after(0);
         let cmd = parse(&[
@@ -1021,6 +1026,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let mut out = String::new();
         run(
@@ -1080,6 +1086,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1123,6 +1130,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let mut out = String::new();
         run(
@@ -1199,6 +1207,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let mut out = String::new();
         run(
@@ -1277,6 +1286,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let cmd = parse(&[
             s("post"),
@@ -1309,6 +1319,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         auto_file_operation_refusal(
@@ -1333,6 +1344,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         for _ in 0..3 {
             auto_file_operation_refusal(
@@ -1361,6 +1373,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         auto_file_operation_refusal(
             &mut env,
@@ -1391,6 +1404,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         auto_file_operation_refusal(&mut env, "issue.view", "issue #99 is unavailable");
         auto_file_operation_refusal(
@@ -1414,6 +1428,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         auto_file_operation_refusal(&mut env, "board.post", "board post refused");
 
@@ -1478,6 +1493,7 @@ mod tests {
     #[test]
     fn board_family_run_show_workspace_filter_keeps_broadcast_and_matching_audience() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         for (body, audience) in [
@@ -1521,6 +1537,7 @@ mod tests {
     #[test]
     fn board_family_run_show_all_flag_shows_full_timeline() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         for (body, audience) in [
@@ -1808,6 +1825,7 @@ mod tests {
     #[test]
     fn board_family_run_post_persists_target_owners() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1843,6 +1861,7 @@ mod tests {
     #[test]
     fn board_family_run_post_persists_typed_mentions() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1924,6 +1943,7 @@ mod tests {
     #[test]
     fn board_family_run_post_persists_audience_from_workspace_mentions() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1971,6 +1991,7 @@ mod tests {
     #[test]
     fn board_family_run_post_broadcast_flag_keeps_audience_empty_without_explicit_workspace() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2009,8 +2030,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
         session.save(&sessions_dir).unwrap();
@@ -2061,8 +2081,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2114,8 +2133,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2192,8 +2210,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2264,8 +2281,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2330,8 +2346,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2428,6 +2443,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2476,6 +2492,7 @@ mod tests {
     #[test]
     fn board_family_run_post_updates_projection() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2509,6 +2526,7 @@ mod tests {
     #[test]
     fn board_family_run_post_succeeds_when_entry_commits_without_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         gwt_core::coordination::load_snapshot(tmp.path()).unwrap();
         let projection_path =
@@ -2545,6 +2563,7 @@ mod tests {
     #[test]
     fn board_family_run_show_scopes_workspace_and_all_timelines() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let mut env = crate::cli::TestEnv::new(repo.clone());
@@ -2634,8 +2653,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2699,9 +2717,13 @@ mod tests {
         assert!(!out.contains("other entry"), "{out}");
     }
 
+    // Issue #4052: the Board store lives under gwt_home(), so this test pins
+    // its own thread-local gwt home instead of depending on whatever process
+    // HOME a sibling test happens to have swapped in at the time.
     #[test]
     fn board_family_run_show_renders_origin_metadata_suffix() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),
@@ -2742,6 +2764,7 @@ mod tests {
     #[test]
     fn board_family_run_show_falls_back_to_author_without_origin_metadata() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),
@@ -2780,6 +2803,7 @@ mod tests {
     #[test]
     fn board_family_run_show_renders_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),
@@ -2818,6 +2842,7 @@ mod tests {
     #[test]
     fn board_family_run_show_renders_multiline_body_as_indented_block() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),

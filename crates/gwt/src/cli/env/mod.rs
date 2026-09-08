@@ -17,7 +17,7 @@ mod tests;
 
 pub use default::DefaultCliEnv;
 #[cfg(test)]
-pub use default::{IssueClientFactory, LazyIssueClient, LazyOwnerClient, OwnerClientFactory};
+pub use default::{IssueClientFactory, LazyIssueClient};
 pub(crate) use stdout_capture::StdoutCaptureEnv;
 pub use test_env::{TargetIssueCreateCall, TestEnv};
 
@@ -27,10 +27,7 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{
-    client::{ApiError, IssueClient, OwnerRepositoryClient, ResolutionDeadline},
-    IssueNumber, IssueSnapshot, SpecListFilter, SpecOpsError,
-};
+use gwt_github::{client::IssueClient, IssueNumber, IssueSnapshot, SpecListFilter};
 
 use super::{
     parse_actions_args, parse_board_args, parse_discussion_args, parse_hook_args, parse_issue_args,
@@ -43,13 +40,7 @@ use super::{
 /// `client::fake::FakeIssueClient`) instead of spinning up real HTTP.
 pub trait CliEnv {
     type Client: IssueClient;
-    type OwnerClient: OwnerRepositoryClient;
     fn client(&self) -> &Self::Client;
-    fn improvement_owner_client(
-        &self,
-        deadline: &ResolutionDeadline,
-    ) -> Result<&Self::OwnerClient, ApiError>;
-    fn improvement_source_scope_nonce(&self) -> Result<String, SpecOpsError>;
     fn cache_root(&self) -> PathBuf;
     fn repo_path(&self) -> &std::path::Path;
     fn stdout(&mut self) -> &mut dyn io::Write;
@@ -103,6 +94,8 @@ pub trait CliEnv {
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary>;
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String>;
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
+    /// Issue #3515: re-run a failed run or job. Returns the outcome line.
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn run_internal_command(
         &mut self,
         args: &[String],

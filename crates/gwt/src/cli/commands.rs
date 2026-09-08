@@ -136,8 +136,17 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
+        /// stored value untouched).
+        auto_close_merged_issues: Option<bool>,
+        /// Issue #3906 AC-1: explicit auto-apply-updates override (`None`
+        /// leaves the stored value untouched).
+        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
+        /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
+        /// clear (`false`) the non-destructive update drain.
+        update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
     /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
     /// the usage threshold.
@@ -201,6 +210,19 @@ pub enum IssueCommand {
     MonitorQuotaHoldList {
         project_root: Option<std::path::PathBuf>,
     },
+    /// Issue #3883 AC-6: put the still-running agent windows back under slot
+    /// accounting. Additive only — no pane is closed and no slot is taken
+    /// away — so it is safe to run against a project mid-flight.
+    /// Issue #4084 AC-5: release idle launched windows on the operator's
+    /// authority, or (with `dry_run`) report only what would be released.
+    MonitorReleaseIdle {
+        project_root: Option<std::path::PathBuf>,
+        number: Option<u64>,
+        dry_run: bool,
+    },
+    MonitorReconcile {
+        project_root: Option<std::path::PathBuf>,
+    },
     /// Issue #3923 AC-1: release one provider's quota hold on the operator's
     /// authority. The release is a durable fence, so a process that still
     /// holds the hold in memory cannot re-stamp it.
@@ -241,11 +263,15 @@ pub enum PrCommand {
     List {
         stale_after_hours: Option<i64>,
         escalate_after_cycles: Option<u32>,
-        /// Issue #3891: bypass the TTL cache and the budget throttle.
+        /// Issue #3891: bypass the TTL cache. SPEC #4093 FR-008: the budget
+        /// throttle still applies; see `force_reason`.
         refresh: bool,
         /// Issue #3891 AC-2: heavy fields to hydrate; `None` keeps the crate
         /// default (checks, no body).
         include: Option<gwt_git::PrInventoryInclude>,
+        /// SPEC #4093 FR-008: one-step override of the reserve / burst
+        /// throttle, with the reason. Never bypasses an open refusal window.
+        force_reason: Option<String>,
     },
     Create {
         base: String,

@@ -496,9 +496,14 @@ fn broken_scopes_still_unhealthy(
                 "project index status probe unavailable",
             ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(search_unavailable_error("project index search timed out"));
-        }
+        // Issue #4033: a probe the attempt deadline cut short has not proven
+        // the scope healthy, so report it as still broken and let the caller's
+        // own deadline check return the typed `INDEX_NOT_READY`. Surfacing it
+        // as a distinct failure made the error *type* depend on whether the
+        // reaper happened to return a few microseconds before or after the
+        // deadline instant — on a loaded runner that flipped a passing search
+        // contract into an unrelated failure.
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(true),
         Err(_) => {
             return Err(search_unavailable_error(
                 "project index status probe unavailable",

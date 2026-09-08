@@ -13,10 +13,8 @@ pub mod branch_list;
 pub mod cli;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
-#[cfg(unix)]
 pub mod daemon_publisher;
 pub mod daemon_runtime;
-#[cfg(unix)]
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
@@ -33,6 +31,7 @@ pub mod issue_monitor;
 pub mod issue_monitor_authz;
 pub mod issue_monitor_gate;
 pub mod issue_monitor_review;
+pub mod issue_monitor_settlement;
 pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
@@ -52,6 +51,7 @@ pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_drain;
 pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
@@ -123,7 +123,8 @@ pub use index_worker::{
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
     bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
-    establish_issue_monitor_authority_fence, is_auto_improve_candidate,
+    clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
+    delegation_recorded, establish_issue_monitor_authority_fence, is_auto_improve_candidate,
     is_legacy_git_launch_failure_for_project, issue_monitor_authority_fence_path,
     issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
     issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
@@ -146,21 +147,27 @@ pub use issue_monitor::{
     EligibilityDecision, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
     IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
     IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
-    IssueMonitorFailoverOutcome, IssueMonitorFailure, IssueMonitorInboxItem, IssueMonitorIssue,
-    IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
-    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfileSource,
-    IssueMonitorLaunchProfileSwitchError, IssueMonitorLaunchRequest,
-    IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
-    IssueMonitorPrefs, IssueMonitorProviderQuotaHold, IssueMonitorProviderQuotaHoldClearOutcome,
+    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorExecutionSettlement,
+    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorFailure,
+    IssueMonitorIdleKind, IssueMonitorIdlePaneClose, IssueMonitorIdleReconciliation,
+    IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow, IssueMonitorInboxItem,
+    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchBindingReconciliation,
+    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate,
+    IssueMonitorLaunchProfileSource, IssueMonitorLaunchProfileSwitchError,
+    IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue,
+    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorPrefsReset,
+    IssueMonitorProviderQuotaHold, IssueMonitorProviderQuotaHoldClearOutcome,
     IssueMonitorProviderQuotaHoldEvidence, IssueMonitorProviderQuotaHoldRelease,
     IssueMonitorProviderQuotaPollerWindow, IssueMonitorProviderUsageLimitOutcome,
     IssueMonitorReadiness, IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
-    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
-    IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary,
-    LaunchProfileSelection, LaunchProfileSkip, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver, IssueMonitorScanDriverKind,
+    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch,
+    IssueMonitorStopOutcome, IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts,
+    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl, IssueMonitorUpdateDrainReason,
+    IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
+    LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement,
+    MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect,
+    AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
@@ -171,9 +178,10 @@ pub use knowledge_bridge::{
     KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{
-    build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
-    has_gwt_spec_label, knowledge_launch_target_branch_name, load_agent_options, AgentOption,
-    DockerWizardContext, LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
+    default_wizard_version_cache_path, has_gwt_spec_label, knowledge_launch_target_branch_name,
+    load_agent_options, AgentOption, AgentSetupAffordance, AgentSetupKind, DockerWizardContext,
+    LaunchTargetKind, LaunchWizardAction, LaunchWizardAgentSetupView, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
     LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardLiveSessionView,
     LaunchWizardMode, LaunchWizardOptionView, LaunchWizardPreviousProfile,

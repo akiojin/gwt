@@ -244,6 +244,23 @@ fn frontend_event_deserializes_agent_kanban_commands() {
     }
 }
 
+// SPEC-3885 FR-012 / AC-12: the inverse of Windowize. The window already knows its
+// Issue, so the frontend only names the window it wants folded back into the list.
+#[test]
+fn dock_agent_window_to_issue_event_deserializes() {
+    let dock = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "dock_agent_window_to_issue",
+        "id": "project-1::agent-1"
+    }))
+    .expect("dock_agent_window_to_issue should deserialize");
+    match dock {
+        FrontendEvent::DockAgentWindowToIssue { id } => {
+            assert_eq!(id, "project-1::agent-1");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
 // SPEC-3671 FR-001 / FR-004: the wire kind the frontend `isOffCanvasPlacement()` seam
 // matches on. The JS predicate and this string must move in lockstep.
 #[test]

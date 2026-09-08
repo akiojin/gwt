@@ -164,6 +164,40 @@ fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
     Ok((gate_program, gate_args))
 }
 
+/// Apply an agent resource policy to a gated launch without letting a
+/// rejection fail it.
+///
+/// Issue #3942: the tree-wide priority of SPEC #1921 Phase 86 (#3813) is an
+/// optimization for GUI responsiveness, not a precondition for running an
+/// agent. `setpriority` returns EPERM on every host where the launcher may not
+/// renice the target's process group, and propagating that turned an ordinary
+/// launch into a user-facing `PTY creation failed: setpriority permission
+/// denied`. This returns nothing on purpose: the spawn routes never hold an
+/// outcome they could propagate, panic on, or drop silently.
+pub(crate) fn best_effort_apply_policy(
+    window_id: &str,
+    pending: &gwt_terminal::PendingPane,
+    policy: gwt_terminal::pty::ProcessPolicy,
+) {
+    note_unapplied_agent_resource_policy(window_id, pending.apply_policy(policy));
+}
+
+/// Warn about a rejected policy and let the target run at the inherited
+/// priority. Split from `best_effort_apply_policy` so the warning contract is
+/// testable without a live PTY.
+pub(crate) fn note_unapplied_agent_resource_policy(
+    window_id: &str,
+    outcome: Result<(), gwt_terminal::TerminalError>,
+) {
+    if let Err(error) = outcome {
+        tracing::warn!(
+            window_id = %window_id,
+            error = %error,
+            "agent resource policy was not applied; continuing launch at the inherited priority"
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingToolRuntimeMigration {
     source: gwt_agent::Session,
@@ -841,37 +875,16 @@ pub(crate) fn heal_lost_generation_publication_best_effort(
 /// generation. When a holder Session dies without settling, every later fresh
 /// launch (Issue Monitor retries included) collides here, so the refusal names
 /// the blocking generation, its holder and durable state, and both recovery
-/// routes. Diagnostics are best effort: an unreadable holder Session degrades
-/// the detail, never the refusal.
+/// routes. Issue #4042 AC-1: the holder is read through the same
+/// `OwnerGenerationHold` projection the Issue Monitor reclaim uses, so the
+/// refusal and the reclaim can never describe one holder differently.
 fn existing_generation_conflict_detail(
     sessions_dir: &Path,
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
 ) -> String {
-    let status = ledger
-        .current_effective_status()
-        .map_or("unknown", |status| match status {
-            gwt::cli::execution_state::ExecutionControlStatus::Active => "active",
-            gwt::cli::execution_state::ExecutionControlStatus::Completed => "completed",
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked => "blocked",
-        });
-    let holder = ledger.current_generation().map(|generation| {
-        let session_id = generation.identity.initial_session_id.clone();
-        let session_state =
-            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).map_or_else(
-                |_| "durable Session unreadable".to_string(),
-                |session| format!("{:?}", session.status),
-            );
-        format!(" held by Session {session_id} ({session_state})")
-    });
-    format!(
-        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
-        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
-        owner.kind.as_str(),
-        owner.number,
-        status,
-        holder.unwrap_or_default(),
-    )
+    let hold = gwt::cli::execution_state::owner_generation_hold_from_ledger(sessions_dir, ledger);
+    gwt::cli::execution_state::execution_generation_conflict_refusal(owner, hold.as_ref())
 }
 
 struct FinalizedAgentCapabilityLaunch<'a> {
@@ -1970,11 +1983,26 @@ fn persist_lazy_tool_runtime_provenance_migration(
     }
 }
 
-fn apply_post_resolution_bun_cache_fast_path(config: &mut gwt_agent::LaunchConfig) -> bool {
+fn apply_post_resolution_bun_cache_fast_path(
+    config: &mut gwt_agent::LaunchConfig,
+) -> gwt_agent::HostBunxCacheFastPath {
     if config.tool_runtime_provenance.is_some() {
-        return false;
+        return gwt_agent::HostBunxCacheFastPath::NotApplicable;
     }
     gwt_agent::apply_host_bunx_cache_fast_path(config)
+}
+
+/// Issue #3857 AC-5: terminal line shown in the agent window when a validated
+/// Bun package cache entry resolved to a bin target gwt could not launch. It
+/// names the resolved path and the reason, then states that the launch falls
+/// back to the package runner.
+fn bun_cache_fast_path_rejection_terminal_bytes(executable: &Path, reason: &str) -> Vec<u8> {
+    format!(
+        "[gwt] Bun package cache entry {} was not launched directly: {}. Falling back to the bunx package runner.\r\n",
+        executable.display(),
+        reason.trim().trim_end_matches('.')
+    )
+    .into_bytes()
 }
 
 fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
@@ -1988,22 +2016,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
         return WindowProcessStatus::Starting;
     }
     WindowProcessStatus::Running
-}
-
-/// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this tab.
-/// A canvas Issue window is preferred over one that is itself contained, and creation
-/// order breaks ties so repeated launches land in the same pane.
-fn issue_preview_host_window_id(workspace: &gwt::WindowCanvasState) -> Option<String> {
-    let windows = &workspace.persisted().windows;
-    windows
-        .iter()
-        .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
-        .or_else(|| {
-            windows
-                .iter()
-                .find(|window| window.preset.hosts_issue_preview())
-        })
-        .map(|window| window.id.clone())
 }
 
 #[derive(Debug, Clone)]
@@ -2029,11 +2041,20 @@ struct AgentWindowSpawnOptions {
     continuation: Option<PendingContinueWork>,
 }
 
+/// SPEC-3864 T-006: install detection runs off the startup critical path.
+/// The slot starts as a background thread and is joined on first wizard
+/// access; clones share the same slot so a joined result is reused.
+#[derive(Debug)]
+enum AgentOptionsSlot {
+    Loading(Option<std::thread::JoinHandle<Vec<gwt::AgentOption>>>),
+    Ready(Vec<gwt::AgentOption>),
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchWizardMemoryCache {
     sessions_dir: PathBuf,
     sessions: Vec<gwt_agent::Session>,
-    agent_options: Vec<gwt::AgentOption>,
+    agent_options: Arc<Mutex<AgentOptionsSlot>>,
     // SPEC-3170 FR-001: Claude capability detection may read settings and run
     // `claude --version` once per process. The wizard stores the booleans at
     // cache load time and reuses them on every open.
@@ -2047,7 +2068,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options: Self::load_agent_options(),
+            agent_options: Self::spawn_agent_options_detection(),
             claude_ultracode_supported: claude_capabilities.ultracode_supported,
             claude_workflows_enabled: claude_capabilities.workflows_enabled,
         }
@@ -2071,7 +2092,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options,
+            agent_options: Arc::new(Mutex::new(AgentOptionsSlot::Ready(agent_options))),
             claude_ultracode_supported,
             claude_workflows_enabled,
         }
@@ -2098,12 +2119,44 @@ impl LaunchWizardMemoryCache {
         ))
     }
 
+    /// Start install detection on a background thread so `load` (and thus
+    /// app startup / settings updates) never waits on `<agent> --version`
+    /// probes. A thread that cannot be spawned falls back to synchronous
+    /// detection so the options are never silently empty.
+    fn spawn_agent_options_detection() -> Arc<Mutex<AgentOptionsSlot>> {
+        let slot = match std::thread::Builder::new()
+            .name("gwt-agent-detect".to_string())
+            .spawn(Self::load_agent_options)
+        {
+            Ok(handle) => AgentOptionsSlot::Loading(Some(handle)),
+            Err(error) => {
+                tracing::warn!(error = %error, "agent detection thread unavailable; detecting inline");
+                AgentOptionsSlot::Ready(Self::load_agent_options())
+            }
+        };
+        Arc::new(Mutex::new(slot))
+    }
+
     pub(super) fn refresh_agent_options(&mut self) {
-        self.agent_options = Self::load_agent_options();
+        self.agent_options = Self::spawn_agent_options_detection();
     }
 
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
-        self.agent_options.clone()
+        let mut slot = self
+            .agent_options
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let AgentOptionsSlot::Loading(handle) = &mut *slot {
+            let options = handle
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_else(Self::load_agent_options);
+            *slot = AgentOptionsSlot::Ready(options);
+        }
+        match &*slot {
+            AgentOptionsSlot::Ready(options) => options.clone(),
+            AgentOptionsSlot::Loading(_) => unreachable!("slot joined above"),
+        }
     }
 
     /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
@@ -2671,28 +2724,48 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                 .map(|home| home.join("config.toml"))
                 .or_else(|| codex_config_path_for_profile_config(profile_config_path))
             else {
+                // Not a registration failure: gwt simply cannot locate this
+                // profile's Codex config, which says nothing about whether the
+                // hooks are trusted. Blocking the launch here would strand
+                // every Codex launch under a non-standard profile layout, so
+                // keep it a warning — Issue #3967 AC-4 covers registrations
+                // that actually fail.
                 tracing::warn!(
                     profile_config = %profile_config_path.display(),
                     "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
                 );
                 return Ok(None);
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // Issue #3967 AC-1: trust every managed hooks file that can exist
+            // on disk, not just the one this launch would generate. The
+            // `Both`-mode managed-asset writers (startup self-heal, hook front
+            // door, health repair, SessionStart re-materialization) keep the
+            // worktree-local copy refreshed even when generation targets the
+            // workspace-home copy, and Codex discovers whichever it finds
+            // first. Narrowing trust to the generation mode left the other copy
+            // orphaned — present, gwt-generated, and untrusted. Trust state is
+            // keyed by absolute hooks path, so entries for a file Codex does
+            // not read are inert.
+            let report = gwt_skills::register_codex_managed_hook_trust_for_mode(
                 worktree_path,
                 &codex_config_path,
-                codex_hook_discovery_mode,
-            ) {
-                Ok(report) => Ok(Some(report)),
-                Err(error) => {
-                    tracing::warn!(
-                        worktree = %worktree_path.display(),
-                        codex_config = %codex_config_path.display(),
-                        error = %error,
-                        "failed to register gwt-managed Codex hook trust; continuing launch"
-                    );
-                    Ok(None)
-                }
+                gwt::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+            )
+            .map_err(|error| {
+                format!(
+                    "Codex hook trust registration failed for worktree {} (config {}): {error}",
+                    worktree_path.display(),
+                    codex_config_path.display()
+                )
+            })?;
+            // Issue #4071 AC-2: the reason says whether any trust state was
+            // written and what each hooks file was compared against, so a
+            // skipped registration and a trusted_hash / path-form mismatch
+            // are told apart in the launch failure record.
+            if let Some(reason) = report.hooks_need_review_reason() {
+                return Err(reason);
             }
+            Ok(Some(report))
         }
         gwt_agent::LaunchRuntimeTarget::Docker => {
             if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
@@ -3471,9 +3544,14 @@ impl AppRuntime {
                         // `launch_feedback_context` (and therefore the same
                         // delivery id).
                         if !is_fresh_execution_launch && autonomous_handoff_delivery.is_none() {
-                            if let Some(issue_number) = launch_feedback_context
-                                .as_ref()
-                                .and_then(|context| context.issue_monitor_issue_number)
+                            // Issue #4041: a review dispatch window never
+                            // ACKs the Issue's launch — that would rebind
+                            // `launched_issues` away from the running
+                            // implementation window.
+                            if let Some(issue_number) =
+                                launch_feedback_context.as_ref().and_then(|context| {
+                                    context.issue_monitor_launch_binding_issue_number()
+                                })
                             {
                                 let delivery_id =
                                     launch_feedback_context.as_ref().and_then(|context| {
@@ -3832,9 +3910,7 @@ impl AppRuntime {
                 uuid::Uuid::new_v4().to_string(),
             )
             .map_err(|error| error.to_string())?;
-            pending
-                .apply_policy(policy)
-                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            best_effort_apply_policy(id, &pending, policy);
             pending.release().map_err(|error| error.to_string())?
         } else {
             Pane::new_with_spawn_config(id.to_string(), spawn_config)
@@ -3923,9 +3999,7 @@ impl AppRuntime {
         // after identity proof and before release, so the target never runs
         // ungoverned.
         if let Some(policy) = resource_policy {
-            pending
-                .apply_policy(policy)
-                .map_err(|error| format!("apply agent resource policy: {error}"))?;
+            best_effort_apply_policy(id, &pending, policy);
         }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);
@@ -4337,6 +4411,11 @@ impl AppRuntime {
         let _ = tab
             .workspace
             .set_agent_id(&window.id, config.agent_id.command().to_string());
+        // SPEC-3885 FR-011: an Issue-originated launch produces an Issue window, not a
+        // bare terminal, wherever it is drawn. FR-013 leaves a non-Issue session `None`.
+        let _ = tab
+            .workspace
+            .set_linked_issue_number(&window.id, config.linked_issue_number);
         if let Some(target) = agent_kanban_target.as_ref() {
             let _ = tab.workspace.place_agent_window_in_kanban(
                 &window.id,
@@ -4349,7 +4428,7 @@ impl AppRuntime {
             // window instead of opening a canvas window. FR-003 keeps every manual
             // launch (Start Work / Launch Agent) on the canvas, and a tab with no
             // Issue window keeps the canvas fallback so the agent is never invisible.
-            if let Some(issue_window_id) = issue_preview_host_window_id(&tab.workspace) {
+            if let Some(issue_window_id) = tab.workspace.issue_preview_host_window_id() {
                 let _ = tab.workspace.place_agent_window_in_issue_preview(
                     &window.id,
                     &issue_window_id,
@@ -4397,6 +4476,13 @@ impl AppRuntime {
             );
         }
         if let Some(context) = launch_feedback_context {
+            // Issue #4084 AC-2: remember which windows are independent review
+            // dispatches (Issue #4041) so an idle one with a published verdict
+            // is classified as review rather than as an unexplained stall.
+            if context.issue_monitor_review_dispatch {
+                self.issue_monitor_review_dispatch_windows
+                    .insert(window_id.clone());
+            }
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }
@@ -4566,14 +4652,32 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_post_resolution_bun_cache_fast_path(&mut config)
-            {
-                tracing::debug!(
-                    agent = %config.agent_id,
-                    command = %config.command,
-                    "reusing fresh Bun agent package cache"
-                );
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                match apply_post_resolution_bun_cache_fast_path(&mut config) {
+                    gwt_agent::HostBunxCacheFastPath::Applied => {
+                        tracing::debug!(
+                            agent = %config.agent_id,
+                            command = %config.command,
+                            "reusing fresh Bun agent package cache"
+                        );
+                    }
+                    gwt_agent::HostBunxCacheFastPath::Rejected { executable, reason } => {
+                        tracing::warn!(
+                            agent = %config.agent_id,
+                            executable = %executable.display(),
+                            reason = %reason,
+                            "Bun agent package cache entry is not launchable; falling back to the package runner"
+                        );
+                        proxy.send(UserEvent::LaunchTerminalOutput {
+                            window_id: window_id.clone(),
+                            data: bun_cache_fast_path_rejection_terminal_bytes(
+                                &executable,
+                                &reason,
+                            ),
+                        });
+                    }
+                    gwt_agent::HostBunxCacheFastPath::NotApplicable => {}
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
@@ -4904,6 +5008,24 @@ impl AppRuntime {
                 pending_tool_runtime_migration,
                 resource_policy,
             };
+            // Issue #3490 AC-1: without a Backend Override profile every Codex
+            // process shares the user's `~/.codex`, and two of them
+            // initializing its SQLite state together lose the race with
+            // `database is locked`. gwt fans launches out in parallel, so it
+            // owns the mitigation: hold the last step before dispatch until
+            // the previous shared-`~/.codex` spawn has cleared its
+            // initialization window. This runs on the per-launch worker
+            // thread, never on the UI thread, and a worktree-local CODEX_HOME
+            // has no contention to pace.
+            if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
+                let waited = gwt_agent::pace_shared_codex_spawn();
+                if !waited.is_zero() {
+                    tracing::debug!(
+                        waited_ms = waited.as_millis() as u64,
+                        "paced Codex spawn to avoid shared ~/.codex state contention"
+                    );
+                }
+            }
             Ok((
                 process_launch,
                 session_id,
@@ -8206,8 +8328,34 @@ mod tool_runtime_integration_tests {
         config.args = vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()];
         let expected = (config.command.clone(), config.args.clone());
 
-        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config));
+        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config).is_applied());
         assert_eq!((config.command, config.args), expected);
+    }
+
+    // Issue #3857 AC-5: a rejected cache entry is explained in the agent
+    // terminal with the resolved path and the reason it could not be launched.
+    #[test]
+    fn bun_cache_fast_path_rejection_names_the_path_and_reason_in_the_terminal() {
+        let executable =
+            Path::new("/tmp/bunx-501-opencode-ai@latest/node_modules/opencode-ai/bin/opencode.exe");
+
+        let bytes = bun_cache_fast_path_rejection_terminal_bytes(
+            executable,
+            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE).",
+        );
+        let text = String::from_utf8(bytes).expect("utf8 terminal line");
+
+        assert!(text.starts_with("[gwt] "), "{text}");
+        assert!(text.contains("opencode-ai/bin/opencode.exe"), "{text}");
+        assert!(
+            text.contains("neither a script nor a recognized native executable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Falling back to the bunx package runner"),
+            "{text}"
+        );
+        assert!(text.ends_with("\r\n"), "{text}");
     }
 
     #[cfg(windows)]

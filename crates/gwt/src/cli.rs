@@ -9,6 +9,7 @@ pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;
+pub(crate) mod branch;
 mod build;
 mod commands;
 pub mod daemon;
@@ -21,10 +22,6 @@ mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
-pub mod improvement;
-pub mod improvement_contract;
-mod improvement_owner;
-mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -38,6 +35,7 @@ mod plan;
 mod pm;
 mod pr;
 pub(crate) mod register;
+mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
 #[cfg(test)]
@@ -54,6 +52,7 @@ mod workspace;
 
 use std::{io, path::PathBuf};
 
+pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
@@ -62,7 +61,6 @@ pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
-pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
@@ -165,8 +163,9 @@ pub enum CliCommand {
     Pr(PrCommand),
     Actions(ActionsCommand),
     Board(BoardCommand),
+    /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
+    Branch(branch::BranchCommand),
     Hook(HookCommand),
-    Improvement(ImprovementCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
     Intake(intake_outcome::IntakeCommand),
@@ -195,6 +194,8 @@ pub enum CliCommand {
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
     GithubBudget(github_budget::GithubBudgetCommand),
+    /// Issue #3516: `release.*` interrupted-release standing check.
+    Release(release::ReleaseCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -294,15 +295,6 @@ pub enum WorkspaceCommand {
         ids: Vec<String>,
         project_root: Option<String>,
     },
-}
-
-/// SPEC-1942 command model for `actions.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionsCommand {
-    /// `actions.logs`.
-    Logs { run_id: u64 },
-    /// `actions.job_logs`.
-    JobLogs { job_id: u64 },
 }
 
 /// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.
@@ -649,7 +641,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
-        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
+        CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
@@ -659,6 +651,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
         CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
+        CliCommand::Release(inner) => release::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

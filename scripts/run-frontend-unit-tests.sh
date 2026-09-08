@@ -10,6 +10,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/index-status-controller.test.mjs \
   crates/gwt/web/__tests__/index-works-scope.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-agent-setup.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
@@ -17,7 +18,6 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/pm-launcher.test.mjs \
   crates/gwt/web/__tests__/pm-settings-panel.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
-  crates/gwt/web/__tests__/improvement-inbox-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \
   crates/gwt/web/__tests__/focus-trap.test.mjs \
   crates/gwt/web/__tests__/kanban-structure.test.mjs \
@@ -31,6 +31,8 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/issue-preview-pane.test.mjs \
   crates/gwt/web/__tests__/issue-row-work-info.test.mjs \
   crates/gwt/web/__tests__/issue-row-state-model.test.mjs \
+  crates/gwt/web/__tests__/issue-window-composite.test.mjs \
+  crates/gwt/web/__tests__/issue-window-split.test.mjs \
   crates/gwt/web/__tests__/surface-naming.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
@@ -53,6 +55,8 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/settings-agent-backends-tab.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-backend-picker.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-hermes-options.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-controls.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-model-fallback.test.mjs \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/workspace-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \

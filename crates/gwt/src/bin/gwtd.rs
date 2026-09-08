@@ -190,11 +190,12 @@ fn format_daemon_help() -> String {
         "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
-        "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
+        "  - Listens on a Unix domain socket (Unix) or a named pipe (Windows) per RuntimeScope.",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
         "  - An explicit project_root must resolve to an existing directory; invalid roots",
         "    fail closed and never fall back to cwd. Omitting it preserves cwd resolution.",
-        "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
+        "  - SIGINT / SIGTERM (Unix) or Ctrl-C / Ctrl-Break / console close (Windows) trigger",
+        "    graceful shutdown + endpoint file removal.",
         "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
         "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
         "    when the endpoint file is stale or unreachable.",
@@ -226,6 +227,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.questions | issue.monitor.question.answer",
         "  issue.monitor.wait",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
+        "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -244,6 +246,10 @@ fn format_issue_help() -> String {
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
+        "  number?, dry_run                      issue.monitor.release_idle frees the slots",
+        "                                        of idle windows (review verdict published /",
+        "                                        settled execution / dead binding) and closes",
+        "                                        their panes; dry_run reports only",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -279,7 +285,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Fetch GitHub Actions run/job logs via JSON envelope.",
+        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -289,9 +295,15 @@ fn format_actions_help() -> String {
         "Operations:",
         "  actions.logs                            Print raw run logs",
         "  actions.job_logs                        Print raw job logs",
+        "  actions.rerun                           Re-run a failed run or a single failed job",
         "",
         "Key params:",
         "  run_id, job_id",
+        "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "",
+        "Notes:",
+        "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
     .join("\n")
@@ -744,14 +756,6 @@ fn is_allowed_argv_exception(argv: &[String]) -> bool {
                 argv.get(1).map(String::as_str),
                 argv.get(2).map(String::as_str),
                 argv.get(3),
-            ),
-            (Some("hook"), Some("gwt-self-improvement-stop"), None)
-        )
-        || matches!(
-            (
-                argv.get(1).map(String::as_str),
-                argv.get(2).map(String::as_str),
-                argv.get(3),
                 argv.get(4),
                 argv.get(5),
             ),
@@ -776,9 +780,7 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message.push_str(
         "Example: {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}\n",
     );
-    message.push_str(
-        "Hook transport exceptions: gwtd hook event <Event>; gwtd hook gwt-self-improvement-stop\n",
-    );
+    message.push_str("Hook transport exceptions: gwtd hook event <Event>\n");
     message
 }
 
@@ -873,6 +875,20 @@ mod tests {
         // must point at the real `search` family (SPEC-1942 FR-109).
         assert_eq!(did_you_mean("serach"), Some("search"));
         assert_eq!(did_you_mean("baord"), Some("board"));
+    }
+
+    /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
+    /// and both of its target params, so an agent blocked on `gh run rerun`
+    /// can discover the sanctioned replacement from the help alone.
+    #[test]
+    fn actions_family_help_documents_rerun() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
     }
 
     #[test]
@@ -1071,12 +1087,18 @@ mod tests {
             // launch. If it is not discoverable here, the operator falls back
             // to hand-editing the state file, which is the bug.
             "issue.monitor.requeue",
+            // Issue #4084: the manual half of idle-window release.
+            "issue.monitor.release_idle",
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",
+            // Issue #3883 AC-6: the only recovery for launches that are still
+            // running but no longer tracked. Undiscoverable here means the
+            // operator hand-edits the state file, which is the bug.
+            "issue.monitor.reconcile",
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             "launch_agent",
             "project_root",
