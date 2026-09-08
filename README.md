@@ -333,10 +333,16 @@ an explicit action in the GUI. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
 `review_verdict_published`, `execution_settled`, `binding_dead`, or
 `stuck_unknown` (visible per row and in `idle_windows` in
-`issue.monitor.status`), releases the first three without requeueing the Issue,
-and closes their panes. Only `stuck_unknown` — a window that is idle while its
-execution record is still active — stays for a human, and it asks for a
-decision once it has been idle for twice the stuck timeout.
+`issue.monitor.status`), releases the first three and closes their panes. A
+released Issue stays out of the queue, except when its window died with an
+execution record that never settled — an app restart that took the pane with
+it, for example — in which case the Issue is requeued so the next scan
+relaunches it on its existing branch. `binding_dead` is released whether or
+not autonomous mode is on, because its pane is already gone; the other two
+kinds end a live pane and so stay behind the autonomous-mode gate. Only
+`stuck_unknown` — a window that is idle while its execution record is still
+active — stays for a human, and it asks for a decision once it has been idle
+for twice the stuck timeout.
 `issue.monitor.release_idle` runs the same release by hand for one Issue or
 every idle row, and `dry_run: true` reports the targets without touching
 anything. `issue.monitor.profiles` reads the launch

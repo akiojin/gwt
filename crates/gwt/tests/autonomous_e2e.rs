@@ -620,6 +620,52 @@ mod idle_windows {
         );
     }
 
+    /// Issue #4131: the auto-update-restart shape. The pane is killed while the
+    /// execution record is still Active, so the slot must come back *and* the
+    /// interrupted Issue must become a launch candidate again — without a PM
+    /// `issue.monitor.stop` and without passing through `needs_human`.
+    #[test]
+    fn a_restart_killed_pane_frees_its_slot_and_requeues_its_own_issue() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Active)]),
+            NOW,
+        );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(monitor.active_count(), 0, "the slot is free");
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the interrupted Issue is queued, never parked for a human"
+        );
+        assert!(monitor.queued_issue_numbers().contains(&43));
+        assert!(
+            monitor.next_launch_request(NOW).is_some(),
+            "the freed slot admits a launch in the same scan"
+        );
+    }
+
+    /// Issue #4131: the same recovery on an attended host. `autonomous_mode` is
+    /// off, so the kinds that end a live pane stay gated — but a binding whose
+    /// pane is already gone is still released, because leaving it held is how
+    /// an auto-update restart used to leak every slot it took.
+    #[test]
+    fn a_dead_binding_frees_its_slot_with_autonomous_mode_off() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.set_autonomous_mode(false);
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Active)]),
+            NOW,
+        );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.queued_issue_numbers().contains(&43));
+    }
+
     #[test]
     fn active_record_with_idle_pane_keeps_its_slot() {
         let mut monitor = launched_with_queue(44, 54, "tab-1::stuck-44");

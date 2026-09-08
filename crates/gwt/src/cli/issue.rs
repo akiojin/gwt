@@ -878,6 +878,10 @@ fn run_monitor_release_idle<E: CliEnv>(
                 "idle_since": idle.idle_since,
                 "bound": idle.bound,
                 "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+                // Issue #4131: releasing this row also puts its Issue back on
+                // the queue, because the execution it was launched for never
+                // settled. The operator should see that before asking.
+                "requeue_on_release": idle.requeue_on_release,
             })
         })
         .collect::<Vec<_>>();

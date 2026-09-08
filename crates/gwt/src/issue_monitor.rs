@@ -1910,6 +1910,12 @@ pub struct IssueMonitorIdleWindow {
     /// instead of being freed (AC-2, the 9.91.0 review-binding shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebind_to: Option<String>,
+    /// Issue #4131: the window died while its execution record was still
+    /// Active, so the work it was launched for is unfinished. Releasing such a
+    /// window returns the Issue to the queue instead of leaving it `Launched`
+    /// with no pane and no way back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requeue_on_release: bool,
 }
 
 /// Issue #4084: one pane the GUI closes because the Monitor released it.
@@ -1935,8 +1941,11 @@ pub struct IssueMonitorIdleReleaseRequest {
 pub struct IssueMonitorIdleReconciliation {
     /// Every idle window found this scan, released or not.
     pub idle_windows: Vec<IssueMonitorIdleWindow>,
-    /// Issues whose slot was freed (no requeue).
+    /// Issues whose slot was freed.
     pub released: Vec<u64>,
+    /// Issue #4131: released Issues whose execution never settled, put back on
+    /// the queue so the next scan can relaunch them. A subset of `released`.
+    pub requeued: Vec<u64>,
     /// Issues whose slot moved to a running implementation window.
     pub rebound: Vec<(u64, String)>,
     /// Panes queued for the GUI to close.
@@ -1945,6 +1954,28 @@ pub struct IssueMonitorIdleReconciliation {
     pub steering_requested: Vec<u64>,
     /// Idle windows an operator request could not release automatically.
     pub skipped: Vec<(u64, IssueMonitorIdleKind)>,
+}
+
+/// Which idle kinds one release pass may act on (Issue #4131).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleReleaseScope {
+    /// Every kind [`IssueMonitorIdleKind::releasable`] admits. Used when an
+    /// operator asked, and under autonomous mode.
+    EveryReleasableKind,
+    /// Only bindings whose pane is already gone. Freeing such a slot ends no
+    /// running work and reverses no decision, so it needs no autonomous
+    /// opt-in — which is what lets an attended host recover the slots an
+    /// auto-update restart took with it.
+    DeadBindingsOnly,
+}
+
+impl IdleReleaseScope {
+    fn admits(self, idle_kind: IssueMonitorIdleKind) -> bool {
+        match self {
+            Self::EveryReleasableKind => true,
+            Self::DeadBindingsOnly => idle_kind == IssueMonitorIdleKind::BindingDead,
+        }
+    }
 }
 
 /// Issue #4084: a canvas snapshot older than this proves nothing about the
@@ -12580,6 +12611,15 @@ impl IssueMonitorState {
                     | WindowState::Error => continue,
                 },
             };
+            // Issue #4131: a dead binding whose execution never settled is
+            // interrupted work, not a finished launch. Completed / Blocked
+            // records finished, and an absent record proves nothing, so both
+            // stay fail-closed and are released without a requeue.
+            let requeue_on_release = idle_kind == IssueMonitorIdleKind::BindingDead
+                && matches!(
+                    settlements.get(issue_number),
+                    Some(IssueMonitorExecutionSettlement::Active)
+                );
             classified.push(IssueMonitorIdleWindow {
                 window_id: window_id.clone(),
                 issue_number: Some(*issue_number),
@@ -12588,6 +12628,7 @@ impl IssueMonitorState {
                 bound: true,
                 pane_present,
                 rebind_to,
+                requeue_on_release,
             });
         }
         // Issue #4041 shape: the review window is not the launch binding, so
@@ -12619,6 +12660,7 @@ impl IssueMonitorState {
                 bound: false,
                 pane_present: true,
                 rebind_to: None,
+                requeue_on_release: false,
             });
         }
         classified
@@ -12626,17 +12668,28 @@ impl IssueMonitorState {
 
     /// Issue #4084 AC-2/AC-3/AC-4: classify the idle windows, then act.
     ///
-    /// Automatic release runs only under autonomous mode — the same fail-closed
-    /// gate as [`Self::recover_stuck_autonomous`], so the default human-gated
-    /// flow observes but never tears anything down — or when an operator
-    /// asked through [`Self::request_idle_release`]. `stuck_unknown` is never
+    /// Automatic release of the kinds that end a live pane runs only under
+    /// autonomous mode — the same fail-closed gate as
+    /// [`Self::recover_stuck_autonomous`], so the default human-gated flow
+    /// observes but never tears anything down — or when an operator asked
+    /// through [`Self::request_idle_release`].
+    ///
+    /// Issue #4131: a dead binding is the exception, and is released in both
+    /// modes. Its pane is already gone, so freeing the slot ends nothing and
+    /// reverses no decision; leaving it gated meant that on an attended host
+    /// (`enabled` with `autonomous_mode` off) every pane an auto-update restart
+    /// killed leaked its slot until a PM ran `issue.monitor.stop` by hand.
+    ///
+    /// `stuck_unknown` is never
     /// released here; past twice `stuck_timeout_secs` of idleness it asks the
     /// PM for a decision instead. Release frees the slot and unbinds the window
-    /// without spending an attempt or requeueing the Issue (AC-2/AC-3): the row
-    /// stays `Launched` out of the queue, exactly as
-    /// [`Self::settle_exact_terminal_delivery`] leaves it, until the ordinary
-    /// completion probe or the PM ends it. Nothing here changes `enabled`,
-    /// `max_active_agents`, or any claim (AC-6).
+    /// without spending an attempt (AC-2/AC-3): the row stays `Launched` out of
+    /// the queue, exactly as [`Self::settle_exact_terminal_delivery`] leaves
+    /// it, until the ordinary completion probe or the PM ends it — the one
+    /// exception being a window that died with its execution record still
+    /// Active, whose Issue is requeued (Issue #4131 AC-2) because the work it
+    /// was launched for was interrupted rather than finished. Nothing here
+    /// changes `enabled`, `max_active_agents`, or any claim (AC-6).
     pub fn reconcile_idle_windows(
         &mut self,
         settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
@@ -12666,7 +12719,13 @@ impl IssueMonitorState {
         };
         match self.pending_idle_release.take() {
             Some(request) => {
-                self.apply_idle_release(&mut outcome, request.number, &request.reason, true);
+                self.apply_idle_release(
+                    &mut outcome,
+                    request.number,
+                    &request.reason,
+                    true,
+                    IdleReleaseScope::EveryReleasableKind,
+                );
             }
             None if self.autonomous_mode => {
                 self.apply_idle_release(
@@ -12674,10 +12733,19 @@ impl IssueMonitorState {
                     None,
                     "released automatically by the Issue Monitor",
                     false,
+                    IdleReleaseScope::EveryReleasableKind,
                 );
                 self.notify_stuck_idle_windows(&mut outcome, now);
             }
-            None => {}
+            None => {
+                self.apply_idle_release(
+                    &mut outcome,
+                    None,
+                    "released automatically by the Issue Monitor: the bound agent window is gone",
+                    false,
+                    IdleReleaseScope::DeadBindingsOnly,
+                );
+            }
         }
         outcome
     }
@@ -12695,7 +12763,13 @@ impl IssueMonitorState {
             idle_windows: self.idle_windows(),
             ..IssueMonitorIdleReconciliation::default()
         };
-        self.apply_idle_release(&mut outcome, number, reason, true);
+        self.apply_idle_release(
+            &mut outcome,
+            number,
+            reason,
+            true,
+            IdleReleaseScope::EveryReleasableKind,
+        );
         outcome
     }
 
@@ -12705,11 +12779,13 @@ impl IssueMonitorState {
         number: Option<u64>,
         reason: &str,
         forced: bool,
+        scope: IdleReleaseScope,
     ) {
         let targets = self
             .idle_windows()
             .into_iter()
             .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
+            .filter(|idle| scope.admits(idle.idle_kind))
             .collect::<Vec<_>>();
         for idle in targets {
             if !idle.idle_kind.releasable() {
@@ -12742,6 +12818,14 @@ impl IssueMonitorState {
                             reason,
                         );
                         outcome.released.push(issue_number);
+                        // Issue #4131 AC-2: freeing the slot is only half the
+                        // recovery when the agent died mid-execution. Put the
+                        // Issue back on the queue so the next scan relaunches
+                        // it; `needs_human` is never involved.
+                        if idle.requeue_on_release {
+                            self.requeue_released_launch(issue_number);
+                            outcome.requeued.push(issue_number);
+                        }
                     }
                 }
             }
@@ -12762,10 +12846,30 @@ impl IssueMonitorState {
         }
     }
 
+    /// Issue #4131 AC-2: the agent died before its execution settled, so the
+    /// owner is unfinished work rather than a finished launch. Make the same
+    /// transition [`Self::expire_stale_unbound_launches`] makes for a launch
+    /// that never bound a window, so the next scan can claim it again.
+    fn requeue_released_launch(&mut self, issue_number: u64) {
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: requeued after its agent window died with the execution record still Active"
+            ),
+        );
+    }
+
     /// Free the slot held by `window_id` for `issue_number` without spending an
-    /// attempt or requeueing. Mirrors [`Self::settle_exact_terminal_delivery`],
+    /// attempt. Mirrors [`Self::settle_exact_terminal_delivery`],
     /// plus dropping the binding ledger entry so a pane that survives its close
-    /// cannot be re-adopted into the slot it just left.
+    /// cannot be re-adopted into the slot it just left. The caller decides
+    /// whether the Issue is also requeued (see [`Self::requeue_released_launch`]).
     fn release_idle_launch(
         &mut self,
         issue_number: u64,
@@ -26167,6 +26271,121 @@ mod tests {
             "the exited pane is closed once the slot is released"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Issue #4131: an auto-update restart kills every pane. The slot must
+    // come back without a PM `issue.monitor.stop`, and the Issue must go
+    // back to the queue instead of parking.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_dead_binding_is_released_outside_autonomous_mode() {
+        // AC-1: #4084 gated every automatic release behind `autonomous_mode`,
+        // so a host running the Monitor attended (enabled, autonomous OFF —
+        // this project's own configuration) leaked a slot for every pane an
+        // auto-update restart killed. Releasing a dead binding closes no live
+        // pane and reverses no decision, so it needs no autonomous opt-in.
+        // The kinds that do tear down a live pane stay gated.
+        let mut monitor = launched_cohort(&[
+            (43, "tab-1::dead-43"),
+            (42, "tab-1::impl-42"),
+            (44, "tab-1::stuck-44"),
+        ]);
+        assert!(!monitor.autonomous_mode());
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                // #43's pane was killed by the restart; #42 and #44 are alive.
+                idle_observation("tab-1::dead-43", Some(43), WindowState::Stopped, false),
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Idle, false),
+                idle_observation("tab-1::stuck-44", Some(44), WindowState::Idle, false),
+            ],
+        ));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[
+                (42, IssueMonitorExecutionSettlement::Completed),
+                (44, IssueMonitorExecutionSettlement::Active),
+            ]),
+            IDLE_NOW,
+        );
+        assert_eq!(
+            outcome.released,
+            vec![43],
+            "only the dead binding is released while autonomous mode is off"
+        );
+        assert_eq!(
+            monitor.active_count(),
+            2,
+            "the settled and the stuck window keep their slots"
+        );
+        assert_eq!(monitor.launched_window_id(43), None);
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::dead-43".to_string()],
+            "the exited pane is closed; no live pane is touched"
+        );
+        // AC-6 of #4084 still holds: nothing but the launch itself moved.
+        let prefs = monitor.prefs();
+        assert!(prefs.enabled);
+        assert_eq!(prefs.max_active_agents, 3);
+        assert!(prefs.failed_issues.is_empty());
+    }
+
+    #[test]
+    fn a_dead_binding_with_an_unsettled_execution_record_is_requeued() {
+        // AC-2: the agent died mid-work, so freeing the slot is only half the
+        // recovery — the Issue has to become a launch candidate again on the
+        // next scan instead of sitting `Launched` forever with no window.
+        // `needs_human` is never involved.
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Active)]),
+            IDLE_NOW,
+        );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "an unfinished execution goes back to the queue, not to needs_human"
+        );
+        assert!(monitor.queued_issue_numbers().contains(&43));
+        assert!(monitor.prefs().failed_issues.is_empty());
+    }
+
+    #[test]
+    fn a_dead_binding_whose_execution_settled_is_released_without_a_requeue() {
+        // The counterpart of the requeue: a record that reached Completed or
+        // Blocked finished its work, so relaunching it would redo settled
+        // work. An absent record stays fail-closed for the same reason.
+        for settlement in [
+            Some(IssueMonitorExecutionSettlement::Completed),
+            Some(IssueMonitorExecutionSettlement::Blocked),
+            None,
+        ] {
+            let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+            monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+            let settlements = settlement
+                .map(|settlement| settlements(&[(43, settlement)]))
+                .unwrap_or_default();
+            let outcome = monitor.reconcile_idle_windows(&settlements, IDLE_NOW);
+            assert_eq!(outcome.released, vec![43], "{settlement:?}");
+            assert!(outcome.requeued.is_empty(), "{settlement:?}");
+            assert_eq!(
+                monitor.inbox_item(43).map(|item| item.state),
+                Some(MonitorInboxState::Launched),
+                "{settlement:?}"
+            );
+            assert!(monitor.queued_issue_numbers().is_empty(), "{settlement:?}");
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Issue #4117: review dispatch admission (same-PR dedupe, max_active
     // accounting, separate review-window ledger).
