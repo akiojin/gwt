@@ -1261,6 +1261,13 @@ pub struct AppRuntime {
     /// notification center once the frontend canvas is ready.
     pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Issue #4143 (AC-3): windows spawned by an *automatic* restore (startup
+    /// auto-resume / Open Project) whose launch has not reached PTY start yet.
+    /// Nobody is watching such a window, so a pre-PTY failure would leave an
+    /// empty `Launch failed before PTY started.` pane that the next generation
+    /// restores again. The entry is consumed by the launch-error path and
+    /// dropped once the PTY is installed or the window closes.
+    pub(crate) automatic_restore_launch_windows: HashSet<String>,
     /// Legacy official-provider provenance is staged during preparation and
     /// committed only after the exact launched Session emits authenticated
     /// SessionStart. Any earlier route failure leaves the source Session bytes
@@ -2866,6 +2873,7 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            automatic_restore_launch_windows: HashSet::new(),
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),

@@ -3300,6 +3300,7 @@ mod tests {
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
+            automatic_restore_launch_windows: std::collections::HashSet::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             update_resume_tab_ids: std::collections::HashSet::new(),
             update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),

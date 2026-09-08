@@ -385,6 +385,11 @@ impl AppRuntime {
             .is_some_and(|context| context.issue_monitor_autonomous_submit_started);
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
+        // Issue #4143 (AC-3): this launch was started by an automatic restore,
+        // so the failure happened before any PTY existed and the pane holds
+        // nothing but this one error line. Consume the marker here: the
+        // launch is over either way.
+        let automatic_restore = self.automatic_restore_launch_windows.remove(&window_id);
         if self.tracked_window_exists(&window_id) {
             self.launch_error_terminal_details
                 .insert(window_id.clone(), user_detail.clone());
@@ -439,6 +444,21 @@ impl AppRuntime {
                         );
                     }
                 }
+                return events;
+            }
+            // Issue #4143 (AC-3): a restore nobody asked for produced an empty
+            // pane. Persisting it makes the next generation restore it again —
+            // the mechanism that grew 135 `Launch failed before PTY started.`
+            // windows across restarts. `log_window_launch_error` above already
+            // put the concrete reason in gwt.log and in the error ledger that
+            // backs `errors.list`, so the diagnostic outlives the pane.
+            if automatic_restore {
+                tracing::warn!(
+                    target: "gwt::agent_launch",
+                    window_id = %window_id,
+                    "closing the automatically restored window that failed before PTY start"
+                );
+                events.extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
             }
             return events;
         }

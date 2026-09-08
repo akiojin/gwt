@@ -3981,6 +3981,9 @@ impl AppRuntime {
             );
         }
         self.window_details.remove(id);
+        // Issue #4143 (AC-3): the PTY exists, so this window is no longer an
+        // empty restore artifact and a later failure must stay visible.
+        self.automatic_restore_launch_windows.remove(id);
         // Publish the PTY handle to the WebSocket fast-path registry BEFORE
         // inserting the runtime so that the first `terminal_input` from the
         // frontend (which can arrive immediately after `TerminalStatus`) has a

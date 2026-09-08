@@ -201,6 +201,35 @@ pub(crate) fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalC
     Ineligible("not_terminal")
 }
 
+/// Ineligibility causes that mean "the canonical facts could not be read",
+/// not "the Work is still live".
+///
+/// Issue #4143: the close observer must fail closed on these (never close a
+/// window on an unreadable fact), but automatic *restore* has the opposite
+/// polarity — spawning on an unreadable fact is what turned one descriptor
+/// exhaustion (#4142) into 254 respawned windows, 135 of which died before
+/// PTY start. A restore therefore also fails closed here: it does not spawn,
+/// and it keeps the placeholder, because an unreadable fact is no evidence
+/// that the window is finished.
+const RESTORE_UNPROVABLE_CAUSES: &[&str] = &[
+    "monitor_unreadable",
+    "execution_unreadable",
+    "session_unreadable",
+];
+
+/// Issue #4143 (AC-2): the admission decision for one restore candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreAdmission {
+    /// The Work is live, or the Session carries no Issue-linked Work at all.
+    Admit,
+    /// The Work is provably terminal: disable restore and drop the
+    /// placeholder so the window stops coming back.
+    RefuseTerminal(TerminalCloseReason),
+    /// The canonical facts could not be read. Do not spawn, but keep the
+    /// placeholder: the next generation may be able to prove the answer.
+    RefuseUnprovable(&'static str),
+}
+
 /// Immutable facts about one Issue-linked Agent window captured on the Tao
 /// thread for the background observer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,22 +674,26 @@ impl AppRuntime {
         events
     }
 
-    /// FR-047: decide whether automatic restore may spawn `session`. Returns
-    /// the terminal reason when the persisted window is already eligible;
-    /// the caller then disables restore and removes the placeholder.
+    /// FR-047 / Issue #4143 (AC-2): decide whether automatic restore may spawn
+    /// `session`.
     ///
     /// `window_id` is the persisted placeholder when one exists. An orphan
     /// Session (no persisted window) has no identity to compare against the
     /// Monitor binding, so only the identity-free facts — a closed Issue or
     /// a settled execution — can refuse it; `RevokedLaunch` needs the exact
     /// window and is never inferred from a missing one.
-    pub(crate) fn restore_admission_terminal_reason(
+    pub(crate) fn restore_admission(
         &self,
         session: &gwt_agent::Session,
         project_root: &Path,
         window_id: Option<&str>,
-    ) -> Option<TerminalCloseReason> {
-        session.linked_issue_number?;
+    ) -> RestoreAdmission {
+        if session.linked_issue_number.is_none() {
+            // A Session with no Issue link has no Work whose terminality this
+            // predicate can read (a PM pane, a manual launch). Restore keeps
+            // the "everything the user did not explicitly close" rule.
+            return RestoreAdmission::Admit;
+        }
         let facts = read_terminal_window_facts(
             session,
             window_id.unwrap_or_default(),
@@ -671,10 +704,15 @@ impl AppRuntime {
             TerminalCloseEligibility::Eligible(TerminalCloseReason::RevokedLaunch)
                 if window_id.is_none() =>
             {
-                None
+                RestoreAdmission::Admit
             }
-            TerminalCloseEligibility::Eligible(reason) => Some(reason),
-            TerminalCloseEligibility::Ineligible(_) => None,
+            TerminalCloseEligibility::Eligible(reason) => RestoreAdmission::RefuseTerminal(reason),
+            TerminalCloseEligibility::Ineligible(cause)
+                if RESTORE_UNPROVABLE_CAUSES.contains(&cause) =>
+            {
+                RestoreAdmission::RefuseUnprovable(cause)
+            }
+            TerminalCloseEligibility::Ineligible(_) => RestoreAdmission::Admit,
         }
     }
 
