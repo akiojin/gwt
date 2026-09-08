@@ -1051,8 +1051,14 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh refresh failed\r\n\
   exit /b 1\r\n\
 )\r\n\
+set \"gwt_arg1=%~1\"\r\n\
+set \"gwt_arg2=%~2\"\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
-  if /I \"%1 %2\"==\"pr list\" (\r\n\
+  if /I \"%gwt_arg2:~0,26%\"==\"repos/{owner}/{repo}/pulls\" (\r\n\
+    echo []\r\n\
+    exit /b 0\r\n\
+  )\r\n\
+  if /I \"%gwt_arg1% %gwt_arg2%\"==\"pr list\" (\r\n\
     echo []\r\n\
     exit /b 0\r\n\
   )\r\n\
@@ -1082,7 +1088,12 @@ exit /b 0\r\n",
 	  printf '%s\n' 'gh refresh failed' >&2
 	  exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+# SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync.
+case "$1 $2" in
+  "api repos/{owner}/{repo}/pulls?state=closed"*) merged_pulls_query=1 ;;
+  *) merged_pulls_query=0 ;;
+esac
+if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && { [ "$merged_pulls_query" = "1" ] || { [ "$1" = "pr" ] && [ "$2" = "list" ]; }; }; then
   printf '%s\n' '[]'
   exit 0
 fi
@@ -1090,7 +1101,7 @@ if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ]; then
   printf '%s\n' 'gh refresh failed' >&2
   exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && { [ "$merged_pulls_query" = "1" ] || { [ "$1" = "pr" ] && [ "$2" = "list" ]; }; }; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
 fi
@@ -1368,6 +1379,7 @@ fn sample_window(
         tab_group_active: false,
         session_id: None,
         linked_issue_number: None,
+        runtime_started_at_ms: None,
         is_pm: false,
     }
 }
@@ -7647,6 +7659,7 @@ fn issue_monitor_autonomous_record(
         wait: None,
         needs_human_kind: None,
         steering: None,
+        review_dispatch_hold: None,
     }
 }
 
@@ -42895,6 +42908,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -60711,6 +60725,98 @@ fn workspace_view_marks_only_the_registered_pm_window() {
         vec!["tab-1::agent-1"],
         "exactly the registered PM session's window is marked"
     );
+}
+
+/// SPEC #3885 T-020 (Issue #4082 AC-1): the workspace view carries the moment
+/// the agent's PTY runtime started, so the Issue row's elapsed time survives a
+/// frontend reload instead of restarting from the last observed state change.
+/// The field is wire-only: the persisted image never learns it.
+#[test]
+fn workspace_view_carries_the_runtime_start_time_for_live_agent_windows() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows = vec![
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running),
+        sample_window("agent-2", WindowPreset::Agent, WindowProcessStatus::Running),
+    ];
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let before_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
+    let after_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+
+    let view = runtime.workspace_view_for_tab(runtime.tab("tab-1").expect("tab"));
+    let live = view
+        .windows
+        .iter()
+        .find(|window| window.id == "tab-1::agent-1")
+        .expect("live agent window");
+    let started = live
+        .runtime_started_at_ms
+        .expect("a window with a live PTY runtime reports when it started");
+    assert!(
+        (before_ms..=after_ms).contains(&started),
+        "start time {started} must fall inside the install window {before_ms}..={after_ms}"
+    );
+    let idle = view
+        .windows
+        .iter()
+        .find(|window| window.id == "tab-1::agent-2")
+        .expect("agent window without a runtime");
+    assert_eq!(
+        idle.runtime_started_at_ms, None,
+        "no PTY runtime means no start time"
+    );
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .all(|window| window.runtime_started_at_ms.is_none()),
+        "the start time is wire-only and never enters the persisted image"
+    );
+    // The wire field must not be readable back from disk either.
+    let json = serde_json::json!({
+        "id": "agent-9",
+        "title": "Agent",
+        "preset": "agent",
+        "geometry": { "x": 0, "y": 0, "width": 100, "height": 100 },
+        "z_index": 1,
+        "status": "running",
+        "runtime_started_at_ms": 1_700_000_000_000u64,
+    });
+    let restored: gwt::PersistedWindowState =
+        serde_json::from_value(json).expect("window state deserializes");
+    assert_eq!(restored.runtime_started_at_ms, None);
+
+    runtime.stop_window_runtime("tab-1::agent-1");
 }
 
 #[test]
