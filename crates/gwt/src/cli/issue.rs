@@ -5970,13 +5970,18 @@ mod tests {
                 claim_id: None,
                 delivery_id: None,
                 waiting: None,
+                idle_kind: None,
+                idle_since: None,
                 steering: None,
             }],
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
             scan_stall: None,
             github_budget: None,
+            idle_windows: Vec::new(),
+            idle_window_counts: std::collections::BTreeMap::new(),
             generation_reclaim: None,
+            review_windows: Vec::new(),
         };
 
         let blocked = agent_status_blocked_by_claim(&status, 4077).expect("blocked row");
