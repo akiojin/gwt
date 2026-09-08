@@ -11,7 +11,9 @@ use gwt_github::{
     SpecOpsError,
 };
 
-use crate::cli::{CliEnv, CliParseError, ClientRef, IssueCommand};
+use crate::cli::{
+    issue::guard_autonomous_acceptance_block, CliEnv, CliParseError, ClientRef, IssueCommand,
+};
 
 use std::collections::BTreeMap;
 
@@ -475,6 +477,7 @@ fn write_spec_section<E: CliEnv>(
         },
         cache,
     );
+    guard_spec_section_write(&ops, number, &section, &content)?;
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
     super::intake_outcome::auto_record_issue_operation(
@@ -492,6 +495,28 @@ fn write_spec_section<E: CliEnv>(
     );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
+}
+
+/// Issue #3873 AC-2: a `spec` section write on an `auto-merge` Issue must keep
+/// a machine-checkable acceptance block. Reads the Issue's current labels
+/// through a conditional refresh so a label added after the last cache write
+/// is honoured; other sections are never inspected.
+fn guard_spec_section_write<C: IssueClient>(
+    ops: &SpecOps<C>,
+    number: u64,
+    section: &str,
+    content: &str,
+) -> Result<(), SpecOpsError> {
+    if section != SPEC_SECTION_NAME {
+        return Ok(());
+    }
+    ops.refresh_cache(IssueNumber(number))?;
+    let labels = ops
+        .cache()
+        .load_entry(IssueNumber(number))
+        .map(|entry| entry.snapshot.labels)
+        .unwrap_or_default();
+    guard_autonomous_acceptance_block(&labels, content)
 }
 
 /// Render the committed-write evidence line (SPEC-3248 P7C / #3284): byte
@@ -536,6 +561,7 @@ fn write_structured_spec_section<E: CliEnv>(
     } else {
         merge_structured_spec(&existing, &structured)
     };
+    guard_spec_section_write(&ops, number, &section, &content)?;
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
     super::intake_outcome::auto_record_issue_operation(
@@ -574,6 +600,7 @@ fn create_spec_from_markdown<E: CliEnv>(
         .into_iter()
         .map(|section| (section.name, section.content))
         .collect();
+    guard_autonomous_acceptance_block(&labels, raw)?;
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -604,6 +631,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
     );
     let structured = parse_structured_spec_json(raw_json)?;
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
+    guard_autonomous_acceptance_block(&labels, &spec)?;
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(

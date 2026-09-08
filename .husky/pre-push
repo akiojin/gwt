@@ -51,6 +51,11 @@ echo "Running CI-equivalent lint checks..."
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ensure_coverage_tooling
+# --test-threads=1 here is a coverage-instrumentation contract, not a
+# RUST_TEST_THREADS=1 workaround (#3404 AC-4). llvm-cov slows every test enough
+# that parallel process-global env-lock contention dominates the run. Default
+# parallelism is proven separately by the Windows `Test (Rust default
+# parallelism, Windows)` job, which runs the same suites three times in a row.
 cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json -- --test-threads=1
 node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90
 bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md

@@ -155,8 +155,15 @@ pub fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match command {
         DiscussionCommand::Update(update) => {
-            let path =
-                update_discussion_entry(env.repo_path(), &update).map_err(io_as_spec_error)?;
+            // Issue #3465: stamp the owning session at the edge so the
+            // project-scoped discussion log stays shareable while the Stop
+            // gate can tell whose discussion an entry is.
+            let origin_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty());
+            let path = update_discussion_entry(env.repo_path(), &update, origin_session.as_deref())
+                .map_err(io_as_spec_error)?;
             out.push_str(&format!("discussion updated: {}\n", path.display()));
             Ok(0)
         }
@@ -178,6 +185,7 @@ pub fn migrate_legacy_discussions_file(repo_root: &Path) -> std::io::Result<bool
 fn update_discussion_entry(
     repo_root: &Path,
     update: &DiscussionUpdateCommand,
+    origin_session: Option<&str>,
 ) -> std::io::Result<PathBuf> {
     let path = gwt_core::paths::gwt_work_notes_discussions_path(repo_root);
     crate::work_notes::with_work_notes_lock(repo_root, || {
@@ -190,7 +198,7 @@ fn update_discussion_entry(
             .clone()
             .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
         let heading = format!("## {date} — {}", update.title);
-        let entry = format_discussion_entry(&date, update);
+        let entry = format_discussion_entry(&date, update, origin_session);
         content = replace_or_append_section(&content, &heading, &entry);
         fs::write(&path, content)
     })?;
@@ -204,7 +212,11 @@ fn ensure_discussions_file(path: &Path) -> std::io::Result<()> {
     fs::write(path, DEFAULT_DISCUSSIONS_HEADER)
 }
 
-fn format_discussion_entry(date: &str, update: &DiscussionUpdateCommand) -> String {
+fn format_discussion_entry(
+    date: &str,
+    update: &DiscussionUpdateCommand,
+    origin_session: Option<&str>,
+) -> String {
     let related_specs = if update.related_specs.is_empty() {
         String::new()
     } else {
@@ -215,8 +227,16 @@ fn format_discussion_entry(date: &str, update: &DiscussionUpdateCommand) -> Stri
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let origin_session = origin_session
+        .map(|id| {
+            format!(
+                "{field}: {id}\n",
+                field = crate::discussion_resume::ORIGIN_SESSION_FIELD
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "## {date} — {title}\n\nStatus: {status}\nTopics: {topics}\nRelated SPECs: {related_specs}\nRelated Works: {related_works}\nPromoted To: {promoted_to}\n\nSummary:\n{summary}\n\nDecisions:\n{decisions}\n\nOpen Questions:\n{open_questions}\n\nNext:\n{next}\n",
+        "## {date} — {title}\n\nStatus: {status}\n{origin_session}Topics: {topics}\nRelated SPECs: {related_specs}\nRelated Works: {related_works}\nPromoted To: {promoted_to}\n\nSummary:\n{summary}\n\nDecisions:\n{decisions}\n\nOpen Questions:\n{open_questions}\n\nNext:\n{next}\n",
         title = update.title,
         status = update.status,
         topics = update.topics.join(", "),

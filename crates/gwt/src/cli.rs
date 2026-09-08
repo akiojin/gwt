@@ -9,6 +9,7 @@ pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;
+pub(crate) mod branch;
 mod build;
 mod commands;
 pub mod daemon;
@@ -17,13 +18,10 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
-pub mod improvement;
-pub mod improvement_contract;
-mod improvement_owner;
-mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -33,9 +31,12 @@ pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
 mod pane;
+pub(crate) mod perf;
 mod plan;
+mod pm;
 mod pr;
 pub(crate) mod register;
+mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
 #[cfg(test)]
@@ -44,16 +45,16 @@ mod title_summary_guard;
 pub mod tray;
 pub mod trusted_store;
 pub mod update;
+pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
+pub(crate) mod worktree_gc;
 
-use std::{
-    io::{self},
-    path::PathBuf,
-};
+use std::{io, path::PathBuf};
 
+pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
@@ -62,95 +63,14 @@ pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
-pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
+pub use pr::types::{
+    LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
+    PrReviewThread, PrReviewThreadComment,
+};
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
-
-/// Compact linked PR summary used by `issue.linked_prs`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LinkedPrSummary {
-    pub number: u64,
-    pub title: String,
-    pub state: String,
-    pub url: String,
-    #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
-    pub will_close_target: bool,
-}
-
-/// Compact PR check entry used by `pr.checks`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrCheckItem {
-    pub name: String,
-    pub state: String,
-    pub conclusion: String,
-    pub url: String,
-    pub started_at: String,
-    pub completed_at: String,
-    pub workflow: String,
-}
-
-/// Render-friendly aggregate used by `pr.checks`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrChecksSummary {
-    pub summary: String,
-    pub ci_status: String,
-    pub merge_status: String,
-    pub review_status: String,
-    pub checks: Vec<PrCheckItem>,
-}
-
-/// PR review summary used by `pr.reviews`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrReview {
-    pub id: String,
-    pub state: String,
-    pub body: String,
-    pub submitted_at: String,
-    pub author: String,
-}
-
-/// Single comment inside a review thread.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrReviewThreadComment {
-    pub id: String,
-    pub body: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub author: String,
-}
-
-/// Review thread snapshot used by `pr.review_threads`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrReviewThread {
-    pub id: String,
-    pub is_resolved: bool,
-    pub is_outdated: bool,
-    pub path: String,
-    pub line: Option<u64>,
-    pub comments: Vec<PrReviewThreadComment>,
-}
-
-/// Test-visible log entry for `pr.create`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrCreateCall {
-    pub base: String,
-    pub head: Option<String>,
-    pub title: String,
-    pub body: String,
-    pub labels: Vec<String>,
-    pub draft: bool,
-}
-
-/// Test-visible log entry for `pr.edit`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrEditCall {
-    pub number: u64,
-    pub title: Option<String>,
-    pub body: Option<String>,
-    pub add_labels: Vec<String>,
-}
 
 /// Top-level argv parse result for the CLI. SPEC-1942 FR-088〜092: each top
 /// verb maps to one family-typed inner enum, so the parent enum stays compact
@@ -161,8 +81,11 @@ pub enum CliCommand {
     Pr(PrCommand),
     Actions(ActionsCommand),
     Board(BoardCommand),
+    /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
+    Branch(branch::BranchCommand),
+    /// Issue #4009: `worktree.gc_build_artifacts` build-cache reclaim.
+    Worktree(worktree_gc::WorktreeCommand),
     Hook(HookCommand),
-    Improvement(ImprovementCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
     Intake(intake_outcome::IntakeCommand),
@@ -178,14 +101,23 @@ pub enum CliCommand {
     Update(UpdateCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
+    /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
+    VerifyLease(verification_lease::VerificationLeaseCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` read operations.
+    Perf(perf::PerfCommand),
+    /// SPEC-3431: `pm.*` PM agent diagnostics.
+    Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
+    GithubBudget(github_budget::GithubBudgetCommand),
+    /// Issue #3516: `release.*` interrupted-release standing check.
+    Release(release::ReleaseCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -199,7 +131,15 @@ pub enum DaemonCommand {
     /// subscribe to one or more broadcast channels, and print received events
     /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
     /// fan-out pipeline.
-    Subscribe { channels: Vec<String> },
+    Subscribe {
+        channels: Vec<String>,
+        /// SPEC-3431 FR-141: optional explicit project daemon authority for the
+        /// event stream; `None` preserves the legacy cwd-derived scope.
+        project_root: Option<PathBuf>,
+        /// SPEC-3431 FR-025: bound the read so an unattended caller can run
+        /// subscribe → reconcile in a loop without an external supervisor.
+        timeout_seconds: Option<u64>,
+    },
 }
 
 /// SPEC-2359 command model for `workspace.*` JSON operations.
@@ -254,15 +194,29 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
-}
-
-/// SPEC-1942 command model for `actions.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionsCommand {
-    /// `actions.logs`.
-    Logs { run_id: u64 },
-    /// `actions.job_logs`.
-    JobLogs { job_id: u64 },
+    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
+    /// fold project stores that a pre-#3466 build split apart back into the
+    /// repository's canonical store.
+    ///
+    /// The dry run reports the plan and issues its `manifest_hash`; applying
+    /// requires that hash back *and* the recorded dry run that issued it, so a
+    /// store nobody reviewed can never be moved. `project_root` names the
+    /// project explicitly; authority still comes from the ambient Session.
+    StoreConsolidate {
+        project_root: Option<PathBuf>,
+        dry_run: bool,
+        manifest_hash: Option<String>,
+    },
+    /// Issue #3448: settle incomplete Works whose owner Issue is already
+    /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
+    /// reports the plan without emitting close events. `project_root` targets
+    /// a project other than the current one (the GUI opens the layout root,
+    /// which resolves to a different store than a linked worktree — #3466).
+    WorkPrune {
+        dry_run: bool,
+        ids: Vec<String>,
+        project_root: Option<String>,
+    },
 }
 
 /// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.
@@ -331,6 +285,15 @@ pub enum PaneCommand {
     /// `pane.send` (SPEC-3050: self-only injection
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
+    /// `pm.message.send` (SPEC-3431 FR-111 / T-206): PM-privileged delivery
+    /// into another agent pane of the same project. The authenticated server
+    /// principal is the sole caller authority; `project_root` only selects an
+    /// explicit project view with the same semantics as `pm.status`.
+    PmSend {
+        project_root: Option<String>,
+        id: String,
+        text: String,
+    },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -600,7 +563,8 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
-        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
+        CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
+        CliCommand::Worktree(inner) => worktree_gc::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
@@ -608,6 +572,9 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
+        CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
+        CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
+        CliCommand::Release(inner) => release::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
@@ -705,6 +672,8 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
+        CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };
@@ -760,6 +729,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -828,6 +798,7 @@ mod tests {
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
             will_close_target: true,
+            merged_at: None,
         }];
 
         assert!(

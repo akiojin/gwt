@@ -2,7 +2,8 @@
 //!
 //! This module is the front-door client used by `gwt` and the in-process
 //! hook dispatcher to talk to a running `gwtd` daemon over the local
-//! Unix domain socket.
+//! IPC transport (`super::transport`: Unix domain socket or Windows
+//! named pipe).
 //!
 //! Wire format mirrors `super::server::handle_connection`:
 //!
@@ -23,35 +24,30 @@
 //! typed frame schema is already extensible via new
 //! `ClientFrame` / `DaemonFrame` variants.
 
-#![cfg(unix)]
-
 use gwt_core::daemon::{
     validate_handshake, DaemonEndpoint, IpcHandshakeRequest, IpcHandshakeResponse,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{
-        unix::{OwnedReadHalf, OwnedWriteHalf},
-        UnixStream,
-    },
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use super::transport::{check_server_identity, IpcReadHalf, IpcStream, IpcWriteHalf};
 
 /// Connected, post-handshake daemon client.
 ///
 /// `DaemonClient` owns the split read/write halves of the underlying
-/// [`UnixStream`]; dropping the value closes the connection.
+/// `IpcStream`; dropping the value closes the connection.
 pub struct DaemonClient {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<IpcReadHalf>,
+    writer: IpcWriteHalf,
 }
 
 impl DaemonClient {
     /// Connect to the daemon at `endpoint.bind` and complete the
     /// handshake. The returned client is ready for [`Self::send_frame`].
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self, String> {
-        let stream = UnixStream::connect(&endpoint.bind)
+        let stream = IpcStream::connect(&endpoint.bind)
             .await
             .map_err(|err| format!("daemon connect failed ({}): {err}", endpoint.bind))?;
+        check_server_identity(&stream, endpoint.pid)?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
@@ -105,7 +101,7 @@ where
     Ok(())
 }
 
-async fn read_json_line<T>(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<T>, String>
+async fn read_json_line<T>(reader: &mut BufReader<IpcReadHalf>) -> Result<Option<T>, String>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -164,13 +160,7 @@ mod tests {
     }
 
     async fn wait_for_socket(path: &std::path::Path) {
-        for _ in 0..50 {
-            if path.exists() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("daemon socket never appeared at {}", path.display());
+        crate::cli::daemon::transport::wait_until_bound(path).await;
     }
 
     #[tokio::test]

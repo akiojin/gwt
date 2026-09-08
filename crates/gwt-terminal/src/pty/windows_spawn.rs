@@ -211,7 +211,6 @@ mod tests {
                 path,
             )
             .expect("copy real PE fixture");
-            return;
         }
         #[cfg(not(windows))]
         {

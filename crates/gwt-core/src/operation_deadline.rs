@@ -53,9 +53,27 @@ pub fn is_lock_contended(error: &io::Error) -> bool {
 }
 
 pub fn lock_exclusive(file: &File) -> io::Result<()> {
+    lock_exclusive_with_observer(file, || {})
+}
+
+/// Acquire an exclusive lock and report the first contention observed by this
+/// exact call. The callback is a causal test/instrumentation boundary; lock
+/// timing and deadline behavior remain identical to [`lock_exclusive`].
+pub fn lock_exclusive_with_observer(
+    file: &File,
+    mut on_first_contention: impl FnMut(),
+) -> io::Result<()> {
     let Some(deadline) = current() else {
-        return FileExt::lock_exclusive(file);
+        return match file.try_lock_exclusive() {
+            Ok(()) => Ok(()),
+            Err(error) if is_lock_contended(&error) => {
+                on_first_contention();
+                FileExt::lock_exclusive(file)
+            }
+            Err(error) => Err(error),
+        };
     };
+    let mut contention_reported = false;
     loop {
         if Instant::now() >= deadline {
             return Err(deadline_error("file lock"));
@@ -69,6 +87,10 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
                 return Ok(());
             }
             Err(error) if is_lock_contended(&error) => {
+                if !contention_reported {
+                    on_first_contention();
+                    contention_reported = true;
+                }
                 let now = Instant::now();
                 if now >= deadline {
                     return Err(deadline_error("file lock"));
@@ -117,6 +139,28 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+        FileExt::unlock(&first).expect("unlock first lock");
+    }
+
+    #[test]
+    fn contended_file_lock_notifies_the_call_scoped_observer() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("lock");
+        let first = File::create(&path).expect("first lock file");
+        let second = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("second lock file");
+        first.lock_exclusive().expect("hold first lock");
+        let _deadline = ScopedOperationDeadline::enter(Instant::now() + Duration::from_millis(40));
+        let mut observed = 0;
+
+        let error = lock_exclusive_with_observer(&second, || observed += 1)
+            .expect_err("contended lock must time out");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(observed >= 1, "the exact call reports lock contention");
         FileExt::unlock(&first).expect("unlock first lock");
     }
 

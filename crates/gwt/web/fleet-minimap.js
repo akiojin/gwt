@@ -31,10 +31,17 @@
 //   (pan / zoom / framing tween / server restore).
 
 // The camera frame occupies this fraction of the minimap's limiting dimension.
+// Issue #3884 AC-1: a window whose placement keeps it off the canvas (SPEC-3671
+// `issue_preview`, Agent Kanban card) has geometry but no canvas rectangle, so it
+// must not get a radar cell either — an orphan cell reads as a vanished window.
+import { isOffCanvasPlacement } from "./agent-kanban-surface.js";
+
 const FRAME_FRACTION_DEFAULT = 0.45;
 const FRAME_FRACTION_MIN = 0.15;
 const FRAME_FRACTION_MAX = 0.9;
 const MINIMAP_ZOOM_STEP = 1.25; // per wheel notch / button press.
+// Marker footprint: 1px cell border + 2px inset + 8px content + 4px padding + 2px marker border.
+const WORKTREE_MARKER_MIN_CELL_SIZE = 17;
 
 function finiteOr(value, fallback) {
   return Number.isFinite(value) ? value : fallback;
@@ -52,8 +59,8 @@ export function createFleetMinimap({
   // glance. Falls back to windowDisplayTitle for back-compat.
   cellTooltip,
   cellAgentColor,
-  cellLaneKind,
-  cellLaneBadge,
+  cellWorktreeForm,
+  cellWorktreeBadge,
   cellTelemetryState,
 }) {
   if (!container) {
@@ -94,7 +101,7 @@ export function createFleetMinimap({
   // Cells are keyed by window id so unchanged windows keep their node across
   // renders (avoids losing hover/tooltip mid-interaction).
   const cellMap = new Map();
-  const laneMarkerMap = new Map();
+  const worktreeMarkerMap = new Map();
   // The only persistent radar state: how much of the minimap the camera frame
   // occupies. The world→px scale itself is derived from the live viewport.
   let frameFraction = FRAME_FRACTION_DEFAULT;
@@ -141,7 +148,7 @@ export function createFleetMinimap({
   // Absolute world→radar positions inside the world layer; panning only
   // translates the layer, never these.
   function positionCells(scale) {
-    const windows = (getWindows() || []).filter((windowData) => windowData?.geometry);
+    const windows = canvasWindows();
     for (const windowData of windows) {
       const cell = cellMap.get(windowData.id);
       if (!cell) continue;
@@ -152,17 +159,28 @@ export function createFleetMinimap({
       cell.style.top = `${finiteOr(Number(geometry.y), 0) * scale}px`;
       cell.style.width = `${width}px`;
       cell.style.height = `${height}px`;
-      const laneSymbol = laneMarkerMap.get(windowData.id);
-      if (laneSymbol && width >= 12 && height >= 12) {
-        cell.dataset.laneSymbol = laneSymbol;
+      const worktreeSymbol = worktreeMarkerMap.get(windowData.id);
+      if (
+        worktreeSymbol &&
+        width >= WORKTREE_MARKER_MIN_CELL_SIZE &&
+        height >= WORKTREE_MARKER_MIN_CELL_SIZE
+      ) {
+        cell.dataset.worktreeSymbol = worktreeSymbol;
       } else {
-        delete cell.dataset.laneSymbol;
+        delete cell.dataset.worktreeSymbol;
       }
     }
   }
 
+  // The windows the radar draws: laid-out canvas windows only.
+  function canvasWindows() {
+    return (getWindows() || []).filter(
+      (windowData) => windowData?.geometry && !isOffCanvasPlacement(windowData),
+    );
+  }
+
   function renderCells() {
-    const windows = (getWindows() || []).filter((windowData) => windowData?.geometry);
+    const windows = canvasWindows();
     hasWindows = windows.length > 0;
     container.dataset.empty = hasWindows ? "false" : "true";
 
@@ -171,7 +189,7 @@ export function createFleetMinimap({
       for (const [id, cell] of cellMap) {
         cell.remove();
         cellMap.delete(id);
-        laneMarkerMap.delete(id);
+        worktreeMarkerMap.delete(id);
       }
       update();
       return;
@@ -201,33 +219,37 @@ export function createFleetMinimap({
         delete cell.dataset.telemetry;
       }
 
-      const laneKind =
-        typeof cellLaneKind === "function" ? cellLaneKind(windowData) : windowData?.lane_kind;
-      if (laneKind) {
-        cell.dataset.laneKind = laneKind;
+      const worktreeForm =
+        typeof cellWorktreeForm === "function"
+          ? cellWorktreeForm(windowData)
+          : "";
+      if (worktreeForm) {
+        cell.dataset.worktreeForm = worktreeForm;
       } else {
-        delete cell.dataset.laneKind;
+        delete cell.dataset.worktreeForm;
       }
-      const laneBadge =
-        typeof cellLaneBadge === "function" ? cellLaneBadge(windowData) : null;
-      const hasKnownLaneBadge = Boolean(laneBadge?.kind && laneBadge.kind !== "unknown");
-      if (hasKnownLaneBadge && laneBadge?.symbol) {
-        laneMarkerMap.set(windowData.id, laneBadge.symbol);
+      const worktreeBadge =
+        typeof cellWorktreeBadge === "function"
+          ? cellWorktreeBadge(windowData)
+          : null;
+      const hasWorktreeBadge = Boolean(worktreeBadge?.form);
+      if (hasWorktreeBadge && worktreeBadge?.symbol) {
+        worktreeMarkerMap.set(windowData.id, worktreeBadge.symbol);
       } else {
-        laneMarkerMap.delete(windowData.id);
-        delete cell.dataset.laneSymbol;
+        worktreeMarkerMap.delete(windowData.id);
+        delete cell.dataset.worktreeSymbol;
       }
-      if (hasKnownLaneBadge && laneBadge?.ariaLabel) {
-        cell.dataset.laneLabel = laneBadge.ariaLabel;
+      if (hasWorktreeBadge && worktreeBadge?.label) {
+        cell.dataset.worktreeLabel = worktreeBadge.label;
       } else {
-        delete cell.dataset.laneLabel;
+        delete cell.dataset.worktreeLabel;
       }
 
       cell.classList.toggle("is-focused", windowData.id === focusedId);
       const tooltip = resolveCellTooltip(windowData);
       const label =
-        hasKnownLaneBadge && laneBadge?.ariaLabel
-          ? `${tooltip} - ${laneBadge.ariaLabel}`
+        hasWorktreeBadge && worktreeBadge?.ariaLabel
+          ? `${tooltip} - ${worktreeBadge.ariaLabel}`
           : tooltip;
       cell.setAttribute("aria-label", label);
       cell.title = label;
@@ -238,7 +260,7 @@ export function createFleetMinimap({
       if (!liveIds.has(id)) {
         cell.remove();
         cellMap.delete(id);
-        laneMarkerMap.delete(id);
+        worktreeMarkerMap.delete(id);
       }
     }
 

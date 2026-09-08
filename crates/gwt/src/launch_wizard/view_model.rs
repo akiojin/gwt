@@ -30,11 +30,11 @@ impl LaunchWizardState {
         LaunchWizardView {
             title: match self.wizard_mode {
                 LaunchWizardMode::StartWork => "Start Work".to_string(),
-                LaunchWizardMode::Intake => "Intake".to_string(),
                 LaunchWizardMode::ExistingBranch => "Open existing branch".to_string(),
                 _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
+            holder_decision: self.holder_decision.clone(),
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
             open_branch_candidates: self.open_branch_candidates.clone(),
@@ -98,22 +98,32 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
             show_execution_mode: false,
-            show_skip_permissions: show_manual_setup
-                && self.launch_target_is_agent()
-                && self.mode == "normal",
+            // Issue #3462: the toggle stays visible for Resume / Continue so
+            // the inherited preference is both editable and honored.
+            show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
             show_fast_mode,
             show_codex_fast_mode: show_manual_setup
                 && self.launch_target_is_agent()
                 && self.agent_is_codex(),
             show_hermes_options,
-            hermes_needs_setup: show_hermes_options && self.hermes_needs_setup,
+            hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
-            opencode_needs_setup: show_opencode_options && self.opencode_needs_setup,
+            opencode_needs_setup: show_opencode_options
+                && self.agent_needs_configuration("opencode"),
+            agent_setup: self.agent_setup_view(show_manual_setup),
+            // Issue #4079 AC-2: only the app runtime knows the saved candidate
+            // pool, so it fills this in when the wizard is the Issue Monitor
+            // Agent Settings form.
+            issue_monitor_pool_impact: None,
             hermes_provider: self.hermes_provider.clone(),
-            hermes_provider_options: self.hermes_provider_choices.clone(),
+            hermes_provider_options: self.hermes_choices.providers.clone(),
+            hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
             hermes_profile: self.hermes_profile.clone(),
+            hermes_profile_options: self.hermes_choices.profiles.clone(),
             hermes_toolsets: self.hermes_toolsets.clone(),
+            hermes_toolset_options: self.hermes_choices.toolsets.clone(),
             hermes_skills: self.hermes_skills.clone(),
+            hermes_skill_options: self.hermes_choices.skills.clone(),
             hermes_max_turns: self.hermes_max_turns.clone(),
             hermes_safe_mode: self.hermes_safe_mode,
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
@@ -138,6 +148,9 @@ impl LaunchWizardState {
             launch_summary: self.launch_summary_view(),
             phase: self.current_phase(),
             error: self.error.clone(),
+            // Issue #3962 AC-5: rendered next to the Model field, which the
+            // surface already gates on `show_agent_settings`.
+            model_fallback_notice: self.model_fallback_notice.clone(),
         }
     }
 
@@ -148,7 +161,6 @@ impl LaunchWizardState {
         if self.wizard_mode == LaunchWizardMode::ExistingBranch && self.branch_name.is_empty() {
             return Vec::new();
         }
-        let is_intake = self.wizard_mode == LaunchWizardMode::Intake;
         let has_previous_settings = self.has_previous_start_settings();
         let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);
@@ -170,12 +182,7 @@ impl LaunchWizardState {
                 kind: LaunchWizardStartMethodKind::ConfigureAndStart
                     .value()
                     .to_string(),
-                label: if is_intake {
-                    "Configure intake"
-                } else {
-                    "Configure and start"
-                }
-                .to_string(),
+                label: "Configure and start".to_string(),
                 badge: "Settings".to_string(),
                 group: start_method_group(
                     LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -183,12 +190,7 @@ impl LaunchWizardState {
                     recommended_method,
                 ),
                 recommended: recommended_method == LaunchWizardStartMethodKind::ConfigureAndStart,
-                summary: if is_intake {
-                    "Edit intake settings before starting"
-                } else {
-                    "Edit settings before launch"
-                }
-                .to_string(),
+                summary: "Edit settings before launch".to_string(),
                 detail: None,
                 enabled: true,
                 disabled_reason: None,
@@ -197,12 +199,7 @@ impl LaunchWizardState {
                 kind: LaunchWizardStartMethodKind::StartWithLastSettings
                     .value()
                     .to_string(),
-                label: if is_intake {
-                    "Use saved settings"
-                } else {
-                    "Start with last settings"
-                }
-                .to_string(),
+                label: "Start with last settings".to_string(),
                 badge: "New".to_string(),
                 group: start_method_group(
                     LaunchWizardStartMethodKind::StartWithLastSettings,
@@ -212,17 +209,9 @@ impl LaunchWizardState {
                 recommended: recommended_method
                     == LaunchWizardStartMethodKind::StartWithLastSettings,
                 summary: if has_previous_settings {
-                    if is_intake {
-                        "New intake session with saved settings"
-                    } else {
-                        "New session with saved settings"
-                    }
+                    "New session with saved settings"
                 } else {
-                    if is_intake {
-                        "Use saved intake settings"
-                    } else {
-                        "Use saved launch settings"
-                    }
+                    "Use saved launch settings"
                 }
                 .to_string(),
                 detail: None,
@@ -279,20 +268,8 @@ impl LaunchWizardState {
                     recommended_method,
                 ),
                 recommended: recommended_method == LaunchWizardStartMethodKind::OpenSessionPicker,
-                summary: if is_intake {
-                    "Choose a saved intake session"
-                } else {
-                    "Choose a saved session"
-                }
-                .to_string(),
-                detail: Some(
-                    if is_intake {
-                        "Opens the intake session picker"
-                    } else {
-                        "Opens the agent's session picker"
-                    }
-                    .to_string(),
-                ),
+                summary: "Choose a saved session".to_string(),
+                detail: Some("Opens the agent's session picker".to_string()),
                 enabled: true,
                 disabled_reason: None,
             });
@@ -301,12 +278,7 @@ impl LaunchWizardState {
             kind: LaunchWizardStartMethodKind::FocusRunningSession
                 .value()
                 .to_string(),
-            label: if is_intake {
-                "Focus running intake"
-            } else {
-                "Focus running session"
-            }
-            .to_string(),
+            label: "Focus running session".to_string(),
             badge: "Running".to_string(),
             group: start_method_group(
                 LaunchWizardStartMethodKind::FocusRunningSession,
@@ -316,13 +288,7 @@ impl LaunchWizardState {
             recommended: recommended_method == LaunchWizardStartMethodKind::FocusRunningSession,
             summary: latest_live
                 .map(|session| session.name.clone())
-                .unwrap_or_else(|| {
-                    if is_intake {
-                        "Switch to running intake session".to_string()
-                    } else {
-                        "Switch to running session".to_string()
-                    }
-                }),
+                .unwrap_or_else(|| "Switch to running session".to_string()),
             detail: latest_live.and_then(|session| {
                 session
                     .detail
@@ -366,6 +332,24 @@ impl LaunchWizardState {
             .collect()
     }
 
+    /// SPEC-3864 FR-013: before launch the wizard states whether `Installed`,
+    /// `latest`, or setup applies to the selected agent; this is the setup
+    /// branch of that decision.
+    fn agent_setup_view(&self, show_manual_setup: bool) -> Option<LaunchWizardAgentSetupView> {
+        if !show_manual_setup || !self.launch_target_is_agent() {
+            return None;
+        }
+        let agent = self.selected_agent()?;
+        let affordance = self.agent_setup_affordance_for(agent)?;
+        Some(LaunchWizardAgentSetupView {
+            agent_id: agent.id.clone(),
+            kind: affordance.kind.wire_value().to_string(),
+            title: affordance.title,
+            detail: affordance.detail,
+            action_label: affordance.action_label,
+        })
+    }
+
     fn agent_options_view(&self) -> Vec<LaunchWizardOptionView> {
         self.detected_agents
             .iter()
@@ -391,7 +375,8 @@ impl LaunchWizardState {
     }
 
     fn reasoning_options_view(&self) -> Vec<LaunchWizardOptionView> {
-        self.current_reasoning_options()
+        let mut options: Vec<_> = self
+            .current_reasoning_options()
             .iter()
             .map(|option| LaunchWizardOptionView {
                 value: option.stored_value.to_string(),
@@ -399,7 +384,16 @@ impl LaunchWizardState {
                 description: Some(option.description.to_string()),
                 color: None,
             })
-            .collect()
+            .collect();
+        if let Some(reasoning) = self.unlisted_grok_reasoning() {
+            options.push(LaunchWizardOptionView {
+                value: reasoning.to_string(),
+                label: reasoning.to_string(),
+                description: Some("Saved custom effort; passed through unchanged".to_string()),
+                color: None,
+            });
+        }
+        options
     }
 
     fn docker_service_options_view(&self) -> Vec<LaunchWizardOptionView> {
@@ -439,12 +433,7 @@ impl LaunchWizardState {
     }
 
     fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
-        let mut summary = if self.wizard_mode == LaunchWizardMode::Intake {
-            vec![LaunchWizardSummaryView {
-                label: "Session".to_string(),
-                value: "Ephemeral intake".to_string(),
-            }]
-        } else if self.wizard_mode == LaunchWizardMode::StartWork {
+        let mut summary = if self.wizard_mode == LaunchWizardMode::StartWork {
             vec![LaunchWizardSummaryView {
                 label: "Workspace".to_string(),
                 value: "Current project".to_string(),
@@ -471,10 +460,10 @@ impl LaunchWizardState {
                     .map(|agent| agent.name.clone())
                     .unwrap_or_else(|| "Unavailable".to_string()),
             });
-            if is_explicit_model_selection(&self.model) {
+            if let Some(model) = self.explicit_model_for_launch() {
                 summary.push(LaunchWizardSummaryView {
                     label: "Model".to_string(),
-                    value: self.model.clone(),
+                    value: model.to_string(),
                 });
             }
             if let Some(reasoning) = self.reasoning_level_for_launch() {
@@ -596,9 +585,6 @@ impl LaunchWizardState {
             return "Preparing...".to_string();
         }
         if self.show_start_methods() {
-            if self.wizard_mode == LaunchWizardMode::Intake {
-                return "Choose intake method".to_string();
-            }
             return "Choose start method".to_string();
         }
         match self.launch_path {
@@ -631,6 +617,7 @@ impl LaunchWizardState {
             || self.runtime_resolution_pending
             || self.launch_materialization_pending
             || self.show_start_methods()
+            || self.holder_decision.is_some()
         {
             return false;
         }
@@ -716,12 +703,7 @@ impl LaunchWizardState {
             },
             LaunchWizardProgressStepView {
                 key: "start".to_string(),
-                label: if self.wizard_mode == LaunchWizardMode::Intake {
-                    "Begin"
-                } else {
-                    "Start"
-                }
-                .to_string(),
+                label: "Start".to_string(),
                 state: start_state.to_string(),
                 detail: self.launch_materialization_message.clone(),
             },
@@ -822,16 +804,7 @@ impl LaunchWizardState {
                     color: None,
                 })
                 .collect(),
-            LaunchWizardStep::ReasoningLevel => self
-                .current_reasoning_options()
-                .iter()
-                .map(|option| LaunchWizardOptionView {
-                    value: option.stored_value.to_string(),
-                    label: option.label.to_string(),
-                    description: Some(option.description.to_string()),
-                    color: None,
-                })
-                .collect(),
+            LaunchWizardStep::ReasoningLevel => self.reasoning_options_view(),
             LaunchWizardStep::RuntimeTarget => RUNTIME_TARGET_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
@@ -907,6 +880,138 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    fn grok_manual_state() -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_agent_id("grok");
+        state
+    }
+
+    #[test]
+    fn grok_build_view_exposes_freetext_model_and_common_effort_surface() {
+        // SPEC-1921 T483: the Rust view model must expose the Grok launch
+        // values without substituting a fixed model catalog.
+        let mut state = grok_manual_state();
+        state.set_model("grok-4.20-beta");
+        state.set_reasoning("high");
+
+        let view = state.view();
+        let effort_values: Vec<&str> = view
+            .reasoning_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+
+        assert!(view.show_agent_settings);
+        assert!(view.show_reasoning);
+        assert!(view.model_options.is_empty());
+        assert_eq!(view.selected_model, "grok-4.20-beta");
+        assert_eq!(view.selected_reasoning, "high");
+        assert_eq!(
+            effort_values,
+            ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Model" && item.value == "grok-4.20-beta"));
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Effort" && item.value == "high"));
+    }
+
+    #[test]
+    fn normal_wizard_view_has_no_holder_decision() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let view = state.view();
+
+        assert!(view.holder_decision.is_none());
+        assert_eq!(
+            serde_json::to_value(&view).expect("serialize normal wizard view")["holder_decision"],
+            serde_json::Value::Null,
+        );
+    }
+
+    #[test]
+    fn holder_decision_state_is_projected_into_the_view() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1:agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: false,
+            move_unavailable_reason: Some("The holder is in another runtime".to_string()),
+        });
+
+        let view = state.view();
+        let decision = view.holder_decision.expect("holder decision view");
+
+        assert_eq!(decision.fingerprint, "repo:/tmp/gwt:work/issue-3547");
+        assert_eq!(decision.holder_session_id, "session-holder");
+        assert_eq!(
+            decision.holder_window_id.as_deref(),
+            Some("tab-1:agent-holder")
+        );
+        assert_eq!(decision.holder_summary, "Codex · work/issue-3547");
+        assert!(decision.stop_available);
+        assert!(decision.stop_unavailable_reason.is_none());
+        assert!(!decision.move_available);
+        assert_eq!(
+            decision.move_unavailable_reason.as_deref(),
+            Some("The holder is in another runtime")
+        );
+    }
+
+    #[test]
+    fn holder_decision_disables_legacy_primary_launch_action() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "exact-holder".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1::agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: true,
+            move_unavailable_reason: None,
+        });
+
+        assert!(!state.view().primary_action_enabled);
+    }
+
     #[test]
     fn start_methods_view_exposes_direct_methods() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
@@ -953,70 +1058,6 @@ mod tests {
         assert_eq!(methods[4].kind, "focus_running_session");
         assert_eq!(methods[4].badge, "Running");
         assert!(methods.iter().all(|method| method.enabled));
-    }
-
-    #[test]
-    fn intake_view_uses_curate_copy_and_branchless_summary() {
-        let state = LaunchWizardState::open_intake_with_previous_profiles(
-            context(branch("origin/develop"), ""),
-            sample_agent_options(),
-            vec![quick_start_entry(
-                "session-newer",
-                "codex",
-                Some("native-newer"),
-                None,
-                gwt_agent::LaunchRuntimeTarget::Host,
-                None,
-            )],
-            Default::default(),
-        );
-
-        let view = state.view();
-
-        assert_eq!(view.mode, LaunchWizardMode::Intake);
-        assert_eq!(view.title, "Intake");
-        assert!(
-            !view
-                .launch_summary
-                .iter()
-                .any(|item| item.label == "Branch"),
-            "Intake summary must not expose a blank branch card"
-        );
-        assert!(
-            view.launch_summary
-                .iter()
-                .any(|item| item.label == "Session" && item.value == "Ephemeral intake"),
-            "Intake summary must identify the branchless curate session"
-        );
-        let configure = view
-            .start_methods
-            .iter()
-            .find(|method| method.kind == "configure_and_start")
-            .expect("configure intake method");
-        assert_eq!(configure.label, "Configure intake");
-        assert_eq!(configure.summary, "Edit intake settings before starting");
-        let saved = view
-            .start_methods
-            .iter()
-            .find(|method| method.kind == "start_with_last_settings")
-            .expect("saved intake settings method");
-        assert_eq!(saved.label, "Use saved settings");
-        let picker = view
-            .start_methods
-            .iter()
-            .find(|method| method.kind == "open_session_picker")
-            .expect("intake session picker method");
-        assert_eq!(picker.summary, "Choose a saved intake session");
-        assert_eq!(
-            picker.detail.as_deref(),
-            Some("Opens the intake session picker")
-        );
-        assert!(
-            view.progress_steps
-                .iter()
-                .any(|step| step.key == "start" && step.label == "Begin"),
-            "Intake progress rail must not show the direct Launch Start step"
-        );
     }
 
     #[test]
@@ -1429,13 +1470,13 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
 
         let configured = state.view();
         assert!(!configured.show_start_methods);
         assert!(configured.show_manual_setup);
-        assert_eq!(configured.selected_model, "gpt-5.4");
+        assert_eq!(configured.selected_model, "gpt-5.5");
 
         state.apply(LaunchWizardAction::Back);
 
@@ -1443,7 +1484,7 @@ mod tests {
         assert!(state.completion.is_none());
         assert!(backed.show_start_methods);
         assert!(!backed.show_manual_setup);
-        assert_eq!(backed.selected_model, "gpt-5.4");
+        assert_eq!(backed.selected_model, "gpt-5.5");
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -1451,7 +1492,7 @@ mod tests {
         let configured_again = state.view();
         assert!(!configured_again.show_start_methods);
         assert!(configured_again.show_manual_setup);
-        assert_eq!(configured_again.selected_model, "gpt-5.4");
+        assert_eq!(configured_again.selected_model, "gpt-5.5");
     }
 
     #[test]
@@ -1501,6 +1542,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             windows_shell: None,
+            hermes: Default::default(),
         };
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260523-1406"),
@@ -1567,6 +1609,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1606,6 +1649,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.2-codex".to_string()),
@@ -1626,11 +1670,20 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
+        // Issue #3962 AC-5: the swap is reported, not silent.
+        let notice = state
+            .model_fallback_notice
+            .as_deref()
+            .expect("a removed Quick Start model must be reported");
+        assert!(
+            notice.contains("gpt-5.2-codex") && notice.contains("gpt-6-astra"),
+            "the notice must name both models: {notice}"
+        );
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+                    assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -1657,6 +1710,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1731,6 +1785,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1772,6 +1827,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2017,7 +2073,7 @@ mod tests {
         state.step = LaunchWizardStep::ModelSelect;
         state.selected = 0;
         state.apply_selection();
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-astra");
 
         state.step = LaunchWizardStep::ReasoningLevel;
         state.selected = 1;
@@ -2167,6 +2223,7 @@ mod tests {
             ),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "proxy-agent".to_string(),
                 tool_label: "Claude Proxy".to_string(),
                 model: None,
@@ -2188,9 +2245,10 @@ mod tests {
         });
 
         let view = state.view();
+        // Issue #3462: Quick Start Resume inherits the entry's preference.
         assert!(
-            !view.skip_permissions,
-            "a Resume launch must not advertise a permission bypass"
+            view.skip_permissions,
+            "Quick Start Resume must advertise the inherited Skip Permissions preference"
         );
 
         match state.completion.as_ref() {
@@ -2199,10 +2257,10 @@ mod tests {
                     assert_eq!(config.command, custom_path.display().to_string());
                     assert_eq!(config.display_name, "Claude Proxy");
                     assert!(config.args.contains(&"--resume".to_string()));
-                    assert!(!config.skip_permissions);
+                    assert!(config.skip_permissions);
                     assert!(
-                        !config.args.contains(&"--unsafe".to_string()),
-                        "Quick Start Resume must suppress permission bypass"
+                        config.args.contains(&"--unsafe".to_string()),
+                        "Quick Start Resume must carry the custom agent skip-permissions args"
                     );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),

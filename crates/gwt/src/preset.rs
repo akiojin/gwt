@@ -20,12 +20,13 @@ pub enum WindowPreset {
     Profile,
     Logs,
     Issue,
+    /// Legacy-only value accepted so persisted Issue Monitor windows restore
+    /// into the canonical Issue surface. It is not exposed in [`Self::ALL`].
     IssueMonitor,
     Spec,
     #[serde(alias = "workspace")]
     Work,
     Index,
-    Improvement,
     Board,
     Pr,
     /// SPEC-2809 — independent Console window surface for external
@@ -46,9 +47,7 @@ pub enum WindowSurface {
     Index,
     Work,
     AgentKanban,
-    Improvement,
     Console,
-    IssueMonitor,
     Mock,
 }
 
@@ -69,16 +68,14 @@ impl WindowSurface {
             Self::Index => "index",
             Self::Work => "work",
             Self::AgentKanban => "agent-kanban",
-            Self::Improvement => "improvement",
             Self::Console => "console",
-            Self::IssueMonitor => "issue-monitor",
             Self::Mock => "mock",
         }
     }
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 18] = [
+    pub const ALL: [WindowPreset; 16] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
@@ -89,11 +86,9 @@ impl WindowPreset {
         WindowPreset::Profile,
         WindowPreset::Logs,
         WindowPreset::Issue,
-        WindowPreset::IssueMonitor,
         WindowPreset::Spec,
         WindowPreset::Work,
         WindowPreset::Index,
-        WindowPreset::Improvement,
         WindowPreset::Board,
         WindowPreset::Pr,
         WindowPreset::Console,
@@ -112,12 +107,14 @@ impl WindowPreset {
             Self::Memo => "Memo",
             Self::Profile => "Profile",
             Self::Logs => "Logs",
+            // SPEC-3671 FR-014: the three Knowledge-surface faces must be
+            // tellable apart from an open window's title.
             Self::Issue => "Issue",
             Self::IssueMonitor => "Issue Monitor",
-            Self::Spec => "Issue",
-            Self::Work => "Workspace",
+            Self::Spec => "SPEC",
+            // SPEC-3671 FR-015: the surface lists Works (launches).
+            Self::Work => "Work",
             Self::Index => "Index",
-            Self::Improvement => "Improvement Inbox",
             Self::Board => "Board",
             Self::Pr => "PR",
             Self::Console => "Console",
@@ -138,11 +135,10 @@ impl WindowPreset {
             Self::Profile => "Manage env profiles, overrides, and merged preview",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Browse cached issues and launch agents",
-            Self::IssueMonitor => "Watch labeled Issues and launch improvement agents",
+            Self::IssueMonitor => "Browse cached issues and manage agent execution",
             Self::Spec => "Browse cached issues and launch agents",
-            Self::Work => "Workspace overview",
+            Self::Work => "Work overview",
             Self::Index => "Search indexed project knowledge",
-            Self::Improvement => "Review gwt improvement candidates",
             Self::Board => "Placeholder board surface",
             Self::Pr => "Placeholder PR surface",
             Self::Console => "External process stdout/stderr per kind",
@@ -167,7 +163,6 @@ impl WindowPreset {
             Self::Spec => "spec",
             Self::Work => "work",
             Self::Index => "index",
-            Self::Improvement => "improvement",
             Self::Board => "board",
             Self::Pr => "pr",
             Self::Console => "console",
@@ -184,11 +179,9 @@ impl WindowPreset {
             Self::Profile => WindowSurface::Profile,
             Self::Logs => WindowSurface::Logs,
             Self::Board => WindowSurface::Board,
-            Self::IssueMonitor => WindowSurface::IssueMonitor,
-            Self::Issue | Self::Spec | Self::Pr => WindowSurface::Knowledge,
+            Self::Issue | Self::IssueMonitor | Self::Spec | Self::Pr => WindowSurface::Knowledge,
             Self::Work => WindowSurface::Work,
             Self::Index => WindowSurface::Index,
-            Self::Improvement => WindowSurface::Improvement,
             Self::Console => WindowSurface::Console,
             Self::Settings => WindowSurface::Mock,
         }
@@ -196,6 +189,13 @@ impl WindowPreset {
 
     pub fn requires_process(self) -> bool {
         matches!(self.surface(), WindowSurface::Terminal)
+    }
+
+    /// SPEC-3671: the Issue window is the surface that mirrors auto-launched
+    /// agents in its preview pane. `Spec` and `Pr` share the Knowledge surface
+    /// but are different faces, so they never host a preview.
+    pub fn hosts_issue_preview(self) -> bool {
+        matches!(self, Self::Issue | Self::IssueMonitor)
     }
 
     pub fn is_agent_terminal(self) -> bool {
@@ -240,7 +240,6 @@ impl WindowPreset {
             | Self::Spec
             | Self::Work
             | Self::Index
-            | Self::Improvement
             | Self::Board
             | Self::Pr
             | Self::Console => None,
@@ -389,7 +388,6 @@ where
         | WindowPreset::Spec
         | WindowPreset::Work
         | WindowPreset::Index
-        | WindowPreset::Improvement
         | WindowPreset::Board
         | WindowPreset::Pr
         | WindowPreset::Console => unreachable!("non-process presets are rejected above"),
@@ -511,21 +509,20 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 18);
+        assert_eq!(WindowPreset::ALL.len(), 16);
+        // SPEC-3671 FR-014 / FR-015: each face is identifiable from its title.
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
-        assert_eq!(WindowPreset::Spec.title(), "Issue");
+        assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
-        assert_eq!(WindowPreset::Work.title(), "Workspace");
+        assert_eq!(WindowPreset::Work.title(), "Work");
         assert_eq!(WindowPreset::Index.title(), "Index");
-        assert_eq!(WindowPreset::Improvement.title(), "Improvement Inbox");
         assert_eq!(WindowPreset::Pr.title(), "PR");
         assert_eq!(WindowPreset::AgentKanban.id_prefix(), "agent-kanban");
         assert_eq!(WindowPreset::Board.id_prefix(), "board");
         assert_eq!(WindowPreset::Work.id_prefix(), "work");
         assert_eq!(WindowPreset::Index.id_prefix(), "index");
         assert_eq!(WindowPreset::IssueMonitor.id_prefix(), "issue-monitor");
-        assert_eq!(WindowPreset::Improvement.id_prefix(), "improvement");
         assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
         assert_eq!(
             WindowPreset::AgentKanban.surface(),
@@ -537,15 +534,11 @@ mod tests {
         assert_eq!(WindowPreset::Issue.surface(), WindowSurface::Knowledge);
         assert_eq!(
             WindowPreset::IssueMonitor.surface(),
-            WindowSurface::IssueMonitor
+            WindowSurface::Knowledge
         );
         assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
         assert_eq!(WindowPreset::Index.surface(), WindowSurface::Index);
-        assert_eq!(
-            WindowPreset::Improvement.surface(),
-            WindowSurface::Improvement
-        );
         assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
         // SPEC-2008 camera-focus: terminal-surface presets open work-area large
@@ -687,16 +680,13 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
-                WindowPreset::Issue | WindowPreset::Spec | WindowPreset::Pr => {
+                WindowPreset::Issue
+                | WindowPreset::IssueMonitor
+                | WindowPreset::Spec
+                | WindowPreset::Pr => {
                     assert_eq!(preset.surface(), WindowSurface::Knowledge);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
-                }
-                WindowPreset::IssueMonitor => {
-                    assert_eq!(preset.surface(), WindowSurface::IssueMonitor);
-                    assert!(!preset.requires_process());
-                    assert_eq!(preset.command_name(), None);
-                    assert_eq!(preset.default_size(), (720.0, 420.0));
                 }
                 WindowPreset::Work => {
                     assert_eq!(preset.surface(), WindowSurface::Work);
@@ -705,11 +695,6 @@ mod tests {
                 }
                 WindowPreset::Index => {
                     assert_eq!(preset.surface(), WindowSurface::Index);
-                    assert!(!preset.requires_process());
-                    assert_eq!(preset.command_name(), None);
-                }
-                WindowPreset::Improvement => {
-                    assert_eq!(preset.surface(), WindowSurface::Improvement);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }

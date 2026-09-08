@@ -1,9 +1,17 @@
 //! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::SystemTime,
+};
 
 use crate::{
-    pty::{PtyHandle, SpawnConfig},
+    pty::{PendingPty, PtyHandle, SpawnConfig},
     scrollback::{ScrollbackLine, ScrollbackStorage},
     TerminalError,
 };
@@ -16,7 +24,96 @@ pub enum PaneStatus {
     Error(String),
 }
 
-const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+/// Scrollback rows a pane keeps and replays into `snapshot_bytes`.
+///
+/// This is the hard bound on how much work one snapshot can cost no matter how
+/// much the agent printed, so regression tests assert against this constant
+/// instead of a wall-clock budget (Issue #3988).
+pub const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+/// Upper bound for the unterminated escape prefix a snapshot carries
+/// (Issue #4095); longer prefixes are abandoned string sequences.
+const MAX_INCOMPLETE_ESCAPE_TAIL: usize = 1_024;
+/// Process-wide source for [`Pane::output_seq`] (Issue #4095). Positions stay
+/// monotonic across pane restarts that reuse a window id, so a client queue
+/// never mistakes a restarted pane's first chunks for chunks an older
+/// snapshot of the same window already covered.
+static NEXT_OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Trailing screen rows folded into the logged PTY exit record, and the
+/// character budget that keeps one log line readable (Issue #3341).
+const EXIT_LOG_TAIL_LINES: usize = 3;
+const EXIT_LOG_TAIL_MAX_CHARS: usize = 240;
+
+/// Tracing target shared with `gwt_core::process`, so an agent PTY exit lands
+/// in the same Process facet stream as every logged `git` spawn instead of
+/// leaving the most consequential child process unrecorded (Issue #3341).
+const EXIT_SUMMARY_TARGET: &str = "gwt.process.summary";
+
+/// Exact receipt of one PTY child exit.
+///
+/// [`PaneStatus`] is a display contract: it collapses every failure to
+/// `Completed(1)` and every success to `Completed(0)`, so on its own it cannot
+/// answer "did the agent exit cleanly, or was it signalled?". This record keeps
+/// what `portable_pty::ExitStatus` actually reported, which is the difference
+/// between diagnosing an agent that vanished mid-turn and guessing about it
+/// (Issue #3341).
+///
+/// # Reporting a mid-turn agent death upstream
+///
+/// Three sources together identify whether the provider or gwt dropped the
+/// turn. All three must be collected before filing upstream (e.g. against
+/// `openai/codex`):
+///
+/// 1. **gwt exit record** — this receipt, logged at
+///    `target = "gwt.process.summary"`, `kind = "agent"` with the exit code,
+///    signal, observation time, child pid, and final screen tail. The same
+///    values are persisted on the owning gwt Session as `last_exit_code` /
+///    `last_exit_signal` / `last_exited_at`, so they survive a gwt restart.
+///    A `signal = none, exit_code = 0` receipt rules out both signal death and
+///    a gwt-side kill, leaving the provider's own clean shutdown.
+/// 2. **provider rollout tail** — the last events of the provider transcript
+///    for the `agent_session_id` recorded on that Session, which shows whether
+///    the provider logged a shutdown or simply went silent.
+/// 3. **provider file log** — for Codex, `$CODEX_HOME/log/codex-tui.log`
+///    (default `~/.codex/log/codex-tui.log`), which gwt enables by exporting
+///    `RUST_LOG` on every Codex launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneExit {
+    /// Exit code as reported by the platform. `portable-pty` reports `1` for a
+    /// signalled child, so [`Self::signal`] is what separates the two cases.
+    pub exit_code: u32,
+    /// Platform signal name when the child was terminated by a signal.
+    /// `None` means the child returned [`Self::exit_code`] on its own.
+    pub signal: Option<String>,
+    /// When the child was reaped. Recorded at observation time because the
+    /// status only reaches durable storage after event-loop and persistence
+    /// latency, which has already been mistaken for a much later death.
+    pub observed_at: SystemTime,
+    /// OS process id of the direct child, when it was still known at spawn.
+    pub child_pid: Option<u32>,
+}
+
+impl PaneExit {
+    /// Whether the child ended on its own with a success status.
+    pub fn is_clean(&self) -> bool {
+        self.signal.is_none() && self.exit_code == 0
+    }
+}
+
+fn unix_millis(at: SystemTime) -> u64 {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push('…');
+    truncated
+}
 
 /// A terminal pane integrating PTY, vt100 parser, and scrollback.
 ///
@@ -31,16 +128,105 @@ pub struct Pane {
     parser: vt100::Parser,
     scrollback: ScrollbackStorage,
     status: PaneStatus,
+    /// Direct child pid captured at spawn. Kept separately because the pid is
+    /// no longer reliably readable from the handle once the child is reaped,
+    /// and it is what correlates a PTY exit with OS-level evidence.
+    child_pid: Option<u32>,
+    /// Exit receipt captured on the `Running` → exited transition, which
+    /// happens exactly once per pane (Issue #3341).
+    last_exit: Option<PaneExit>,
     /// Accumulator for incomplete lines from raw PTY output. Holds raw bytes
     /// (including SGR escape sequences) until a `\n` boundary is reached, then
     /// the completed line is split off and pushed into `scrollback` with both
     /// a plain-text rendering and the original byte stream so SGR formatting
     /// can be replayed later (SPEC-1919 FR-003j).
     line_buf: Vec<u8>,
+    /// Stream position of the last PTY chunk folded into `parser`
+    /// (Issue #4095), drawn from the process-wide [`NEXT_OUTPUT_SEQ`]. A
+    /// snapshot taken at position `n` already contains every chunk of this
+    /// pane with a position `<= n`; the client queue uses the pair to skip
+    /// streamed chunks that a later-queued snapshot already reproduces
+    /// instead of re-applying their relative cursor moves on top of it.
+    output_seq: u64,
+    /// Trailing bytes of the parsed stream that start an escape sequence the
+    /// parser has not finished (Issue #4095). Appended verbatim to snapshots
+    /// so a client that resets to the snapshot continues the sequence with
+    /// the next chunk exactly like the pane's own parser does.
+    incomplete_escape_tail: Vec<u8>,
+}
+
+/// A pane whose trusted gate helper is running but whose target is still
+/// blocked. It cannot expose PTY I/O or a Running status before release.
+pub struct PendingPane {
+    id: String,
+    rows: u16,
+    cols: u16,
+    pty: PendingPty,
+}
+
+impl PendingPane {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn process_id(&self) -> Option<u32> {
+        self.pty.process_id()
+    }
+
+    pub fn release(self) -> Result<Pane, TerminalError> {
+        let pty = Arc::new(self.pty.release()?);
+        let child_pid = pty.process_id();
+        Ok(Pane {
+            id: self.id,
+            pty,
+            parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
+            scrollback: ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY),
+            status: PaneStatus::Running,
+            child_pid,
+            last_exit: None,
+            line_buf: Vec::new(),
+            output_seq: 0,
+            incomplete_escape_tail: Vec::new(),
+        })
+    }
+
+    pub fn abort(self) -> Result<(), TerminalError> {
+        self.pty.abort()
+    }
+
+    /// Apply a resource policy to the gated tree before [`Self::release`].
+    pub fn apply_policy(&self, policy: crate::pty::ProcessPolicy) -> Result<(), TerminalError> {
+        self.pty.apply_policy(policy)
+    }
 }
 
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
     parser.screen_mut().set_size(rows, cols);
+}
+
+/// Longest suffix of `bytes` that starts an escape sequence the terminal
+/// parser cannot have finished yet (Issue #4095): a bare `ESC`, a CSI without
+/// its final byte, an OSC / DCS / SOS / PM / APC string without `BEL` or `ST`,
+/// or an `ESC` + intermediate without its final byte. Anything the parser
+/// would already have executed or aborted counts as complete.
+fn incomplete_escape_suffix(bytes: &[u8]) -> &[u8] {
+    let Some(esc) = bytes.iter().rposition(|byte| *byte == 0x1b) else {
+        return &[];
+    };
+    let Some((&kind, body)) = bytes[esc + 1..].split_first() else {
+        return &bytes[esc..];
+    };
+    let complete = match kind {
+        b'[' => body.iter().any(|byte| !(0x20..=0x3f).contains(byte)),
+        b']' | b'P' | b'X' | b'^' | b'_' => body.contains(&0x07),
+        0x20..=0x2f => body.iter().any(|byte| !(0x20..=0x2f).contains(byte)),
+        _ => true,
+    };
+    if complete {
+        &[]
+    } else {
+        &bytes[esc..]
+    }
 }
 
 impl Pane {
@@ -73,6 +259,7 @@ impl Pane {
         let rows = config.rows;
         let cols = config.cols;
         let pty = Arc::new(PtyHandle::spawn(config)?);
+        let child_pid = pty.process_id();
         let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
         let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
@@ -82,7 +269,31 @@ impl Pane {
             parser,
             scrollback,
             status: PaneStatus::Running,
+            child_pid,
+            last_exit: None,
             line_buf: Vec::new(),
+            output_seq: 0,
+            incomplete_escape_tail: Vec::new(),
+        })
+    }
+
+    /// Create a pane whose target remains blocked behind a one-shot gate until
+    /// [`PendingPane::release`] succeeds.
+    pub fn new_pending_with_spawn_config(
+        id: String,
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+    ) -> Result<PendingPane, TerminalError> {
+        let rows = config.rows;
+        let cols = config.cols;
+        let pty = PtyHandle::spawn_pending(config, gate_program, gate_args_prefix, nonce)?;
+        Ok(PendingPane {
+            id,
+            rows,
+            cols,
+            pty,
         })
     }
 
@@ -113,6 +324,19 @@ impl Pane {
     pub fn process_bytes(&mut self, data: &[u8]) {
         // Update vt100 screen state
         self.parser.process(data);
+        self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        self.incomplete_escape_tail = if self.incomplete_escape_tail.is_empty() {
+            incomplete_escape_suffix(data).to_vec()
+        } else {
+            let mut carried = std::mem::take(&mut self.incomplete_escape_tail);
+            carried.extend_from_slice(data);
+            incomplete_escape_suffix(&carried).to_vec()
+        };
+        if self.incomplete_escape_tail.len() > MAX_INCOMPLETE_ESCAPE_TAIL {
+            // A string sequence this long is not one the PTY split; treat it
+            // as abandoned rather than letting the tail grow unbounded.
+            self.incomplete_escape_tail.clear();
+        }
 
         // Capture raw bytes for scrollback. SGR escape sequences (CSI ... m)
         // never contain `\n`, so byte-level newline splitting preserves both
@@ -136,6 +360,14 @@ impl Pane {
         self.parser.screen()
     }
 
+    /// Stream position of the parsed screen: the position of the last PTY
+    /// chunk folded into it by [`Self::process_bytes`], monotonic across every
+    /// pane of the process. Read it under the same lock as the chunk or
+    /// snapshot it describes (Issue #4095).
+    pub fn output_seq(&self) -> u64 {
+        self.output_seq
+    }
+
     /// Build a replayable terminal snapshot for frontend reconnect.
     ///
     /// The snapshot is serialized from parsed vt100 state rather than raw PTY
@@ -151,9 +383,12 @@ impl Pane {
     /// cursor/attributes are best effort. Representable saved states remain
     /// exact.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        self.parser
+        let mut snapshot = self
+            .parser
             .screen()
-            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
+            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        snapshot.extend_from_slice(&self.incomplete_escape_tail);
+        snapshot
     }
 
     /// Get scrollback lines from the ring buffer.
@@ -172,6 +407,12 @@ impl Pane {
     }
 
     /// Check and update the pane's process status.
+    ///
+    /// The `Running` guard makes the exited transition happen exactly once per
+    /// pane no matter how many watchers poll concurrently, which is why the
+    /// exit receipt is captured and logged here rather than at a call site
+    /// (Issue #3341): every teardown path above this layer drops the pane, and
+    /// a clean `exit 0` leaves no other durable evidence at all.
     pub fn check_status(&mut self) -> Result<&PaneStatus, TerminalError> {
         if self.status == PaneStatus::Running {
             if let Some(exit_status) = self.pty.try_wait()? {
@@ -180,9 +421,86 @@ impl Pane {
                 } else {
                     self.status = PaneStatus::Completed(1);
                 }
+                let exit = PaneExit {
+                    exit_code: exit_status.exit_code(),
+                    signal: exit_status.signal().map(str::to_string),
+                    observed_at: SystemTime::now(),
+                    child_pid: self.child_pid,
+                };
+                self.log_child_exit(&exit);
+                self.last_exit = Some(exit);
+                // Issue #4142: the exited-transition is the last moment the
+                // master and writer descriptors mean anything. A pane kept on
+                // screen for recovery diagnostics renders from `parser` and
+                // `scrollback`, not from the PTY, so holding them only spends
+                // the process-wide `RLIMIT_NOFILE` budget every other pane
+                // needs. The output thread's reader clone is separate and
+                // still drains to EOF.
+                self.pty.release_descriptors();
             }
         }
         Ok(&self.status)
+    }
+
+    /// The exit receipt captured when this pane's child was reaped.
+    ///
+    /// `None` while the child is alive, and also for a pane that only reached
+    /// [`Self::mark_error`] — a display-only error never waited on the child,
+    /// so it has no exit evidence to report.
+    pub fn last_exit(&self) -> Option<&PaneExit> {
+        self.last_exit.as_ref()
+    }
+
+    /// Join the last `max_lines` non-empty screen rows into a single line.
+    ///
+    /// The final frame is the only readable trace of what the child was doing
+    /// when it went away. Shared by the logged exit record (Issue #3341) and
+    /// the persistent error detail (Issue #3274) so both describe the same
+    /// frame instead of drifting apart.
+    pub fn screen_tail(&self, max_lines: usize) -> Option<String> {
+        if max_lines == 0 {
+            return None;
+        }
+        let contents = self.parser.screen().contents();
+        let lines: Vec<&str> = contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(max_lines);
+        let tail = lines[start..].join(" ");
+        (!tail.is_empty()).then_some(tail)
+    }
+
+    /// Record the child exit in the Process facet log stream, mirroring the
+    /// `gwt.process.summary` end event that every logged `git` spawn emits.
+    /// See [`PaneExit`] for how these fields combine into an upstream report.
+    fn log_child_exit(&self, exit: &PaneExit) {
+        let tail = self
+            .screen_tail(EXIT_LOG_TAIL_LINES)
+            .map(|tail| truncate_chars(&tail, EXIT_LOG_TAIL_MAX_CHARS))
+            .unwrap_or_default();
+        tracing::info!(
+            target: EXIT_SUMMARY_TARGET,
+            kind = "agent",
+            label = %format!("pty {}", self.id),
+            phase = "end",
+            window_id = %self.id,
+            child_pid = exit.child_pid.unwrap_or_default(),
+            exit_code = exit.exit_code,
+            signal = exit.signal.as_deref().unwrap_or("none"),
+            exited_at_unix_ms = unix_millis(exit.observed_at),
+            success = exit.is_clean(),
+            screen_tail = %tail,
+            "pty child exit",
+        );
+    }
+
+    /// Probe the child directly, independent of the display-facing pane
+    /// status. `PaneStatus::Error` can be set without waiting on the child and
+    /// therefore is not process-exit evidence.
+    pub fn process_has_exited(&self) -> Result<bool, TerminalError> {
+        self.pty.try_wait().map(|status| status.is_some())
     }
 
     /// Mark this pane as errored.
@@ -193,6 +511,11 @@ impl Pane {
     /// Write input to the PTY.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
         self.pty.write_input(data)
+    }
+
+    /// Issue #3702: the TUI composer still holds unsent keystrokes.
+    pub fn has_unsent_user_input(&self) -> bool {
+        self.pty.has_unsent_user_input()
     }
 
     /// Resize the pane (PTY + vt100 parser).
@@ -235,13 +558,107 @@ impl Pane {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
     use std::time::Duration;
 
     use super::*;
+    #[cfg(unix)]
+    use crate::test_util::self_terminate_command;
     use crate::test_util::{
-        answer_cursor_position_query, echo_command, lock_pty_test, read_until_contains,
-        read_with_timeout, sleep_command, stdin_echo_command, success_command, TestCommand,
+        answer_cursor_position_query, echo_command, exit_code_command, lock_pty_test,
+        read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
+        TestCommand,
     };
+
+    /// Collect the fields of every `gwt.process.summary` event emitted while
+    /// the returned subscriber is active, so a test can assert on the record
+    /// that reaches the log file.
+    #[derive(Clone, Default)]
+    struct SummaryFieldCapture(std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+    impl tracing::field::Visit for SummaryFieldCapture {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SummaryFieldCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != EXIT_SUMMARY_TARGET {
+                return;
+            }
+            let mut visitor = self.clone();
+            event.record(&mut visitor);
+        }
+    }
+
+    impl SummaryFieldCapture {
+        fn field(&self, name: &str) -> Option<String> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+
+        fn count(&self, name: &str) -> usize {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .filter(|(key, _)| key == name)
+                .count()
+        }
+    }
+
+    /// Drain the PTY output the way the production reader thread does.
+    ///
+    /// Not optional for an exit test: on macOS a session leader that owns the
+    /// slave tty stays in "trying to exit" until its output is consumed, so an
+    /// undrained pane never reaches a reapable child and `check_status` polls
+    /// `Running` forever.
+    fn drain_pty_output(pane: &Pane) {
+        let Ok(mut reader) = pane.reader() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while reader.read(&mut buffer).is_ok_and(|read| read > 0) {}
+        });
+    }
+
+    /// Drive `check_status` until the child is reaped, then return the exit
+    /// receipt Issue #3341 requires the pane to keep.
+    fn wait_for_exit(pane: &mut Pane) -> PaneExit {
+        drain_pty_output(pane);
+        for _ in 0..100 {
+            if pane
+                .check_status()
+                .is_ok_and(|status| *status != PaneStatus::Running)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pane.last_exit()
+            .cloned()
+            .expect("a reaped child must leave an exit receipt")
+    }
 
     fn test_pane(id: &str, command: TestCommand) -> Pane {
         Pane::new(
@@ -277,6 +694,24 @@ mod tests {
         assert_eq!(pane.id(), "test-1");
         assert_eq!(pane.status(), &PaneStatus::Running);
         assert_eq!(pane.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn process_exit_probe_does_not_treat_display_error_as_child_exit() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-proof", sleep_command("60"));
+        pane.mark_error("display-only failure");
+
+        assert!(!pane.process_has_exited().expect("probe live child"));
+
+        pane.kill().expect("kill child");
+        for _ in 0..100 {
+            if pane.process_has_exited().expect("probe killed child") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("killed child was not reaped");
     }
 
     #[test]
@@ -922,6 +1357,84 @@ mod tests {
         );
     }
 
+    /// Issue #4095: a PTY read can end inside an escape sequence. The parser
+    /// keeps that prefix pending, so a snapshot taken right there must carry
+    /// the prefix verbatim; otherwise a client that resets to the snapshot
+    /// prints the remainder of the sequence (`A`, `K`, ...) as text and its
+    /// cursor drifts away from the pane's.
+    #[test]
+    fn test_snapshot_bytes_carries_unterminated_escape_sequence_prefix() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-escape-tail", 6, sleep_command("60"));
+        pane.process_bytes(
+            "tool output\r\n✻ Frosting…\r\n  Tip: Use /clear\x1b[2K\x1b[1".as_bytes(),
+        );
+
+        let snapshot = pane.snapshot_bytes();
+        assert!(
+            snapshot.ends_with(b"\x1b[1"),
+            "snapshot must end with the pending escape prefix; got tail {:?}",
+            String::from_utf8_lossy(&snapshot[snapshot.len().saturating_sub(12)..])
+        );
+
+        let mut replay = vt100::Parser::new(6, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        replay.process(&snapshot);
+        let rest = "A\x1b[2K\x1b[G✢ Frosting…\r\n  Tip: next".as_bytes();
+        pane.process_bytes(rest);
+        replay.process(rest);
+        assert_eq!(replay.screen().contents(), pane.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            pane.screen().cursor_position()
+        );
+        assert!(
+            !pane.snapshot_bytes().ends_with(b"Tip: next"),
+            "a completed stream leaves no pending prefix"
+        );
+    }
+
+    /// Issue #4095: a restarted window reuses its id but gets a fresh pane.
+    /// Its first chunks must sort after any snapshot of the previous pane, or
+    /// the client queue would discard them as already-covered output.
+    #[test]
+    fn test_output_seq_is_monotonic_across_panes() {
+        let _pty_guard = lock_pty_test();
+        let mut first = test_pane_with_rows("test-seq-first", 4, sleep_command("60"));
+        let mut second = test_pane_with_rows("test-seq-second", 4, sleep_command("60"));
+        first.process_bytes(b"one");
+        let first_seq = first.output_seq();
+        second.process_bytes(b"two");
+        first.process_bytes(b"three");
+        assert!(first_seq > 0);
+        assert!(second.output_seq() > first_seq);
+        assert!(first.output_seq() > second.output_seq());
+        let _ = first.kill();
+        let _ = second.kill();
+    }
+
+    #[test]
+    fn test_incomplete_escape_suffix_recognizes_sequence_shapes() {
+        let cases: [(&[u8], &[u8]); 9] = [
+            (b"plain text", b""),
+            (b"text\x1b", b"\x1b"),
+            (b"text\x1b[2", b"\x1b[2"),
+            (b"text\x1b[2K", b""),
+            (b"text\x1b[?25l\x1b[1", b"\x1b[1"),
+            (b"text\x1b]0;title", b"\x1b]0;title"),
+            (b"text\x1b]0;title\x07", b""),
+            (b"text\x1b]0;title\x1b\\", b""),
+            (b"text\x1b(", b"\x1b("),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                incomplete_escape_suffix(input),
+                expected,
+                "input {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
     #[test]
     fn test_pane_read_output_through_vt100() {
         let _pty_guard = lock_pty_test();
@@ -1105,6 +1618,163 @@ mod tests {
         assert_eq!(pane.status(), &PaneStatus::Completed(0));
     }
 
+    /// Issue #3341: `PaneStatus` collapses every failure to `Completed(1)`,
+    /// so the real exit code has to survive somewhere else. Without it, a
+    /// sudden agent death cannot be told apart from an ordinary error exit.
+    #[test]
+    fn check_status_keeps_the_real_exit_code() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-code", exit_code_command(7));
+
+        let exit = wait_for_exit(&mut pane);
+
+        assert_eq!(exit.exit_code, 7, "the child's real exit code must survive");
+        assert_eq!(exit.signal, None, "an exit code is not a signal death");
+        assert_eq!(
+            pane.status(),
+            &PaneStatus::Completed(1),
+            "the display-facing status contract must not change"
+        );
+    }
+
+    /// Issue #3341: a clean `exit 0` is the case with no other evidence at
+    /// all, so the receipt must be recorded for success too.
+    #[test]
+    fn check_status_keeps_a_clean_exit_receipt() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-clean", success_command());
+
+        let exit = wait_for_exit(&mut pane);
+
+        assert_eq!(exit.exit_code, 0);
+        assert_eq!(exit.signal, None);
+        assert_eq!(pane.status(), &PaneStatus::Completed(0));
+        assert!(
+            exit.observed_at
+                .elapsed()
+                .is_ok_and(|since| since < Duration::from_secs(60)),
+            "the receipt must carry when the exit was observed"
+        );
+    }
+
+    /// Issue #3341: signal death is the hypothesis a clean `exit 0` rules
+    /// out, so the signal name has to be distinguishable from exit code 1.
+    #[cfg(unix)]
+    #[test]
+    fn check_status_keeps_the_terminating_signal_name() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-signal", self_terminate_command());
+
+        let exit = wait_for_exit(&mut pane);
+
+        assert!(
+            exit.signal.is_some(),
+            "a signalled child must report its signal, got {exit:?}"
+        );
+    }
+
+    /// Issue #3341: the exit receipt is captured exactly once, on the
+    /// `Running` → exited transition, so repeated polling cannot overwrite it
+    /// with a later observation time or duplicate the log record.
+    #[test]
+    fn check_status_captures_the_exit_receipt_once() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-once", exit_code_command(3));
+
+        let first = wait_for_exit(&mut pane);
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = pane.check_status();
+
+        assert_eq!(
+            pane.last_exit(),
+            Some(&first),
+            "re-polling a reaped pane must not re-stamp the receipt"
+        );
+    }
+
+    /// Issue #3341: a `mark_error` pane never waited on the child, so it has
+    /// no exit evidence and must not fabricate any.
+    #[test]
+    fn display_only_error_leaves_no_exit_receipt() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-display-error", sleep_command("60"));
+        pane.mark_error("display-only failure");
+
+        assert_eq!(pane.last_exit(), None);
+        let _ = pane.kill();
+    }
+
+    /// Issue #3341: the final screen tail is the only readable trace of what
+    /// the agent was doing when it died. `compose_agent_error_detail` (#3274)
+    /// keeps it for `Error` exits only; the shared extraction lives here so a
+    /// clean `Stopped` exit can log it too.
+    #[test]
+    fn screen_tail_returns_trailing_non_empty_lines() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-tail", sleep_command("60"));
+        pane.process_bytes(b"first\r\nsecond\r\n\r\nthird\r\n");
+
+        assert_eq!(
+            pane.screen_tail(2).as_deref(),
+            Some("second third"),
+            "blank rows must not consume the tail budget"
+        );
+        let _ = pane.kill();
+    }
+
+    /// Issue #3341: gwt logged every `git` spawn but nothing at all for the
+    /// agent PTY that matters most. A clean `exit 0` in particular reached no
+    /// log line, and the final screen tail was kept only for `Error` exits, so
+    /// there was nothing to read after a mid-turn death.
+    #[test]
+    fn child_exit_is_logged_with_the_receipt_and_screen_tail() {
+        let _pty_guard = lock_pty_test();
+        let capture = SummaryFieldCapture::default();
+        let mut pane = test_pane("test-exit-log", success_command());
+        pane.process_bytes(b"thinking about the next step\r\n");
+
+        {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            tracing::subscriber::with_default(subscriber, || {
+                let exit = wait_for_exit(&mut pane);
+                assert!(exit.is_clean());
+            });
+        }
+
+        assert_eq!(capture.field("kind").as_deref(), Some("agent"));
+        assert_eq!(capture.field("phase").as_deref(), Some("end"));
+        assert_eq!(capture.field("window_id").as_deref(), Some("test-exit-log"));
+        assert_eq!(capture.field("exit_code").as_deref(), Some("0"));
+        assert_eq!(capture.field("signal").as_deref(), Some("none"));
+        assert_eq!(capture.field("success").as_deref(), Some("true"));
+        assert!(
+            capture
+                .field("exited_at_unix_ms")
+                .is_some_and(|value| value.parse::<u64>().is_ok_and(|millis| millis > 0)),
+            "the exit record must carry when the exit was observed"
+        );
+        assert_eq!(
+            capture.field("screen_tail").as_deref(),
+            Some("thinking about the next step"),
+            "a clean exit must still log the final screen tail"
+        );
+        assert_eq!(
+            capture.count("exit_code"),
+            1,
+            "the exit must be logged exactly once"
+        );
+    }
+
+    #[test]
+    fn screen_tail_is_absent_for_a_blank_screen() {
+        let _pty_guard = lock_pty_test();
+        let pane = test_pane("test-exit-tail-blank", sleep_command("60"));
+
+        assert_eq!(pane.screen_tail(3), None);
+        let _ = pane.kill();
+    }
+
     #[test]
     fn test_pane_mark_error() {
         let _pty_guard = lock_pty_test();
@@ -1134,5 +1804,90 @@ mod tests {
         assert_eq!(completed, PaneStatus::Completed(0));
         assert_ne!(PaneStatus::Completed(0), PaneStatus::Completed(1));
         assert_eq!(error, PaneStatus::Error("fail".to_string()));
+    }
+
+    /// PTY masters are the only terminals these tests open beyond the harness
+    /// stdio, so the delta of this count is the `/dev/ptmx` count Issue #4142
+    /// measures with `lsof`. Every PTY test in this binary holds
+    /// [`lock_pty_test`], so the counts below are not raced by a sibling.
+    #[cfg(unix)]
+    fn open_tty_fds() -> usize {
+        gwt_core::fd_limit::open_tty_fd_count().expect("unix exposes an fd table")
+    }
+
+    /// Poll `check_status` until the child is reaped, without attaching a
+    /// reader — a reader clone is a descriptor of its own and would mask what
+    /// these tests measure.
+    #[cfg(unix)]
+    fn wait_for_exit_without_reader(pane: &mut Pane, within: Duration) {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if pane
+                .check_status()
+                .is_ok_and(|status| *status != PaneStatus::Running)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not exit within {within:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Issue #4142 AC-1.
+    #[cfg(unix)]
+    #[test]
+    fn child_exit_releases_the_pty_descriptors_within_five_seconds() {
+        let _pty_guard = lock_pty_test();
+        let baseline = open_tty_fds();
+
+        let mut pane = test_pane("fd-exit", success_command());
+        let while_running = open_tty_fds();
+        assert!(
+            while_running > baseline,
+            "spawning a pane must open PTY descriptors: {baseline} -> {while_running}"
+        );
+
+        wait_for_exit_without_reader(&mut pane, Duration::from_secs(5));
+
+        assert_eq!(
+            open_tty_fds(),
+            baseline,
+            "the exited pane still holds PTY descriptors while it stays on screen"
+        );
+        // The pane is still alive and still reports its exit receipt.
+        assert_ne!(pane.status(), &PaneStatus::Running);
+        assert!(pane.last_exit().is_some());
+    }
+
+    /// Issue #4142 AC-4: the descriptor cost of a spawn/exit cycle must not
+    /// accumulate. 300 cycles is past the launchd soft `RLIMIT_NOFILE` of 256,
+    /// so a one-descriptor-per-cycle leak cannot stay invisible here.
+    #[cfg(unix)]
+    #[test]
+    fn repeated_spawn_and_exit_cycles_do_not_accumulate_descriptors() {
+        const CYCLES: usize = 300;
+        const SAMPLE_EVERY: usize = 50;
+
+        let _pty_guard = lock_pty_test();
+        let baseline = open_tty_fds();
+        let mut samples = Vec::new();
+
+        for cycle in 0..CYCLES {
+            let mut pane = test_pane(&format!("fd-cycle-{cycle}"), success_command());
+            wait_for_exit_without_reader(&mut pane, Duration::from_secs(5));
+            drop(pane);
+            if cycle % SAMPLE_EVERY == SAMPLE_EVERY - 1 {
+                samples.push((cycle + 1, open_tty_fds()));
+            }
+        }
+
+        assert!(
+            samples.iter().all(|(_, open)| *open == baseline),
+            "PTY descriptors grew across {CYCLES} spawn/exit cycles \
+             (baseline {baseline}, samples {samples:?})"
+        );
     }
 }

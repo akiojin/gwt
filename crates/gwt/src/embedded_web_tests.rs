@@ -11,6 +11,26 @@ fn root_js_module_source(path: &str) -> &'static str {
         .source
 }
 
+fn js_braced_block_after<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
+    let marker_start = source.find(marker)?;
+    let search_start = marker_start + marker.len();
+    let open = search_start + source[search_start..].find('{')?;
+    let mut depth = 0_u32;
+    for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return source.get((open + 1)..(open + offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn project_tabs_renderer_js() -> &'static str {
     root_js_module_source("/project-tabs-renderer.js")
 }
@@ -74,6 +94,28 @@ fn xterm_css() -> &'static str {
     static_asset_text("/assets/xterm/xterm.css")
 }
 
+#[test]
+fn embedded_web_registers_the_browser_favicon_as_a_binary_asset() {
+    let asset = static_assets()
+        .iter()
+        .find(|asset| asset.route == "/favicon.ico")
+        .expect("favicon must be served by the embedded asset manifest");
+
+    assert!(
+        matches!(asset.body, AssetBody::Bytes(bytes) if !bytes.is_empty()),
+        "favicon must embed the packaged application icon",
+    );
+
+    let response = static_asset_response(asset);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/x-icon"),
+    );
+}
+
 fn frontend_bundle_source() -> &'static str {
     concat!(
         include_str!("../web/index.html"),
@@ -110,9 +152,6 @@ fn frontend_bundle_source() -> &'static str {
         // SPEC-3064 Phase 3 (E5) — Launch Wizard surface moved out of
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
-        "\n",
-        // SPEC-3165 — Issue auto-improve monitor card/inbox/toast surface.
-        include_str!("../web/issue-monitor-surface.js"),
         "\n",
         // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
         // app.js.
@@ -194,41 +233,48 @@ fn embedded_web_terminal_copy_shortcut_module_is_registered() {
 }
 
 #[test]
-fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
+fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     let paths: Vec<&str> = root_js_module_assets()
         .iter()
         .map(|asset| asset.path)
         .collect();
     assert!(
-        paths.contains(&"/issue-monitor-surface.js"),
-        "issue monitor surface must be served as a root JS module"
+        !paths.contains(&"/issue-monitor-surface.js"),
+        "the retired independent Issue Monitor asset must not be served"
     );
 
     let html = app_js();
     assert!(
-        html.contains("createIssueMonitorSurface"),
-        "app.js must import and instantiate the issue monitor surface"
+        !html.contains("createIssueMonitorSurface"),
+        "app.js must not import or instantiate the retired monitor presenter"
     );
     assert!(
-        html.contains("issueMonitorSurface"),
-        "issue monitor surface must be reachable through frontendUnits"
+        !html.contains("surface === \"issue-monitor\""),
+        "the canvas must not mount a second Issue Monitor surface"
     );
     assert!(
-        html.contains("surface === \"issue-monitor\""),
-        "Issue Monitor must mount through the canvas window body surface path"
+        html.contains("preset === \"issue_monitor\"") && html.contains("return \"knowledge\";"),
+        "legacy issue_monitor windows must render through the Knowledge Issue surface"
     );
     assert!(
-        index_html().contains("data-preset=\"issue_monitor\""),
-        "Issue Monitor must be available through the same Add Window preset flow as other canvas windows"
+        !index_html().contains("data-preset=\"issue_monitor\""),
+        "Add Window must expose only the canonical Issue entrypoint"
     );
-    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+    let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     assert!(
-        surface_js.contains("mount(body"),
-        "issue monitor surface must expose a window-body mount API"
+        surface_js.contains("applyIssueMonitorStatus")
+            && surface_js.contains("scheduleIssueMonitorProjectionRefresh")
+            && surface_js.contains("monitorStateView"),
+        "the canonical Issue surface must own monitor status, invalidation, and row rendering"
     );
     assert!(
-        !surface_js.contains("position: fixed"),
-        "Issue Monitor must not render as a fixed overlay card"
+        html.contains("applyKnowledgeIssueMonitorStatus(event.status || {})"),
+        "status events must update the canonical Issue surface"
+    );
+    assert!(
+        html.contains("case \"open-issue-monitor\":")
+            && html.contains("focusOrSpawnPreset(\"issue\")"),
+        "the operator status strip must focus or spawn the canonical Issue preset"
     );
     assert!(
         html.contains("case \"issue_monitor_status\""),
@@ -245,8 +291,8 @@ fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
 }
 
 #[test]
-fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls() {
-    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
+    let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
 
     assert!(
         surface_js.contains("set_issue_monitor_max_active_agents"),
@@ -261,7 +307,7 @@ fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls(
             && surface_js.contains("↓")
             && surface_js.contains("Move up")
             && surface_js.contains("Move down"),
-        "Issue Monitor queue must expose icon priority controls with accessible labels"
+        "Issue rows must expose icon priority controls with accessible labels"
     );
     assert!(
         surface_js.contains("Start") && surface_js.contains("Stop"),
@@ -271,11 +317,11 @@ fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls(
         surface_js.contains("Agent settings")
             && surface_js.contains("Project Agent settings")
             && surface_js.contains("issue_monitor_configure_profile"),
-        "Issue Monitor queue must expose global Agent settings plus row shortcut configuration"
+        "Issue surface must expose global Agent settings plus row shortcut configuration"
     );
     assert!(
-        surface_js.contains("No queued issues"),
-        "Issue Monitor empty state must describe the all-Issue queue, not watched labels"
+        surface_js.contains("exclusion_reason") && surface_js.contains("Unknown (${state})"),
+        "Issue rows must show exclusion reasons and preserve unknown monitor states"
     );
 }
 
@@ -1231,6 +1277,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
     let expected: &[(&str, &str, Option<&str>)] = &[
         ("/", "text/html; charset=utf-8", MUTABLE),
         ("/app.js", JS, MUTABLE),
+        ("/favicon.ico", "image/x-icon", IMMUTABLE),
         ("/assets/xterm/xterm.mjs", JS, None),
         ("/assets/xterm/addon-fit.mjs", JS, None),
         ("/assets/xterm/xterm.css", CSS, None),
@@ -1680,9 +1727,19 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
             "expected presetRoleLabel to cover {label}",
         );
     }
+    // SPEC-3671 FR-014 / 受け入れシナリオ 9: `issue` / `issue_monitor` / `spec`
+    // used to collapse into a single "Issue" badge, so an open window could not
+    // say which face it was. Each face now carries its own label.
     assert!(
-        js.contains(r#"issue: "Issue""#) && js.contains(r#"spec: "Issue""#),
-        "expected legacy issue/spec presets to share the Issue role label",
+        js.contains(r#"issue: "Issue""#)
+            && js.contains(r#"issue_monitor: "Issue Monitor""#)
+            && js.contains(r#"spec: "SPEC""#),
+        "expected the three Issue-family presets to carry distinguishable role labels",
+    );
+    // SPEC-3671 FR-015: the wire preset is `work`; the surface lists Works.
+    assert!(
+        js.contains(r#"work: "Work""#),
+        "expected the Work surface to be labelled by its wire preset key",
     );
     assert!(
         js.contains("function shouldShowRuntimeStatus(windowData)")
@@ -1692,31 +1749,68 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
 }
 
 #[test]
-fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
+fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
     let paths: Vec<&str> = root_js_module_assets()
         .iter()
         .map(|asset| asset.path)
         .collect();
     assert!(
-        paths.contains(&"/window-lane-identity.js"),
-        "window lane identity helper must be served as a root JS module"
+        paths.contains(&"/window-worktree-form.js"),
+        "window worktree form helper must be served as a root JS module"
     );
+    assert!(
+        !paths.contains(&"/window-lane-identity.js"),
+        "legacy lane identity module must not remain registered"
+    );
+    let form_module = root_js_module_assets()
+        .iter()
+        .find(|asset| asset.path == "/window-worktree-form.js")
+        .expect("registered worktree form module");
     let js = app_js();
     let shell_js = project_shell_surface_js();
     let styles = frontend_styles_bundle();
     assert!(
-        js.contains("applyWindowLaneData(element, windowData)")
-            && js.contains("renderWindowLaneBadge"),
-        "app.js must put data-lane-kind and the titlebar lane badge on workspace windows"
+        form_module.source.contains("lane_kind")
+            && form_module.source.contains("laneKind")
+            && form_module.source.contains("ephemeral")
+            && form_module.source.contains("branch-backed"),
+        "worktree form adapter must translate the legacy wire fixture to semantic values"
     );
     assert!(
-        shell_js.contains("window-list-lane"),
-        "window list rows must render lane identity"
+        js.contains("applyWindowWorktreeData(element, windowData)")
+            && js.contains("renderWindowWorktreeBadge"),
+        "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        styles.contains(".window-lane-badge")
-            && styles.contains(".fleet-minimap__cell[data-lane-symbol]::before"),
-        "titlebar/list/minimap lane badge styling must ship in embedded CSS"
+        shell_js.contains("window-list-worktree"),
+        "window list rows must render worktree form"
+    );
+    assert!(
+        styles.contains(".window-worktree-badge")
+            && styles.contains(".fleet-minimap__cell[data-worktree-symbol]::before"),
+        "titlebar/list/minimap worktree badge styling must ship in embedded CSS"
+    );
+    let consumer_wiring = format!("{js}\n{shell_js}");
+    for legacy in [
+        "window-lane-identity",
+        "WindowLane",
+        "windowLane",
+        "window-lane-badge",
+        "window-list-lane",
+        "data-lane-kind",
+        "data-lane-label",
+        "data-lane-symbol",
+        "Intake lane",
+        "Execution lane",
+    ] {
+        assert!(
+            !consumer_wiring.contains(legacy) && !styles.contains(legacy),
+            "old production lane vocabulary must be absent: {legacy}"
+        );
+    }
+    assert!(
+        !consumer_wiring.contains("lane_kind") && !consumer_wiring.contains("laneKind"),
+        "legacy backend fields must be read only by the worktree-form adapter"
     );
 }
 
@@ -1724,17 +1818,19 @@ fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*runtimeState\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
         )
         .expect("valid regex");
 
     assert!(
-        js.contains("const windowRuntimeStateMap = new Map();"),
-        "expected embedded js to keep a shared runtime-state map for badges and the window list",
+        js.contains("const windowRuntimeStateMap = new Map();")
+            && js.contains("return normalizeWindowRuntimeState(sourceState, windowData.preset);")
+            && js.contains("function runtimeStateForAgentFocus(windowData)"),
+        "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
             apply_status.is_match(js),
-            "expected applyStatus to normalize runtime state once, update the shared map, and re-render the window list",
+            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
         );
 }
 
@@ -2266,9 +2362,10 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
         "expected knowledge bridge guidance to avoid direct gh issue/pr commands",
     );
     assert!(
-        html.contains("if (preset === \"issue\" || preset === \"spec\")")
-            && html.contains("return \"issue\";"),
-        "expected legacy spec preset to open the unified Work Item issue view",
+        html.contains(
+            "if (preset === \"issue\" || preset === \"issue_monitor\" || preset === \"spec\")",
+        ) && html.contains("return \"issue\";"),
+        "expected legacy SPEC and Issue Monitor presets to open the unified Work Item issue view",
     );
 }
 
@@ -2288,9 +2385,26 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
         html.contains("request_id"),
         "expected semantic search requests to carry request ids for stale-response guards",
     );
+    let knowledge_status_block = html
+        .split("function renderKnowledgeStatusOnly")
+        .nth(1)
+        .and_then(|tail| tail.split("function renderIssueRow").next())
+        .expect("knowledge status renderer");
     assert!(
-        html.contains("Searching semantic index"),
-        "expected semantic search to expose an in-progress state",
+        knowledge_status_block.contains("!issueSurface && state.searching")
+            && knowledge_status_block.contains("Searching semantic index"),
+        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+    );
+    let direct_send_block = html
+        .split("function sendKnowledgeSemanticSearchNow")
+        .nth(1)
+        .and_then(|tail| tail.split("const uiTraceWiring").next())
+        .expect("semantic direct-send helper");
+    assert!(
+        direct_send_block.contains("activeSocket.readyState !== WebSocket.OPEN")
+            && direct_send_block.contains("activeSocket.send(JSON.stringify(message))")
+            && !direct_send_block.contains("pendingMessages.push"),
+        "expected semantic search to use an OPEN-only direct send that cannot enter the generic queue",
     );
     assert!(
         html.contains("% match"),
@@ -2420,9 +2534,10 @@ fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results
         "expected semantic search state to track the single in-flight backend request",
     );
     assert!(
-        html.contains("queuedSearchQuery")
-            && html.contains("const nextQuery = state.queuedSearchQuery;"),
-        "expected semantic search state to coalesce additional input to the latest query",
+        html.contains("searchGeneration")
+            && html.contains("inFlightSearchIntent")
+            && html.contains("queuedSearchIntent"),
+        "expected semantic search to coalesce one physical request plus one generation-fenced latest intent",
     );
     assert!(
             !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
@@ -2442,9 +2557,27 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
         html.contains("request_id: requestId,\n          number,"),
         "expected select_knowledge_bridge_entry requests to carry the detail request id",
     );
+    let load_request_block = html
+        .split("function requestKnowledgeBridge")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
+                .next()
+        })
+        .expect("knowledge load request block");
+    let pr_compatibility_block = load_request_block
+        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n        }").next())
+        .expect("PR compatibility reset block");
     assert!(
-        html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
-        "expected new cache loads to invalidate older detail response ids",
+        load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
+            && load_request_block
+                .matches("state.detailRequestId = 0;")
+                .count()
+                == 1
+            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
+        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
@@ -2907,16 +3040,12 @@ fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_offers_improvement_inbox() {
+fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"data-preset="improvement""#),
-        "expected Add window modal to expose the Improvement Inbox preset",
-    );
-    assert!(
-        html.contains("<strong>Improvement Inbox</strong>"),
-        "expected Improvement Inbox to have a visible preset label",
+        !html.contains(r#"data-preset="improvement""#),
+        "the retired Improvement Inbox preset must not appear in the Add window modal",
     );
 }
 
@@ -2924,7 +3053,7 @@ fn embedded_web_add_window_modal_offers_improvement_inbox() {
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
     let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action\)\s*\{\s*send\(\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\}\);\s*\}"#,
+            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\};"#,
         )
         .expect("valid regex");
     let footer_close_control = regex::Regex::new(
@@ -3025,7 +3154,7 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     // delegate. A null tombstone must not clear an open-error modal
     // during reconnect.
     let wizard_state = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(!event\.wizard\?\.launch_materialization_pending\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_state_delegate = regex::Regex::new(
@@ -3038,16 +3167,16 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
-// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
-// global entry that drives the shared wizard renderer.
+// SPEC-3245 Stage E: the Intake-only command route is retired while the shared
+// Launch Wizard renderer and its generic controls remain available.
 #[test]
-fn embedded_web_intake_session_uses_shared_wizard_renderer() {
+fn embedded_web_has_no_legacy_intake_route_and_keeps_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"case "intake-session":"#)
-            && html.contains(r#"kind: "open_intake_session""#),
-        "expected Intake session to use a global command instead of a Branches window action",
+        !html.contains(r#"case "intake-session":"#)
+            && !html.contains(r#"kind: "open_intake_session""#),
+        "legacy Intake-only command and event routes must be absent from the embedded bundle",
     );
     assert!(
         !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
@@ -3241,7 +3370,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // receive() case arms are thin delegates into them. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(!event\.wizard\?\.launch_materialization_pending\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_event_delegate = regex::Regex::new(
@@ -3362,7 +3491,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         ".surface-knowledge",
         ".surface-mock",
         ".surface-profile",
-        ".surface-improvement",
     ];
 
     for (anchor, role) in [
@@ -3645,7 +3773,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Work, "work"),
         (WindowSurface::AgentKanban, "agent-kanban"),
         (WindowSurface::Console, "console"),
-        (WindowSurface::IssueMonitor, "issue-monitor"),
         (WindowSurface::Mock, "mock"),
     ];
 
@@ -3665,6 +3792,10 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
     assert!(
         js.contains("preset === \"branches\"") && js.contains("return \"work\";"),
         "expected JS `presetSurface()` to route branches preset to work surface",
+    );
+    assert!(
+        js.contains("preset === \"issue_monitor\"") && js.contains("return \"knowledge\";"),
+        "expected legacy issue_monitor preset to redirect to the Knowledge Issue surface",
     );
 }
 
@@ -3993,5 +4124,183 @@ fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
     assert!(
         !picker.contains("kind: \"continue_work\"") && !wizard.contains("kind: \"continue_work\""),
         "Resume surfaces must never synthesize the producing Continue work request",
+    );
+}
+
+#[test]
+fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
+    let knowledge = root_js_module_source("/knowledge-kanban-surface.js");
+    let resume = knowledge
+        .split("function resumeKnowledgeRelatedSession")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function renderKnowledgeRelatedSessionAction")
+                .next()
+        })
+        .expect("bounded Issue Related Work Resume producer");
+    assert!(
+        resume.contains("const operationId = createLaunchOperationId(\"resume\");"),
+        "the shipped Related Work producer must create one canonical Resume operation identity",
+    );
+    let pending_identity = regex::Regex::new(
+        r#"(?s)launchPending\.begin\(\s*knowledgeRelatedWorkPendingKey\(sessionId\),\s*"Resume",\s*operationId,?\s*\)"#,
+    )
+    .expect("pending identity regex");
+    assert!(
+        pending_identity.is_match(resume),
+        "the shipped pending entry must retain the producer operation identity",
+    );
+    let payload_identity = regex::Regex::new(
+        r#"(?s)send\(\{.*?kind:\s*"resume_workspace_agent",.*?operation_id:\s*operationId,.*?session_id:\s*sessionId,"#,
+    )
+    .expect("payload identity regex");
+    assert!(
+        payload_identity.is_match(resume),
+        "the shipped Resume payload must carry the same operation identity",
+    );
+
+    let app = app_js();
+    let pending_controller = app
+        .split("const launchPending = createLaunchPendingController({")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("const continueWorkDispatcher = createContinueWorkDispatcher({")
+                .next()
+        })
+        .expect("bounded launchPending onChange wiring");
+    let pending_on_change = js_braced_block_after(pending_controller, "onChange: () =>")
+        .expect("launchPending onChange block");
+    assert!(
+        pending_on_change.contains("renderKnowledgeBridge(")
+            || pending_on_change.contains("renderAllKnowledge"),
+        "the shipped pending listener must redraw Knowledge immediately after begin, settle, or timeout",
+    );
+
+    let error_case = app
+        .split("case \"workspace_resume_agent_error\":")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("case \"workspace_resume_agent_started\":")
+                .next()
+        })
+        .expect("bounded workspace Resume error case");
+    let picker = error_case
+        .find("workspaceResumePicker.handleError(event)")
+        .expect("picker error handler");
+    let exact_settle = regex::Regex::new(
+        r"const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*launchPending\.settleAck\(event\)",
+    )
+    .expect("exact settle regex")
+    .captures(error_case)
+    .expect("retained exact-settle result");
+    let settle = exact_settle
+        .get(0)
+        .expect("exact settle expression")
+        .start();
+    assert!(
+        picker < settle,
+        "the shipped picker handler must consume the local error before settlement rerenders it",
+    );
+    let settled_name = exact_settle.get(1).expect("exact settle binding").as_str();
+    let settled_guard = format!("if ({settled_name})");
+    let settled_feedback =
+        js_braced_block_after(error_case, &settled_guard).expect("exact-settle feedback block");
+    assert!(
+        settled_feedback.contains("alertsToasts.push({")
+            && settled_feedback.contains("level: \"error\"")
+            && (settled_feedback.contains("event?.message")
+                || settled_feedback.contains("event.message"))
+            && settled_feedback.contains("dismissible: true")
+            && settled_feedback.contains("timeoutMs: 0")
+            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh()"),
+        "only an exactly-settled shipped Resume error may show sticky feedback and schedule a cache-first Related Work refresh",
+    );
+    assert_eq!(
+        error_case.matches("launchPending.settleAck(event)").count(),
+        1,
+        "the shipped shared pending entry must settle exactly once",
+    );
+    assert_eq!(
+        error_case.matches("alertsToasts.push({").count(),
+        1,
+        "the shipped Resume error case must not show feedback outside the exact-settle guard",
+    );
+    assert_eq!(
+        error_case
+            .matches("scheduleKnowledgeRelatedWorkRefresh()")
+            .count(),
+        1,
+        "the shipped Resume error case must not refresh outside the exact-settle guard",
+    );
+    let related_refresh = knowledge
+        .split("function scheduleKnowledgeRelatedWorkRefresh")
+        .nth(1)
+        .and_then(|tail| tail.split("function applyLocalKnowledgeFilter").next())
+        .expect("bounded Related Work refresh scheduler");
+    assert!(
+        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)",)
+            .expect("cache-first refresh regex")
+            .is_match(related_refresh),
+        "the shipped Related Work refresh scheduler must stay cache-first",
+    );
+}
+
+#[test]
+fn embedded_web_retires_the_autonomous_notifications_log_region() {
+    // SPEC #3206 v2 FR-012 (Sc 6): the top-right floating "autonomous
+    // notifications" log region is replaced by the notification center (bell +
+    // unread badge + history drawer). Nothing of the retired surface may ship:
+    // no module registration, no import / mount / fan-out in app.js, no CSS.
+    // Precedent: SPEC-1939 Phase 13 (project-bar Index badge withdrawal).
+    let html = frontend_styles_bundle();
+    let js = app_js();
+    let module_graph: String = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.source)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/autonomous-notifications.js"),
+        "SPEC #3206 FR-012: autonomous-notifications.js must not be registered",
+    );
+    assert!(
+        !js.contains("autonomous-notifications")
+            && !js.contains("createAutonomousNotifications")
+            && !js.contains("autonomousNotifications"),
+        "SPEC #3206 FR-012: app.js must not import, mount or fan out to the retired log region",
+    );
+    assert!(
+        !module_graph.contains("createAutonomousNotifications"),
+        "SPEC #3206 FR-012: no embedded module may still define the retired region",
+    );
+    assert!(
+        !html.contains(".autonomous-notifications"),
+        "SPEC #3206 FR-012: retired region CSS must not ship",
+    );
+
+    // The replacement is wired: registered + imported, bell in the rail, and
+    // the autonomous fan-out records into the notification center history.
+    assert!(
+        root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/notification-center.js"),
+        "SPEC #3206 v2: notification-center.js must be registered",
+    );
+    assert!(
+        js.contains("from \"/notification-center.js\"")
+            && js.contains("notificationCenter.mount(document.body)"),
+        "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
+    );
+    assert!(
+        html.contains("id=\"op-notifications-button\"")
+            && html.contains("data-cmd=\"toggle-notifications\""),
+        "SPEC #3206 FR-009: the rail must carry the notification bell",
+    );
+    assert!(
+        js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),
+        "SPEC #3206 FR-011: issue_monitor_toast must record into the notification center",
     );
 }
