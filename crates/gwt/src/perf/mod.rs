@@ -1,5 +1,11 @@
+pub mod budget;
+pub mod global;
 mod record;
+pub mod route;
+pub mod self_budget;
+pub mod smoothing;
 mod store;
+pub mod summary;
 
 use std::io;
 
@@ -11,7 +17,22 @@ pub use record::{sanitize_ui_action_field, sanitize_ui_trace_entry};
 #[doc(hidden)]
 pub use record::{PerfRecord, PerfStream, PerfUnit, PerfViolationDetails};
 
+pub use budget::PerfBudgets;
+pub use global::{
+    install, install_from_settings, is_installed, record_operation, record_route, RouteTimer,
+};
+pub use route::PerfRoute;
+
 use store::PerfStore;
+
+/// Perf-log `target` prefix for gwtd operation durations.
+pub const OPERATION_TARGET_PREFIX: &str = "gwtd:";
+
+/// `role` recorded for a read-only gwtd operation.
+pub const OPERATION_ROLE_READ: &str = "read";
+
+/// `role` recorded for a mutating gwtd operation.
+pub const OPERATION_ROLE_MUTATION: &str = "mutation";
 
 /// Kill-switch-aware entry point for all persisted performance samples.
 #[doc(hidden)]

@@ -48,6 +48,12 @@ fn main() -> ExitCode {
         _ => {}
     }
 
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: install the always-on performance
+    // collector before any operation runs, so `gwtd` operation durations reach
+    // ~/.gwt/logs/perf/. Fail-open: an unwritable log directory or a disabled
+    // kill switch leaves every later `record_*` call a no-op.
+    gwt::perf::install_from_settings();
+
     let code = match argv.get(1).map(String::as_str) {
         None => run_json_envelope_cli(&argv),
         Some(_) if is_allowed_argv_exception(&argv) => {
@@ -91,6 +97,7 @@ fn print_help() {
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
     println!("  errors      List host-wide persistent error ledger rows");
+    println!("  perf        Summarize the always-on performance log (SPEC-3700)");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -118,8 +125,37 @@ fn family_help(family: &str) -> Option<String> {
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
         "errors" => Some(format_errors_help()),
+        "perf" => Some(format_perf_help()),
         _ => None,
     }
+}
+
+fn format_perf_help() -> String {
+    [
+        "perf.* — Always-on performance log aggregation via JSON envelope (SPEC-3700 FR-007).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"perf.summary\",\"params\":{\"since\":\"2026-09-08T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  perf.summary                            p50 / p95 / worst per stream and target",
+        "  perf.violations                         Sustained budget violations of the period",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 lower bound; omitted reads all",
+        "  stream                                  Optional ui | op | resource filter",
+        "  target                                  Optional substring the target must contain",
+        "",
+        "Notes:",
+        "  - Perf logs live at ~/.gwt/logs/perf/perf-YYYY-MM-DD.jsonl.",
+        "  - `route:*` targets are user-facing paths; `gwtd:*` targets are operations.",
+        "  - `missing_routes` names instrumented routes with no sample in the period.",
+        "  - Both operations are read-only and never perturb what they measure.",
+        "",
+    ]
+    .join("\n")
 }
 
 fn format_workspace_help() -> String {

@@ -5,10 +5,10 @@ use serde_json::{Map, Value};
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
-    memory::MemoryAddCommand, workflow::WorkflowBypassMode, ActionsCommand, CliCommand, CliEnv,
-    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
-    IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand, SkillStateAction,
-    WorkflowCommand, WorkspaceCommand,
+    memory::MemoryAddCommand, perf::PerfCommand, workflow::WorkflowBypassMode, ActionsCommand,
+    CliCommand, CliEnv, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand,
+    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
+    SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
 use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
@@ -58,7 +58,15 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     };
     let operation = parsed.operation.clone();
     let declared_block = parsed.declared_block;
-    match super::run_collect(env, parsed.command) {
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: every JSON-envelope operation
+    // funnels through here, so one timer covers the whole `op` stream. The
+    // collector is fail-open and is only installed by the `gwtd` binary, so
+    // this is a no-op in tests and in the argv path.
+    let read_only = super::hook::workflow_policy::is_read_only_json_envelope_operation(&operation);
+    let operation_started = std::time::Instant::now();
+    let outcome = super::run_collect(env, parsed.command);
+    crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
+    match outcome {
         Ok((code, output)) => {
             let mut payload = serde_json::json!({
                 "ok": code == 0,
@@ -824,6 +832,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
+        "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
@@ -1167,6 +1177,34 @@ fn errors_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
     }
     Ok(CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList {
         since,
+    }))
+}
+
+/// SPEC #3700 FR-007: `perf.summary` and `perf.violations` share one filter
+/// shape, so they share one parser keyed by the operation name.
+fn perf_read(params: &Map<String, Value>, operation: &str) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["since", "stream", "target"], operation)?;
+    let since = optional_string(params, "since")?;
+    if let Some(raw) = since.as_deref() {
+        super::perf::parse_since(raw)?;
+    }
+    let stream = optional_string(params, "stream")?
+        .map(|raw| super::perf::parse_stream(&raw))
+        .transpose()?;
+    let target = optional_string(params, "target")?;
+
+    Ok(CliCommand::Perf(if operation == "perf.violations" {
+        PerfCommand::Violations {
+            since,
+            stream,
+            target,
+        }
+    } else {
+        PerfCommand::Summary {
+            since,
+            stream,
+            target,
+        }
     }))
 }
 
@@ -1617,7 +1655,7 @@ fn verification_quarantine_requests(
 mod tests {
     use super::{
         parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
+        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand,
         SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
@@ -4060,6 +4098,53 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` share one filter.
+    #[test]
+    fn perf_operations_parse_their_shared_filter() {
+        assert!(matches!(
+            ok("perf.summary", json!({})),
+            CliCommand::Perf(PerfCommand::Summary {
+                since: None,
+                stream: None,
+                target: None
+            })
+        ));
+        match ok(
+            "perf.violations",
+            json!({"since": "2026-09-08T00:00:00Z", "stream": "op", "target": "issue."}),
+        ) {
+            CliCommand::Perf(PerfCommand::Violations {
+                since,
+                stream,
+                target,
+            }) => {
+                assert_eq!(since.as_deref(), Some("2026-09-08T00:00:00Z"));
+                assert_eq!(stream.as_deref(), Some("op"));
+                assert_eq!(target.as_deref(), Some("issue."));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perf_operations_reject_malformed_filters() {
+        match err("perf.summary", json!({"since": "yesterday"})) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "since");
+                assert!(reason.contains("RFC3339"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("perf.summary", json!({"stream": "frontend"})) {
+            CliParseError::InvalidValue { flag, .. } => assert_eq!(flag, "stream"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(matches!(
+            err("perf.violations", json!({"limit": 5})),
+            CliParseError::InvalidJson(_)
+        ));
     }
 
     #[test]

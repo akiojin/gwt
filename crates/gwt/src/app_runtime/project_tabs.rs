@@ -20,6 +20,8 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Mutex,
+    time::Instant,
 };
 
 use super::startup::prepare_open_project_window_restores;
@@ -31,6 +33,38 @@ use super::{
     ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime, UserEvent, Uuid,
     WindowCanvasState,
 };
+
+/// Issue #4145 AC-1: opening a project spans a synchronous reserve, a
+/// blocking-pool prepare and an event-loop commit, so the route's start instant
+/// is parked here keyed by navigation request id. Threading it through
+/// [`ProjectNavigationRequest`] is not an option: that value is cloned into the
+/// worker and compared for identity, and an `Instant` is neither meaningful to
+/// compare nor to send across the boundary twice.
+///
+/// One navigation is in flight at a time (`pending_project_navigation` is a
+/// single slot), so a single slot here matches the domain exactly.
+static PROJECT_OPEN_STARTED: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
+
+fn mark_project_open_started(request_id: u64) {
+    if let Ok(mut slot) = PROJECT_OPEN_STARTED.lock() {
+        *slot = Some((request_id, Instant::now()));
+    }
+}
+
+fn record_project_open_route(request_id: u64) {
+    let Ok(mut slot) = PROJECT_OPEN_STARTED.lock() else {
+        return;
+    };
+    let Some((pending_id, started)) = *slot else {
+        return;
+    };
+    if pending_id != request_id {
+        return;
+    }
+    *slot = None;
+    drop(slot);
+    gwt::perf::record_route(gwt::perf::PerfRoute::ProjectOpen, started.elapsed());
+}
 
 pub(crate) fn initial_project_tab_incarnations(
     tabs: &[ProjectTabRuntime],
@@ -409,6 +443,7 @@ impl AppRuntime {
         source: ProjectNavigationSource,
     ) -> Vec<OutboundEvent> {
         let request = self.reserve_project_navigation(source, None);
+        mark_project_open_started(request.id);
         let request_for_worker = request.clone();
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -487,7 +522,9 @@ impl AppRuntime {
                     return Vec::new();
                 }
                 self.pending_project_navigation = None;
-                self.commit_prepared_project_open(open, prepared.request.source)
+                let events = self.commit_prepared_project_open(open, prepared.request.source);
+                record_project_open_route(prepared.request.id);
+                events
             }
             Ok(ProjectNavigationPayload::Switch(switch)) => {
                 let ProjectNavigationSource::Switch { tab_id } = &prepared.request.source else {
@@ -733,6 +770,9 @@ impl AppRuntime {
     }
 
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        // Issue #4145 AC-1: the whole user-visible switch runs synchronously on
+        // the GUI event loop here, so this guard is the switch route.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::ProjectSwitch);
         let Some(target_incarnation) = self.project_tab_incarnations.get(tab_id).cloned() else {
             return Vec::new();
         };
