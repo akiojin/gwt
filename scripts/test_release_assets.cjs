@@ -336,9 +336,10 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
       defaultParallelJob.indexOf("1..3 | ForEach-Object"),
     "the --no-run build must precede the timed three-run loop"
   );
-  // `--bin gwt` and `-p gwt-core` are excluded: each fails Windows default
-  // parallelism for its own reason, and including either would fail every PR.
-  // Assert the loop's cargo invocations positively — matching comment prose
+  // `-p gwt-core` is excluded: it fails Windows default parallelism on its
+  // own defects, and including it would fail every PR. `--bin gwt` is back
+  // since #4014 fixed the close-finalizer deadlock that stalled it. Assert
+  // the loop's cargo invocations positively — matching comment prose
   // negatively would pass or fail on how the exclusions happen to be worded.
   const loopBody = defaultParallelJob.slice(
     defaultParallelJob.indexOf("1..3 | ForEach-Object")
@@ -349,16 +350,21 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
     .filter((line) => line.startsWith("cargo "));
   assert.deepStrictEqual(
     loopCommands,
-    ["cargo test -p gwt --lib --all-features"],
+    [
+      "cargo test -p gwt --lib --all-features",
+      "cargo test -p gwt --bin gwt --all-features",
+    ],
     "the timed loop must run exactly the targets proven green under Windows default parallelism"
+  );
+  // The `--bin gwt` tests must be compiled outside the timed loop as well
+  // (#4014), or its first iteration pays for that build.
+  assert.match(
+    defaultParallelJob,
+    /cargo test -p gwt --lib --bin gwt --all-features --no-run/,
+    "the --no-run build must cover the --bin gwt target the loop runs"
   );
   // Keep each exclusion tied to its reason so it cannot quietly become
   // permanent once the underlying defect is fixed.
-  assert.match(
-    defaultParallelJob,
-    /deadlocks[\s\S]*?#4014/,
-    "the --bin gwt exclusion must carry its reason and its follow-up owner"
-  );
   assert.match(
     defaultParallelJob,
     /`-p gwt-core` is absent[\s\S]*?await their own owner/,

@@ -26471,6 +26471,80 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     );
 }
 
+/// Issue #4014: closing a window whose PTY child is still alive must finish
+/// its close finalizer. The finalizer joins the reader thread, and on Windows
+/// the ConPTY output pipe never signals EOF while the pseudoconsole is open,
+/// so a finalizer that keeps the master alive while waiting for the reader
+/// hangs - inside `env_test_lock`, which then stalls every other test that
+/// needs the lock.
+#[test]
+fn app_runtime_close_finalizer_completes_while_a_live_pty_reader_is_attached() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+    runtime
+        .spawn_process_window_with_console_kind(
+            &window_id,
+            canvas_bounds(),
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: test_pane_cwd(),
+                pending_tool_runtime_migration: None,
+                resource_policy: None,
+            },
+            None,
+        )
+        .expect("spawn a live pane with reader and status threads");
+
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(runtime.close_window_outcome(&window_id).closed);
+    let finalizer = finalizers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued close finalizer");
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        finalizer();
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "close finalizer must complete once the child is reaped; it must not wait on a PTY reader whose EOF depends on the pseudoconsole the finalizer itself keeps open"
+    );
+}
+
 #[test]
 fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     let _env_lock = env_test_lock()

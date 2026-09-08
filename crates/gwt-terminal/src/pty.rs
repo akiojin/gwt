@@ -255,7 +255,9 @@ struct PtyInputState {
 }
 
 pub struct PtyHandle {
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// `None` once [`Self::close_master`] ran: the pseudoconsole / master
+    /// side is gone and only the child handle remains.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     input_state: Mutex<PtyInputState>,
@@ -509,7 +511,7 @@ impl PtyHandle {
         let (child, process_group) = child.into_parts();
 
         Ok(Self {
-            master: Arc::new(Mutex::new(pair.master)),
+            master: Arc::new(Mutex::new(Some(pair.master))),
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
             input_state: Mutex::new(PtyInputState::default()),
@@ -695,6 +697,11 @@ impl PtyHandle {
         let master = self.master.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
+        let Some(master) = master.as_ref() else {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY master is closed".to_string(),
+            });
+        };
         let lock_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let resize_started = Instant::now();
         let outcome = master.resize(PtySize {
@@ -839,11 +846,36 @@ impl PtyHandle {
         let master = self.master.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
+        let Some(master) = master.as_ref() else {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY master is closed".to_string(),
+            });
+        };
         master
             .try_clone_reader()
             .map_err(|e| TerminalError::PtyIoError {
                 details: e.to_string(),
             })
+    }
+
+    /// Close the PTY master so a reader blocked in `read` observes EOF.
+    ///
+    /// Issue #4014: on Unix the child's exit alone ends the reader, but on
+    /// Windows the ConPTY output pipe stays open until the pseudoconsole
+    /// itself is closed. The reader thread pins the pane (and this handle)
+    /// alive, so a teardown that keeps the handle and waits for the reader
+    /// can never finish there. Dropping the master closes the pseudoconsole;
+    /// call this after the child is killed and reaped. Later `resize` /
+    /// `reader` calls fail with `PtyIoError`.
+    pub fn close_master(&self) {
+        let master = self
+            .master
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Drop outside the lock: closing a pseudoconsole waits for conhost to
+        // flush, and nothing else should block on `master` meanwhile.
+        drop(master);
     }
 
     /// Try to wait for the child process without blocking.
@@ -1762,6 +1794,48 @@ mod tests {
         assert!(
             exited,
             "SIGHUP-resistant child must still be reaped after non-blocking kill"
+        );
+    }
+
+    /// Issue #4014: on Windows the ConPTY output pipe stays open after the
+    /// child exits, so a reader only observes EOF once the master is closed.
+    /// Pane teardown relies on that to join the reader thread.
+    #[test]
+    fn close_master_ends_a_blocked_reader_after_the_child_is_reaped() {
+        use std::io::Read as _;
+
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
+        let mut reader = handle.reader().expect("reader");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        handle.kill().expect("kill should succeed");
+        let mut reaped = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(reaped, "killed child must be reaped");
+        handle.close_master();
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "reader must observe EOF once the master is closed"
+        );
+        assert!(
+            handle.reader().is_err(),
+            "a closed master hands out no further readers"
         );
     }
 
