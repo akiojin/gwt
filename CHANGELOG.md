@@ -1,6 +1,52 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.93.0] - 2026-09-08
+
+### Bug Fixes
+
+- **gui:** Windowize した agent を他 Issue の canvas face にしない
+- **issue-monitor:** Launch_now が backoff window を返し verify.run が GWT_ALLOW_REAL_GH を子に渡さない
+- **github:** HttpIssueClient の budget 接続を本番コンストラクタの opt-in にしテスト fixture を hermetic に保つ
+- **execution:** Receipt generation gate に担当が回復できる経路を追加する
+- **agent:** Bunx cache fast path がネイティブ bin を bun に渡す問題を修正 (#3857)
+- **issue-monitor:** レビュー dispatch に admission を入れ同一 PR の重複起動と max_active 超過を防ぐ
+- **issue-monitor:** Wait 宣言の publish をベストエフォート化し宣言を durable に記録する
+- **verify:** Windows で verify.lease.hold が親 stdio を継承しないようにする
+
+### Features
+
+- **gui:** Issue ウィンドウにリスト⇄分割表示と Issue 窓 chrome を実装する
+- **issue-monitor:** Merged PR reconciliation を REST 差分同期に置き換え GraphQL 全件取得を廃止する
+- **issue-monitor:** Issue list と open PR inventory を REST のページ読みへ移し GraphQL 予算 0 でも scan を完走させる
+- **github-budget:** Refresh:true の予算尊重・[github_budget] settings・GraphQL ポイント会計を追加する
+- **issue-monitor:** Completion probe の linked PR 読みを scan ごとの bulk GraphQL query に置き換える
+- **github-budget:** Reqwest 経路と agent の gh を単一台帳に収束し変化ゼロの PM 周回を park する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4082 の Work event shard を記録する
+- **merge:** Develop 取り込み後の PrCommand::List literal に force_reason を補う
+- **merge:** PrCommand::List literal の force_reason 重複を除去する
+- Clippy cmp_owned を native entrypoint テストで解消 (#3857)
+- **work:** Record issue 3857 work events
+- **ci:** Rerun after flaky lease admission test (#3937)
+- **work:** Issue #4091 の Work event shard を追跡に追加
+- **work:** Issue #4091 の終端 Work update で生成された event shard を追跡に追加
+- **work:** #4117 の Work event shard を追跡する
+- **work:** #4011 の Work event receipt を記録する
+- Rustfmt を適用する
+- Runtime が生成した Work event shard を取り込む
+- 終端の Work update event shard を取り込む
+- **work:** 終端 Work event shard を取り込み直すため一旦外す
+- **work:** 終端 Work update の event shard を取り込む
+- **work:** Issue #4105 の Work 完了イベントを記録
+
+### Testing
+
+- **issue-monitor:** GraphQL window 中も merge reconciliation が REST で完走する期待値に更新する
+- **app-runtime:** Fake gh の merge 応答モードを REST closed-pulls 同期に対応させる
+
 ## [9.92.0] - 2026-09-07
 
 ### Bug Fixes

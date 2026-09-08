@@ -2500,6 +2500,7 @@ mod tests {
             tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         }
     }

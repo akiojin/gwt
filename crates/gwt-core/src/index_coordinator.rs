@@ -234,6 +234,31 @@ pub struct LeaseEvent {
     pub reason: Option<String>,
 }
 
+/// Why a heavy-lease holder handed the host-wide lease back before its own
+/// job finished (Issue #4140).
+///
+/// A long job that keeps the lease for its whole run starves every other
+/// claimant, and heavy verification is the claimant that cannot route around
+/// it: an agent that cannot verify cannot open a PR. Yielding trades the
+/// exclusion guarantee for liveness, so it is a deliberate decision the
+/// caller records rather than a silent release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeavyYieldReason {
+    /// A claimant with strictly higher priority queued behind this holder.
+    Preempted,
+    /// The lease outlived its TTL while the job was still running.
+    CapReached,
+}
+
+impl HeavyYieldReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeavyYieldReason::Preempted => "preempted",
+            HeavyYieldReason::CapReached => "cap-reached",
+        }
+    }
+}
+
 /// Read-only view of the host-wide heavy lease (SPEC #3576 US-1). The kernel
 /// lock decides `held`; the ticket only enriches a lock that is genuinely
 /// taken, so crash residue can never be mistaken for a live holder.
@@ -775,6 +800,47 @@ impl HeavyLease {
         Ok(())
     }
 
+    /// Hold this lease for as long as `job_running` stays true, handing it
+    /// back early when the TTL lapses or a strictly higher-priority claimant
+    /// queues behind it (Issue #4140).
+    ///
+    /// `acquire_heavy_inner`'s priority check only runs *before* the lock is
+    /// taken, so a holder that parks on a long child process is invisible to
+    /// it — that is how a background index job kept heavy verification out for
+    /// half an hour. This is the holding-side half of the same rule, and it
+    /// mirrors the cooperative `BuildStep::Yielded` loop that in-process index
+    /// builds already use.
+    ///
+    /// The lease is always released by the time this returns: `None` means the
+    /// job finished first, `Some(reason)` means the job is still running
+    /// without the lease. Nothing here interrupts the job — AC-Y3 (finish the
+    /// command, then release) stays true, and yielding only gives up the
+    /// exclusion, not the work.
+    pub fn hold_while(
+        self,
+        poll: Duration,
+        job_running: impl Fn() -> bool,
+    ) -> Option<HeavyYieldReason> {
+        let pending_dir = self.root.join("heavy.pending");
+        let priority = self.ticket.priority;
+        loop {
+            if !job_running() {
+                return None;
+            }
+            if self.is_expired() {
+                return Some(HeavyYieldReason::CapReached);
+            }
+            if scan_live_pending(&pending_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .any(|pending| pending < priority)
+            {
+                return Some(HeavyYieldReason::Preempted);
+            }
+            std::thread::sleep(poll);
+        }
+    }
+
     /// Release the lease explicitly, recording whether it ran past its TTL.
     /// Dropping does the same thing; this form surfaces I/O errors.
     pub fn release(mut self) -> Result<(), CoordinatorError> {
@@ -975,8 +1041,12 @@ fn append_lease_event(root: &Path, event: &LeaseEvent) {
         return;
     };
     line.push(b'\n');
+    // `read(true)` is not for reading: Windows `LockFileEx` refuses a handle
+    // that only carries `FILE_APPEND_DATA` (ERROR_ACCESS_DENIED), so an
+    // append-only ledger never recorded a single line there (Issue #4105).
     let Ok(file) = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(root.join(LEASE_EVENT_LOG_NAME))
     else {

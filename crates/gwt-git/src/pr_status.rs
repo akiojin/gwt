@@ -5,7 +5,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
-use gwt_core::github_quota::GitHubQuota;
+use gwt_core::github_quota::{GitHubQuota, RATE_LIMITED_ERROR_CODE};
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -77,17 +77,22 @@ arrange a rerun → regression: arrange a fresh launch → neither possible: esc
 
 /// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6) and the
 /// budget behaviour of the read itself (Issue #3891).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInventoryOptions {
     /// Hours without an `updated_at` bump before a row is `stale`.
     pub stale_after_hours: i64,
     /// Unchanged consecutive observations before a row is `escalation_due`.
     pub escalate_after_cycles: u32,
-    /// Bypass the TTL cache and the budget throttle: the caller needs the live
-    /// state for a decision. Default `false` (periodic, non-essential read).
+    /// Bypass the TTL cache: the caller needs the live state for a decision.
+    /// Default `false` (periodic, non-essential read). SPEC #4093 FR-008: a
+    /// refresh still honors the GitHub budget (refusal window, reserve, burst)
+    /// and answers from the stale cache when throttled.
     pub refresh: bool,
     /// Heavy per-PR fields to hydrate on top of the light list query.
     pub include: PrInventoryInclude,
+    /// One-step override of the reserve / burst throttle, with the reason the
+    /// decision cannot wait. Never bypasses an open refusal window.
+    pub force_reason: Option<String>,
 }
 
 impl Default for PrInventoryOptions {
@@ -97,6 +102,7 @@ impl Default for PrInventoryOptions {
             escalate_after_cycles: PR_ESCALATE_AFTER_UNCHANGED_CYCLES,
             refresh: false,
             include: PrInventoryInclude::default(),
+            force_reason: None,
         }
     }
 }
@@ -1006,24 +1012,30 @@ where
                 });
             }
         }
-        if let Some(reason) = periodic_read_throttle(repo_path, ledger, now, &mut run_gh) {
-            if cache.fetched_at.is_some() {
-                return Ok(PrInventoryRead {
-                    items: cache.items(now, options)?,
-                    source: "stale-cache",
-                    fetched_at: cache.fetched_at,
-                    cache_age_secs: cache_age,
-                    throttled: Some(reason),
-                    github_calls: 0,
-                    unlanded_branches: Vec::new(),
-                });
-            }
-            return Err(GwtError::Git(format!(
-                "pr inventory unobservable: the GitHub budget throttled this read and no \
-                 cached snapshot exists ({reason}); pass refresh:true only if the decision \
-                 at hand needs the live inventory"
-            )));
+    }
+    // SPEC #4093 FR-008 / AC-10: an explicit refresh skips the TTL cache but
+    // still honors the budget. An open refusal window is never bypassed; the
+    // reserve / burst guards yield to a one-step override that names its reason.
+    let throttle = periodic_read_throttle(repo_path, ledger, now, &mut run_gh).filter(|reason| {
+        options.force_reason.is_none() || reason.starts_with(RATE_LIMITED_ERROR_CODE)
+    });
+    if let Some(reason) = throttle {
+        if cache.fetched_at.is_some() {
+            return Ok(PrInventoryRead {
+                items: cache.items(now, options)?,
+                source: "stale-cache",
+                fetched_at: cache.fetched_at,
+                cache_age_secs: cache_age,
+                throttled: Some(reason),
+                github_calls: 0,
+                unlanded_branches: Vec::new(),
+            });
         }
+        return Err(GwtError::Git(format!(
+            "pr inventory unobservable: the GitHub budget throttled this read and no \
+             cached snapshot exists ({reason}); a refresh honors the reserve too — pass \
+             force_reason:<why> to override it outside a refusal window"
+        )));
     }
 
     let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
@@ -1095,7 +1107,7 @@ fn periodic_read_throttle<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let policy = ThrottlePolicy::default();
+    let policy = ThrottlePolicy::current();
     let mut snapshot = ledger.snapshot(now);
     if github_budget::probe_is_stale(&snapshot, &policy) {
         if let Ok(output) = run_gh(repo_path, &["api", "rate_limit"]) {
@@ -1481,12 +1493,12 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
-/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
-/// call. A transient failure returns an `Err` (the caller keeps work as
-/// launched) rather than an empty set, so closing the active slot only happens
-/// on a positive merge signal.
+/// Branches (PR head refs) whose PR has merged, from the differential sync
+/// behind [`fetch_merged_pr_deliveries`]. A transient failure returns an `Err`
+/// (the caller keeps work as launched) rather than an empty set, so closing
+/// the active slot only happens on a positive merge signal.
 pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
-    fetch_merged_pr_deliveries_with(repo_path, run_gh_command).map(|merged| merged.branches)
+    fetch_merged_pr_deliveries(repo_path).map(|merged| merged.branches)
 }
 
 /// The base branch whose merges deliver a work branch (Issue #3917). `main`
@@ -1513,37 +1525,54 @@ pub struct MergedPrDeliveries {
     pub deliveries: std::collections::BTreeMap<String, MergedPrDelivery>,
 }
 
-/// Fetch merged PRs with their delivery identity (`number`, `mergeCommit`,
-/// `mergedAt`, `baseRefName`) in the same single query the branch-only
-/// reconciliation already pays for.
+/// Merged PRs with their delivery identity (`number`, merge SHA, `mergedAt`,
+/// base), accumulated by the differential REST sync of
+/// [`crate::merged_pr_sync`] (SPEC #4093 FR-003). One scan costs a bounded
+/// number of REST requests and no GraphQL, whatever the merged-PR count.
 pub fn fetch_merged_pr_deliveries(repo_path: &Path) -> Result<MergedPrDeliveries> {
-    fetch_merged_pr_deliveries_with(repo_path, run_gh_command)
+    crate::merged_pr_sync::sync_merged_pr_deliveries(repo_path)
 }
 
-fn fetch_merged_pr_deliveries_with<F>(repo_path: &Path, mut run_gh: F) -> Result<MergedPrDeliveries>
-where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
-{
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--json",
-            "headRefName,state,number,mergeCommit,mergedAt,baseRefName",
-            "--state",
-            "merged",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list merged: {}",
-            output.stderr.trim()
-        )));
+/// One merged head branch as a delivery source: the branch plus, when the
+/// row carried a PR number, its delivery identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedPrRow {
+    pub(crate) head_ref: String,
+    pub(crate) delivery: Option<MergedPrDelivery>,
+}
+
+impl MergedPrDeliveries {
+    /// Fold merged rows into branches plus the latest `develop` delivery per
+    /// branch. Rows without a PR number still count as merged branches but
+    /// cannot be settled.
+    pub(crate) fn from_rows(rows: impl IntoIterator<Item = MergedPrRow>) -> Self {
+        let mut merged = Self::default();
+        for row in rows {
+            merged.branches.insert(row.head_ref.clone());
+            let Some(delivery) = row.delivery else {
+                continue;
+            };
+            // Issue #3917: only a merge into the integration branch delivers the
+            // work. A later merge of the same head branch into `main` (release) or
+            // any other base must not become the branch's settlement delivery.
+            if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
+                continue;
+            }
+            let newer = match merged.deliveries.get(&row.head_ref) {
+                None => true,
+                Some(current) => match (&delivery.merged_at, &current.merged_at) {
+                    (Some(candidate), Some(existing)) if candidate != existing => {
+                        candidate > existing
+                    }
+                    _ => delivery.number > current.number,
+                },
+            };
+            if newer {
+                merged.deliveries.insert(row.head_ref, delivery);
+            }
+        }
+        merged
     }
-    parse_merged_pr_deliveries(&output.stdout)
 }
 
 /// Parse `gh pr list --json headRefName,state,number,mergeCommit,mergedAt,baseRefName`
@@ -1552,65 +1581,37 @@ where
 pub fn parse_merged_pr_deliveries(json: &str) -> Result<MergedPrDeliveries> {
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
-    let mut merged = MergedPrDeliveries::default();
-    for value in &arr {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(String::from)
+    };
+    let rows = arr.iter().filter_map(|value| {
         let is_merged = value
             .get("state")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
         if !is_merged {
-            continue;
+            return None;
         }
-        let Some(branch) = value
-            .get("headRefName")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        merged.branches.insert(branch.to_string());
-        let Some(number) = value.get("number").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(String::from)
-        };
-        let delivery = MergedPrDelivery {
-            number,
-            merge_sha: value
-                .get("mergeCommit")
-                .and_then(|commit| commit.get("oid"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|sha| !sha.is_empty())
-                .map(String::from),
-            base_ref: text("baseRefName"),
-            merged_at: text("mergedAt"),
-        };
-        // Issue #3917: only a merge into the integration branch delivers the
-        // work. A later merge of the same head branch into `main` (release) or
-        // any other base must not become the branch's settlement delivery.
-        if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
-            continue;
-        }
-        let newer = match merged.deliveries.get(branch) {
-            None => true,
-            Some(current) => match (&delivery.merged_at, &current.merged_at) {
-                (Some(candidate), Some(existing)) if candidate != existing => candidate > existing,
-                _ => delivery.number > current.number,
-            },
-        };
-        if newer {
-            merged.deliveries.insert(branch.to_string(), delivery);
-        }
-    }
-    Ok(merged)
+        let head_ref = text(value, "headRefName")?;
+        let delivery = value
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .map(|number| MergedPrDelivery {
+                number,
+                merge_sha: value
+                    .get("mergeCommit")
+                    .and_then(|commit| text(commit, "oid")),
+                base_ref: text(value, "baseRefName"),
+                merged_at: text(value, "mergedAt"),
+            });
+        Some(MergedPrRow { head_ref, delivery })
+    });
+    Ok(MergedPrDeliveries::from_rows(rows))
 }
 
 /// Read one PR body for delegation evidence (Issue #3917 AC-2).
@@ -2077,40 +2078,38 @@ fn try_fetch_open_pr_numbers_by_branch_with<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--json",
-            "number,headRefName",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list open inventory: {}",
-            output.stderr.trim()
-        )));
-    }
-    parse_open_pr_numbers_by_branch(&output.stdout)
+    // SPEC #4093 FR-002: the inventory is a paged REST read (`core` budget,
+    // one request per 100 rows), never `gh pr list` (GraphQL).
+    let pages = crate::gh_rest::read_pages_with("repos/{owner}/{repo}/pulls?state=open", |path| {
+        let output = run_gh(repo_path, &["api", path]).map_err(|error| error.to_string())?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            Err(output.stderr.trim().to_string())
+        }
+    })
+    .map_err(|error| GwtError::Git(format!("gh api pulls open inventory: {error}")))?;
+    Ok(open_pr_numbers_by_branch(&pages.rows))
 }
 
-/// Parse `gh pr list --json number,headRefName` into `branch -> open PR
-/// number`. Rows without a head ref are dropped; the highest number per branch
-/// wins.
+/// Parse an open-PR list (REST `head.ref` / `number`, or the GraphQL
+/// `headRefName` spelling) into `branch -> open PR number`. Rows without a
+/// head ref are dropped; the highest number per branch wins.
 pub fn parse_open_pr_numbers_by_branch(
     json: &str,
 ) -> Result<std::collections::HashMap<String, u64>> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json)
         .map_err(|error| GwtError::Other(format!("gh pr list open inventory JSON: {error}")))?;
+    Ok(open_pr_numbers_by_branch(&arr))
+}
+
+fn open_pr_numbers_by_branch(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
     let mut index = std::collections::HashMap::new();
-    for value in &arr {
+    for value in rows {
         let Some(branch) = value
-            .get("headRefName")
+            .get("head")
+            .and_then(|head| head.get("ref"))
+            .or_else(|| value.get("headRefName"))
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -2125,7 +2124,7 @@ pub fn parse_open_pr_numbers_by_branch(
             *best = number;
         }
     }
-    Ok(index)
+    index
 }
 
 #[cfg(test)]
@@ -2607,9 +2606,10 @@ where
 mod tests {
     use super::*;
 
-    /// Issue #3963 AC-2: the scan reads every open PR in ONE `gh pr list` call
+    /// Issue #3963 AC-2: the scan reads every open PR in one inventory read
     /// and resolves each candidate branch from that index, so the number of
-    /// GitHub calls no longer grows with the queue.
+    /// GitHub calls no longer grows with the queue. SPEC #4093 AC-3: that read
+    /// is the paged REST endpoint, never `gh pr list` (GraphQL).
     #[test]
     fn open_pr_numbers_by_branch_are_read_in_one_call_and_keep_the_highest_number() {
         let mut calls: Vec<Vec<String>> = Vec::new();
@@ -2617,7 +2617,7 @@ mod tests {
             calls.push(args.iter().map(|arg| arg.to_string()).collect());
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"[{"number":7,"headRefName":"work/issue-43"},{"number":9,"headRefName":"work/issue-43"},{"number":8,"headRefName":"work/issue-44"},{"number":10,"headRefName":""}]"#.to_string(),
+                stdout: r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#.to_string(),
                 stderr: String::new(),
             })
         })
@@ -2627,14 +2627,8 @@ mod tests {
         assert_eq!(
             calls[0],
             [
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "number,headRefName",
-                "--limit",
-                "999"
+                "api",
+                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"
             ]
         );
         assert_eq!(
@@ -2805,39 +2799,6 @@ mod tests {
             parsed.branches.contains("work/issue-50") && parsed.branches.contains("work/issue-51"),
             "branch-only reconciliation keeps every merged head branch"
         );
-    }
-
-    #[test]
-    fn fetch_merged_pr_deliveries_requests_delivery_fields() {
-        let mut seen = Vec::new();
-        let parsed = fetch_merged_pr_deliveries_with(Path::new("/repo"), |_, args| {
-            seen.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-            Ok(GhCliOutput {
-                success: true,
-                stdout: r#"[{"headRefName":"work/issue-1","state":"MERGED","number":3,"mergeCommit":{"oid":"c0ffee"},"baseRefName":"develop"}]"#.to_string(),
-                stderr: String::new(),
-            })
-        })
-        .unwrap();
-        assert_eq!(seen.len(), 1);
-        let args = &seen[0];
-        assert_eq!(&args[..2], &["pr", "list"]);
-        let fields = args[args.iter().position(|a| a == "--json").unwrap() + 1].clone();
-        for field in [
-            "headRefName",
-            "state",
-            "number",
-            "mergeCommit",
-            "mergedAt",
-            "baseRefName",
-        ] {
-            assert!(
-                fields.split(',').any(|f| f == field),
-                "missing {field} in {fields}"
-            );
-        }
-        assert!(args.iter().any(|a| a == "merged"));
-        assert_eq!(parsed.deliveries["work/issue-1"].number, 3);
     }
 
     #[test]
@@ -4783,26 +4744,78 @@ mod tests {
         assert_eq!(gh.calls, vec!["api rate_limit".to_string()]);
     }
 
+    /// SPEC #4093 AC-10: `refresh:true` skips the TTL cache but not the
+    /// budget. Below the reserve it answers from the stale cache; a one-step
+    /// override with a reason reads live; an open refusal window is never
+    /// bypassed (the 2026-09-06 refusals were exactly such reads).
     #[test]
-    fn inventory_refresh_bypasses_cache_and_throttle() {
+    fn inventory_refresh_skips_the_cache_but_honors_reserve_and_window() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let ledger = BudgetLedger::at(&tmp.path().join("budget"));
         let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891(),
+            &PrInventoryOptions::default(),
+        )
+        .expect("warm");
+        gh.calls.clear();
         gh.probe_remaining = 50;
-        let options = PrInventoryOptions {
+        // Past the probe's max age, so the refresh re-probes (free) and sees
+        // the exhausted window before spending.
+        let later = now_3891()
+            + chrono::Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1);
+        let refresh = PrInventoryOptions {
             refresh: true,
             ..PrInventoryOptions::default()
         };
-        let read = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("read");
-        assert_eq!(read.source, "github");
+
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &refresh).expect("read");
+        assert_eq!(read.source, "stale-cache");
+        let reason = read.throttled.expect("throttle reason");
+        assert!(reason.contains("budget_reserve"), "{reason}");
+        assert_eq!(
+            gh.calls,
+            vec!["api rate_limit".to_string()],
+            "below the reserve a refresh probes (free) and spends nothing"
+        );
+
+        gh.calls.clear();
+        let forced = PrInventoryOptions {
+            refresh: true,
+            force_reason: Some("PM merge decision needs live checks".to_string()),
+            ..PrInventoryOptions::default()
+        };
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
+        assert_eq!(read.source, "github", "the override reads live");
         assert!(
             gh.calls.iter().any(|call| call.starts_with("pr list")),
             "{:?}",
             gh.calls
         );
+
+        gh.calls.clear();
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: later + chrono::Duration::seconds(300),
+            },
+            later,
+        );
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
+        assert_eq!(
+            read.source, "stale-cache",
+            "an open window beats the override"
+        );
+        let reason = read.throttled.expect("window reason");
+        assert!(reason.starts_with(RATE_LIMITED_ERROR_CODE), "{reason}");
         assert!(
-            !gh.calls.iter().any(|call| call == "api rate_limit"),
-            "an explicit refresh is essential and never probes to throttle itself: {:?}",
+            !gh.calls.iter().any(|call| call.starts_with("pr list")),
+            "no GraphQL spawn inside the window: {:?}",
             gh.calls
         );
     }

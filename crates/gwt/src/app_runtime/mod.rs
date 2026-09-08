@@ -157,6 +157,10 @@ pub struct WindowRuntime {
     /// reused by a successor, so background events must carry this value and
     /// prove they still belong to the runtime currently stored for the id.
     incarnation: u64,
+    /// SPEC-3885 T-020: when this runtime started, in milliseconds since the
+    /// Unix epoch. It is the Issue row's elapsed-time source, so it must not
+    /// move when the agent merely changes state.
+    started_at_ms: u64,
     pane: Arc<Mutex<Pane>>,
     /// Lock-free process lifecycle handle captured before the reader/status
     /// workers can contend on `pane`. GUI-thread teardown must never acquire
@@ -180,6 +184,10 @@ impl WindowRuntime {
             .shared_pty();
         Self {
             incarnation,
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis() as u64)
+                .unwrap_or_default(),
             pane,
             pty,
             output_thread: None,
@@ -746,6 +754,10 @@ impl ManualLaunchHolderIntent {
 pub struct IssueMonitorProfileSaveContext {
     pub(crate) client_id: ClientId,
     pub(crate) issue_number: Option<u64>,
+    /// Issue #4079 AC-2: the candidate pool as it was when the form opened, so
+    /// the wizard can say which candidate the save replaces without re-reading
+    /// preferences on every keystroke.
+    pub(crate) pool: Vec<gwt::IssueMonitorLaunchProfile>,
 }
 
 #[derive(Debug, Clone)]
@@ -2234,6 +2246,7 @@ fn local_completion_probe(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
+    batch: Option<&gwt::issue_monitor_worker::LinkedPrProbeBatch>,
 ) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure> {
     #[cfg(test)]
     {
@@ -2244,7 +2257,29 @@ fn local_completion_probe(
             return hook(issue.number);
         }
     }
-    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+    gwt::issue_monitor_worker::try_issue_completed_by_merged_pr_classified_with(
+        owner, repo, issue, batch,
+    )
+}
+
+/// The bulk linked-PR read of one GUI-local scan (SPEC #4093 FR-005). Under a
+/// test probe hook the batch stays empty so the hook answers every probe.
+fn local_probe_batch<'a>(
+    owner: &str,
+    repo: &str,
+    issues: impl Iterator<Item = &'a gwt::IssueMonitorIssue>,
+) -> gwt::issue_monitor_worker::LinkedPrProbeBatch {
+    #[cfg(test)]
+    {
+        let hooked = local_completion_probe_test_hook()
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false);
+        if hooked {
+            return gwt::issue_monitor_worker::LinkedPrProbeBatch::default();
+        }
+    }
+    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues)
 }
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
@@ -2278,6 +2313,15 @@ fn observe_local_claim_candidates(
         0
     };
     let (available, candidates) = monitor.claim_probe_plan(claimable_cap);
+    // SPEC #4093 FR-005: one bulk linked-PR read for the whole frontier.
+    let batch = local_probe_batch(
+        owner,
+        repo,
+        loaded
+            .issues
+            .iter()
+            .filter(|issue| candidates.contains(&issue.number)),
+    );
     let observations =
         claim_candidate_completion_observations(available, candidates, |issue_number| {
             let Some(issue) = loaded
@@ -2287,7 +2331,7 @@ fn observe_local_claim_candidates(
             else {
                 return Ok(false);
             };
-            observe_claim_candidate_completion(owner, repo, issue)
+            observe_claim_candidate_completion(owner, repo, issue, &batch)
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
@@ -2311,10 +2355,11 @@ fn observe_claim_candidate_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
+    batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
 ) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
-    match local_completion_probe(owner, repo, issue) {
+    match local_completion_probe(owner, repo, issue, Some(batch)) {
         Ok(completed) => Ok(completed),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
@@ -8405,6 +8450,13 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
+                    // SPEC-3885 T-020: the live PTY runtime owns the agent's
+                    // start time, so the Issue row's elapsed time survives a
+                    // frontend reload. A window with no runtime reports none.
+                    window.runtime_started_at_ms = self
+                        .runtimes
+                        .get(&window.id)
+                        .map(|runtime| runtime.started_at_ms);
                     if worktree_form_projection == WorktreeFormProjection::Resolve {
                         window.worktree_form = self
                             .active_agent_sessions

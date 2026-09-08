@@ -8,6 +8,8 @@ use std::{
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
+/// Rows one live Issue list may return (`REST_MAX_PAGES_PER_READ` pages of
+/// `REST_PAGE_SIZE`). A list this long may be incomplete.
 pub const GITHUB_ISSUE_LIST_LIMIT: &str = "1000";
 
 /// A GitHub Issue.
@@ -23,10 +25,6 @@ pub struct Issue {
     pub url: String,
     #[serde(default)]
     pub updated_at: Option<String>,
-}
-
-fn issue_list_json_fields() -> &'static str {
-    "number,title,state,labels,assignees,body,url,updatedAt"
 }
 
 /// File-based cache for GitHub Issues.
@@ -101,35 +99,56 @@ fn cache_filename(owner: &str, repo: &str) -> String {
     )
 }
 
-/// Fetch open issues from GitHub via `gh issue list --json`.
+/// Fetch open issues from GitHub through the paged REST list
+/// (`GET /repos/{owner}/{repo}/issues?state=open`, SPEC #4093 FR-002). Costs at
+/// most [`crate::gh_rest::REST_MAX_PAGES_PER_READ`] REST requests and no
+/// GraphQL; a list of [`GITHUB_ISSUE_LIST_LIMIT`] rows may be incomplete.
 pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
-    let repo_slug = format!("{owner}/{repo}");
-    let hub = gwt_core::process_console::global();
-    let output = gwt_core::process_console::spawn_logged_blocking(
-        &hub,
-        gwt_core::process_console::ProcessKind::Gh,
-        "gh",
-        &[
-            "issue",
-            "list",
-            "--repo",
-            repo_slug.as_str(),
-            "--state",
-            "open",
-            "--json",
-            issue_list_json_fields(),
-            "--limit",
-            GITHUB_ISSUE_LIST_LIMIT,
-        ],
-        gwt_core::process_console::SpawnOptions::new("gh issue list"),
-    )
-    .map_err(|e| GwtError::Git(format!("gh issue list: {e}")))?;
+    fetch_issues_with(owner, repo, |path| {
+        let hub = gwt_core::process_console::global();
+        let output = gwt_core::process_console::spawn_logged_blocking(
+            &hub,
+            gwt_core::process_console::ProcessKind::Gh,
+            "gh",
+            &["api", path],
+            gwt_core::process_console::SpawnOptions::new("gh api issues"),
+        )
+        .map_err(|e| e.to_string())?;
+        if output.success() {
+            Ok(output.stdout)
+        } else {
+            Err(output.stderr.trim().to_string())
+        }
+    })
+}
 
-    if !output.success() {
-        return Err(GwtError::Git(format!("gh issue list: {}", output.stderr)));
+/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path>`.
+pub fn fetch_issues_with<F>(owner: &str, repo: &str, fetch: F) -> Result<Vec<Issue>>
+where
+    F: FnMut(&str) -> std::result::Result<String, String>,
+{
+    let endpoint = format!("repos/{owner}/{repo}/issues?state=open&sort=updated&direction=desc");
+    let pages = crate::gh_rest::read_pages_with(&endpoint, fetch)
+        .map_err(|e| GwtError::Git(format!("gh api issues: {e}")))?;
+    Ok(crate::gh_rest::parse_issue_rows(&pages.rows)
+        .into_iter()
+        .map(Issue::from)
+        .collect())
+}
+
+impl From<crate::gh_rest::RestIssueRow> for Issue {
+    fn from(row: crate::gh_rest::RestIssueRow) -> Self {
+        Self {
+            number: row.number,
+            title: row.title,
+            state: row.state,
+            labels: row.labels,
+            assignee: row.assignee,
+            body: row.body,
+            url: row.url,
+            updated_at: row.updated_at,
+        }
     }
-
-    parse_gh_issues_json(&output.stdout)
 }
 
 /// Fetch the comment bodies of one Issue via `gh issue view --json comments`
@@ -349,17 +368,47 @@ mod tests {
     #[test]
     fn issue_list_limit_is_high_enough_for_large_repositories() {
         assert_eq!(GITHUB_ISSUE_LIST_LIMIT, "1000");
+        assert_eq!(
+            GITHUB_ISSUE_LIST_LIMIT.parse::<usize>().unwrap(),
+            crate::gh_rest::REST_MAX_PAGES_PER_READ * crate::gh_rest::REST_PAGE_SIZE,
+            "the incomplete-list signal must match the REST page budget"
+        );
     }
 
+    /// SPEC #4093 AC-3: the Issue Monitor's candidate list is a REST read
+    /// (`gh api repos/{owner}/{repo}/issues`), never `gh issue list` (GraphQL),
+    /// and one read spends at most the page budget.
     #[test]
-    fn issue_list_fields_request_updated_at() {
-        let fields = issue_list_json_fields().split(',').collect::<Vec<_>>();
-
-        assert!(fields.contains(&"updatedAt"));
+    fn fetch_issues_reads_the_rest_issue_list_page_by_page() {
+        let mut calls = Vec::new();
+        let issues = fetch_issues_with("acme", "widgets", |path| {
+            calls.push(path.to_string());
+            Ok(if calls.len() == 1 {
+                r#"[{"number":42,"title":"Fix bug","state":"open","labels":[{"name":"bug"}],"assignees":[{"login":"alice"}],"body":"b","html_url":"https://github.com/acme/widgets/issues/42","updated_at":"2026-09-01T00:00:00Z"},{"number":43,"title":"PR row","state":"open","pull_request":{"url":"x"}}]"#.to_string()
+            } else {
+                "[]".to_string()
+            })
+        })
+        .unwrap();
         assert_eq!(
-            fields.iter().filter(|field| **field == "updatedAt").count(),
-            1
+            calls,
+            ["repos/acme/widgets/issues?state=open&sort=updated&direction=desc&per_page=100&page=1"]
         );
+        assert_eq!(issues.len(), 1, "pull requests are not issues");
+        assert_eq!(issues[0].number, 42);
+        assert_eq!(issues[0].state, "OPEN");
+        assert_eq!(issues[0].assignee.as_deref(), Some("alice"));
+        assert_eq!(issues[0].url, "https://github.com/acme/widgets/issues/42");
+        assert_eq!(
+            issues[0].updated_at.as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
+
+        let failure = fetch_issues_with("acme", "widgets", |_| Err("HTTP 502".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("gh api issues"), "{failure}");
+        assert!(failure.contains("HTTP 502"), "{failure}");
     }
 
     #[test]
