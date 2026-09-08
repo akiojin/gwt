@@ -40,6 +40,12 @@ pub enum IssueCommand {
         phase: Option<String>,
         state: Option<String>,
     },
+    /// Issue #4146: scan gwt-spec Issues and report the ones whose `tasks`
+    /// section carries task rows with no checkbox, the shape that read as
+    /// "all complete" before the completion accounting was fixed.
+    SpecAudit {
+        state: Option<String>,
+    },
     SpecCreate {
         title: String,
         file: String,

@@ -286,6 +286,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             phase: optional_string(params, "phase")?,
             state: optional_string(params, "state")?,
         }),
+        "issue.spec.audit" => CliCommand::Issue(IssueCommand::SpecAudit {
+            state: optional_string(params, "state")?,
+        }),
         "issue.spec.pull" => CliCommand::Issue(IssueCommand::SpecPull {
             all: optional_bool(params, "all")?.unwrap_or(false),
             numbers: optional_u64_vec(params, "numbers")?,

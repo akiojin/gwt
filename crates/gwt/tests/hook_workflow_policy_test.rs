@@ -617,6 +617,9 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
             json!({ "number": 1935, "section": "spec" }),
         ),
         ("issue.spec.list", json!({ "state": "open" })),
+        // Issue #4146 AC-4: auditing which SPECs were misjudged as complete
+        // is a read, so it must not be gated by an owner either.
+        ("issue.spec.audit", json!({ "state": "closed" })),
         (
             "issue.create",
             json!({ "title": "bug", "body": "body", "labels": ["bug"] }),
