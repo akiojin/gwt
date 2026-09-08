@@ -7,6 +7,7 @@ build the index in-process (full mode) and then run the search. The
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -55,6 +56,215 @@ class AutoBuildFallbackTests(unittest.TestCase):
         sections.mkdir(exist_ok=True)
         (sections / "spec.md").write_text(body)
 
+    @staticmethod
+    def _file_results(payload: dict) -> list[dict]:
+        return list(
+            ((payload.get("scope_results") or {}).get("files") or {}).get(
+                "results"
+            )
+            or []
+        )
+
+    def test_explicit_v2_search_serves_healthy_legacy_without_eager_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            self._make_repo(root)
+            db_root = Path(tmp) / "index_root"
+            coordinator = Path(tmp) / "coordinator"
+            coordinator.mkdir()
+            repo_hash = "abc1234567890def"
+            worktree_hash = "111122223333ffff"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GWT_INDEX_COORDINATOR_ROOT": str(coordinator),
+                    "GWT_INDEX_FAKE_EMBEDDING": "1",
+                },
+                clear=False,
+            ):
+                for scope in ("files", "files-docs"):
+                    built = runner.action_index_files_v2(
+                        project_root=str(root),
+                        repo_hash=repo_hash,
+                        worktree_hash=worktree_hash,
+                        mode="full",
+                        db_root=db_root,
+                        scope=scope,
+                        file_index_protocol="legacy",
+                    )
+                    self.assertTrue(built.get("ok"), built)
+                legacy_db = runner.resolve_db_path(
+                    repo_hash, worktree_hash, "files", db_root=db_root
+                )
+                legacy_pointer = runner.active_pointer_path(legacy_db)
+                pointer_before = legacy_pointer.read_bytes()
+                v2_root = runner.resolve_file_index_v2_root(
+                    repo_hash, db_root=db_root
+                )
+                self.assertFalse(v2_root.exists())
+                sentinel = v2_root / "sentinel.bin"
+                sentinel.parent.mkdir(parents=True)
+                sentinel.write_bytes(b"v2-layout-must-not-change")
+
+                with mock.patch.object(runner, "action_index_files_v2") as rebuild:
+                    legacy = runner.action_search_v2(
+                        action="search-files",
+                        repo_hash=repo_hash,
+                        worktree_hash=worktree_hash,
+                        project_root=str(root),
+                        query="watcher debounce",
+                        n_results=5,
+                        db_root=db_root,
+                    )
+                    legacy_docs = runner.action_search_v2(
+                        action="search-files-docs",
+                        repo_hash=repo_hash,
+                        worktree_hash=worktree_hash,
+                        project_root=str(root),
+                        query="project",
+                        n_results=5,
+                        db_root=db_root,
+                    )
+                    explicit_single = runner.action_search_v2(
+                        action="search-files",
+                        repo_hash=repo_hash,
+                        worktree_hash=worktree_hash,
+                        project_root=str(root),
+                        query="watcher debounce",
+                        n_results=5,
+                        db_root=db_root,
+                        file_index_protocol="v2",
+                    )
+                    explicit_v2 = runner.action_search_multi_v2(
+                        repo_hash=repo_hash,
+                        worktree_hash=worktree_hash,
+                        project_root=str(root),
+                        query="watcher debounce",
+                        n_results=5,
+                        scopes=["files"],
+                        db_root=db_root,
+                        file_index_protocol="v2",
+                    )
+                    runner._MODEL_CACHE = None
+                    cache_cleared = runner.action_search_multi_v2(
+                        repo_hash=repo_hash,
+                        worktree_hash=worktree_hash,
+                        project_root=str(root),
+                        query="watcher debounce",
+                        n_results=5,
+                        scopes=["files"],
+                        db_root=db_root,
+                        file_index_protocol="v2",
+                    )
+
+                rebuild.assert_not_called()
+                self.assertTrue(legacy.get("ok"), legacy)
+                self.assertTrue(legacy.get("results"), legacy)
+                self.assertTrue(legacy_docs.get("ok"), legacy_docs)
+                self.assertTrue(legacy_docs.get("results"), legacy_docs)
+                self.assertTrue(explicit_single.get("ok"), explicit_single)
+                self.assertTrue(explicit_single.get("results"), explicit_single)
+                self.assertEqual(
+                    explicit_single.get("fallback_source"), "legacy", explicit_single
+                )
+                for result in (explicit_v2, cache_cleared):
+                    self.assertTrue(result.get("ok"), result)
+                    self.assertTrue(self._file_results(result), result)
+                    self.assertEqual(
+                        result["scopes"]["files"].get("fallback_source"),
+                        "legacy",
+                        result,
+                    )
+                    self.assertEqual(
+                        result["scopes"]["files"].get("state"), "stale", result
+                    )
+                    self.assertEqual(result.get("stale_scopes"), ["files"], result)
+                self.assertEqual(legacy_pointer.read_bytes(), pointer_before)
+                self.assertEqual(
+                    sorted(path.relative_to(v2_root) for path in v2_root.rglob("*")),
+                    [Path("sentinel.bin")],
+                    "read-only legacy/default/v2 fallback must not mutate v2 layout",
+                )
+                self.assertEqual(sentinel.read_bytes(), b"v2-layout-must-not-change")
+
+    def test_explicit_v2_search_without_any_compatible_corpus_is_typed_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            self._make_repo(root)
+            db_root = Path(tmp) / "index_root"
+            with mock.patch.object(runner, "action_index_files_v2") as rebuild:
+                single = runner.action_search_v2(
+                    action="search-files",
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    project_root=str(root),
+                    query="watcher debounce",
+                    n_results=5,
+                    db_root=db_root,
+                    file_index_protocol="v2",
+                )
+                result = runner.action_search_multi_v2(
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    project_root=str(root),
+                    query="watcher debounce",
+                    n_results=5,
+                    scopes=["files"],
+                    db_root=db_root,
+                    file_index_protocol="v2",
+                )
+
+            rebuild.assert_not_called()
+            self.assertFalse(single.get("ok"), single)
+            self.assertEqual(single.get("error_code"), "INDEX_NOT_READY", single)
+            self.assertIs(single.get("retryable"), True, single)
+            self.assertEqual(single.get("waited_ms"), 0, single)
+            self.assertNotIn("results", single)
+            self.assertFalse(result.get("ok"), result)
+            self.assertEqual(result.get("error_code"), "INDEX_NOT_READY", result)
+            self.assertEqual(result.get("waited_ms"), 0, result)
+            self.assertIs(result.get("retryable"), True, result)
+            self.assertEqual(result.get("affected_scopes"), ["files"], result)
+            self.assertGreater(result.get("retry_after_ms", 0), 0, result)
+            self.assertNotIn("scope_results", result)
+
+    def test_single_file_search_dispatch_forwards_explicit_protocol(self):
+        for action in ("search-files", "search-files-docs"):
+            with self.subTest(action=action):
+                args = argparse.Namespace(
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    db_root="",
+                    project_root="/fixture/project",
+                    query="watcher debounce",
+                    n_results=3,
+                    no_auto_build=False,
+                    match_mode="semantic",
+                    file_index_protocol="v2",
+                )
+                expected = {"ok": False, "error_code": "INDEX_NOT_READY"}
+                with mock.patch.object(
+                    runner, "action_search_v2", return_value=expected
+                ) as search, mock.patch.object(runner, "emit") as emit:
+                    exit_code = runner._dispatch_v2(action, args)
+
+                self.assertEqual(exit_code, 0)
+                search.assert_called_once_with(
+                    action=action,
+                    repo_hash="abc1234567890def",
+                    worktree_hash="111122223333ffff",
+                    project_root="/fixture/project",
+                    query="watcher debounce",
+                    n_results=3,
+                    no_auto_build=False,
+                    match_mode="semantic",
+                    db_root=None,
+                    file_index_protocol="v2",
+                )
+                emit.assert_called_once_with(expected)
+
     def test_search_files_auto_builds_when_index_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -102,32 +312,34 @@ class AutoBuildFallbackTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result.get("error_code"), "INDEX_MISSING")
 
-    def test_search_multi_disables_auto_build_for_each_scope(self):
-        with mock.patch.object(
-            runner,
-            "action_search_v2",
-            side_effect=[
-                {"ok": True, "issueResults": [{"number": 1}]},
-                {"ok": True, "specResults": [{"spec_id": "1939"}]},
-                {"ok": True, "boardResults": [{"entry_id": "board-1"}]},
-            ],
-        ) as search:
-            result = runner.action_search_multi_v2(
-                repo_hash="abc1234567890def",
-                worktree_hash=None,
-                project_root="/repo",
-                query="Git",
-                n_results=5,
-                scopes=["issues", "specs", "board"],
-            )
+    def test_search_multi_never_auto_builds_missing_scopes(self):
+        # Phase 70: search-multi classifies broken scopes instead of building
+        # them inline. Missing stores are reported per scope; no index action
+        # runs (the Rust caller owns repair scheduling).
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index"
+            with mock.patch.object(
+                runner, "action_index_issues_v2"
+            ) as build_issues, mock.patch.object(
+                runner, "action_index_specs_v2"
+            ) as build_specs:
+                result = runner.action_search_multi_v2(
+                    repo_hash="abc1234567890def",
+                    worktree_hash=None,
+                    project_root=str(Path(tmp) / "repo"),
+                    query="Git",
+                    n_results=5,
+                    scopes=["issues", "specs", "board"],
+                    db_root=db_root,
+                )
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["issueResults"][0]["number"], 1)
-        self.assertEqual(result["specResults"][0]["spec_id"], "1939")
-        self.assertEqual(result["boardResults"][0]["entry_id"], "board-1")
-        self.assertEqual(search.call_count, 3)
-        for call in search.call_args_list:
-            self.assertTrue(call.kwargs["no_auto_build"])
+        for scope in ("issues", "specs", "board"):
+            self.assertEqual(
+                result["scopes"][scope]["state"], "missing", result
+            )
+        build_issues.assert_not_called()
+        build_specs.assert_not_called()
 
     def test_progress_emitted_on_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:

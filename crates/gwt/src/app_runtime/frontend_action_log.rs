@@ -90,11 +90,7 @@ impl FrontendUserActionLog {
 }
 
 fn sanitize_ui_action_field(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(160)
-        .collect()
+    gwt::perf::sanitize_ui_action_field(value)
 }
 
 fn sanitize_ui_action_url(value: &str) -> String {
@@ -213,6 +209,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::UndockAgentWindow { id, .. } => {
             FrontendUserActionLog::new("undock_agent_window", "window").window(id)
         }
+        FrontendEvent::DockAgentWindowToIssue { id } => {
+            FrontendUserActionLog::new("dock_agent_window_to_issue", "window").window(id)
+        }
         FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
             FrontendUserActionLog::new("set_agent_kanban_card_collapsed", "window")
                 .window(id)
@@ -222,7 +221,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("update_terminal_grid", "terminal").window(id)
         }
         FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
-        FrontendEvent::CloseWindow { id } => {
+        FrontendEvent::CloseWindow { id, .. } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
         FrontendEvent::StopWindow { id } => {
@@ -427,9 +426,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .target(issue_number.to_string())
         }
-        FrontendEvent::OpenIntakeSession => {
-            FrontendUserActionLog::new("open_intake_session", "launch")
-        }
         FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
             FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
                 .window(board_id)
@@ -443,13 +439,20 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ResumeWorkspace { source, .. } => {
             FrontendUserActionLog::new("resume_workspace", "workspace").mode(format!("{source:?}"))
         }
-        FrontendEvent::ListResumableAgents { workspace_id } => {
+        FrontendEvent::ListResumableAgents { workspace_id, .. } => {
             FrontendUserActionLog::new("list_resumable_agents", "workspace")
                 .target(workspace_id.as_deref().unwrap_or_default())
         }
         FrontendEvent::ResumeWorkspaceAgent { session_id, .. } => {
             FrontendUserActionLog::new("resume_workspace_agent", "workspace").target(session_id)
         }
+        FrontendEvent::ContinueWork {
+            operation_id,
+            work_id,
+            ..
+        } => FrontendUserActionLog::new("continue_work", "workspace")
+            .target(work_id)
+            .mode(operation_id),
         FrontendEvent::ResumeBranchLatestAgent {
             id, branch_name, ..
         } => FrontendUserActionLog::new("resume_branch_latest_agent", "launch")
@@ -513,6 +516,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
+        }
+        FrontendEvent::CancelUpdateAutoApply => {
+            FrontendUserActionLog::new("cancel_update_auto_apply", "update")
         }
         FrontendEvent::OpenUpdateLog { log_path } => {
             FrontendUserActionLog::new("open_update_log", "update")
@@ -640,16 +646,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
-        FrontendEvent::ImprovementPromoteIssue { id } => {
-            FrontendUserActionLog::new("improvement_promote_issue", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementDismiss { id, .. } => {
-            FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
-        }
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
+        }
+        FrontendEvent::PmPaneSendInput { window_id, .. } => {
+            FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
         }
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
@@ -657,6 +660,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
@@ -670,6 +677,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }
+        FrontendEvent::QuickRegisterIssue { title, launch } => {
+            FrontendUserActionLog::new("quick_register_issue", "issue_monitor")
+                .mode(if *launch { "launch" } else { "register" })
+                .count(title.len())
+        }
         FrontendEvent::IssueMonitorLaunchNow { issue_number, .. } => {
             FrontendUserActionLog::new("issue_monitor_launch_now", "issue_monitor")
                 .target(issue_number.to_string())
@@ -678,9 +690,35 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("issue_monitor_configure_issue", "issue_monitor")
                 .target(issue_number.to_string())
         }
+        FrontendEvent::IssueMonitorConfigureProfile => {
+            FrontendUserActionLog::new("issue_monitor_configure_profile", "issue_monitor")
+        }
+        // SPEC-3431 FR-018: the PM launcher is a deliberate user action worth
+        // logging; its payload is only optional canvas bounds.
+        FrontendEvent::OpenPmAgent { .. } => FrontendUserActionLog::new("open_pm_agent", "pm"),
+        // SPEC-3431 FR-026: PM settings changes are deliberate, low-frequency
+        // user actions; the agent/model they select is not sensitive.
+        FrontendEvent::SetPmAutoStart { enabled } => {
+            FrontendUserActionLog::new("set_pm_auto_start", "pm").mode(if *enabled {
+                "on"
+            } else {
+                "off"
+            })
+        }
+        FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
+            FrontendUserActionLog::new("set_pm_loop_interval", "pm")
+                .target(loop_interval_secs.to_string())
+        }
+        FrontendEvent::SetPmLaunchProfile {
+            agent_id, model, ..
+        } => FrontendUserActionLog::new("set_pm_launch_profile", "pm")
+            .agent(agent_id)
+            .target(model.as_deref().unwrap_or_default()),
+        FrontendEvent::RestartPmAgent => FrontendUserActionLog::new("restart_pm_agent", "pm"),
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
+        | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }

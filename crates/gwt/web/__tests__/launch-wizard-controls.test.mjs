@@ -30,6 +30,29 @@ const CODEX_REASONING = [
   { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
 ];
 
+// SPEC-1921 US-20 / FR-122 (+ Issue #3962 AC-4 — 2026-09-05 snapshot) — Codex
+// reasoning ladders scale per model. The backend sends 6 stops for
+// gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra (low..ultra), 5 stops for
+// gpt-5.6-luna (low..max), and the existing 4 stops for gpt-5.5 /
+// gpt-5.4-mini / gpt-5.3-codex-spark (low..xhigh). There is NO Auto row for
+// Codex — the whole ladder is ordinal, so no stop is lifted out of the slider.
+const CODEX_REASONING_6 = [
+  { value: "low", label: "Low", description: "Fast responses with lighter reasoning" },
+  { value: "medium", label: "Medium", description: "Balances speed and reasoning depth" },
+  { value: "high", label: "High", description: "Greater reasoning depth" },
+  { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
+  { value: "max", label: "Max", description: "Maximum reasoning depth for the hardest problems" },
+  { value: "ultra", label: "Ultra", description: "Maximum reasoning with automatic task delegation" },
+];
+
+const CODEX_REASONING_5 = [
+  { value: "low", label: "Low", description: "Fast responses with lighter reasoning" },
+  { value: "medium", label: "Medium", description: "Balances speed and reasoning depth" },
+  { value: "high", label: "High", description: "Greater reasoning depth" },
+  { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
+  { value: "max", label: "Max", description: "Maximum reasoning depth for the hardest problems" },
+];
+
 const CLAUDE_OPUS_REASONING = [
   { value: "auto", label: "Auto", description: "Let the model choose the effort" },
   { value: "low", label: "Low", description: "Fast responses for simple work" },
@@ -171,6 +194,40 @@ test("reasoningSliderModel marks Auto selection and parks slider at a sane fallb
   assert.equal(model.ordinalIndex, 2);
 });
 
+test("reasoningSliderModel maps the 6-stop Codex ladder low->ultra with no Auto lift-out", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-6-astra / gpt-5.6-sol /
+  // gpt-5.6-terra send six ordinal Codex stops (low..ultra) and no Auto row, so
+  // the whole ladder stays on the ordinal scale and ultra is the top stop.
+  const model = reasoningSliderModel(CODEX_REASONING_6, "ultra");
+  assert.equal(model.hasAuto, false, "Codex has no Auto row");
+  assert.equal(model.stops.length, 6);
+  assert.deepEqual(
+    model.stops.map((stop) => stop.value),
+    ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "six ordinal stops in ladder order",
+  );
+  assert.equal(model.ordinalIndex, 5, "ultra is the top stop");
+  assert.equal(model.isAuto, false);
+  assert.equal(model.activeValue, "ultra");
+  assert.equal(model.activeDescription, "Maximum reasoning with automatic task delegation");
+});
+
+test("reasoningSliderModel maps the 5-stop Codex ladder low->max", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-luna sends five ordinal stops
+  // (low..max) with no Auto row, topping out at max.
+  const model = reasoningSliderModel(CODEX_REASONING_5, "max");
+  assert.equal(model.hasAuto, false, "Codex has no Auto row");
+  assert.equal(model.stops.length, 5);
+  assert.deepEqual(
+    model.stops.map((stop) => stop.value),
+    ["low", "medium", "high", "xhigh", "max"],
+    "five ordinal stops in ladder order",
+  );
+  assert.equal(model.ordinalIndex, 4, "max is the top stop");
+  assert.equal(model.isAuto, false);
+  assert.equal(model.activeValue, "max");
+});
+
 // --- buildReasoningField ---------------------------------------------------
 
 test("buildReasoningField renders a snapped range over ordinal stops", () => {
@@ -251,6 +308,75 @@ test("buildReasoningField exposes an Auto toggle that suspends the slider for Cl
   changeChecked(doc, autoToggle, false);
   assert.equal(range.disabled, false, "disabling Auto re-enables the slider");
   assert.notEqual(sent.at(-1), "auto", "disabling Auto sends an ordinal stop value");
+});
+
+test("buildReasoningField renders the 6-stop Codex ladder and commits 'ultra' at the top", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — the data-driven slider scales to six
+  // Codex stops (low..ultra) with no Auto toggle; releasing on the top stop
+  // commits the backend stored value 'ultra'.
+  const doc = bootDom();
+  const sent = [];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: CODEX_REASONING_6,
+    selectedValue: "low",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  assert.ok(range, "reasoning field must render a range slider");
+  assert.equal(range.getAttribute("max"), "5", "six stops -> max index 5");
+  assert.equal(field.querySelector("[data-reasoning-auto]"), null, "Codex has no Auto toggle");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "Extra high", "Max", "Ultra"]);
+  assert.equal(ticks.at(-1), "Ultra", "Ultra renders as the top stop, above Max");
+
+  // Drag preview never commits (a commit would re-render and destroy the slider
+  // mid-drag); only release/keyboard-step commits, and it commits exactly once.
+  dispatchRange(doc, range, 5, "input");
+  assert.deepEqual(sent, [], "input (drag) previews locally without committing");
+  dispatchRange(doc, range, 5, "change");
+  assert.deepEqual(sent, ["ultra"], "committing the top stop commits stored value 'ultra'");
+});
+
+test("buildReasoningField renders the 5-stop Codex ladder and commits 'max' at the top", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-luna's five-stop ladder tops out
+  // at Max; releasing on the top stop commits the backend stored value 'max'.
+  const doc = bootDom();
+  const sent = [];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: CODEX_REASONING_5,
+    selectedValue: "low",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  assert.equal(range.getAttribute("max"), "4", "five stops -> max index 4");
+  assert.equal(field.querySelector("[data-reasoning-auto]"), null, "Codex has no Auto toggle");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "Extra high", "Max"]);
+  dispatchRange(doc, range, 4, "change");
+  assert.deepEqual(sent, ["max"], "committing the top stop commits stored value 'max'");
+});
+
+test("buildReasoningField commits 'xhigh' at the top of the 4-stop Codex ladder", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5 / gpt-5.4-mini /
+  // gpt-5.3-codex-spark keep the four-stop ladder that tops out at Extra high /
+  // stored value 'xhigh'.
+  const doc = bootDom();
+  const sent = [];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: CODEX_REASONING,
+    selectedValue: "low",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  assert.equal(range.getAttribute("max"), "3", "four stops -> max index 3");
+  assert.equal(field.querySelector("[data-reasoning-auto]"), null, "Codex has no Auto toggle");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "Extra high"]);
+  dispatchRange(doc, range, 3, "change");
+  assert.deepEqual(sent, ["xhigh"], "committing the top stop commits stored value 'xhigh'");
 });
 
 // --- buildSegmentedField ---------------------------------------------------
@@ -349,6 +475,57 @@ const wizardSource = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), "../launch-wizard-surface.js"),
   "utf8",
 );
+
+test("Grok Build は固定 catalog ではなく config-default 付き free-text Model を表示する", () => {
+  const grokGate = wizardSource.search(
+    /launchWizard\.(?:show_grok_options|show_grok_model|show_freetext_model|show_free_text_model)|selected_agent_id\s*===\s*["']grok["']/,
+  );
+  assert.notEqual(grokGate, -1, "Grok 固有の launch profile 表示 gate が必要");
+
+  const grokProfileSurface = wizardSource.slice(grokGate, grokGate + 1800);
+  const grokBranchEnd = grokProfileSurface.indexOf("} else if");
+  assert.notEqual(grokBranchEnd, -1, "Grok Model branch を他 agent の picker と分離する");
+  const grokModelBranch = grokProfileSurface.slice(
+    0,
+    grokBranchEnd,
+  );
+  assert.match(
+    grokModelBranch,
+    /appendTextField\([\s\S]*?["']Model["'][\s\S]*?launchWizard\.selected_model[\s\S]*?blank\s*=\s*config[\s\S]*?kind:\s*["']set_model["']/i,
+    "Grok Model は selected_model を編集する free-text field で、空欄は config default と説明する",
+  );
+  assert.doesNotMatch(
+    grokModelBranch,
+    /appendSelectField\([\s\S]{0,160}?["']Model["']/,
+    "account/custom model を固定 dropdown にしない",
+  );
+});
+
+test("Launch Wizard の共通 reasoning control は Effort として set_reasoning を送る", () => {
+  assert.match(
+    wizardSource,
+    /if\s*\(launchWizard\.show_reasoning\)\s*\{[\s\S]{0,240}?selected_agent_id\s*===\s*["']grok["']\s*\?\s*["']Effort["']\s*:\s*["']Reasoning["'][\s\S]{0,500}?appendReasoningField\(\s*grid,[\s\S]{0,120}?reasoningLabel[\s\S]{0,300}?launchWizard\.reasoning_options[\s\S]{0,180}?launchWizard\.selected_reasoning[\s\S]{0,300}?kind:\s*["']set_reasoning["']/,
+    "Grok は Effort、既存 agent は Reasoning のまま共通 set_reasoning action を使う",
+  );
+});
+
+test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
+  assert.match(
+    wizardSource,
+    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
+    "wizard start methods must classify history, focus, and new-launch intents independently",
+  );
+  assert.match(
+    wizardSource,
+    /button\.dataset\.executionIntent\s*=\s*startMethodIntent/,
+    "start method rows must expose their execution intent to the rendered contract",
+  );
+  assert.doesNotMatch(
+    wizardSource,
+    /History only/,
+    "legacy conversation methods carry no observation-only notice",
+  );
+});
 
 test("wizard surface extends the interaction guard to the reasoning slider", () => {
   // The guard previously covered only native <select> (Issue #2698). The

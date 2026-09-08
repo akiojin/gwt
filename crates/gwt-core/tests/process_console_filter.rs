@@ -11,6 +11,12 @@ use gwt_core::logging::{current_log_file, init, LogLevel, LoggingConfig};
 
 #[test]
 fn process_line_events_are_excluded_from_canonical_log_file() {
+    // This test validates the target filter layered on top of the explicit
+    // LoggingConfig default. Ignore launch-scoped RUST_LOG overrides so an
+    // unrelated target directive cannot suppress both control events. This
+    // integration binary contains only this test, so process-local removal is
+    // sufficient and keeps default-feature builds independent of test helpers.
+    std::env::remove_var("RUST_LOG");
     let dir = tempfile::tempdir().expect("tempdir");
     let config = LoggingConfig {
         log_dir: dir.path().to_path_buf(),

@@ -4,6 +4,7 @@ use gwt::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
     list_branch_entries_with_active_sessions, BranchCleanupOptions, BranchCleanupResultStatus,
 };
+use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
 #[test]
@@ -221,7 +222,7 @@ fn init_repo(repo: &std::path::Path) {
 }
 
 fn branch_exists(repo: &std::path::Path, refname: &str) -> bool {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args(["rev-parse", "--verify", "--quiet", refname])
         .current_dir(repo)
         .output()
@@ -230,7 +231,7 @@ fn branch_exists(repo: &std::path::Path, refname: &str) -> bool {
 }
 
 fn run_git(repo: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args(args)
         .current_dir(repo)
         .output()

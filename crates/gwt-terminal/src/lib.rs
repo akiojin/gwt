@@ -15,8 +15,8 @@ pub mod scrollback;
 pub(crate) mod test_util;
 
 pub use manager::PaneManager;
-pub use pane::{Pane, PaneStatus};
-pub use pty::PtyHandle;
+pub use pane::{Pane, PaneExit, PaneStatus, PendingPane, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT};
+pub use pty::{PendingPty, PtyHandle};
 pub use scrollback::ScrollbackStorage;
 use thiserror::Error;
 

@@ -1,8 +1,92 @@
 import { test } from "node:test";
-import { createLaunchPendingController } from "../launch-pending-controller.js";
+import {
+  createContinueWorkDispatcher,
+  createLaunchPendingController,
+} from "../launch-pending-controller.js";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
-import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
+import {
+  createWorkspaceKanbanSurface,
+  mergeActiveWorkProjectionPatch,
+} from "../workspace-kanban-surface.js";
+
+test("bounded Active Work patches preserve history while replacing live membership", () => {
+  const previousSession = {
+    agent_session_id: "conversation-old",
+    started_at: "2026-08-29T00:00:00Z",
+  };
+  const previous = {
+    id: "work-1",
+    title: "Previous title",
+    journal_entries: [{ id: "journal-old" }],
+    works: [{ id: "history-old" }],
+    agents: [{ session_id: "session-old", sessions: [previousSession] }],
+    unassigned_agents: [],
+    active_works: [{
+      id: "workspace-1",
+      agents: [{ session_id: "session-old", sessions: [previousSession] }],
+      works: [{
+        id: "child-1",
+        agents: [{ session_id: "session-old", sessions: [previousSession] }],
+      }],
+    }],
+  };
+  const patch = {
+    id: "work-1",
+    title: "Fresh title",
+    journal_entries: [],
+    works: [],
+    agents: [{ session_id: "session-old", sessions: [] }],
+    unassigned_agents: [{ session_id: "session-new", sessions: [] }],
+    active_works: [{
+      id: "workspace-1",
+      agents: [{ session_id: "session-old", sessions: [] }],
+      works: [{
+        id: "child-1",
+        agents: [{ session_id: "session-old", sessions: [] }],
+      }],
+    }],
+  };
+
+  const merged = mergeActiveWorkProjectionPatch(previous, patch);
+
+  assert.equal(merged.title, "Fresh title", "patch fields stay authoritative");
+  assert.deepEqual(merged.journal_entries, previous.journal_entries);
+  assert.deepEqual(merged.works, previous.works);
+  assert.deepEqual(merged.agents[0].sessions, [previousSession]);
+  assert.deepEqual(merged.active_works[0].agents[0].sessions, [previousSession]);
+  assert.deepEqual(
+    merged.active_works[0].works[0].agents[0].sessions,
+    [previousSession],
+  );
+  assert.deepEqual(merged.unassigned_agents[0].sessions, []);
+  assert.equal(
+    merged.agents.some((agent) => agent.session_id === "session-removed"),
+    false,
+    "the patch owns current membership rather than retaining vanished agents",
+  );
+});
+
+test("Active Work patches never graft history across project identities", () => {
+  const patch = {
+    id: "work-new",
+    journal_entries: [],
+    works: [],
+    agents: [{ session_id: "session-old", sessions: [] }],
+    unassigned_agents: [],
+    active_works: [],
+  };
+
+  assert.deepEqual(
+    mergeActiveWorkProjectionPatch({
+      id: "work-old",
+      journal_entries: [{ id: "foreign" }],
+      works: [{ id: "foreign" }],
+      agents: [{ session_id: "session-old", sessions: [{ agent_session_id: "foreign" }] }],
+    }, patch),
+    patch,
+  );
+});
 
 test("Workspace Overview renders a readable Workspace list with compact filters", () => {
   const fixture = createFixture();
@@ -461,6 +545,8 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.deepEqual(sectionTitles, [
     "Progress Summary",
     "Current State",
+    "Branch",
+    "Worktree",
     "Agents & Sessions",
     "Linked Work",
     "Lifecycle",
@@ -483,6 +569,157 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.match(text, /board-claim-1/);
 });
 
+test("Workspace detail renders backend execution diagnosis without replacing the Work purpose", () => {
+  const projection = sampleProjection();
+  projection.works[0].works = [
+    {
+      id: "work-diagnosis",
+      title: "Release Notes cleanup",
+      status_category: "blocked",
+      status_text: "Waiting for recovery",
+      lifecycle_state: "active",
+      agents: [],
+      execution_diagnosis: {
+        schema_version: 1,
+        ecr_status: "blocked",
+        owner_kind: "spec",
+        owner_number: 3393,
+        blocked_reason: "Verification evidence is stale",
+        missing_verification: "User confirmation",
+        generation_id: "generation-2",
+        binding_state: "stale",
+        binding_cause: "current_session_not_authorized",
+        verification_state: "stale_fingerprint",
+        trivial_reason: "docs_only",
+        generated_outputs: ["artifacts/report.json"],
+        capability_generation: 4,
+        continuation: {
+          status: "activated",
+          outcome: "successor_created",
+          predecessor_generation_id: "generation-1",
+          generation_id: "generation-2",
+          validated: true,
+        },
+        workspace_update_applicable: false,
+        workspace_update_applicability_reason: "workspace_update_authority_mismatch",
+        obligation_revival: {
+          outcome: "persist_failed",
+          error: "trusted state write failed",
+        },
+        binding_repair: {
+          status: "failed",
+          failure_cause: "probe_receipt_mismatch",
+          generation_id: "generation-2",
+          matches_current_generation: true,
+          validated: true,
+        },
+        repair: {
+          outcome: "activated",
+          repair_id: "repair-1",
+          new_generation_id: "generation-2",
+          repaired_at: "2026-07-29T00:00:00Z",
+          source_kinds: ["execution_control", "generation_ledger"],
+        },
+        work_event_receipt_generation_id: "generation-1",
+        work_event_receipt_matches_current_generation: false,
+        settlement: { blocked: "missing_upstream" },
+        settlement_severity: "warning",
+        settlement_obligation_open: true,
+        open_obligations: ["user_verification"],
+        available_recoveries: ["verify.run", "execution.reopen"],
+        warnings: ["Host status is temporarily unavailable"],
+      },
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(
+    fixture.body.querySelector(".workspace-detail-title").textContent.trim(),
+    "Release Notes cleanup",
+    "SPEC-3075 purpose remains the detail heading",
+  );
+  const diagnosis = fixture.body.querySelector(
+    '[data-section="execution-diagnosis"][data-severity="warning"]',
+  );
+  assert.ok(diagnosis, "backend diagnosis renders in the existing detail surface");
+  const text = diagnosis.textContent.replace(/\s+/g, " ").trim();
+  assert.match(text, /Blocked/);
+  assert.match(text, /Stale/);
+  assert.match(text, /Verification evidence is stale/);
+  assert.match(text, /User confirmation/);
+  assert.match(text, /Stale fingerprint/);
+  assert.match(text, /Docs only/);
+  assert.match(text, /Capability generation\s*4/);
+  assert.match(text, /Successor created/);
+  assert.match(text, /Workspace update\s*Not applicable/);
+  assert.match(text, /Workspace update authority mismatch/);
+  assert.match(text, /Persist failed/);
+  assert.match(text, /Binding repair outcome\s*Failed/);
+  assert.match(text, /Binding repair cause\s*Probe receipt mismatch/);
+  assert.match(text, /Binding repair generation\s*generation-2/);
+  assert.match(text, /repair-1/);
+  assert.match(text, /Repair outcome\s*Activated/);
+  assert.match(text, /execution_control/);
+  assert.match(text, /generation_ledger/);
+  assert.match(text, /Work receipt generation\s*generation-1/);
+  assert.match(text, /Work receipt binding\s*Stale/);
+  assert.match(text, /Warning/);
+  assert.match(text, /Host status is temporarily unavailable/);
+  assert.match(text, /verify\.run/);
+  assert.match(text, /execution\.reopen/);
+  assert.match(text, /artifacts\/report\.json/);
+});
+
+test("Workspace detail surfaces an active bound execution as clear without recovery inference", () => {
+  const projection = sampleProjection();
+  projection.works[0].execution_containers = [
+    {
+      branch: "work/20260521-0234",
+      worktree_path: "/repo/work/20260521-0234",
+      diagnosis: {
+        ecr_status: "active",
+        owner_kind: "spec",
+        owner_number: 3393,
+        blocked_reason: null,
+        missing_verification: null,
+        generation_id: "generation-3",
+        binding_state: "bound",
+        binding_cause: "current_generation",
+        verification_state: "fresh",
+        settlement: { settled: { event_commit: "abc123", upstream_ref: "origin/work" } },
+        settlement_severity: "clear",
+        settlement_obligation_open: false,
+        open_obligations: [],
+        available_recoveries: [],
+        warnings: [],
+      },
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const diagnosis = fixture.body.querySelector(
+    '[data-section="execution-diagnosis"][data-severity="clear"]',
+  );
+  assert.ok(diagnosis);
+  assert.match(diagnosis.textContent, /Active/);
+  assert.match(diagnosis.textContent, /Bound/);
+  assert.match(diagnosis.textContent, /Fresh/);
+  assert.match(diagnosis.textContent, /Clear/);
+  assert.equal(diagnosis.querySelector(".workspace-execution-recovery-list"), null);
+});
+
 test("Workspace detail Board refs can focus the matching Board entry", () => {
   const fixture = createFixture();
   const focused = [];
@@ -494,6 +731,27 @@ test("Workspace detail Board refs can focus the matching Board entry", () => {
     focusWindowLocally() {},
     sendFocus() {},
   });
+
+  const diagnostics = fixture.body.querySelector(
+    'details[data-section="board-diagnostics"]',
+  );
+  assert.ok(diagnostics, "raw Board ids belong in a diagnostics disclosure");
+  assert.equal(diagnostics.hasAttribute("open"), false, "diagnostics start collapsed");
+  assert.equal(diagnostics.querySelector("summary").textContent, "Diagnostics (1)");
+  assert.match(diagnostics.textContent, /board-claim-1/);
+
+  const lifecycle = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-section"),
+  ).find(
+    (section) => section.querySelector(".workspace-detail-section-title")?.textContent
+      === "Lifecycle",
+  );
+  assert.ok(lifecycle, "lifecycle section must remain available");
+  assert.doesNotMatch(
+    lifecycle.textContent,
+    /board-claim-1/,
+    "raw Board IDs stay out of event titles and lifecycle metadata",
+  );
 
   const boardRef = fixture.body.querySelector(
     "[data-action='focus-board-entry'][data-board-entry-id='board-claim-1']",
@@ -628,6 +886,67 @@ test("Workspace detail shows a Work heading per launch when a Workspace has mult
   assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
 });
 
+test("Workspace detail renders the latest Session for every Agent in one Work", () => {
+  const projection = sampleProjection();
+  const workspace = projection.works[0];
+  projection.works = [workspace];
+  workspace.session_agent_total = 2;
+  workspace.works = [
+    {
+      id: "work-combined",
+      title: "Combined Work",
+      lifecycle_state: "paused",
+      agents: [
+        {
+          session_id: "launch-1",
+          agent_id: "codex",
+          display_name: "Codex",
+          status_category: "idle",
+          sessions: [
+            { agent_session_id: "conv-1", started_at: "2026-05-21T03:20:00Z", is_active: true },
+          ],
+        },
+        {
+          session_id: "launch-2",
+          agent_id: "claude-code",
+          display_name: "Claude Code",
+          status_category: "idle",
+          sessions: [
+            { agent_session_id: "conv-2", started_at: "2026-05-21T05:00:00Z", is_active: false },
+          ],
+        },
+      ],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const sessions = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-session-id"),
+    (node) => node.title,
+  );
+  assert.deepEqual(sessions, ["conv-1", "conv-2"]);
+  const resumes = Array.from(
+    fixture.body.querySelectorAll("[data-action='resume-session']"),
+  );
+  assert.deepEqual(
+    resumes.map((button) => [button.dataset.sessionId, button.dataset.agentSessionId]),
+    [
+      ["launch-1", "conv-1"],
+      ["launch-2", "conv-2"],
+    ],
+  );
+  assert.equal(
+    fixture.body.querySelector(".workspace-detail-more-sessions"),
+    null,
+    "rendered Agents must not also be counted as hidden sessions",
+  );
+});
+
 test("Workspace list selection updates the detail pane", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());
@@ -653,15 +972,15 @@ test("Workspace list selection updates the detail pane", () => {
   assert.match(detailText, /Already merged/);
 });
 
-test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () => {
-  const projection = sampleProjection();
-  // A Paused (resumable) Work — the active/running Work has nothing to resume.
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
+test("each Work exposes one Continue work action with opaque Work identity (SPEC-2359 W-24)", () => {
+  const projection = continuationProjection();
   const fixture = createFixture();
-  const sent = [];
+  const continued = [];
   const surface = createSurface(fixture, projection, {
-    send: (message) => sent.push(message),
+    continueWork: (workId, bounds) => {
+      continued.push({ workId, bounds });
+      return true;
+    },
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
@@ -670,21 +989,337 @@ test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () 
     sendFocus() {},
   });
 
-  // Resume lives on the list elements, not on the Workspace header. A Work with
-  // no recorded conversation still exposes Resume on its placeholder row.
+  // Producing continuation is a single Work-level intent. It never derives
+  // authority from the nested gwt Session or provider conversation.
   assert.equal(
     fixture.body.querySelector("[data-action='resume-workspace']"),
     null,
     "Workspace header no longer carries a Resume button",
   );
-  const resume = fixture.body.querySelector("[data-action='resume-work']");
-  assert.ok(resume, "a session-less Work still exposes a Resume action");
-  assert.equal(resume.dataset.sessionId, "work-launch-1");
-  resume.click();
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "resume_workspace_agent");
-  assert.equal(sent[0].session_id, "work-launch-1");
-  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+  const actions = fixture.body.querySelectorAll("[data-action='continue-work']");
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].textContent, "Continue work");
+  assert.equal(actions[0].dataset.workId, "work-opaque-1");
+  assert.equal(actions[0].dataset.sessionId, undefined);
+  actions[0].click();
+  assert.deepEqual(continued, [{
+    workId: "work-opaque-1",
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+  }]);
+});
+
+test("Work without Session history keeps one Continue work action and renders one fresh-continuation explanation (SPEC-2359 AS-91.7)", () => {
+  const projection = continuationProjection();
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.equal(group.querySelectorAll('[data-action="continue-work"]').length, 1);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 1);
+  assert.equal(
+    group.querySelector(".workspace-detail-session-guidance").textContent,
+    "No previous session to open. Continue work can start a new one.",
+  );
+});
+
+test("Work with mixed Agent history renders real Sessions without empty guidance (SPEC-2359 AS-91.8)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "empty-session",
+      agent_id: "claude-code",
+      display_name: "Claude Code",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "usable-session",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "usable-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.equal(group.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 0);
+  assert.equal(
+    group.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "usable-session",
+  );
+});
+
+test("Task-first Work layout separates purpose, producing intent, and lifecycle actions (SPEC-2359 US-91)", () => {
+  const projection = continuationProjection({ sessions: [
+    {
+      agent_session_id: "conv-latest",
+      started_at: "2026-07-26T02:00:00Z",
+      is_active: true,
+      resumable: true,
+    },
+  ] });
+  const work = projection.active_works[0].works[0];
+  projection.active_works[0].branch = "work/issue-2359";
+  work.lifecycle_state = "paused";
+  work.manual_close_allowed = true;
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  const head = group.querySelector(".workspace-detail-work-head");
+  const rail = group.querySelector(".workspace-detail-work-action-rail");
+  assert.ok(head.querySelector(".workspace-detail-work-heading"));
+  assert.ok(head.querySelector(".workspace-overview-lifecycle"));
+  assert.equal(head.querySelector("button"), null, "purpose header is not an action row");
+  assert.ok(rail, "Work actions have a dedicated rail");
+  const continueWork = rail.querySelector('[data-action="continue-work"]');
+  assert.ok(continueWork.classList.contains("primary"));
+  assert.ok(rail.querySelector(".workspace-detail-work-actions"));
+  assert.ok(
+    rail.querySelector('[data-action="close-work-discard"]').classList.contains("destructive"),
+  );
+  assert.equal(
+    group.querySelector('[data-action="resume-session"]').textContent,
+    "Open session",
+    "Session history does not compete with the producing Continue work intent",
+  );
+  assert.deepEqual(
+    Array.from(
+      fixture.body.querySelectorAll(".workspace-overview-detail-pane .wizard-button.primary"),
+      (button) => button.dataset.action,
+    ),
+    ["continue-work"],
+    "Continue work is the detail's sole producing primary; Launch Agent stays secondary",
+  );
+});
+
+test("Work detail suppresses empty duplicates when the same Agent has a usable Session (SPEC-2359 AS-91.2)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "empty-newest",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "usable-session",
+      agent_id: "Codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "usable-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "empty-oldest",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "usable-session",
+  );
+});
+
+test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2359 FR-582)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "custom-hyphen-session",
+      agent_id: "my-agent",
+      display_name: "my-agent",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "custom-hyphen-conversation",
+        started_at: "2026-07-26T03:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "custom-compact-session",
+      agent_id: "myagent",
+      display_name: "myagent",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "custom-compact-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.deepEqual(
+    Array.from(
+      group.querySelectorAll('[data-action="resume-session"]'),
+      (button) => button.dataset.sessionId,
+    ),
+    ["custom-hyphen-session", "custom-compact-session"],
+    "unknown custom IDs keep their trimmed command spelling; punctuation is identity-significant",
+  );
+});
+
+test("Work detail collapses Grok Build builtin aliases into one Agent identity", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "grok-empty-command",
+      agent_id: "grok",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "grok-usable-display",
+      agent_id: "Grok Build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "grok-conversation",
+        started_at: "2026-08-13T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "grok-empty-hyphen",
+      agent_id: "grok-build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "grok-usable-display",
+  );
+});
+
+test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", () => {
+  const projection = continuationProjection({ sessions: [{
+    agent_session_id: "inspect-conversation",
+    started_at: "2026-07-26T03:00:00Z",
+    is_active: true,
+    resumable: true,
+  }] });
+  const fixture = createFixture();
+  const begins = [];
+  const launchPending = {
+    begin(key, label, operationId) {
+      begins.push({ key, label, operationId });
+      return true;
+    },
+    isPending() {
+      return false;
+    },
+  };
+  const surface = createSurface(fixture, projection, {
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  fixture.body.querySelector('[data-action="resume-session"]').click();
+
+  assert.equal(begins.length, 1);
+  assert.equal(
+    begins[0].label,
+    "Open session",
+    "timeout notices must not regress to the old Resume wording",
+  );
+});
+
+test("discarded Work never exposes Continue work even when a legacy lifecycle is stale", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].lifecycle_state = "active";
+  projection.active_works[0].works[0].discarded = true;
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(
+    fixture.body.querySelectorAll("[data-action='continue-work']").length,
+    0,
+  );
 });
 
 test("Each Session row carries its own Resume that resumes that conversation (SPEC-2359)", () => {
@@ -723,26 +1358,24 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   resumes[0].click();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.match(sent[0].operation_id, /^resume-/);
   assert.equal(sent[0].session_id, "work-launch-1");
   assert.equal(sent[0].agent_session_id, "conv-latest2222");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
-test("Non-resumable Sessions are history-only; a Start Fresh control keeps the Work launchable (SPEC-2359)", () => {
-  const projection = sampleProjection();
-  // A Paused Work whose only conversations cannot be resumed here (e.g. pruned
-  // or placeholder handles). Each Session row must render without a Resume, and
-  // the Work must still expose a way to launch a fresh conversation.
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
-  projection.works[0].agents[0].sessions = [
+test("Non-resumable Sessions show no Resume control while Continue work owns fallback (SPEC-2359)", () => {
+  const projection = continuationProjection({ sessions: [
     { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
     { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },
-  ];
+  ] });
   const fixture = createFixture();
-  const sent = [];
+  const continued = [];
   const surface = createSurface(fixture, projection, {
-    send: (message) => sent.push(message),
+    continueWork: (workId, bounds) => {
+      continued.push({ workId, bounds });
+      return true;
+    },
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
@@ -756,17 +1389,16 @@ test("Non-resumable Sessions are history-only; a Start Fresh control keeps the W
   assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
   assert.equal(fixture.body.querySelector("[data-action='resume-session']"), null);
 
-  // A single Start Fresh fallback launches a new conversation on the Work.
-  const fresh = fixture.body.querySelector(".workspace-detail-session-fresh [data-action='resume-work']");
-  assert.ok(fresh, "Start Fresh control appears when no Session is resumable");
-  assert.equal(fresh.textContent, "Start Fresh");
-  assert.equal(fresh.dataset.sessionId, "work-launch-1");
-  fresh.click();
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "resume_workspace_agent");
-  assert.equal(sent[0].session_id, "work-launch-1");
-  // Start Fresh carries no specific conversation → backend resolves latest/fresh.
-  assert.equal(sent[0].agent_session_id, undefined);
+  assert.equal(
+    fixture.body.querySelector("[data-action='resume-work']"),
+    null,
+    "fallback is not exposed as a second producing intent",
+  );
+  const continueButton = fixture.body.querySelector("[data-action='continue-work']");
+  assert.ok(continueButton);
+  continueButton.click();
+  assert.equal(continued.length, 1);
+  assert.equal(continued[0].workId, "work-opaque-1");
 });
 
 test("Workspace surface is a single fused view with no Work/Git Branches tab toggle (SPEC-2359)", () => {
@@ -932,7 +1564,7 @@ test("Work surface renders a lifecycle_state badge on each Work row (SPEC-2359 W
   assert.equal(pausedBadge.dataset.lifecycle, "paused");
 });
 
-test("Work surface Done action sends close_work with close_kind done (SPEC-2359 W-12 FR-351)", () => {
+test("Paused child Work Done sends close_work for the child identity", () => {
   const fixture = createFixture();
   const sent = [];
   const surface = createSurface(fixture, {
@@ -942,11 +1574,20 @@ test("Work surface Done action sends close_work with close_kind done (SPEC-2359 
     active_work_count: 1,
     active_works: [
       {
-        id: "work-active",
-        title: "Active Work",
-        status_category: "active",
-        lifecycle_state: "active",
+        id: "workspace-work-shared",
+        title: "Shared branch",
+        status_category: "idle",
+        lifecycle_state: "paused",
         agents: [],
+        works: [{
+          id: "work-paused",
+          title: "Paused Work",
+          status_category: "idle",
+          status_text: "Paused",
+          lifecycle_state: "paused",
+          manual_close_allowed: true,
+          agents: [],
+        }],
       },
     ],
   }, { send: (message) => sent.push(message) });
@@ -960,11 +1601,11 @@ test("Work surface Done action sends close_work with close_kind done (SPEC-2359 
   assert.ok(doneButton, "expected a Done action on the selected Work detail");
   doneButton.click();
   assert.deepEqual(sent, [
-    { kind: "close_work", work_id: "work-active", close_kind: "done" },
+    { kind: "close_work", work_id: "work-paused", close_kind: "done" },
   ]);
 });
 
-test("Work surface Discard action sends close_work with close_kind discarded (SPEC-2359 W-12 FR-351)", () => {
+test("Paused child Work Discard sends close_work for the child identity", () => {
   const fixture = createFixture();
   const sent = [];
   const surface = createSurface(fixture, {
@@ -974,11 +1615,20 @@ test("Work surface Discard action sends close_work with close_kind discarded (SP
     active_work_count: 1,
     active_works: [
       {
-        id: "work-active",
-        title: "Active Work",
-        status_category: "active",
-        lifecycle_state: "active",
+        id: "workspace-work-shared",
+        title: "Shared branch",
+        status_category: "idle",
+        lifecycle_state: "paused",
         agents: [],
+        works: [{
+          id: "work-paused",
+          title: "Paused Work",
+          status_category: "idle",
+          status_text: "Paused",
+          lifecycle_state: "paused",
+          manual_close_allowed: true,
+          agents: [],
+        }],
       },
     ],
   }, { send: (message) => sent.push(message) });
@@ -992,8 +1642,98 @@ test("Work surface Discard action sends close_work with close_kind discarded (SP
   assert.ok(discardButton, "expected a Discard action on the selected Work detail");
   discardButton.click();
   assert.deepEqual(sent, [
-    { kind: "close_work", work_id: "work-active", close_kind: "discarded" },
+    { kind: "close_work", work_id: "work-paused", close_kind: "discarded" },
   ]);
+});
+
+test("Workspace header is read-only and operations belong to target contexts", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "projection",
+      title: "projection",
+      status_category: "idle",
+      active_works: [{
+        id: "workspace-work-shared",
+        title: "Shared branch",
+        branch: "work/shared",
+        worktree_path: "/repo/work/shared",
+        status_category: "active",
+        lifecycle_state: "active",
+        cleanup_candidate: {
+          branch: "work/shared",
+          worktree_path: "/repo/work/shared",
+          reason: "no_changes",
+        },
+        agents: [],
+        works: [
+          {
+            id: "work-paused",
+            title: "Paused Work",
+            status_category: "idle",
+            status_text: "Paused",
+            lifecycle_state: "paused",
+            manual_close_allowed: true,
+            agents: [],
+          },
+          {
+            id: "work-live",
+            title: "Live Work",
+            status_category: "active",
+            status_text: "Running",
+            lifecycle_state: "active",
+            manual_close_allowed: false,
+            close_blocked_reason: "live_agent",
+            agents: [],
+          },
+        ],
+      }],
+      agents: [],
+    },
+    {
+      send: (message) => sent.push(message),
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-detail-header button").length,
+    0,
+    "Workspace header is read-only",
+  );
+  assert.ok(
+    fixture.body.querySelector('[data-section="branch-context"] [data-action="launch-workspace"]'),
+    "Launch belongs to branch context",
+  );
+  assert.ok(
+    fixture.body.querySelector('[data-section="worktree-context"] [data-action="cleanup-merged-workspace"]'),
+    "Clean Up belongs to worktree context",
+  );
+  const paused = fixture.body.querySelector('[data-work-id="work-paused"]');
+  assert.ok(paused.querySelector('[data-action="close-work-done"]'));
+  assert.ok(paused.querySelector('[data-action="close-work-discard"]'));
+  const live = fixture.body.querySelector('[data-work-id="work-live"]');
+  assert.equal(live.querySelector('[data-action="close-work-done"]').disabled, true);
+  assert.equal(live.querySelector('[data-action="close-work-discard"]').disabled, true);
+
+  paused.querySelector('[data-action="close-work-done"]').click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "close_work",
+    work_id: "work-paused",
+    close_kind: "done",
+  });
+  fixture.body
+    .querySelector('[data-section="worktree-context"] [data-action="cleanup-merged-workspace"]')
+    .click();
+  assert.equal(cleanupCalls.length, 1);
 });
 
 function sampleProjection() {
@@ -1091,6 +1831,35 @@ function sampleProjection() {
         branch: "work/20260511-0100",
       },
     ],
+  };
+}
+
+function continuationProjection({ sessions = [] } = {}) {
+  return {
+    id: "continuation-projection",
+    title: "Continuation projection",
+    status_category: "idle",
+    active_work_count: 1,
+    active_works: [{
+      id: "workspace-continuation",
+      title: "Continuation workspace",
+      status_category: "idle",
+      lifecycle_state: "paused",
+      agents: [],
+      works: [{
+        id: "work-opaque-1",
+        title: "Continuation Work",
+        status_category: "idle",
+        lifecycle_state: "done",
+        agents: [{
+          session_id: "work-launch-1",
+          display_name: "Codex",
+          status_category: "idle",
+          sessions,
+        }],
+      }],
+    }],
+    agents: [],
   };
 }
 
@@ -1202,11 +1971,9 @@ test("sessionless Workspace offers a Launch control that opens the launch wizard
   assert.equal(sent[0].branch_name, "work/foo");
 });
 
-// Placement feedback (2026-06-11 user verification): the Launch Agent control
-// has one canonical home — the detail header actions — never an arbitrary
-// position after a variable-length Work list. A backfilled row whose title IS
-// the branch name must not repeat the same string as subtitle meta.
-test("Launch control lives in the detail header actions and duplicate branch meta is suppressed", () => {
+// W-21: Launch is a branch operation. A backfilled row whose title IS the
+// branch name must not repeat the same string as subtitle meta.
+test("Launch control lives in branch context and duplicate branch meta is suppressed", () => {
   const fixture = createFixture();
   const surface = createSurface(
     fixture,
@@ -1240,8 +2007,8 @@ test("Launch control lives in the detail header actions and duplicate branch met
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
   assert.ok(launch, "Launch Agent control must exist");
   assert.ok(
-    launch.parentElement.classList.contains("workspace-detail-actions"),
-    "Launch Agent belongs to the detail header actions",
+    launch.closest('[data-section="branch-context"]'),
+    "Launch Agent belongs to branch context",
   );
 
   const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
@@ -1671,14 +2438,12 @@ test("Workspace with existing Works still offers a Launch control", () => {
   assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
   assert.equal(sent.at(-1)?.branch_name, "develop");
 
-  // Placement feedback (2026-06-11): one fixed home in the header actions —
-  // first action, before Done / Discard — and no floating row after the list.
-  const actions = fixture.body.querySelector(".workspace-detail-actions");
-  assert.ok(actions, "detail header actions container must exist");
+  const actions = fixture.body.querySelector('[data-section="branch-context"]');
+  assert.ok(actions, "branch context must exist");
   assert.equal(
-    actions.firstElementChild?.dataset?.action,
+    actions.querySelector('[data-action="launch-workspace"]')?.dataset?.action,
     "launch-workspace",
-    "Launch Agent is the first (primary) header action",
+    "Launch Agent is owned by branch context",
   );
   assert.equal(
     fixture.body.querySelectorAll('[data-action="launch-workspace"]').length,
@@ -1737,8 +2502,9 @@ test("merged Workspace detail offers Clean Up only from a backend cleanup candid
     sendFocus() {},
   });
 
-  const cleanup = [...fixture.body.querySelectorAll(".workspace-detail-actions button")]
-    .find((button) => button.textContent.trim() === "Clean Up");
+  const cleanup = fixture.body.querySelector(
+    '[data-section="worktree-context"] [data-action="cleanup-merged-workspace"]',
+  );
   assert.ok(cleanup, "merged Workspace must offer a Clean Up action");
   cleanup.click();
   assert.equal(cleanupCalls.length, 1);
@@ -2136,6 +2902,15 @@ test("remote-only Workspace shows the Remote badge and keeps the prefilled Launc
   const badge = fixture.body.querySelector(".workspace-overview-remote");
   assert.ok(badge, "Remote badge renders for remote-only rows");
   assert.equal(badge.textContent, "Remote");
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-overview-lifecycle").length,
+    0,
+    "remote environment absence must not be shown as a local Paused/Closed lifecycle",
+  );
+  assert.equal(
+    fixture.body.querySelector(".workspace-overview-row").dataset.attention,
+    "remote",
+  );
   assert.equal(sent.length, 0, "rendering generates no events (FR-381/FR-390)");
 
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
@@ -2203,7 +2978,7 @@ test("eligible remote branches render as unified Workspace rows tagged Remote", 
 
   assert.deepEqual(
     rowIdsInList(fixture),
-    ["work-local", "remote-start:feature-foo", "remote-start:feature/bar"],
+    ["remote-start:feature-foo", "remote-start:feature/bar", "work-local"],
     "eligible remote branches join the list as rows; a duplicate of a real work is dropped",
   );
 
@@ -2219,8 +2994,8 @@ test("eligible remote branches render as unified Workspace rows tagged Remote", 
   );
   assert.equal(
     remoteRow.dataset.attention,
-    "paused",
-    "a startable remote branch sits in the Paused lane",
+    "remote",
+    "a startable remote branch stays Remote instead of guessing a local Paused state",
   );
   const tag = remoteRow.querySelector(".workspace-overview-remote");
   assert.ok(tag, "the row carries the shared Remote tag");
@@ -2594,20 +3369,23 @@ test("cleanup-candidate Workspace shows the safe-to-delete detail signal", () =>
   );
 });
 
-// SPEC-2359 W-17 (FR-398): Resume entry points show pending state and guard
-// against double-sends via the shared launch-pending controller.
-test("Resume click marks the Work pending and a re-click does not re-send", () => {
-  const projection = sampleProjection();
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
+// SPEC-2359 W-24 (FR-578): Continue work owns one correlated in-flight
+// operation and preserves its operation id across an idempotent retry.
+test("Continue work click marks the Work pending and a re-click does not re-send", () => {
+  const projection = continuationProjection();
   const fixture = createFixture();
   const sent = [];
   const launchPending = createLaunchPendingController({
     setTimeoutFn: () => 1,
     clearTimeoutFn: () => {},
   });
-  const surface = createSurface(fixture, projection, {
+  const dispatcher = createContinueWorkDispatcher({
+    launchPending,
     send: (message) => sent.push(message),
+    createOperationId: () => "continue-operation-1",
+  });
+  const surface = createSurface(fixture, projection, {
+    continueWork: dispatcher.dispatch,
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
@@ -2617,29 +3395,85 @@ test("Resume click marks the Work pending and a re-click does not re-send", () =
     sendFocus() {},
   });
 
-  const resume = fixture.body.querySelector("[data-action='resume-work']");
-  resume.click();
+  const continueButton = fixture.body.querySelector("[data-action='continue-work']");
+  continueButton.click();
   assert.equal(sent.length, 1);
   assert.equal(
-    launchPending.isPending("session:work-launch-1"),
+    launchPending.isPending("continue:work-opaque-1"),
     true,
     "click registers the Work as pending",
   );
+  const pendingButton = fixture.body.querySelector("[data-action='continue-work']");
+  assert.equal(
+    pendingButton.disabled,
+    false,
+    "the pending replacement stays natively focusable",
+  );
+  assert.equal(pendingButton.getAttribute("aria-disabled"), "true");
+  assert.equal(pendingButton.getAttribute("aria-busy"), "true");
+  assert.match(pendingButton.textContent, /Continuing/);
 
-  resume.click();
+  pendingButton.click();
   assert.equal(sent.length, 1, "re-click while pending must not re-send");
 });
 
-test("a pending Work renders its Resume button disabled with progress label", () => {
-  const projection = sampleProjection();
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
+test("Continue work keeps keyboard focus on the pending replacement action", () => {
+  const projection = continuationProjection();
+  const fixture = createFixture();
+  let activeElement = null;
+  Object.defineProperty(fixture.document, "activeElement", {
+    configurable: true,
+    get: () => activeElement,
+  });
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  const dispatcher = createContinueWorkDispatcher({
+    launchPending,
+    send() {},
+    createOperationId: () => "continue-operation-focus",
+  });
+  const surface = createSurface(fixture, projection, {
+    continueWork: dispatcher.dispatch,
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+    createNode: (tag, className, text) => {
+      const node = createNode(fixture.document, tag, className, text);
+      node.focus = () => {
+        activeElement = node;
+      };
+      return node;
+    },
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  const button = fixture.body.querySelector("[data-action='continue-work']");
+  button.focus();
+  button.click();
+
+  assert.equal(activeElement?.dataset?.action, "continue-work");
+  assert.equal(activeElement?.dataset?.workId, "work-opaque-1");
+  assert.equal(activeElement?.disabled, false);
+  assert.equal(activeElement?.getAttribute("aria-disabled"), "true");
+});
+
+test("a pending Work renders focusable disabled semantics with progress label", () => {
+  const projection = continuationProjection();
   const fixture = createFixture();
   const launchPending = createLaunchPendingController({
     setTimeoutFn: () => 1,
     clearTimeoutFn: () => {},
   });
-  launchPending.begin("session:work-launch-1", "Resume");
+  launchPending.beginCorrelated(
+    "continue:work-opaque-1",
+    "continue-operation-1",
+    "work-opaque-1",
+    "Continue work",
+  );
   const surface = createSurface(fixture, projection, {
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
@@ -2650,8 +3484,171 @@ test("a pending Work renders its Resume button disabled with progress label", ()
     sendFocus() {},
   });
 
-  const resume = fixture.body.querySelector("[data-action='resume-work']");
-  assert.ok(resume, "Resume control still renders while pending");
-  assert.equal(resume.disabled, true, "pending Work disables its Resume");
-  assert.match(resume.textContent, /Resuming/);
+  const continueButton = fixture.body.querySelector("[data-action='continue-work']");
+  assert.ok(continueButton, "Continue work control still renders while pending");
+  assert.equal(continueButton.disabled, false, "pending Work remains focusable");
+  assert.equal(continueButton.getAttribute("aria-disabled"), "true");
+  assert.equal(continueButton.getAttribute("aria-busy"), "true");
+  assert.match(continueButton.textContent, /Continuing/);
+});
+
+// Issue #3455: `workspacesFromProjection` normalized every child Work with the
+// whole projection as the per-item fallback, so a Work with no owner inherited
+// the CURRENT Work's owner. On real data 648 of 783 works had no owner and all
+// of them rendered the current owner ("3410") — June date-branches showed a
+// July-created Issue number. The projection is the container, never the
+// identity of its children.
+test("child Work with no owner does not inherit the projection owner (#3455)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-owner-bleed",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-20260621-2342-3c84198a",
+          title: "work/20260621-2342",
+          owner: null,
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260621-2342",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-work-20260621-2342-3c84198a"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `an ownerless Work must not show the projection owner: ${row.textContent}`,
+  );
+  assert.match(
+    row.textContent,
+    /work\/20260621-2342/,
+    "the branch stays visible as the row heading",
+  );
+});
+
+// Issue #3455: the same fallback leaked agents and board_refs. 536 of 783 works
+// had no agents and rendered the current Work's agent list instead of their own.
+test("child Work does not inherit projection agents or board_refs (#3455)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-agent-bleed",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      session_agent_total: 4,
+      board_refs: [{ id: "board-parent", kind: "status", body: "parent board entry" }],
+      active_works: [
+        {
+          id: "work-no-agents",
+          title: "Refactor command palette",
+          owner: null,
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260620-0114",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+          board_refs: [],
+        },
+      ],
+      agents: [
+        { session_id: "s1", agent_id: "codex", display_name: "Codex", status_category: "active" },
+        { session_id: "s2", agent_id: "codex", display_name: "Codex", status_category: "active" },
+        { session_id: "s3", agent_id: "claude", display_name: "Claude", status_category: "active" },
+        { session_id: "s4", agent_id: "claude", display_name: "Claude", status_category: "active" },
+      ],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-no-agents"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `owner must not bleed into the agent-less row: ${row.textContent}`,
+  );
+  assert.ok(
+    !/\+\s*\d+\s*more session/i.test(row.textContent),
+    `a Work with no agents must not surface the projection's sessions: ${row.textContent}`,
+  );
+});
+
+// Issue #3455 AC-3: the fix must not over-block. A Work carrying its own owner
+// keeps showing it.
+test("child Work with its own owner still renders it (#3455 regression)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-own-owner",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-with-owner",
+          title: "Coordination domain",
+          owner: "SPEC-2359",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/issue-2359",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-with-owner"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.match(
+    row.textContent,
+    /SPEC-2359/,
+    "a Work that declares its own owner keeps showing it",
+  );
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `the projection owner must never replace a declared owner: ${row.textContent}`,
+  );
 });

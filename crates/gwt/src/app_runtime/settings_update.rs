@@ -141,9 +141,10 @@ pub(super) fn os_url_open_command(url: &str) -> (&'static str, Vec<String>) {
 }
 
 fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
-    use std::process::Command;
     let (program, args) = os_url_open_command(url);
-    let child = Command::new(program).args(&args).spawn()?;
+    let child = gwt_core::process::hidden_command(program)
+        .args(&args)
+        .spawn()?;
     std::thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
@@ -156,21 +157,20 @@ fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
 /// silently dropped so the modal does not surface noise; the path is logged
 /// at the trace level.
 fn open_path_with_os_default(path: &str) -> Result<(), std::io::Error> {
-    use std::process::Command;
     // Reap the spawned opener on a detached thread so repeated invocations
     // do not accumulate zombie processes on Unix. `std::process::Child` has
     // no Drop-time wait, so without this the PID stays in the process table
     // until parent exit (CodeRabbit review on PR #2630).
     let child = if cfg!(target_os = "macos") {
-        let mut cmd = Command::new("open");
+        let mut cmd = gwt_core::process::hidden_command("open");
         cmd.arg(path);
         cmd.spawn()?
     } else if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
+        let mut cmd = gwt_core::process::hidden_command("cmd");
         cmd.args(["/C", "start", "", path]);
         cmd.spawn()?
     } else {
-        let mut cmd = Command::new("xdg-open");
+        let mut cmd = gwt_core::process::hidden_command("xdg-open");
         cmd.arg(path);
         cmd.spawn()?
     };
@@ -567,6 +567,7 @@ impl AppRuntime {
         language: String,
         codex_trust_managed_hooks: Option<bool>,
         board_provider: Option<String>,
+        agent_resource: Option<gwt::protocol::AgentResourceSettings>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -587,6 +588,7 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource,
             ),
         )]
     }
@@ -774,11 +776,11 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend
-    /// commits the prepared payload via the helper subprocess and exits the
-    /// parent. Falls back to the legacy `apply_update_state_and_exit` path
-    /// when no prepared payload exists yet (e.g. user manually re-clicked CTA
-    /// before download completed).
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. The event
+    /// loop resolves the prepared payload (persisted manifest, or a download
+    /// when the user re-clicked the CTA before it persisted) and commits it
+    /// through the graceful `ApplyUpdateGraceful` route (Issue #4038), which
+    /// quits via `QuitApp` instead of exiting from a worker thread.
     pub(super) fn apply_update_restart_now_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(

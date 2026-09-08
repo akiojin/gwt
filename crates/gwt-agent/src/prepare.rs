@@ -1,16 +1,23 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
+
+use reqwest::Url;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
     environment::LaunchEnvironment,
     launch::LaunchConfig,
     session::{
-        runtime_state_path, Session, SessionRuntimeState, GWT_BIN_PATH_ENV,
-        GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
-        GWT_SESSION_RUNTIME_PATH_ENV,
+        runtime_state_path, Session, SessionRuntimeState, ToolRuntimeProvenance,
+        ToolRuntimeResolutionReason, ToolRuntimeRunnerKind, GWT_BIN_PATH_ENV,
+        GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
+        GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::{AgentId, DockerLifecycleIntent, LaunchRuntimeTarget},
 };
@@ -24,13 +31,65 @@ const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
 const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
 const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 1] = ["origin/develop"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub remove_env: Vec<String>,
     pub cwd: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for PreparedProcessLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    if private_launch_env_key(key) {
+                        "<redacted>"
+                    } else {
+                        value.as_str()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let redacted_args = self
+            .args
+            .iter()
+            .map(|argument| {
+                let Some((key, _)) = argument.split_once('=') else {
+                    return argument.clone();
+                };
+                if private_launch_env_key(key) {
+                    format!("{key}=<redacted>")
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        formatter
+            .debug_struct("PreparedProcessLaunch")
+            .field("command", &self.command)
+            .field("args", &redacted_args)
+            .field("env", &redacted_env)
+            .field("remove_env", &self.remove_env)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
+fn private_launch_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        GWT_CONTINUE_WORK_READY_NONCE_ENV
+            | GWT_HOOK_FORWARD_TOKEN_ENV
+            | GWT_SESSION_ID_ENV
+            | GWT_SESSION_RUNTIME_PATH_ENV
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -42,10 +101,161 @@ pub struct PreparedAgentLaunch {
     pub used_host_package_runner_fallback: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HookForwardEnv {
     pub url: String,
     pub token: String,
+}
+
+struct PreparedLaunchFinalization<'a> {
+    used_host_package_runner_fallback: bool,
+    container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
+}
+
+impl std::fmt::Debug for HookForwardEnv {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookForwardEnv")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Translate the daemon's host-only hook endpoint for the selected launch
+/// runtime. Host launches retain the issued URL byte-for-byte.
+pub fn hook_forward_url_for_launch_runtime(
+    host_url: &str,
+    runtime_target: LaunchRuntimeTarget,
+    container_runtime_kind: Option<gwt_docker::ContainerRuntimeKind>,
+) -> Result<String, String> {
+    if runtime_target == LaunchRuntimeTarget::Host {
+        return Ok(host_url.to_string());
+    }
+
+    let bridge_host = container_runtime_kind
+        .ok_or_else(|| "container hook forwarding requires a resolved runtime kind".to_string())?
+        .host_bridge_name();
+    let mut url =
+        Url::parse(host_url).map_err(|error| format!("invalid host hook forward URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "container hook forwarding requires an HTTP(S) URL scheme, got '{}'",
+            url.scheme()
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("container hook forwarding URL must not contain user credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "host hook forward URL is missing a host".to_string())?;
+    if !is_loopback_hook_forward_host(host) {
+        return Err(format!(
+            "container hook forwarding requires a loopback host endpoint before bridge translation, got '{host}'"
+        ));
+    }
+    if url.port().is_none() {
+        return Err(
+            "container hook forwarding requires an explicit port before bridge translation"
+                .to_string(),
+        );
+    }
+    if url.path() != "/internal/hook-live" || url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "container hook forwarding URL must use the exact /internal/hook-live path without query or fragment, got '{}'",
+            url.path()
+        ));
+    }
+    url.set_host(Some(bridge_host)).map_err(|_| {
+        format!("failed to install container host bridge name '{bridge_host}' in hook URL")
+    })?;
+    Ok(url.into())
+}
+
+/// Select the pane WebSocket endpoint for the launch runtime.
+///
+/// Every managed agent uses the capability-authenticated agent listener.
+/// Host agents keep its loopback URL; container agents rewrite that URL to
+/// the runtime's reserved host bridge.
+pub fn pane_websocket_url_for_launch_runtime(
+    _browser_listener_url: &str,
+    agent_listener_url: &str,
+    runtime_target: LaunchRuntimeTarget,
+    container_runtime_kind: Option<gwt_docker::ContainerRuntimeKind>,
+) -> Result<String, String> {
+    let mut url = Url::parse(agent_listener_url)
+        .map_err(|error| format!("invalid agent pane WebSocket URL: {error}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(format!(
+            "managed pane access requires a WebSocket URL scheme, got '{}'",
+            url.scheme()
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("managed pane WebSocket URL must not contain user credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "managed pane WebSocket URL is missing a host".to_string())?;
+    if !is_loopback_hook_forward_host(host) {
+        return Err(format!(
+            "managed pane WebSocket access requires a loopback agent endpoint, got '{host}'"
+        ));
+    }
+    if url.port().is_none() {
+        return Err("managed pane WebSocket URL requires an explicit port".to_string());
+    }
+    if url.path() != "/internal/pane-ws" || url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "managed pane WebSocket URL must use the exact /internal/pane-ws path without query or fragment, got '{}'",
+            url.path()
+        ));
+    }
+    if runtime_target == LaunchRuntimeTarget::Host {
+        return Ok(url.into());
+    }
+
+    let bridge_host = container_runtime_kind
+        .ok_or_else(|| "container pane access requires a resolved runtime kind".to_string())?
+        .host_bridge_name();
+    url.set_host(Some(bridge_host)).map_err(|_| {
+        format!("failed to install container host bridge name '{bridge_host}' in pane URL")
+    })?;
+    Ok(url.into())
+}
+
+fn is_loopback_hook_forward_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn install_hook_forward_env(
+    config: &mut LaunchConfig,
+    target: Option<HookForwardEnv>,
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<(), String> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let url = hook_forward_url_for_launch_runtime(
+        &target.url,
+        config.runtime_target,
+        container_runtime.map(gwt_docker::detect::ResolvedContainerRuntime::kind),
+    )?;
+    config
+        .env_vars
+        .insert(GWT_HOOK_FORWARD_URL_ENV.to_string(), url);
+    config
+        .env_vars
+        .insert(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), target.token);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +298,509 @@ struct PackageRunnerProgram {
     args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostRunnerProbeKind {
+    Direct,
+    /// Legacy/non-targeted package-runner executable health check.
+    Runner,
+    Metadata,
+    Package,
+}
+
+/// Runtime-only exact package runner selected for a targeted Windows Host
+/// launch. Only the path-independent provenance is persisted in a Session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHostPackagePlan {
+    pub runner_executable: String,
+    pub package_prefix: Vec<String>,
+    pub provenance: ToolRuntimeProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRunnerProbeOutcome {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub error: Option<String>,
+}
+
+impl HostRunnerProbeOutcome {
+    pub fn success() -> Self {
+        Self {
+            success: true,
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    pub fn failure_with_stderr(stderr: &str) -> Self {
+        Self {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    pub fn timeout() -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
+            error: None,
+        }
+    }
+
+    /// Synthesized outcome for a runner that never spawned (e.g. the direct
+    /// executable is not on PATH). SPEC-3864 T-011: it carries no
+    /// `exit_code`, so the diagnostic cannot read as a real process exit.
+    pub fn unresolved(reason: &str) -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: Some(reason.to_string()),
+        }
+    }
+
+    fn combined_output(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+
+    fn diagnostic(&self, env_vars: &HashMap<String, String>) -> String {
+        let mut parts = Vec::new();
+        if let Some(error) = &self.error {
+            parts.push(redact_runner_probe_text(error, env_vars));
+        }
+        if self.timed_out {
+            parts.push("probe timed out".to_string());
+        }
+        if let Some(code) = self.exit_code {
+            parts.push(format!("exit status {code}"));
+        }
+        let output = self.combined_output();
+        let output = output.trim();
+        if !output.is_empty() {
+            let redacted = redact_runner_probe_text(output, env_vars);
+            parts.push(truncate_runner_diagnostic(&redacted, 1200));
+        }
+        if parts.is_empty() {
+            "probe failed without output.".to_string()
+        } else {
+            format!("Probe detail: {}.", parts.join("; "))
+        }
+    }
+}
+
+const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const PACKAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn host_runner_probe_timeout(kind: HostRunnerProbeKind) -> Duration {
+    match kind {
+        HostRunnerProbeKind::Direct | HostRunnerProbeKind::Runner => DIRECT_RUNNER_PROBE_TIMEOUT,
+        HostRunnerProbeKind::Metadata => METADATA_PROBE_TIMEOUT,
+        HostRunnerProbeKind::Package => PACKAGE_PROBE_TIMEOUT,
+    }
+}
+
+/// Issue #3941 AC-3: stable phrase carried by every launch abort that the
+/// Issue Monitor may retry on its own without spending an attempt. The
+/// monitor classifies on this phrase, so the wording is part of the contract.
+pub const TRANSIENT_LAUNCH_RETRY_HINT: &str =
+    "gwt retries this launch automatically without spending an attempt";
+
+/// Whether a launch failure message describes transient infrastructure
+/// (an exact package probe timeout with no cached version, or a remote-
+/// tracking ref race between concurrent fetches) rather than a broken agent
+/// or a broken launch profile.
+pub fn is_transient_launch_failure(message: &str) -> bool {
+    message.contains(TRANSIENT_LAUNCH_RETRY_HINT)
+        || gwt_git::worktree::is_remote_tracking_ref_cas_conflict(message)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalPackageCacheRoot {
+    /// npm's `_npx` directory: `<root>/<hash>/node_modules/<package>`.
+    Npx(PathBuf),
+    /// bun's install cache: `<root>/[<scope>/]<name>@<version>[@@@<n>]`.
+    Bun(PathBuf),
+}
+
+impl LocalPackageCacheRoot {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Npx(path) | Self::Bun(path) => path,
+        }
+    }
+}
+
+fn launch_env_value(env_vars: &HashMap<String, String>, key: &str) -> Option<String> {
+    env_vars
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+fn local_package_cache_roots(env_vars: &HashMap<String, String>) -> Vec<LocalPackageCacheRoot> {
+    let home = launch_env_value(env_vars, "HOME")
+        .or_else(|| launch_env_value(env_vars, "USERPROFILE"))
+        .map(PathBuf::from);
+    let npm_cache = launch_env_value(env_vars, "npm_config_cache")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(windows) {
+                launch_env_value(env_vars, "LOCALAPPDATA")
+                    .map(|base| PathBuf::from(base).join("npm-cache"))
+            } else {
+                home.as_ref().map(|home| home.join(".npm"))
+            }
+        });
+    let bun_cache = launch_env_value(env_vars, "BUN_INSTALL_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            launch_env_value(env_vars, "BUN_INSTALL")
+                .map(|base| PathBuf::from(base).join("install").join("cache"))
+        })
+        .or_else(|| {
+            home.as_ref()
+                .map(|home| home.join(".bun").join("install").join("cache"))
+        });
+    let mut roots = Vec::new();
+    if let Some(npm_cache) = npm_cache {
+        roots.push(LocalPackageCacheRoot::Npx(npm_cache.join("_npx")));
+    }
+    if let Some(bun_cache) = bun_cache {
+        roots.push(LocalPackageCacheRoot::Bun(bun_cache));
+    }
+    roots
+}
+
+fn package_json_version(package_dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(package_dir.join("package.json")).ok()?;
+    let manifest = serde_json::from_str::<serde_json::Value>(&manifest).ok()?;
+    manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn npx_cache_hit(root: &Path, package: &str, exact_version: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    entries.flatten().find_map(|entry| {
+        let package_dir = entry.path().join("node_modules").join(package);
+        (package_json_version(&package_dir).as_deref() == Some(exact_version))
+            .then_some(package_dir)
+    })
+}
+
+fn bun_cache_hit(root: &Path, package: &str, exact_version: &str) -> Option<PathBuf> {
+    let (scope_dir, name) = match package
+        .strip_prefix('@')
+        .and_then(|rest| rest.split_once('/'))
+    {
+        Some((scope, name)) => (root.join(format!("@{scope}")), name),
+        None => (root.to_path_buf(), package),
+    };
+    let prefix = format!("{name}@{exact_version}");
+    let entries = std::fs::read_dir(scope_dir).ok()?;
+    entries.flatten().find_map(|entry| {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let remainder = file_name.strip_prefix(prefix.as_str())?;
+        if !(remainder.is_empty() || remainder.starts_with("@@@")) {
+            return None;
+        }
+        let package_dir = entry.path();
+        (package_json_version(&package_dir).as_deref() == Some(exact_version))
+            .then_some(package_dir)
+    })
+}
+
+/// Issue #3941 AC-1: locate `package@exact_version` in the local package-runner
+/// caches (npm `_npx`, bun install cache) using the launch's effective
+/// environment. A hit means `npx --yes package@exact_version` can start without
+/// the registry, so a timed-out health probe is not a reason to abort.
+pub fn local_exact_package_cache_hit(
+    package: &str,
+    exact_version: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    local_package_cache_roots(env_vars)
+        .into_iter()
+        .find_map(|root| match root {
+            LocalPackageCacheRoot::Npx(base) => npx_cache_hit(&base, package, exact_version),
+            LocalPackageCacheRoot::Bun(base) => bun_cache_hit(&base, package, exact_version),
+        })
+}
+
+/// `package@<semver>` → `(package, semver)`; `None` for `latest` / range specs.
+fn exact_package_spec(version_spec: &str) -> Option<(&str, &str)> {
+    let at = version_spec.rfind('@').filter(|index| *index > 0)?;
+    let (package, version) = (&version_spec[..at], &version_spec[at + 1..]);
+    semver::Version::parse(version)
+        .ok()
+        .map(|_| (package, version))
+}
+
+/// Issue #3941 AC-1/AC-3: decide a timed-out exact package probe. A cached
+/// version continues the launch with a report message; otherwise the abort
+/// message states the cause (timeout), the cache miss, and the next action,
+/// and carries [`TRANSIENT_LAUNCH_RETRY_HINT`].
+fn resolve_exact_probe_timeout(
+    package: &str,
+    exact_version: &str,
+    timeout: Duration,
+    after_repair: bool,
+    env_vars: &HashMap<String, String>,
+    report: &mut HostRunnerHealthReport,
+) -> Result<(), String> {
+    let secs = timeout.as_secs();
+    let phase = if after_repair {
+        " after npm cache repair"
+    } else {
+        ""
+    };
+    if let Some(cached) = local_exact_package_cache_hit(package, exact_version, env_vars) {
+        report.messages.push(format!(
+            "exact npx package probe timed out for {package}@{exact_version} after {secs} seconds{phase}; continuing because the requested version is present in the local package cache at {}",
+            cached.display()
+        ));
+        return Ok(());
+    }
+    let roots = local_package_cache_roots(env_vars)
+        .iter()
+        .map(|root| root.path().display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "exact npx package probe timed out for {package}@{exact_version} after {secs} seconds{phase} and the requested version is not in the local package cache; launch was aborted before spawn. \
+         Cause: probe timeout (npm registry latency or concurrent npx contention). \
+         Cache: {package}@{exact_version} absent from [{roots}]. \
+         Next: warm the cache once with `npx --yes {package}@{exact_version} --version`; {TRANSIENT_LAUNCH_RETRY_HINT}."
+    ))
+}
+
+/// Identity of one package-runner probe for in-process sharing. The working
+/// directory is deliberately excluded: `npx --yes pkg@x --version` answers
+/// the same for every worktree, and concurrent launches all use different
+/// worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProbeSingleFlightKey {
+    pub kind: HostRunnerProbeKind,
+    pub command: String,
+    pub args: Vec<String>,
+    pub path: String,
+}
+
+impl ProbeSingleFlightKey {
+    fn new(
+        kind: HostRunnerProbeKind,
+        command: &str,
+        args: &[String],
+        env_vars: &HashMap<String, String>,
+    ) -> Self {
+        Self {
+            kind,
+            command: command.to_string(),
+            args: args.to_vec(),
+            path: launch_env_value(env_vars, "PATH").unwrap_or_default(),
+        }
+    }
+}
+
+/// How a probe result reached the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeShare {
+    /// This caller ran the probe process.
+    Led,
+    /// This caller waited for another launch's in-flight probe.
+    Joined,
+    /// A recent successful probe was replayed without a process.
+    Reused,
+}
+
+const PROBE_RESULT_REUSE_TTL: Duration = Duration::from_secs(300);
+
+enum ProbeSlotState {
+    InFlight,
+    Done {
+        outcome: HostRunnerProbeOutcome,
+        completed_at: Instant,
+    },
+}
+
+struct ProbeSlot {
+    state: Mutex<ProbeSlotState>,
+    ready: std::sync::Condvar,
+}
+
+impl ProbeSlot {
+    fn in_flight() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ProbeSlotState::InFlight),
+            ready: std::sync::Condvar::new(),
+        })
+    }
+
+    fn complete(&self, outcome: HostRunnerProbeOutcome) {
+        *lock_ignoring_poison(&self.state) = ProbeSlotState::Done {
+            outcome,
+            completed_at: Instant::now(),
+        };
+        self.ready.notify_all();
+    }
+}
+
+/// Settles the slot if the leader unwinds, so joined launches never hang on
+/// a probe that will not finish.
+struct ProbeLeaderGuard<'a> {
+    slot: &'a ProbeSlot,
+    completed: bool,
+}
+
+impl Drop for ProbeLeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.slot.complete(runner_probe_internal_error(
+                "probe leader unwound before completing".to_string(),
+            ));
+        }
+    }
+}
+
+fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Issue #3941 AC-2: one probe process per (runner, package spec) at a time.
+/// Concurrent launches in the same scan join the in-flight probe instead of
+/// each spawning `npx --yes pkg@x --version` and racing the registry; a
+/// successful result is replayed for five minutes. Failures
+/// and timeouts are never replayed.
+#[derive(Default)]
+pub struct HostRunnerProbeSingleFlight {
+    slots: Mutex<HashMap<ProbeSingleFlightKey, Arc<ProbeSlot>>>,
+}
+
+impl HostRunnerProbeSingleFlight {
+    pub fn run(
+        &self,
+        key: ProbeSingleFlightKey,
+        run: impl FnOnce() -> HostRunnerProbeOutcome,
+    ) -> (HostRunnerProbeOutcome, ProbeShare) {
+        enum Admission {
+            Lead(Arc<ProbeSlot>),
+            Join(Arc<ProbeSlot>),
+            Reuse(HostRunnerProbeOutcome),
+        }
+        let admission = {
+            let mut slots = lock_ignoring_poison(&self.slots);
+            let existing =
+                slots
+                    .get(&key)
+                    .and_then(|slot| match &*lock_ignoring_poison(&slot.state) {
+                        ProbeSlotState::InFlight => Some(Admission::Join(Arc::clone(slot))),
+                        ProbeSlotState::Done {
+                            outcome,
+                            completed_at,
+                        } if outcome.success && completed_at.elapsed() < PROBE_RESULT_REUSE_TTL => {
+                            Some(Admission::Reuse(outcome.clone()))
+                        }
+                        ProbeSlotState::Done { .. } => None,
+                    });
+            existing.unwrap_or_else(|| {
+                let slot = ProbeSlot::in_flight();
+                slots.insert(key, Arc::clone(&slot));
+                Admission::Lead(slot)
+            })
+        };
+        match admission {
+            Admission::Reuse(outcome) => (outcome, ProbeShare::Reused),
+            Admission::Lead(slot) => {
+                let mut guard = ProbeLeaderGuard {
+                    slot: &slot,
+                    completed: false,
+                };
+                let outcome = run();
+                slot.complete(outcome.clone());
+                guard.completed = true;
+                (outcome, ProbeShare::Led)
+            }
+            Admission::Join(slot) => {
+                let state = lock_ignoring_poison(&slot.state);
+                let state = slot
+                    .ready
+                    .wait_while(state, |state| matches!(state, ProbeSlotState::InFlight))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match &*state {
+                    ProbeSlotState::Done { outcome, .. } => (outcome.clone(), ProbeShare::Joined),
+                    ProbeSlotState::InFlight => unreachable!("wait_while exits on Done"),
+                }
+            }
+        }
+    }
+}
+
+fn host_runner_probe_single_flight() -> &'static HostRunnerProbeSingleFlight {
+    static REGISTRY: std::sync::OnceLock<HostRunnerProbeSingleFlight> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(HostRunnerProbeSingleFlight::default)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostRunnerHealthReport {
+    pub switched_to_fallback: bool,
+    pub repaired_npx_cache: bool,
+    pub messages: Vec<String>,
+    /// Bounded and redacted output from a successful built-in direct runner
+    /// version probe. Consumers may reuse this evidence instead of spawning a
+    /// second discovery process.
+    pub version_output: Option<String>,
+    /// Verified exact package plan for a targeted Windows Host launch.
+    pub resolved_package_plan: Option<ResolvedHostPackagePlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsNpxCacheRepairCandidate {
+    pub npx_root: PathBuf,
+    pub missing_binary: PathBuf,
+    #[cfg(windows)]
+    validation: WindowsNpxCacheRepairValidation,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsNpxCacheRepairValidation {
+    npx_cache_base: PathBuf,
+    base_identity: WindowsFileIdentity,
+    root_identity: WindowsFileIdentity,
+    missing_relative: PathBuf,
+    directory_identities: Vec<(PathBuf, WindowsFileIdentity)>,
+    marker_identities: Vec<(PathBuf, WindowsFileIdentity)>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsFileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DevContainerLaunchDefaults {
     service: Option<String>,
@@ -103,13 +816,19 @@ enum DockerLaunchServiceAction {
     Recreate,
 }
 
-type PackageRunnerProbe =
-    dyn FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool;
+type HostRunnerProbe = dyn FnMut(
+    HostRunnerProbeKind,
+    &str,
+    Vec<String>,
+    &HashMap<String, String>,
+    &[String],
+    Option<PathBuf>,
+) -> HostRunnerProbeOutcome;
 type GwtBinLookup = dyn Fn(&str) -> Option<PathBuf>;
 
 struct PrepareLaunchDeps<'a> {
     current_exe: &'a Path,
-    probe_host_runner: &'a mut PackageRunnerProbe,
+    probe_host_runner: &'a mut HostRunnerProbe,
     lookup_gwt_bin: &'a GwtBinLookup,
 }
 
@@ -124,8 +843,15 @@ where
     F: FnMut(&Path) -> Result<(), String>,
 {
     let current_exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
-    let mut probe_host_runner = probe_host_package_runner
-        as fn(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool;
+    let mut probe_host_runner = probe_host_runner_outcome
+        as fn(
+            HostRunnerProbeKind,
+            &str,
+            Vec<String>,
+            &HashMap<String, String>,
+            &[String],
+            Option<PathBuf>,
+        ) -> HostRunnerProbeOutcome;
     let lookup_gwt_bin = |command: &str| which::which(command).ok();
     prepare_agent_launch_with(
         repo_path,
@@ -160,7 +886,7 @@ where
 
     resolve_launch_worktree(repo_path, &mut config)?;
     normalize_launch_config_working_dir(&mut config);
-    apply_docker_runtime_to_launch_config(repo_path, &mut config)?;
+    let container_runtime = apply_docker_runtime_to_launch_config(repo_path, &mut config)?;
 
     let worktree_path = normalize_child_process_path(
         &config
@@ -182,14 +908,20 @@ where
         .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
     refresh_worktree_assets(&worktree_path)?;
 
-    let npx_fallback_executable =
-        crate::launch::resolve_host_npx_fallback_executable(&config.env_vars);
-    let used_host_package_runner_fallback = config.runtime_target == LaunchRuntimeTarget::Host
-        && apply_host_package_runner_fallback_with_probe(
-            &mut config,
-            npx_fallback_executable,
-            probe_host_runner,
+    let fallback_executable =
+        crate::launch::resolve_host_npx_fallback_executable_with_effective_env(
+            &config.env_vars,
+            &config.remove_env,
+            config.working_dir.as_deref(),
         );
+    let fallback_report = resolve_host_runner_health_checked_with_probe_and_repair(
+        &mut config,
+        fallback_executable,
+        default_windows_npx_cache_base(),
+        probe_host_runner,
+        repair_windows_npx_cache,
+    )?;
+    let used_host_package_runner_fallback = fallback_report.switched_to_fallback;
 
     install_launch_gwt_bin_env_with_lookup(
         &mut config.env_vars,
@@ -208,33 +940,49 @@ where
     config
         .env_vars
         .insert(GWT_SESSION_ID_ENV.to_string(), session.id.clone());
-    // SPEC-3247 FR-001: export the session-kind signal so managed hooks and
-    // coordination guidance can adapt to the Curate (intake) vs Execute
-    // (execution) lane. Derived from the ephemeral intake flag (SPEC-3214);
-    // absent/unknown is treated as Execution downstream (FR-004).
-    let session_kind_env = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral)
-        .as_env_str()
-        .to_string();
-    config.env_vars.insert(
-        gwt_skills::GWT_SESSION_KIND_ENV.to_string(),
-        session_kind_env,
-    );
     config.env_vars.insert(
         GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
         runtime_path.display().to_string(),
     );
-    if let Some(target) = hook_forward {
-        config
-            .env_vars
-            .insert(GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
-        config
-            .env_vars
-            .insert(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), target.token);
-    }
+    install_hook_forward_env(&mut config, hook_forward, container_runtime.as_ref())?;
     config
         .env_vars
         .entry("COLORTERM".to_string())
         .or_insert_with(|| "truecolor".to_string());
+
+    finalize_and_persist_prepared_launch(
+        repo_path,
+        sessions_dir,
+        config,
+        session,
+        runtime_path,
+        worktree_path,
+        PreparedLaunchFinalization {
+            used_host_package_runner_fallback,
+            container_runtime: container_runtime.as_ref(),
+        },
+    )
+}
+
+fn finalize_and_persist_prepared_launch(
+    repo_path: &Path,
+    sessions_dir: &Path,
+    mut config: LaunchConfig,
+    mut session: Session,
+    runtime_path: PathBuf,
+    worktree_path: PathBuf,
+    finalization: PreparedLaunchFinalization<'_>,
+) -> Result<PreparedAgentLaunch, String> {
+    let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
+        repo_path,
+        &mut config,
+        finalization.container_runtime,
+    )?;
+    if let Some(runtime_worktree) = docker_runtime_worktree {
+        let project_state_root = normalize_child_process_path(repo_path);
+        session.project_state_root = Some(project_state_root.clone());
+        session.bind_docker_runtime(runtime_worktree, &project_state_root)?;
+    }
 
     session
         .save(sessions_dir)
@@ -242,8 +990,6 @@ where
     SessionRuntimeState::new(crate::AgentStatus::Running)
         .save(&runtime_path)
         .map_err(|error| error.to_string())?;
-
-    finalize_docker_agent_launch_config(repo_path, &mut config)?;
 
     Ok(PreparedAgentLaunch {
         process_launch: PreparedProcessLaunch {
@@ -256,7 +1002,7 @@ where
         session,
         runtime_path,
         worktree_path,
-        used_host_package_runner_fallback,
+        used_host_package_runner_fallback: finalization.used_host_package_runner_fallback,
     })
 }
 
@@ -433,11 +1179,9 @@ pub fn resolve_launch_worktree_request(
 }
 
 pub fn apply_host_package_runner_fallback(config: &mut LaunchConfig) -> bool {
-    apply_host_package_runner_fallback_with_probe(
-        config,
-        "npx".to_string(),
-        probe_host_package_runner,
-    )
+    resolve_host_runner_health_checked(config)
+        .map(|report| report.switched_to_fallback)
+        .unwrap_or(false)
 }
 
 pub fn apply_host_package_runner_fallback_with_probe<F>(
@@ -448,14 +1192,550 @@ pub fn apply_host_package_runner_fallback_with_probe<F>(
 where
     F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
 {
-    let Some(program) =
-        resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
-    else {
-        return false;
+    resolve_host_runner_health_checked_with_probe_and_repair(
+        config,
+        fallback_executable,
+        None,
+        |_kind, command, args, env_vars, remove_env, cwd| {
+            if probe(command, args, env_vars, remove_env, cwd) {
+                HostRunnerProbeOutcome::success()
+            } else {
+                HostRunnerProbeOutcome::failure_with_stderr("injected probe failure")
+            }
+        },
+        |_candidate| Ok(()),
+    )
+    .map(|report| report.switched_to_fallback)
+    .unwrap_or(false)
+}
+
+/// Validate the complete Host runner chain before Session persistence or
+/// process dispatch. This is the canonical runner-health policy used by both
+/// the public preparation API and the GUI production launch path.
+pub fn resolve_host_runner_health_checked(
+    config: &mut LaunchConfig,
+) -> Result<HostRunnerHealthReport, String> {
+    let fallback_executable =
+        crate::launch::resolve_host_npx_fallback_executable_with_effective_env(
+            &config.env_vars,
+            &config.remove_env,
+            config.working_dir.as_deref(),
+        );
+    resolve_host_runner_health_checked_with_probe_and_repair(
+        config,
+        fallback_executable,
+        default_windows_npx_cache_base(),
+        probe_host_runner_outcome,
+        repair_windows_npx_cache,
+    )
+}
+
+#[doc(hidden)]
+pub fn resolve_host_runner_health_checked_with_probe_and_repair<F, R>(
+    config: &mut LaunchConfig,
+    fallback_executable: String,
+    npx_cache_base: Option<PathBuf>,
+    mut probe: F,
+    mut repair: R,
+) -> Result<HostRunnerHealthReport, String>
+where
+    F: FnMut(
+        HostRunnerProbeKind,
+        &str,
+        Vec<String>,
+        &HashMap<String, String>,
+        &[String],
+        Option<PathBuf>,
+    ) -> HostRunnerProbeOutcome,
+    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
+{
+    if config.runtime_target != LaunchRuntimeTarget::Host {
+        return Ok(HostRunnerHealthReport::default());
+    }
+    if config.agent_id.builtin_descriptor().is_none() {
+        return Ok(HostRunnerHealthReport::default());
+    }
+    if is_targeted_windows_host_package_launch(config) && config.tool_runtime_provenance.is_some() {
+        return resolve_targeted_windows_host_package_plan(
+            config,
+            fallback_executable,
+            npx_cache_base,
+            None,
+            &mut probe,
+            &mut repair,
+        );
+    }
+    if !is_host_builtin_direct_runner(config) {
+        if is_targeted_windows_host_package_launch(config) {
+            return resolve_targeted_windows_host_package_plan(
+                config,
+                fallback_executable,
+                npx_cache_base,
+                None,
+                &mut probe,
+                &mut repair,
+            );
+        }
+        return apply_host_package_runner_checked_with_probe_and_repair(
+            config,
+            fallback_executable,
+            npx_cache_base,
+            probe,
+            repair,
+        );
+    }
+
+    let direct_command = crate::launch::resolve_direct_runner_with_effective_env(
+        &config.command,
+        &config.env_vars,
+        &config.remove_env,
+        config.working_dir.as_deref(),
+    );
+    let direct_probe_args = crate::launch::builtin_version_probe_args(&config.agent_id)
+        .expect("built-in descriptor checked above");
+    let direct_probe = direct_command.as_deref().map_or_else(
+        || HostRunnerProbeOutcome::unresolved("direct runner executable not resolved"),
+        |direct_command| {
+            probe(
+                HostRunnerProbeKind::Direct,
+                direct_command,
+                direct_probe_args,
+                &config.env_vars,
+                &config.remove_env,
+                config.working_dir.clone(),
+            )
+        },
+    );
+    if direct_probe.success {
+        let report = HostRunnerHealthReport {
+            version_output: strict_semver_probe_evidence(&direct_probe),
+            ..HostRunnerHealthReport::default()
+        };
+        let mut candidate = config.clone();
+        candidate.command = direct_command.expect("successful probe has a resolved command");
+        *config = candidate;
+        return Ok(report);
+    }
+
+    let direct_diagnostic = direct_probe.diagnostic(&config.env_vars);
+    let agent_name = config.agent_id.display_name().to_string();
+    if is_targeted_windows_host_package_launch(config) {
+        let mut report = resolve_targeted_windows_host_package_plan(
+            config,
+            fallback_executable,
+            npx_cache_base,
+            Some("installed"),
+            &mut probe,
+            &mut repair,
+        )
+        .map_err(|fallback_error| {
+            format!(
+                "{agent_name} installed runner failed its health check. {direct_diagnostic} Exact npm fallback is also unhealthy: {fallback_error}"
+            )
+        })?;
+        report.switched_to_fallback = true;
+        report.messages.insert(
+            0,
+            format!(
+                "{} runner unavailable; switching to a verified exact npx package...",
+                config.agent_id.display_name()
+            ),
+        );
+        return Ok(report);
+    }
+    let Some(package) = config.agent_id.npm_package() else {
+        // SPEC-3864 FR-013 / T-010: no runtime `latest` route exists, so the
+        // only recovery is a pre-install. Name the route's install command
+        // when the descriptor declares one.
+        let setup_hint = config
+            .agent_id
+            .distribution()
+            .install_shell_command()
+            .map_or_else(
+                || " Setup required: install it manually and relaunch.".to_string(),
+                |command| format!(" Setup required: install it with `{command}` and relaunch."),
+            );
+        return Err(format!(
+            "{agent_name} installed runner failed its health check. {direct_diagnostic} No runtime package route is available.{setup_hint}"
+        ));
     };
-    config.command = program.executable;
-    config.args = program.args;
-    true
+
+    let runner = crate::launch::resolve_latest_runner_with_effective_env(
+        &config.agent_id,
+        &config.env_vars,
+        &config.remove_env,
+        config.working_dir.as_deref(),
+    );
+    if !(command_matches_runner(&runner.executable, "bunx")
+        || command_matches_runner(&runner.executable, "npx"))
+    {
+        return Err(format!(
+            "{agent_name} installed runner failed its health check. {direct_diagnostic} Latest package fallback '{package}@latest' could not be resolved."
+        ));
+    }
+
+    let mut candidate = config.clone();
+    candidate.command = runner.executable;
+    candidate.args = runner.base_args;
+    candidate.args.extend(config.args.clone());
+    let mut report = apply_host_package_runner_checked_with_probe_and_repair(
+        &mut candidate,
+        fallback_executable,
+        npx_cache_base,
+        probe,
+        repair,
+    )
+    .map_err(|fallback_error| {
+        format!(
+            "{agent_name} installed runner failed its health check. {direct_diagnostic} Latest package fallback '{package}@latest' is also unhealthy: {fallback_error}"
+        )
+    })?;
+
+    let selected_fallback = if command_matches_runner(&candidate.command, "npx") {
+        "npx"
+    } else {
+        "bunx"
+    };
+    *config = candidate;
+    report.switched_to_fallback = true;
+    report.messages.insert(
+        0,
+        format!(
+            "{} runner unavailable; switching to latest package runner ({selected_fallback})...",
+            config.agent_id.display_name()
+        ),
+    );
+    Ok(report)
+}
+
+fn is_targeted_windows_host_package_launch(config: &LaunchConfig) -> bool {
+    cfg!(windows)
+        && config.runtime_target == LaunchRuntimeTarget::Host
+        && matches!(config.agent_id, AgentId::Codex | AgentId::ClaudeCode)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_targeted_windows_host_package_plan<F, R>(
+    config: &mut LaunchConfig,
+    fallback_executable: String,
+    npx_cache_base: Option<PathBuf>,
+    requested_selector_override: Option<&str>,
+    probe: &mut F,
+    repair: &mut R,
+) -> Result<HostRunnerHealthReport, String>
+where
+    F: FnMut(
+        HostRunnerProbeKind,
+        &str,
+        Vec<String>,
+        &HashMap<String, String>,
+        &[String],
+        Option<PathBuf>,
+    ) -> HostRunnerProbeOutcome,
+    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
+{
+    let package = config
+        .agent_id
+        .npm_package()
+        .expect("targeted official provider has an npm package");
+    let version_spec = host_package_runner_version_spec(config);
+    let agent_args = version_spec.as_deref().map_or_else(
+        || config.args.clone(),
+        |version_spec| strip_package_runner_args(&config.args, version_spec),
+    );
+    let switched_to_fallback = !is_windows_npx_cmd(&config.command);
+    let npx_executable = if !switched_to_fallback {
+        config.command.clone()
+    } else {
+        fallback_executable
+    };
+    if !is_windows_npx_cmd(&npx_executable) {
+        return Err(format!(
+            "npx resolution failed before metadata lookup for {package}; Windows official-provider launches require npx.cmd and never fall back to bunx."
+        ));
+    }
+
+    let requested_selector = requested_selector_override
+        .map(str::to_string)
+        .or_else(|| {
+            config
+                .tool_runtime_provenance
+                .as_ref()
+                .map(|provenance| provenance.requested_selector.clone())
+        })
+        .or_else(|| config.tool_version.clone())
+        .or_else(|| {
+            version_spec
+                .as_deref()
+                .and_then(|spec| package_selector(spec, package))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "latest".to_string());
+    let (resolved_exact_version, resolution_reason) = if let Some(provenance) =
+        config.tool_runtime_provenance.as_ref()
+    {
+        validate_tool_runtime_provenance(provenance, package, &requested_selector)?;
+        (
+            provenance.resolved_exact_version.clone(),
+            provenance.resolution_reason,
+        )
+    } else if semver::Version::parse(&requested_selector).is_ok() {
+        (
+            requested_selector.clone(),
+            if config.tool_runtime_source_session_id.is_some() {
+                ToolRuntimeResolutionReason::LegacyMigration
+            } else {
+                ToolRuntimeResolutionReason::RequestedSelector
+            },
+        )
+    } else if matches!(requested_selector.as_str(), "latest" | "installed") {
+        let npm_executable = sibling_npm_executable(&npx_executable)?;
+        let metadata_spec = format!("{package}@latest");
+        let metadata = probe(
+            HostRunnerProbeKind::Metadata,
+            &npm_executable,
+            vec![
+                "view".to_string(),
+                metadata_spec,
+                "version".to_string(),
+                "--json".to_string(),
+            ],
+            &config.env_vars,
+            &config.remove_env,
+            config.working_dir.clone(),
+        );
+        let exact = parse_exact_package_metadata(&metadata, &config.env_vars, package)?;
+        (
+            exact,
+            if requested_selector == "installed" {
+                ToolRuntimeResolutionReason::InstalledFallback
+            } else if config.tool_runtime_source_session_id.is_some() {
+                ToolRuntimeResolutionReason::LegacyMigration
+            } else {
+                ToolRuntimeResolutionReason::RequestedSelector
+            },
+        )
+    } else {
+        return Err(format!(
+                "package metadata resolution rejected selector '{requested_selector}' for {package}; expected 'latest', 'installed', or one exact semantic version."
+            ));
+    };
+
+    let provenance = ToolRuntimeProvenance {
+        schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+        official_package: package.to_string(),
+        requested_selector,
+        resolved_exact_version: resolved_exact_version.clone(),
+        runner_kind: ToolRuntimeRunnerKind::Npx,
+        resolution_reason,
+    };
+    let package_prefix = vec![
+        "--yes".to_string(),
+        format!("{package}@{resolved_exact_version}"),
+    ];
+    let plan = ResolvedHostPackagePlan {
+        runner_executable: npx_executable,
+        package_prefix,
+        provenance,
+    };
+    let mut report = HostRunnerHealthReport::default();
+    probe_exact_npx_package_plan(&plan, config, npx_cache_base, probe, repair, &mut report)?;
+    report.switched_to_fallback = switched_to_fallback;
+    if switched_to_fallback {
+        report
+            .messages
+            .push("Using the verified exact npx.cmd package plan...".to_string());
+    }
+
+    let mut candidate = config.clone();
+    candidate.command = plan.runner_executable.clone();
+    candidate.args = plan.package_prefix.clone();
+    candidate.args.extend(agent_args);
+    candidate.tool_runtime_provenance = Some(plan.provenance.clone());
+    *config = candidate;
+    report.resolved_package_plan = Some(plan);
+    Ok(report)
+}
+
+fn is_windows_npx_cmd(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd"))
+}
+
+fn package_selector<'a>(version_spec: &'a str, package: &str) -> Option<&'a str> {
+    version_spec
+        .strip_prefix(package)
+        .and_then(|suffix| suffix.strip_prefix('@'))
+        .filter(|selector| !selector.is_empty())
+}
+
+fn sibling_npm_executable(npx_executable: &str) -> Result<String, String> {
+    let path = Path::new(npx_executable);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "npx resolution produced a non-UTF-8 executable path".to_string())?;
+    let npm_name = if name.eq_ignore_ascii_case("npx.cmd") {
+        "npm.cmd"
+    } else if name.eq_ignore_ascii_case("npx") {
+        "npm"
+    } else {
+        return Err(format!(
+            "npx resolution produced unsupported executable '{name}' before metadata lookup"
+        ));
+    };
+    Ok(path.with_file_name(npm_name).to_string_lossy().into_owned())
+}
+
+fn parse_exact_package_metadata(
+    outcome: &HostRunnerProbeOutcome,
+    env_vars: &HashMap<String, String>,
+    package: &str,
+) -> Result<String, String> {
+    if outcome.timed_out {
+        return Err(format!(
+            "package metadata lookup timed out for {package}@latest after 15 seconds; launch was aborted before spawn."
+        ));
+    }
+    if !outcome.success {
+        return Err(format!(
+            "package metadata lookup failed for {package}@latest. {}",
+            outcome.diagnostic(env_vars)
+        ));
+    }
+    let exact = serde_json::from_str::<String>(outcome.stdout.trim()).map_err(|error| {
+        format!(
+            "package metadata for {package}@latest did not contain exactly one semantic version: {error}"
+        )
+    })?;
+    semver::Version::parse(&exact).map_err(|error| {
+        format!(
+            "package metadata for {package}@latest did not contain exactly one semantic version: {error}"
+        )
+    })?;
+    Ok(exact)
+}
+
+fn validate_tool_runtime_provenance(
+    provenance: &ToolRuntimeProvenance,
+    package: &str,
+    requested_selector: &str,
+) -> Result<(), String> {
+    if provenance.schema_version != ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION
+        || provenance.official_package != package
+        || provenance.requested_selector != requested_selector
+        || provenance.runner_kind != ToolRuntimeRunnerKind::Npx
+        || semver::Version::parse(&provenance.resolved_exact_version).is_err()
+    {
+        return Err(format!(
+            "persisted tool runtime provenance is invalid for {package}@{requested_selector}; launch was aborted before spawn."
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probe_exact_npx_package_plan<F, R>(
+    plan: &ResolvedHostPackagePlan,
+    config: &LaunchConfig,
+    npx_cache_base: Option<PathBuf>,
+    probe: &mut F,
+    repair: &mut R,
+    report: &mut HostRunnerHealthReport,
+) -> Result<(), String>
+where
+    F: FnMut(
+        HostRunnerProbeKind,
+        &str,
+        Vec<String>,
+        &HashMap<String, String>,
+        &[String],
+        Option<PathBuf>,
+    ) -> HostRunnerProbeOutcome,
+    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
+{
+    let mut probe_args = plan.package_prefix.clone();
+    probe_args.push("--version".to_string());
+    let first = probe(
+        HostRunnerProbeKind::Package,
+        &plan.runner_executable,
+        probe_args.clone(),
+        &config.env_vars,
+        &config.remove_env,
+        config.working_dir.clone(),
+    );
+    if first.success {
+        return Ok(());
+    }
+    if first.timed_out {
+        return resolve_exact_probe_timeout(
+            &plan.provenance.official_package,
+            &plan.provenance.resolved_exact_version,
+            PACKAGE_PROBE_TIMEOUT,
+            false,
+            &config.env_vars,
+            report,
+        );
+    }
+    let probe_output = first.combined_output();
+    let repair_candidate = npx_cache_base
+        .as_deref()
+        .and_then(|base| detect_windows_npx_cache_corruption(&probe_output, base));
+    let Some(repair_candidate) = repair_candidate else {
+        return Err(format!(
+            "exact npx package probe failed for {}@{}. {}",
+            plan.provenance.official_package,
+            plan.provenance.resolved_exact_version,
+            first.diagnostic(&config.env_vars)
+        ));
+    };
+    report.repaired_npx_cache = true;
+    report.messages.push(format!(
+        "Detected broken npm npx cache; repairing {}...",
+        repair_candidate.npx_root.display()
+    ));
+    repair(&repair_candidate).map_err(|error| {
+        format!(
+            "Failed to repair npm npx cache at {}: {error}",
+            repair_candidate.npx_root.display()
+        )
+    })?;
+    report
+        .messages
+        .push("npm npx cache repair succeeded; retrying the exact package probe...".to_string());
+    let second = probe(
+        HostRunnerProbeKind::Package,
+        &plan.runner_executable,
+        probe_args,
+        &config.env_vars,
+        &config.remove_env,
+        config.working_dir.clone(),
+    );
+    if second.timed_out {
+        return resolve_exact_probe_timeout(
+            &plan.provenance.official_package,
+            &plan.provenance.resolved_exact_version,
+            PACKAGE_PROBE_TIMEOUT,
+            true,
+            &config.env_vars,
+            report,
+        );
+    }
+    if !second.success {
+        return Err(format!(
+            "exact npx package probe failed after repairing npm cache at {}. {}",
+            repair_candidate.npx_root.display(),
+            second.diagnostic(&config.env_vars)
+        ));
+    }
+    Ok(())
+}
+
+fn is_host_builtin_direct_runner(config: &LaunchConfig) -> bool {
+    config.agent_id.builtin_descriptor().is_some()
+        && command_matches_runner(&config.command, config.agent_id.command())
 }
 
 pub fn install_launch_gwt_bin_env(
@@ -583,6 +1863,12 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
+    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
+        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
+            return candidate;
+        }
+    }
+
     if should_prefer_path_gwt(current_exe) {
         if let Some(candidate) = lookup("gwtd").filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
@@ -622,9 +1908,9 @@ fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
 fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut LaunchConfig,
-) -> Result<(), String> {
+) -> Result<Option<gwt_docker::detect::ResolvedContainerRuntime>, String> {
     if config.runtime_target != LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
 
     let worktree = normalize_child_process_path(
@@ -634,12 +1920,23 @@ fn apply_docker_runtime_to_launch_config(
             .unwrap_or_else(|| repo_path.to_path_buf()),
     );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
+    let runtime =
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(&docker_binary_for_launch())?;
+    ensure_docker_launch_runtime_ready_for_runtime(&runtime)?;
     let mut launch = launch;
-    let compose_override_file =
-        ensure_docker_gwt_binary_setup(&worktree, &launch.service, &launch.target_arch)?;
+    let (compose_override_file, managed_override_changed) = ensure_docker_gwt_binary_setup(
+        &worktree,
+        &launch.service,
+        &launch.target_arch,
+        runtime.kind(),
+    )?;
     launch.include_compose_override(compose_override_file);
-    ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    let lifecycle_intent = if managed_override_changed {
+        DockerLifecycleIntent::Recreate
+    } else {
+        config.docker_lifecycle_intent
+    };
+    ensure_docker_launch_service_ready(&launch, lifecycle_intent)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
@@ -649,7 +1946,7 @@ fn apply_docker_runtime_to_launch_config(
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
-    Ok(())
+    Ok(Some(runtime))
 }
 
 pub fn register_codex_managed_hook_trust_in_docker(
@@ -720,13 +2017,16 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-fn finalize_docker_agent_launch_config(
+fn finalize_docker_agent_launch_config_with_runtime(
     repo_path: &Path,
     config: &mut LaunchConfig,
-) -> Result<(), String> {
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<Option<String>, String> {
     if config.runtime_target != LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
+    let container_runtime = container_runtime
+        .ok_or_else(|| "Docker launch finalization requires a resolved runtime".to_string())?;
 
     let worktree = normalize_child_process_path(
         &config
@@ -741,49 +2041,190 @@ fn finalize_docker_agent_launch_config(
     };
 
     let mut args = docker_compose_command_prefix(&launch);
-    args.extend(["exec".to_string(), "-w".to_string(), launch.container_cwd]);
+    let runtime_worktree_path = launch.container_cwd;
+    args.extend([
+        "exec".to_string(),
+        "-w".to_string(),
+        runtime_worktree_path.clone(),
+    ]);
     args.extend(docker_compose_exec_env_args(&config.env_vars));
     args.push(launch.service);
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
-    config.command = docker_binary_for_launch();
+    config.command = container_runtime.binary().to_string();
     config.args = args;
-    Ok(())
+    Ok(Some(runtime_worktree_path))
 }
 
-fn resolve_host_package_runner_with_probe<F>(
-    config: &LaunchConfig,
+fn apply_host_package_runner_checked_with_probe_and_repair<F, R>(
+    config: &mut LaunchConfig,
     fallback_executable: String,
-    probe: &mut F,
-) -> Option<PackageRunnerProgram>
+    npx_cache_base: Option<PathBuf>,
+    mut probe: F,
+    mut repair: R,
+) -> Result<HostRunnerHealthReport, String>
 where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
+    F: FnMut(
+        HostRunnerProbeKind,
+        &str,
+        Vec<String>,
+        &HashMap<String, String>,
+        &[String],
+        Option<PathBuf>,
+    ) -> HostRunnerProbeOutcome,
+    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
 {
-    let version_spec = host_package_runner_version_spec(config)?;
-    if !command_matches_runner(&config.command, "bunx") {
-        return None;
+    let Some(version_spec) = host_package_runner_version_spec(config) else {
+        return Ok(HostRunnerHealthReport::default());
+    };
+    let using_bunx = command_matches_runner(&config.command, "bunx");
+    let using_npx = command_matches_runner(&config.command, "npx");
+    if !using_bunx && !using_npx {
+        return Ok(HostRunnerHealthReport::default());
     }
 
-    let probe_args = vec![version_spec.clone(), "--version".to_string()];
     let cwd = config.working_dir.clone();
-    if probe(
-        &config.command,
-        probe_args,
-        &config.env_vars,
-        &config.remove_env,
-        cwd,
-    ) {
-        return None;
+    if using_bunx {
+        let bunx_probe = probe(
+            HostRunnerProbeKind::Runner,
+            &config.command,
+            package_runner_probe_args(&version_spec, false),
+            &config.env_vars,
+            &config.remove_env,
+            cwd.clone(),
+        );
+        if bunx_probe.success {
+            return Ok(HostRunnerHealthReport::default());
+        }
     }
 
     let agent_args = strip_package_runner_args(&config.args, &version_spec);
-    let mut args = vec!["--yes".to_string(), version_spec];
-    args.extend(agent_args);
-    Some(PackageRunnerProgram {
-        executable: fallback_executable,
-        args,
-    })
+    let (npx_executable, fallback_args, fallback_probe_args) = if using_npx {
+        let mut probe_args = Vec::new();
+        if config
+            .args
+            .first()
+            .is_some_and(|arg| matches!(arg.as_str(), "--yes" | "-y"))
+        {
+            probe_args.push(config.args[0].clone());
+        }
+        probe_args = package_runner_probe_args(&version_spec, !probe_args.is_empty());
+        (config.command.clone(), config.args.clone(), probe_args)
+    } else {
+        let mut args = vec!["--yes".to_string(), version_spec.clone()];
+        args.extend(agent_args);
+        (
+            fallback_executable,
+            args,
+            package_runner_probe_args(&version_spec, true),
+        )
+    };
+    let mut report = HostRunnerHealthReport::default();
+    let finish = |config: &mut LaunchConfig, mut report: HostRunnerHealthReport| {
+        config.command = npx_executable.clone();
+        config.args = fallback_args.clone();
+        report.switched_to_fallback = using_bunx;
+        if using_bunx {
+            report
+                .messages
+                .push("bunx unavailable, switching to npx...".to_string());
+        }
+        report
+    };
+    let first_npx_probe = probe(
+        HostRunnerProbeKind::Runner,
+        &npx_executable,
+        fallback_probe_args.clone(),
+        &config.env_vars,
+        &config.remove_env,
+        cwd.clone(),
+    );
+    if first_npx_probe.success {
+        return Ok(finish(config, report));
+    }
+    if first_npx_probe.timed_out {
+        // Issue #3941 AC-1: an exact version already in the local cache is
+        // launchable even when the health probe could not answer in time.
+        if let Some((package, exact_version)) = exact_package_spec(&version_spec) {
+            resolve_exact_probe_timeout(
+                package,
+                exact_version,
+                DIRECT_RUNNER_PROBE_TIMEOUT,
+                false,
+                &config.env_vars,
+                &mut report,
+            )?;
+            return Ok(finish(config, report));
+        }
+        return Err(format!(
+            "npx package-runner probe timed out for {version_spec}; launch was aborted because the runner was not proven healthy. Retry `npx --yes {version_spec} --version` in a terminal before launching again."
+        ));
+    }
+
+    let probe_output = first_npx_probe.combined_output();
+    let repair_candidate = npx_cache_base
+        .as_deref()
+        .and_then(|base| detect_windows_npx_cache_corruption(&probe_output, base));
+    let Some(repair_candidate) = repair_candidate else {
+        return Err(format!(
+            "npx package-runner probe failed for {version_spec}. {} Manual recovery: run `npx --yes {version_spec} --version` in a terminal and repair the reported npm `_npx` directory if npm reports a missing executable.",
+            first_npx_probe.diagnostic(&config.env_vars)
+        ));
+    };
+
+    report.repaired_npx_cache = true;
+    report.messages.push(format!(
+        "Detected broken npm npx cache; repairing {}...",
+        repair_candidate.npx_root.display()
+    ));
+    repair(&repair_candidate).map_err(|error| {
+        format!(
+            "Failed to repair npm npx cache at {}: {error}. Manual recovery: remove this `_npx` directory and retry the launch.",
+            repair_candidate.npx_root.display()
+        )
+    })?;
+    report
+        .messages
+        .push("npm npx cache repair succeeded; retrying launch...".to_string());
+
+    let second_npx_probe = probe(
+        HostRunnerProbeKind::Runner,
+        &npx_executable,
+        fallback_probe_args,
+        &config.env_vars,
+        &config.remove_env,
+        cwd,
+    );
+    if second_npx_probe.timed_out {
+        if let Some((package, exact_version)) = exact_package_spec(&version_spec) {
+            resolve_exact_probe_timeout(
+                package,
+                exact_version,
+                DIRECT_RUNNER_PROBE_TIMEOUT,
+                true,
+                &config.env_vars,
+                &mut report,
+            )?;
+            return Ok(finish(config, report));
+        }
+        return Err(format!(
+            "npx package-runner probe timed out after npm cache repair for {version_spec}; launch was aborted because the repaired runner was not proven healthy. Retry `npx --yes {version_spec} --version` in a terminal before launching again."
+        ));
+    }
+    if !second_npx_probe.success {
+        return Err(format!(
+            "npx package-runner probe failed after repairing npm npx cache at {}. {} Manual recovery: remove this `_npx` directory and retry the launch.",
+            repair_candidate.npx_root.display(),
+            second_npx_probe.diagnostic(&config.env_vars)
+        ));
+    }
+
+    Ok(finish(config, report))
+}
+
+fn package_runner_probe_args(_version_spec: &str, _npx_yes: bool) -> Vec<String> {
+    vec!["--version".to_string()]
 }
 
 fn host_package_runner_version_spec(config: &LaunchConfig) -> Option<String> {
@@ -806,61 +2247,1495 @@ fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<S
     Some(version_spec.clone())
 }
 
-fn probe_host_package_runner(
+fn probe_host_runner_outcome(
+    kind: HostRunnerProbeKind,
     command: &str,
     args: Vec<String>,
     env_vars: &HashMap<String, String>,
     remove_env: &[String],
     cwd: Option<PathBuf>,
-) -> bool {
-    // SPEC-1924 FR-039 / SPEC-2809 Phase D-agent — emit
-    // `gwt.process.summary` start / end events so agent-bootstrap
-    // probes appear in the Logs Process facet and the Console window
-    // counts them under the `agent` tab. stdio stays redirected to
-    // /dev/null because the probe only consumes the exit status.
+) -> HostRunnerProbeOutcome {
+    let key = ProbeSingleFlightKey::new(kind, command, &args, env_vars);
+    let (outcome, share) = host_runner_probe_single_flight().run(key, || {
+        probe_host_runner_with_timeout(
+            kind,
+            command,
+            args,
+            env_vars,
+            remove_env,
+            cwd,
+            host_runner_probe_timeout(kind),
+            Duration::from_millis(50),
+        )
+    });
+    if share != ProbeShare::Led {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            label = %runner_probe_trace_label(kind),
+            probe_kind = ?kind,
+            share = ?share,
+            success = outcome.success,
+            "probe result shared with a concurrent launch",
+        );
+    }
+    outcome
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn probe_host_runner_with_timeout(
+    kind: HostRunnerProbeKind,
+    command: &str,
+    args: Vec<String>,
+    env_vars: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> HostRunnerProbeOutcome {
+    let hub = gwt_core::process_console::global();
+    probe_host_runner_bounded_with_hub(
+        HostRunnerProbeRequest {
+            kind,
+            command,
+            args,
+            env_vars,
+            remove_env,
+            cwd,
+            timeout,
+            poll_interval,
+        },
+        &hub,
+    )
+}
+
+fn truncate_runner_diagnostic(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+const MIN_RUNNER_PROBE_SECRET_VALUE_CHARS: usize = 8;
+const RUNNER_PROBE_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
+const RUNNER_PROBE_TRUNCATED_MARKER: &str = "\n[gwt] probe output truncated\n";
+const RUNNER_PROBE_CLEANUP_RESERVE_MAX: Duration = Duration::from_millis(250);
+
+fn runner_probe_secret_values(env_vars: &HashMap<String, String>) -> Vec<String> {
+    let mut values = env_vars
+        .values()
+        .filter_map(|value| {
+            let value = gwt_core::process_console::strip_ansi(value);
+            (value.chars().count() >= MIN_RUNNER_PROBE_SECRET_VALUE_CHARS).then_some(value)
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn redact_runner_probe_text(value: &str, env_vars: &HashMap<String, String>) -> String {
+    redact_runner_probe_text_with_values(
+        value,
+        &runner_probe_secret_values(env_vars),
+        MIN_RUNNER_PROBE_SECRET_VALUE_CHARS,
+    )
+}
+
+fn strict_semver_probe_evidence(outcome: &HostRunnerProbeOutcome) -> Option<String> {
+    outcome
+        .combined_output()
+        .split_whitespace()
+        .filter_map(|token| {
+            let token = token.trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-' | '+' | '_')
+            });
+            let token = token.strip_prefix('v').unwrap_or(token);
+            semver::Version::parse(token).ok()
+        })
+        .map(|version| version.to_string())
+        .next()
+}
+
+fn runner_probe_environment(env_vars: &HashMap<String, String>) -> HashMap<String, String> {
+    const ALLOWLIST: &[&str] = &[
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "TERM",
+    ];
+    ALLOWLIST
+        .iter()
+        .filter_map(|key| {
+            env_vars
+                .get(*key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+                .map(|value| ((*key).to_string(), value))
+        })
+        .collect()
+}
+
+fn redact_runner_probe_text_with_values(
+    value: &str,
+    secret_values: &[String],
+    minimum_prefix_chars: usize,
+) -> String {
+    let ansi_safe = strip_runner_probe_ansi(value);
+    let mut redacted = secret_values.iter().fold(
+        gwt_core::process_console::redact_line(&ansi_safe),
+        |redacted, secret| redacted.replace(secret, gwt_core::process_console::REDACTED),
+    );
+    for secret in secret_values {
+        let partial = secret
+            .char_indices()
+            .skip(1)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(secret.len()))
+            .skip(minimum_prefix_chars.saturating_sub(1))
+            .filter(|length| {
+                *length <= redacted.len() && redacted.is_char_boundary(redacted.len() - length)
+            })
+            .filter(|length| redacted.ends_with(&secret[..*length]))
+            .last();
+        if let Some(length) = partial {
+            redacted.truncate(redacted.len() - length);
+            redacted.push_str(gwt_core::process_console::REDACTED);
+        }
+    }
+    redacted
+}
+
+fn strip_runner_probe_ansi(value: &str) -> String {
+    let complete_prefix = value.rfind('\u{1b}').and_then(|index| {
+        let suffix = &value[index..];
+        let incomplete = suffix == "\u{1b}"
+            || (suffix.starts_with("\u{1b}[")
+                && !suffix
+                    .as_bytes()
+                    .iter()
+                    .skip(2)
+                    .any(|byte| (0x40..=0x7e).contains(byte)))
+            || (suffix.starts_with("\u{1b}]")
+                && !suffix.ends_with('\u{7}')
+                && !suffix.ends_with("\u{1b}\\"));
+        incomplete.then_some(&value[..index])
+    });
+    gwt_core::process_console::strip_ansi(complete_prefix.unwrap_or(value))
+}
+
+#[derive(Default)]
+struct RunnerProbeCapture {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl RunnerProbeCapture {
+    fn append(&mut self, bytes: &[u8]) {
+        let remaining = RUNNER_PROBE_CAPTURE_LIMIT_BYTES.saturating_sub(self.bytes.len());
+        let retained = remaining.min(bytes.len());
+        self.bytes.extend_from_slice(&bytes[..retained]);
+        self.truncated |= retained < bytes.len();
+    }
+
+    fn render(&self, env_vars: &HashMap<String, String>) -> String {
+        let raw = decode_runner_probe_capture(&self.bytes, self.truncated);
+        let redacted = if self.truncated {
+            redact_runner_probe_text_with_values(&raw, &runner_probe_secret_values(env_vars), 1)
+        } else {
+            redact_runner_probe_text(&raw, env_vars)
+        };
+        let mut rendered =
+            truncate_runner_capture_bytes(&redacted, RUNNER_PROBE_CAPTURE_LIMIT_BYTES);
+        if self.truncated || rendered.len() < redacted.len() {
+            rendered.push_str(RUNNER_PROBE_TRUNCATED_MARKER);
+        }
+        rendered
+    }
+}
+
+fn decode_runner_probe_capture(bytes: &[u8], truncated: bool) -> std::borrow::Cow<'_, str> {
+    if truncated {
+        if let Err(error) = std::str::from_utf8(bytes) {
+            if error.error_len().is_none() {
+                return String::from_utf8_lossy(&bytes[..error.valid_up_to()]);
+            }
+        }
+    }
+    String::from_utf8_lossy(bytes)
+}
+
+fn truncate_runner_capture_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_string()
+}
+
+struct HostRunnerProbeRequest<'a> {
+    kind: HostRunnerProbeKind,
+    command: &'a str,
+    args: Vec<String>,
+    env_vars: &'a HashMap<String, String>,
+    remove_env: &'a [String],
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+    poll_interval: Duration,
+}
+
+fn probe_host_runner_bounded_with_hub(
+    request: HostRunnerProbeRequest<'_>,
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+) -> HostRunnerProbeOutcome {
+    let HostRunnerProbeRequest {
+        kind,
+        command,
+        args,
+        env_vars,
+        remove_env,
+        cwd,
+        timeout,
+        poll_interval,
+    } = request;
     let spawn_id = next_agent_spawn_id();
-    let label = format!("{} {}", command, args.join(" "));
+    let label = runner_probe_trace_label(kind);
+    let start = Instant::now();
+    if let Some(denial) = package_runner_probe_denial(kind, command, &args, env_vars) {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            spawn_id = spawn_id,
+            label = %label,
+            probe_kind = ?kind,
+            phase = "end",
+            success = false,
+            "package-runner probe refused by the test guard",
+        );
+        return HostRunnerProbeOutcome::failure_with_stderr(&denial);
+    }
     tracing::info!(
         target: "gwt.process.summary",
         kind = "agent",
         spawn_id = spawn_id,
         label = %label,
+        probe_kind = ?kind,
         phase = "start",
         "process start",
     );
-    let started_at = std::time::Instant::now();
 
-    let mut process = gwt_core::process::hidden_command(command);
-    process
+    let remove_env = remove_env
+        .iter()
+        .map(|key| key.to_ascii_uppercase())
+        .collect::<HashSet<_>>();
+    let mut request = gwt_core::process::ProcessPlanRequest::new(command)
         .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for key in remove_env {
-        process.env_remove(key);
+        .inherit_env(false);
+    for (key, value) in runner_probe_environment(env_vars) {
+        if remove_env.contains(&key.to_ascii_uppercase()) {
+            continue;
+        }
+        request = request.env(key, value);
     }
-    process.envs(env_vars);
     if let Some(cwd) = cwd {
-        process.current_dir(cwd);
+        request = request.current_dir(cwd);
     }
-    let status = process.status();
-    let ok = status.as_ref().is_ok_and(|status| status.success());
-
-    let duration_ms = started_at.elapsed().as_millis() as u64;
-    let exit_code = status.ok().and_then(|s| s.code()).map(|c| c as i64);
+    let mut process = match gwt_core::process::resolved_command(request) {
+        Ok(process) => process,
+        Err(_error) => {
+            let message =
+                "[gwt] failed to resolve the runner health probe safely; verify the configured executable and PATH"
+                    .to_string();
+            push_runner_probe_console_line(
+                hub,
+                spawn_id,
+                gwt_core::process_console::ProcessStream::Stderr,
+                &message,
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = spawn_id,
+                label = %label,
+                phase = "end",
+                exit_code = None::<i64>,
+                duration_ms = start.elapsed().as_millis() as u64,
+                success = false,
+                resolution_error = "process resolution rejected",
+                "process end",
+            );
+            return HostRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                timed_out: false,
+                error: Some("runner health probe process resolution was rejected".to_string()),
+            };
+        }
+    };
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let operation_deadline = start.checked_add(timeout).unwrap_or(start);
+    let cleanup_reserve = (timeout / 4).min(RUNNER_PROBE_CLEANUP_RESERVE_MAX);
+    let execution_deadline = operation_deadline
+        .checked_sub(cleanup_reserve)
+        .unwrap_or(start);
+    let outcome = run_runner_probe_in_isolated_runtime(
+        process,
+        env_vars,
+        execution_deadline,
+        operation_deadline,
+        poll_interval,
+    );
+    publish_runner_probe_capture(hub, spawn_id, &outcome.stdout, &outcome.stderr);
+    let note = if outcome.timed_out {
+        Some("timeout")
+    } else if outcome.error.is_some() {
+        Some("probe error")
+    } else {
+        None
+    };
     tracing::info!(
         target: "gwt.process.summary",
         kind = "agent",
         spawn_id = spawn_id,
         label = %label,
         phase = "end",
-        exit_code = exit_code,
-        duration_ms = duration_ms,
-        success = ok,
+        exit_code = outcome.exit_code.map(|code| code as i64),
+        duration_ms = start.elapsed().as_millis() as u64,
+        success = outcome.success,
+        note,
         "process end",
     );
+    outcome
+}
 
-    ok
+fn runner_probe_trace_label(kind: HostRunnerProbeKind) -> &'static str {
+    match kind {
+        HostRunnerProbeKind::Direct => "direct runner health probe",
+        HostRunnerProbeKind::Runner => "package runner executable health probe",
+        HostRunnerProbeKind::Metadata => "package metadata probe",
+        HostRunnerProbeKind::Package => "exact package runner health probe",
+    }
+}
+
+/// Issue #3972: probes that spawn the host package runner (`npx` / `bunx`) or
+/// query the registry through it. `Direct` is excluded — it probes the agent's
+/// own CLI, which tests already pin to a fixture executable on the launch
+/// `PATH`.
+fn is_package_runner_probe(kind: HostRunnerProbeKind) -> bool {
+    matches!(
+        kind,
+        HostRunnerProbeKind::Runner | HostRunnerProbeKind::Metadata | HostRunnerProbeKind::Package
+    )
+}
+
+/// The test guard's refusal for this probe, or `None` when it may proceed.
+///
+/// Markers are looked up in the launch environment the probe would run with
+/// before the process environment, so a test can scope the opt-in to one
+/// `LaunchConfig` instead of mutating the process-global environment
+/// (Issue #3895).
+fn package_runner_probe_denial(
+    kind: HostRunnerProbeKind,
+    command: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if !is_package_runner_probe(kind) {
+        return None;
+    }
+    gwt_core::process_console::real_package_runner_probe_denial(
+        &format!("{command} {}", args.join(" ")),
+        |marker| {
+            env_vars
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case(marker))
+                || std::env::var_os(marker).is_some()
+        },
+    )
+}
+
+fn run_runner_probe_in_isolated_runtime(
+    process: std::process::Command,
+    env_vars: &HashMap<String, String>,
+    execution_deadline: Instant,
+    operation_deadline: Instant,
+    poll_interval: Duration,
+) -> HostRunnerProbeOutcome {
+    thread::scope(|scope| {
+        let worker = thread::Builder::new()
+            .name("gwt-runner-probe".to_string())
+            .spawn_scoped(scope, move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(runtime.block_on(run_runner_probe_async(
+                    process,
+                    env_vars,
+                    execution_deadline,
+                    operation_deadline,
+                    poll_interval,
+                )))
+            });
+        match worker {
+            Ok(worker) => match worker.join() {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(error)) => runner_probe_internal_error(error),
+                Err(_) => runner_probe_internal_error("probe runtime thread panicked".to_string()),
+            },
+            Err(error) => runner_probe_internal_error(format!(
+                "failed to start isolated probe runtime thread: {error}"
+            )),
+        }
+    })
+}
+
+fn runner_probe_internal_error(error: String) -> HostRunnerProbeOutcome {
+    HostRunnerProbeOutcome {
+        success: false,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        error: Some(error),
+    }
+}
+
+async fn run_runner_probe_async(
+    mut process: std::process::Command,
+    env_vars: &HashMap<String, String>,
+    execution_deadline: Instant,
+    operation_deadline: Instant,
+    poll_interval: Duration,
+) -> HostRunnerProbeOutcome {
+    let mut process_tree = match RunnerProbeProcessTree::prepare(&mut process) {
+        Ok(process_tree) => process_tree,
+        Err(()) => {
+            return runner_probe_internal_error(
+                "failed to establish runner health probe process-tree ownership".to_string(),
+            );
+        }
+    };
+    let mut process = tokio::process::Command::from(process);
+    process.kill_on_drop(true);
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let message = format!("[gwt] failed to start runner health probe: {error}");
+            return HostRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                timed_out: false,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let Some(process_id) = child.id() else {
+        let tree_terminated = process_tree.terminate();
+        let direct_child_reaped =
+            stop_and_reap_runner_probe_child(&mut child, operation_deadline).await;
+        let cleanup = RunnerProbeCleanup {
+            process_tree_terminated: tree_terminated,
+            direct_child_reaped,
+            readers_released: true,
+        };
+        let error = with_runner_probe_cleanup_error(
+            "runner health probe did not expose a process identifier".to_string(),
+            cleanup,
+        );
+        return runner_probe_internal_error(error);
+    };
+    if process_tree.after_spawn(process_id).is_err() {
+        let tree_terminated = process_tree.terminate();
+        let direct_child_reaped =
+            stop_and_reap_runner_probe_child(&mut child, operation_deadline).await;
+        let cleanup = RunnerProbeCleanup {
+            process_tree_terminated: tree_terminated,
+            direct_child_reaped,
+            readers_released: true,
+        };
+        let error = if cleanup.complete() {
+            "failed to assign runner health probe process-tree ownership".to_string()
+        } else {
+            format!(
+                "failed to assign runner health probe process-tree ownership; {}",
+                cleanup.error_message()
+            )
+        };
+        return runner_probe_internal_error(error);
+    }
+    let captured_stdout = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+    let captured_stderr = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+    let mut stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_runner_probe_stream_capture(stdout, Arc::clone(&captured_stdout)));
+    let mut stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_runner_probe_stream_capture(stderr, Arc::clone(&captured_stderr)));
+
+    let completion = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(execution_deadline),
+        await_runner_probe_completion(
+            &mut child,
+            &mut stdout_reader,
+            &mut stderr_reader,
+            execution_deadline,
+            poll_interval,
+        ),
+    )
+    .await;
+    match completion {
+        Ok(Ok(status)) => {
+            let cleanup = cleanup_runner_probe_process(
+                &mut child,
+                &mut process_tree,
+                operation_deadline,
+                &mut stdout_reader,
+                &mut stderr_reader,
+            )
+            .await;
+            let cleanup_complete = cleanup.complete();
+            HostRunnerProbeOutcome {
+                success: status.success() && cleanup_complete,
+                exit_code: status.code(),
+                stdout: captured_runner_probe_string(&captured_stdout, env_vars),
+                stderr: captured_runner_probe_string(&captured_stderr, env_vars),
+                timed_out: false,
+                error: (!cleanup_complete).then(|| cleanup.error_message()),
+            }
+        }
+        Ok(Err(RunnerProbeWaitError::Failure(error))) => {
+            let cleanup = cleanup_runner_probe_process(
+                &mut child,
+                &mut process_tree,
+                operation_deadline,
+                &mut stdout_reader,
+                &mut stderr_reader,
+            )
+            .await;
+            HostRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: captured_runner_probe_string(&captured_stdout, env_vars),
+                stderr: captured_runner_probe_string(&captured_stderr, env_vars),
+                timed_out: false,
+                error: Some(with_runner_probe_cleanup_error(error, cleanup)),
+            }
+        }
+        Ok(Err(RunnerProbeWaitError::Deadline)) | Err(_) => {
+            let cleanup = cleanup_runner_probe_process(
+                &mut child,
+                &mut process_tree,
+                operation_deadline,
+                &mut stdout_reader,
+                &mut stderr_reader,
+            )
+            .await;
+            HostRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: captured_runner_probe_string(&captured_stdout, env_vars),
+                stderr: captured_runner_probe_string(&captured_stderr, env_vars),
+                timed_out: true,
+                error: (!cleanup.complete()).then(|| cleanup.error_message()),
+            }
+        }
+    }
+}
+
+fn with_runner_probe_cleanup_error(error: String, cleanup: RunnerProbeCleanup) -> String {
+    if cleanup.complete() {
+        error
+    } else {
+        format!("{error}; {}", cleanup.error_message())
+    }
+}
+
+#[cfg(unix)]
+struct RunnerProbeProcessTree {
+    process_group: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl RunnerProbeProcessTree {
+    fn prepare(command: &mut std::process::Command) -> Result<Self, ()> {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+        Ok(Self {
+            process_group: None,
+        })
+    }
+
+    fn after_spawn(&mut self, process_id: u32) -> Result<(), ()> {
+        self.process_group = Some(process_id as libc::pid_t);
+        Ok(())
+    }
+
+    fn terminate(&mut self) -> bool {
+        let Some(process_group) = self.process_group.take() else {
+            return true;
+        };
+        // SAFETY: the command was configured with process_group(0) before
+        // spawn, so the negative PID targets only the probe process group.
+        let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+}
+
+#[cfg(windows)]
+struct RunnerProbeProcessTree {
+    job: gwt_core::process_tree::WindowsJobObject,
+}
+
+#[cfg(windows)]
+impl RunnerProbeProcessTree {
+    fn prepare(command: &mut std::process::Command) -> Result<Self, ()> {
+        let job = gwt_core::process_tree::WindowsJobObject::new().map_err(|_| ())?;
+        gwt_core::process_tree::WindowsJobObject::configure_suspended(command);
+        Ok(Self { job })
+    }
+
+    fn after_spawn(&mut self, process_id: u32) -> Result<(), ()> {
+        self.job.assign_and_resume(process_id).map_err(|_| ())
+    }
+
+    fn terminate(&mut self) -> bool {
+        self.job.terminate()
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct RunnerProbeProcessTree;
+
+#[cfg(not(any(unix, windows)))]
+impl RunnerProbeProcessTree {
+    fn prepare(_command: &mut std::process::Command) -> Result<Self, ()> {
+        Ok(Self)
+    }
+
+    fn after_spawn(&mut self, _process_id: u32) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn terminate(&mut self) -> bool {
+        false
+    }
+}
+
+impl Drop for RunnerProbeProcessTree {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
+
+type RunnerProbeReaderTask = tokio::task::JoinHandle<Result<(), std::io::ErrorKind>>;
+
+enum RunnerProbeWaitError {
+    Deadline,
+    Failure(String),
+}
+
+async fn await_runner_probe_completion(
+    child: &mut tokio::process::Child,
+    stdout: &mut Option<RunnerProbeReaderTask>,
+    stderr: &mut Option<RunnerProbeReaderTask>,
+    deadline: Instant,
+    poll_interval: Duration,
+) -> Result<ExitStatus, RunnerProbeWaitError> {
+    let mut exit_status = None;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(RunnerProbeWaitError::Deadline);
+        }
+        if exit_status.is_none() {
+            exit_status = child
+                .try_wait()
+                .map_err(|error| RunnerProbeWaitError::Failure(error.to_string()))?;
+        }
+        if runner_probe_streams_finished(stdout, stderr) {
+            if let Some(status) = exit_status.take() {
+                if Instant::now() >= deadline {
+                    return Err(RunnerProbeWaitError::Deadline);
+                }
+                join_runner_probe_streams(stdout, stderr)
+                    .await
+                    .map_err(RunnerProbeWaitError::Failure)?;
+                if Instant::now() >= deadline {
+                    return Err(RunnerProbeWaitError::Deadline);
+                }
+                return Ok(status);
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(poll_interval.min(remaining)).await;
+    }
+}
+
+fn runner_probe_streams_finished(
+    stdout: &Option<RunnerProbeReaderTask>,
+    stderr: &Option<RunnerProbeReaderTask>,
+) -> bool {
+    stdout
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished)
+        && stderr
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+}
+
+async fn join_runner_probe_stream(
+    reader: &mut Option<RunnerProbeReaderTask>,
+    stream: &str,
+) -> Result<(), String> {
+    match reader.take() {
+        Some(reader) => match reader.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(kind)) => Err(format!(
+                "runner probe {stream} read failed ({kind:?}); check the runner executable and retry"
+            )),
+            Err(error) if error.is_cancelled() => Err(format!(
+                "runner probe {stream} reader was cancelled unexpectedly; retry the launch"
+            )),
+            Err(_) => Err(format!(
+                "runner probe {stream} reader terminated unexpectedly; retry the launch"
+            )),
+        },
+        None => Ok(()),
+    }
+}
+
+async fn join_runner_probe_streams(
+    stdout: &mut Option<RunnerProbeReaderTask>,
+    stderr: &mut Option<RunnerProbeReaderTask>,
+) -> Result<(), String> {
+    let (stdout_result, stderr_result) = tokio::join!(
+        join_runner_probe_stream(stdout, "stdout"),
+        join_runner_probe_stream(stderr, "stderr")
+    );
+    match (stdout_result, stderr_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(stdout_error), Err(stderr_error)) => Err(format!("{stdout_error}; {stderr_error}")),
+    }
+}
+
+async fn abort_and_join_runner_probe_stream(reader: &mut Option<RunnerProbeReaderTask>) {
+    if let Some(reader) = reader.take() {
+        reader.abort();
+        let _ = reader.await;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunnerProbeCleanup {
+    process_tree_terminated: bool,
+    direct_child_reaped: bool,
+    readers_released: bool,
+}
+
+impl RunnerProbeCleanup {
+    fn complete(self) -> bool {
+        self.process_tree_terminated && self.direct_child_reaped && self.readers_released
+    }
+
+    fn error_message(self) -> String {
+        let mut failures = Vec::new();
+        if !self.process_tree_terminated {
+            failures.push("process tree termination failed");
+        }
+        if !self.direct_child_reaped {
+            failures.push("direct child reap exceeded deadline");
+        }
+        if !self.readers_released {
+            failures.push("output reader release failed");
+        }
+        format!("probe cleanup incomplete: {}", failures.join(", "))
+    }
+}
+
+async fn cleanup_runner_probe_process(
+    child: &mut tokio::process::Child,
+    process_tree: &mut RunnerProbeProcessTree,
+    deadline: Instant,
+    stdout: &mut Option<RunnerProbeReaderTask>,
+    stderr: &mut Option<RunnerProbeReaderTask>,
+) -> RunnerProbeCleanup {
+    let process_tree_terminated = process_tree.terminate();
+    let process_tree_cleanup = std::future::ready(process_tree_terminated);
+    let direct_child_cleanup = stop_and_reap_runner_probe_child(child, deadline);
+    finish_runner_probe_cleanup(process_tree_cleanup, direct_child_cleanup, stdout, stderr).await
+}
+
+async fn finish_runner_probe_cleanup<TreeCleanup, ChildCleanup>(
+    process_tree_cleanup: TreeCleanup,
+    direct_child_cleanup: ChildCleanup,
+    stdout: &mut Option<RunnerProbeReaderTask>,
+    stderr: &mut Option<RunnerProbeReaderTask>,
+) -> RunnerProbeCleanup
+where
+    TreeCleanup: std::future::Future<Output = bool>,
+    ChildCleanup: std::future::Future<Output = bool>,
+{
+    let reader_cleanup = async {
+        tokio::join!(
+            abort_and_join_runner_probe_stream(stdout),
+            abort_and_join_runner_probe_stream(stderr)
+        );
+        true
+    };
+    let (process_tree_terminated, direct_child_reaped, readers_released) =
+        tokio::join!(process_tree_cleanup, direct_child_cleanup, reader_cleanup);
+    RunnerProbeCleanup {
+        process_tree_terminated,
+        direct_child_reaped,
+        readers_released,
+    }
+}
+
+async fn stop_and_reap_runner_probe_child(
+    child: &mut tokio::process::Child,
+    deadline: Instant,
+) -> bool {
+    match child.try_wait() {
+        Ok(Some(_)) => return true,
+        Ok(None) => {
+            // Closing a Windows Job may win this race and make start_kill
+            // report an already-terminated process. Waiting is still the
+            // authoritative reap operation, so do not fail early here.
+            let _ = child.start_kill();
+        }
+        Err(_) => return false,
+    }
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), child.wait())
+        .await
+        .is_ok_and(|result| result.is_ok())
+}
+
+fn spawn_runner_probe_stream_capture<R>(
+    reader: R,
+    captured: Arc<Mutex<RunnerProbeCapture>>,
+) -> RunnerProbeReaderTask
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = reader;
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) => return Ok(()),
+                Ok(read) => {
+                    if let Ok(mut captured) = captured.lock() {
+                        captured.append(&buffer[..read]);
+                    }
+                }
+                Err(error) => return Err(error.kind()),
+            }
+        }
+    })
+}
+
+fn captured_runner_probe_string(
+    captured: &Arc<Mutex<RunnerProbeCapture>>,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    captured
+        .lock()
+        .map(|value| value.render(env_vars))
+        .unwrap_or_else(|_| String::new())
+}
+
+fn publish_runner_probe_capture(
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stdout: &str,
+    stderr: &str,
+) {
+    for (stream, output) in [
+        (gwt_core::process_console::ProcessStream::Stdout, stdout),
+        (gwt_core::process_console::ProcessStream::Stderr, stderr),
+    ] {
+        for piece in output.split(['\n', '\r']).filter(|piece| !piece.is_empty()) {
+            push_runner_probe_console_line(hub, spawn_id, stream, piece);
+        }
+    }
+}
+
+fn push_runner_probe_console_line(
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stream: gwt_core::process_console::ProcessStream,
+    message: &str,
+) {
+    if message.is_empty() {
+        return;
+    }
+    let stripped = gwt_core::process_console::strip_ansi(message);
+    let redacted = gwt_core::process_console::redact_line(&stripped);
+    hub.push(gwt_core::process_console::ProcessLine::new(
+        gwt_core::process_console::ProcessKind::AgentBootstrap,
+        spawn_id,
+        stream,
+        redacted,
+    ));
+}
+
+#[cfg(all(test, not(windows)))]
+fn host_package_runner_binary_outcome(
+    command: &str,
+    env_vars: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+) -> HostRunnerProbeOutcome {
+    let available = runner_binary_available(command, env_vars, remove_env, cwd);
+    HostRunnerProbeOutcome {
+        success: available,
+        exit_code: Some(if available { 0 } else { 127 }),
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        error: None,
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+fn runner_binary_available(
+    command: &str,
+    env_vars: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+) -> bool {
+    let cwd = match cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        Some(cwd) => cwd,
+        None => return false,
+    };
+    let candidate = Path::new(command);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            cwd.join(candidate)
+        };
+        return runner_candidate_is_executable_file(&candidate);
+    }
+
+    let path = env_vars
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| {
+            if remove_env
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case("PATH"))
+            {
+                None
+            } else {
+                crate::environment::host_process_env()
+                    .into_iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+                    .map(|(_, value)| value)
+            }
+        });
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(std::ffi::OsStr::new(&path)).any(|directory| {
+        let directory = if directory.as_os_str().is_empty() {
+            cwd.clone()
+        } else if directory.is_absolute() {
+            directory
+        } else {
+            cwd.join(directory)
+        };
+        runner_candidate_is_executable_file(&directory.join(command))
+    })
+}
+
+#[cfg(all(test, not(windows)))]
+fn runner_candidate_is_executable_file(candidate: &Path) -> bool {
+    let Ok(metadata) = candidate.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[doc(hidden)]
+pub fn detect_windows_npx_cache_corruption(
+    output: &str,
+    npx_cache_base: &Path,
+) -> Option<WindowsNpxCacheRepairCandidate> {
+    #[cfg(not(windows))]
+    {
+        let _ = output;
+        let _ = npx_cache_base;
+        None
+    }
+    #[cfg(windows)]
+    {
+        let npx_cache_base = lexical_normalize_path(npx_cache_base);
+        let mut candidates = Vec::new();
+        for candidate in extract_windows_exe_paths(output) {
+            let missing_binary = lexical_normalize_path(Path::new(&candidate));
+            if !missing_binary.starts_with(&npx_cache_base) {
+                continue;
+            }
+            let relative = missing_binary.strip_prefix(&npx_cache_base).ok()?;
+            let mut components = relative.components();
+            let hash = components.next()?.as_os_str();
+            if hash.is_empty() || components.next().is_none() {
+                continue;
+            }
+            let npx_root = npx_cache_base.join(hash);
+            let Ok(validation) = validate_windows_npx_cache_repair_candidate(
+                &npx_cache_base,
+                &npx_root,
+                &missing_binary,
+            ) else {
+                continue;
+            };
+            if candidates
+                .iter()
+                .any(|existing: &WindowsNpxCacheRepairCandidate| {
+                    windows_paths_equal(&existing.npx_root, &npx_root)
+                })
+            {
+                continue;
+            }
+            candidates.push(WindowsNpxCacheRepairCandidate {
+                npx_root,
+                missing_binary,
+                validation,
+            });
+        }
+        (candidates.len() == 1).then(|| candidates.remove(0))
+    }
+}
+
+#[cfg(windows)]
+fn extract_windows_exe_paths(output: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for segment in output.split(['"', '\'']) {
+        collect_windows_exe_path_candidate(segment, &mut paths);
+    }
+    for token in output.split_whitespace() {
+        collect_windows_exe_path_candidate(token, &mut paths);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(windows)]
+fn collect_windows_exe_path_candidate(segment: &str, paths: &mut Vec<String>) {
+    let normalized = segment
+        .trim_matches(|ch: char| ch == '`' || ch == ',' || ch == ';')
+        .replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    let Some(start) = lower.find("\\npm-cache\\_npx\\") else {
+        return;
+    };
+    let Some(exe_end) = lower[start..].find(".exe").map(|index| start + index + 4) else {
+        return;
+    };
+    let prefix_start = find_windows_path_start(&normalized, start).unwrap_or_else(|| {
+        normalized[..start]
+            .rfind(char::is_whitespace)
+            .map_or(0, |index| index + 1)
+    });
+    let mut candidate = normalized[prefix_start..exe_end].to_string();
+    while candidate.contains("\\\\") {
+        candidate = candidate.replace("\\\\", "\\");
+    }
+    if !candidate.is_empty() {
+        paths.push(candidate);
+    }
+}
+
+#[cfg(windows)]
+fn find_windows_path_start(value: &str, end: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let max = end.saturating_sub(2).min(bytes.len().saturating_sub(2));
+    (0..=max).rev().find(|&index| {
+        bytes[index].is_ascii_alphabetic()
+            && bytes.get(index + 1) == Some(&b':')
+            && bytes
+                .get(index + 2)
+                .is_some_and(|separator| *separator == b'\\' || *separator == b'/')
+    })
+}
+
+#[cfg(windows)]
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+#[cfg(windows)]
+fn validate_windows_npx_cache_repair_candidate(
+    npx_cache_base: &Path,
+    npx_root: &Path,
+    missing_binary: &Path,
+) -> Result<WindowsNpxCacheRepairValidation, String> {
+    let base_identity = validate_windows_safe_directory(npx_cache_base, "npm cache base")?;
+    let root_identity = validate_windows_safe_directory(npx_root, "npm cache hash root")?;
+
+    let canonical_base = dunce::canonicalize(npx_cache_base)
+        .map_err(|error| format!("failed to resolve npm cache base: {error}"))?;
+    let canonical_root = dunce::canonicalize(npx_root)
+        .map_err(|error| format!("failed to resolve npm cache hash root: {error}"))?;
+    if !canonical_root
+        .parent()
+        .is_some_and(|parent| windows_paths_equal(parent, &canonical_base))
+    {
+        return Err("npm cache hash root is not an exact child of the cache base".to_string());
+    }
+
+    let missing_relative = missing_binary
+        .strip_prefix(npx_root)
+        .map_err(|_| "missing binary is outside the npm cache hash root".to_string())?
+        .to_path_buf();
+    if missing_relative.file_name().is_none() {
+        return Err("missing binary path has no file name".to_string());
+    }
+    match std::fs::symlink_metadata(missing_binary) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Err("reported npm binary is not missing".to_string()),
+        Err(error) => {
+            return Err(format!(
+                "failed to verify reported npm binary absence: {error}"
+            ));
+        }
+    }
+
+    let missing_parent_relative = missing_relative
+        .parent()
+        .ok_or_else(|| "missing binary is not inside a package directory".to_string())?;
+    let mut current = npx_root.to_path_buf();
+    let mut current_relative = PathBuf::new();
+    let mut directory_identities = Vec::new();
+    for component in missing_parent_relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err("npm package path contains a non-normal component".to_string());
+        };
+        current.push(component);
+        current_relative.push(component);
+        let identity = validate_windows_safe_directory(&current, "npm package directory")?;
+        directory_identities.push((current_relative.clone(), identity));
+    }
+
+    let file_name = missing_binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "missing npm binary name is not valid Unicode".to_string())?;
+    let marker_prefix = format!("{file_name}.old.");
+    let missing_parent = missing_binary
+        .parent()
+        .ok_or_else(|| "missing npm binary has no parent".to_string())?;
+    let entries = std::fs::read_dir(missing_parent)
+        .map_err(|error| format!("failed to inspect npm binary directory: {error}"))?;
+    let mut marker_identities = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("failed to inspect npm binary marker: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(suffix) = name.strip_prefix(&marker_prefix) else {
+            continue;
+        };
+        if suffix.is_empty() || !suffix.chars().all(|character| character.is_ascii_digit()) {
+            continue;
+        }
+        let marker_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&marker_path)
+            .map_err(|error| format!("failed to verify npm binary marker: {error}"))?;
+        if !metadata.is_file() || windows_metadata_is_reparse_point(&metadata) {
+            return Err("npm binary marker is not a regular non-reparse file".to_string());
+        }
+        let relative = marker_path
+            .strip_prefix(npx_root)
+            .map_err(|_| "npm binary marker is outside the hash root".to_string())?
+            .to_path_buf();
+        marker_identities.push((
+            relative,
+            windows_path_identity(&marker_path, "npm binary marker", false)?,
+        ));
+    }
+    marker_identities.sort_by(|left, right| left.0.cmp(&right.0));
+    if marker_identities.is_empty() {
+        return Err("no safe npm binary .old.<digits> marker was found".to_string());
+    }
+
+    Ok(WindowsNpxCacheRepairValidation {
+        npx_cache_base: npx_cache_base.to_path_buf(),
+        base_identity,
+        root_identity,
+        missing_relative,
+        directory_identities,
+        marker_identities,
+    })
+}
+
+#[cfg(windows)]
+fn validate_windows_safe_directory(
+    path: &Path,
+    description: &str,
+) -> Result<WindowsFileIdentity, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect {description}: {error}"))?;
+    if !metadata.is_dir() || windows_metadata_is_reparse_point(&metadata) {
+        return Err(format!(
+            "{description} is not a regular non-reparse directory"
+        ));
+    }
+    windows_path_identity(path, description, true)
+}
+
+#[cfg(windows)]
+fn windows_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(windows)]
+fn windows_path_identity(
+    path: &Path,
+    description: &str,
+    expected_directory: bool,
+) -> Result<WindowsFileIdentity, String> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowsFileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowsByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: WindowsFileTime,
+        last_access_time: WindowsFileTime,
+        last_write_time: WindowsFileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            file: *mut std::ffi::c_void,
+            information: *mut WindowsByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| format!("failed to open {description} for identity check: {error}"))?;
+    let mut information = WindowsByHandleFileInformation::default();
+    // SAFETY: `file` owns a valid Windows handle for the duration of the call,
+    // and `information` points to writable storage matching the Win32 layout.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
+    if succeeded == 0 {
+        return Err(format!(
+            "failed to read {description} identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let is_directory = information.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if information.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || is_directory != expected_directory
+    {
+        return Err(format!(
+            "{description} changed type or became a reparse point during validation"
+        ));
+    }
+
+    Ok(WindowsFileIdentity {
+        volume_serial_number: information.volume_serial_number,
+        file_index: (u64::from(information.file_index_high) << 32)
+            | u64::from(information.file_index_low),
+    })
+}
+
+#[cfg(windows)]
+fn windows_paths_equal(left: &Path, right: &Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+fn default_windows_npx_cache_base() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|base| PathBuf::from(base).join("npm-cache").join("_npx"))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn repair_windows_npx_cache(candidate: &WindowsNpxCacheRepairCandidate) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_dir_all(&candidate.npx_root).map_err(|error| error.to_string())
+    }
+    #[cfg(windows)]
+    {
+        repair_windows_npx_cache_with(candidate, |path| std::fs::remove_dir_all(path))
+    }
+}
+
+#[cfg(windows)]
+fn repair_windows_npx_cache_with(
+    candidate: &WindowsNpxCacheRepairCandidate,
+    remove_quarantine: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let current = validate_windows_npx_cache_repair_candidate(
+        &candidate.validation.npx_cache_base,
+        &candidate.npx_root,
+        &candidate.missing_binary,
+    )
+    .map_err(|error| format!("npm cache repair candidate changed before quarantine: {error}"))?;
+    if current != candidate.validation {
+        return Err("npm cache repair candidate identity changed before quarantine".to_string());
+    }
+
+    let quarantine = next_windows_npx_cache_quarantine_path(
+        &candidate.validation.npx_cache_base,
+        &candidate.npx_root,
+    )?;
+    std::fs::rename(&candidate.npx_root, &quarantine)
+        .map_err(|error| format!("failed to quarantine npm cache hash root: {error}"))?;
+
+    let quarantined_missing = quarantine.join(&candidate.validation.missing_relative);
+    let quarantined = validate_windows_npx_cache_repair_candidate(
+        &candidate.validation.npx_cache_base,
+        &quarantine,
+        &quarantined_missing,
+    )
+    .map_err(|error| {
+        format!(
+            "quarantined npm cache hash root at {} failed final validation: {error}",
+            quarantine.display()
+        )
+    })?;
+    if quarantined != candidate.validation {
+        return Err(format!(
+            "quarantined npm cache hash root identity changed at {}; deletion aborted",
+            quarantine.display()
+        ));
+    }
+
+    remove_quarantine(&quarantine).map_err(|error| {
+        format!(
+            "failed to delete quarantined npm cache hash root at {}: {error}",
+            quarantine.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn next_windows_npx_cache_quarantine_path(
+    npx_cache_base: &Path,
+    npx_root: &Path,
+) -> Result<PathBuf, String> {
+    static QUARANTINE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    let hash = npx_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "npm cache hash root has no valid file name".to_string())?;
+    for _ in 0..16 {
+        let counter = QUARANTINE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let quarantine = npx_cache_base.join(format!(
+            ".{hash}.gwt-quarantine-{}-{counter}",
+            std::process::id()
+        ));
+        match std::fs::symlink_metadata(&quarantine) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(quarantine),
+            Ok(_) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to reserve npm cache quarantine path: {error}"
+                ));
+            }
+        }
+    }
+    Err("failed to reserve a unique npm cache quarantine path".to_string())
 }
 
 static AGENT_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -877,24 +3752,40 @@ fn command_matches_runner(command: &str, runner: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
+#[cfg(test)]
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
-    let path = std::env::var("PATH").unwrap_or_default();
     let docker_bin = std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string());
+    ensure_docker_launch_runtime_ready_with(&docker_bin, gwt_docker::launch_preflight)
+}
+
+fn ensure_docker_launch_runtime_ready_for_runtime(
+    runtime: &gwt_docker::detect::ResolvedContainerRuntime,
+) -> Result<(), String> {
+    ensure_docker_launch_runtime_ready_with(runtime.binary(), || {
+        gwt_docker::launch_preflight_for_resolved_runtime(runtime)
+    })
+}
+
+fn ensure_docker_launch_runtime_ready_with(
+    attempted_binary: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let path = std::env::var("PATH").unwrap_or_default();
     tracing::info!(
         target: "gwt::launch::preflight",
         runtime_target = "docker",
-        attempted_binary = %docker_bin,
+        attempted_binary,
         path = %path,
         "docker preflight started"
     );
-    let result = run_docker_preflight();
+    let result = preflight();
     match &result {
         Ok(()) => {
             tracing::info!(
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "ready",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 "docker preflight completed"
             );
         }
@@ -903,7 +3794,7 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "failed",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 path = %path,
                 error = %error,
                 "docker preflight failed"
@@ -911,10 +3802,6 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         }
     }
     result
-}
-
-fn run_docker_preflight() -> Result<(), String> {
-    gwt_docker::launch_preflight()
 }
 
 fn docker_bundle_mounts_for_gwt_home(gwt_home: &Path) -> DockerBundleMounts {
@@ -934,20 +3821,42 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+#[cfg(test)]
+fn docker_bundle_override_content(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    Ok(docker_bundle_override_content_for_runtime(
+        service, bundle, runtime,
+    ))
+}
+
+fn docker_bundle_override_content_for_runtime(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
+    let extra_hosts = runtime
+        .compose_extra_host()
+        .map(|mapping| format!("    extra_hosts:\n      - \"{mapping}\"\n"))
+        .unwrap_or_default();
     format!(
         concat!(
             "{header}\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",
-            "      - \"{host_gwtd}:{path}:ro\"\n"
+            "      - \"{host_gwtd}:{path}:ro\"\n",
+            "{extra_hosts}"
         ),
         header = DOCKER_GWT_OVERRIDE_HEADER,
         service = service,
         host_gwtd = host_gwtd,
         path = DOCKER_GWTD_BIN_PATH,
+        extra_hosts = extra_hosts,
     )
 }
 
@@ -955,9 +3864,10 @@ fn ensure_docker_gwt_binary_setup(
     repo_path: &Path,
     service: &str,
     target_arch: &str,
-) -> Result<PathBuf, String> {
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> Result<(PathBuf, bool), String> {
     let gwt_home = gwt_core::paths::gwt_home();
-    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, |bundle| {
+    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, runtime, |bundle| {
         eprintln!(
             "Installing Linux gwt bundle for Docker at {} and {}",
             bundle.host_gwt.display(),
@@ -994,21 +3904,30 @@ fn ensure_docker_gwt_binary_setup_for_home<F>(
     repo_path: &Path,
     service: &str,
     home: &Path,
+    container_runtime_binary: &str,
     install_bundle: F,
-) -> Result<PathBuf, String>
+) -> Result<(PathBuf, bool), String>
 where
     F: FnMut(&DockerBundleMounts) -> Result<(), String>,
 {
     let gwt_home = home.join(".gwt");
-    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, install_bundle)
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    ensure_docker_gwt_binary_setup_for_gwt_home(
+        repo_path,
+        service,
+        &gwt_home,
+        runtime,
+        install_bundle,
+    )
 }
 
 fn ensure_docker_gwt_binary_setup_for_gwt_home<F>(
     repo_path: &Path,
     service: &str,
     gwt_home: &Path,
+    runtime: gwt_docker::ContainerRuntimeKind,
     mut install_bundle: F,
-) -> Result<PathBuf, String>
+) -> Result<(PathBuf, bool), String>
 where
     F: FnMut(&DockerBundleMounts) -> Result<(), String>,
 {
@@ -1040,7 +3959,7 @@ where
     }
 
     let override_path = docker_compose_override_path(repo_path);
-    let override_content = docker_bundle_override_content(service, &bundle);
+    let override_content = docker_bundle_override_content_for_runtime(service, &bundle, runtime);
     let rewrite_override = fs::read_to_string(&override_path)
         .map(|existing| existing != override_content)
         .unwrap_or(true);
@@ -1054,7 +3973,7 @@ where
         })?;
     }
 
-    Ok(override_path)
+    Ok((override_path, rewrite_override))
 }
 
 fn docker_bundle_binary_ready(path: &Path) -> bool {
@@ -1105,9 +4024,13 @@ fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<Strin
         if key.eq_ignore_ascii_case("PATH") {
             continue;
         }
-        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
         args.push("-e".to_string());
-        args.push(format!("{key}={value}"));
+        if private_launch_env_key(key) {
+            args.push(key.to_string());
+        } else {
+            let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+            args.push(format!("{key}={value}"));
+        }
     }
     args
 }
@@ -1136,7 +4059,7 @@ fn resolve_docker_exec_program(
 }
 
 fn package_runner_version_spec(config: &LaunchConfig) -> Option<String> {
-    let package = config.agent_id.package_name()?;
+    let package = config.agent_id.npm_package()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
         return None;
@@ -1632,12 +4555,297 @@ fn same_path(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::custom::{CustomAgentType, CustomCodingAgent};
     use crate::{AgentLaunchBuilder, SessionMode};
     use std::{
         fs,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
     };
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    fn create_windows_npx_fixture(npx_base: &Path, hash: &str) -> PathBuf {
+        let bin_dir = npx_base
+            .join(hash)
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create npx package bin directory");
+        fs::write(bin_dir.join("codex.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        bin_dir.join("codex.exe")
+    }
+
+    #[cfg(windows)]
+    fn windows_missing_binary_output(missing_binary: &Path) -> String {
+        format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            missing_binary.display()
+        )
+    }
+
+    #[cfg(windows)]
+    fn create_windows_directory_junction(link: &Path, target: &Path) {
+        fs::create_dir_all(link.parent().expect("junction parent"))
+            .expect("create junction parent");
+        fs::create_dir_all(target).expect("create junction target");
+        let output = gwt_core::process::hidden_command("cmd.exe")
+            .arg("/D")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("run mklink /J");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn resolved_test_docker_runtime(
+        directory: &Path,
+    ) -> gwt_docker::detect::ResolvedContainerRuntime {
+        #[cfg(windows)]
+        let wrapper = directory.join("docker.cmd");
+        #[cfg(not(windows))]
+        let wrapper = directory.join("docker");
+        #[cfg(windows)]
+        fs::write(&wrapper, "@echo Docker version 28.3.0, build test\r\n")
+            .expect("write fake Docker CLI");
+        #[cfg(not(windows))]
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\n",
+        )
+        .expect("write fake Docker CLI");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&wrapper)
+                .expect("fake Docker CLI metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&wrapper, permissions).expect("chmod fake Docker CLI");
+        }
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 fake Docker CLI path"),
+        )
+        .expect("resolve fake Docker runtime")
+    }
+
+    #[test]
+    fn hook_forward_launch_runtime_preserves_host_and_maps_container_aliases() {
+        let source = "http://127.0.0.1:45123/internal/hook-live";
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(source, LaunchRuntimeTarget::Host, None,)
+                .expect("host URL"),
+            source
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                source,
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Docker),
+            )
+            .expect("Docker URL"),
+            "http://host.docker.internal:45123/internal/hook-live"
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                "https://[::1]:46000/internal/hook-live",
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Podman),
+            )
+            .expect("Podman URL"),
+            "https://host.containers.internal:46000/internal/hook-live"
+        );
+    }
+
+    #[test]
+    fn hook_forward_launch_runtime_rejects_noncanonical_container_endpoints() {
+        for source in [
+            "http://example.com:45123/internal/hook-live",
+            "http://127.0.0.1/internal/hook-live",
+            "http://127.0.0.1:45123/internal/hook-live/subpath",
+            "http://127.0.0.1:45123/internal/hook-live?generation=7",
+            "http://127.0.0.1:45123/internal/hook-live#fragment",
+            "file:///internal/hook-live",
+        ] {
+            assert!(
+                hook_forward_url_for_launch_runtime(
+                    source,
+                    LaunchRuntimeTarget::Docker,
+                    Some(gwt_docker::ContainerRuntimeKind::Docker),
+                )
+                .is_err(),
+                "container endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_selects_the_listener_for_each_runtime() {
+        let browser = "ws://127.0.0.1:46234/ws";
+        let agent = "ws://127.0.0.1:45123/internal/pane-ws";
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(browser, agent, LaunchRuntimeTarget::Host, None,)
+                .expect("host pane URL"),
+            agent
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                browser,
+                agent,
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Docker),
+            )
+            .expect("Docker pane URL"),
+            "ws://host.docker.internal:45123/internal/pane-ws"
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                browser,
+                "wss://[::1]:45123/internal/pane-ws",
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Podman),
+            )
+            .expect("Podman pane URL"),
+            "wss://host.containers.internal:45123/internal/pane-ws"
+        );
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_rejects_noncanonical_container_endpoints() {
+        for source in [
+            "http://127.0.0.1:45123/internal/pane-ws",
+            "ws://127.0.0.1/internal/pane-ws",
+            "ws://127.0.0.1:46234/internal/hook-live",
+            "ws://127.0.0.1:45123/internal/pane-ws?generation=7",
+            "ws://127.0.0.1:45123/internal/pane-ws#fragment",
+            "ws://example.test:45123/internal/pane-ws",
+        ] {
+            assert!(
+                pane_websocket_url_for_launch_runtime(
+                    "ws://127.0.0.1:46234/ws",
+                    source,
+                    LaunchRuntimeTarget::Docker,
+                    Some(gwt_docker::ContainerRuntimeKind::Docker),
+                )
+                .is_err(),
+                "container pane endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_rejects_noncanonical_host_endpoints() {
+        for source in [
+            "http://127.0.0.1:45123/internal/pane-ws",
+            "ws://127.0.0.1/internal/pane-ws",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws?generation=7",
+            "ws://127.0.0.1:45123/internal/pane-ws#fragment",
+            "ws://example.test:45123/internal/pane-ws",
+            "ws://user@127.0.0.1:45123/internal/pane-ws",
+        ] {
+            assert!(
+                pane_websocket_url_for_launch_runtime(
+                    "ws://127.0.0.1:46234/ws",
+                    source,
+                    LaunchRuntimeTarget::Host,
+                    None,
+                )
+                .is_err(),
+                "host pane endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_launch_env_values_stay_out_of_docker_argv_and_debug() {
+        const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
+        const SESSION_SENTINEL: &str = "session-identity-secret-sentinel";
+        const RUNTIME_SENTINEL: &str = "/private/runtime/session.json";
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        let runtime_dir = tempdir().expect("runtime tempdir");
+        let container_runtime = resolved_test_docker_runtime(runtime_dir.path());
+        install_hook_forward_env(
+            &mut config,
+            Some(HookForwardEnv {
+                url: "http://localhost:45123/internal/hook-live".to_string(),
+                token: TOKEN_SENTINEL.to_string(),
+            }),
+            Some(&container_runtime),
+        )
+        .expect("install Docker hook forwarding environment");
+        config
+            .env_vars
+            .insert(GWT_SESSION_ID_ENV.to_string(), SESSION_SENTINEL.to_string());
+        config.env_vars.insert(
+            GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+            RUNTIME_SENTINEL.to_string(),
+        );
+        config
+            .env_vars
+            .insert("TERM".to_string(), "xterm-256color".to_string());
+        assert_eq!(
+            config
+                .env_vars
+                .get(GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        let env = config.env_vars;
+        let args = docker_compose_exec_env_args(&env);
+
+        for key in [
+            GWT_HOOK_FORWARD_TOKEN_ENV,
+            GWT_SESSION_ID_ENV,
+            GWT_SESSION_RUNTIME_PATH_ENV,
+        ] {
+            assert!(args.windows(2).any(|pair| pair == ["-e", key]));
+        }
+        for private_value in [TOKEN_SENTINEL, SESSION_SENTINEL, RUNTIME_SENTINEL] {
+            assert!(!args.iter().any(|arg| arg.contains(private_value)));
+        }
+        assert!(args.iter().any(|arg| arg == "TERM=xterm-256color"));
+
+        let process_launch = PreparedProcessLaunch {
+            command: "docker".to_string(),
+            args: vec![
+                "compose".to_string(),
+                format!("{GWT_HOOK_FORWARD_TOKEN_ENV}={TOKEN_SENTINEL}"),
+                format!("{GWT_SESSION_ID_ENV}={SESSION_SENTINEL}"),
+            ],
+            env,
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+        let debug = format!("{process_launch:?}");
+        for private_value in [TOKEN_SENTINEL, SESSION_SENTINEL, RUNTIME_SENTINEL] {
+            assert!(
+                !debug.contains(private_value),
+                "private value leaked through Debug: {debug}"
+            );
+        }
+        assert!(debug.contains("<redacted>"));
+
+        let hook_forward = HookForwardEnv {
+            url: "http://127.0.0.1:45123/internal/hook-live".to_string(),
+            token: TOKEN_SENTINEL.to_string(),
+        };
+        let debug = format!("{hook_forward:?}");
+        assert!(!debug.contains(TOKEN_SENTINEL));
+        assert!(debug.contains("<redacted>"));
+    }
 
     #[test]
     fn docker_compose_exec_env_args_does_not_override_container_path() {
@@ -1704,6 +4912,78 @@ mod tests {
         config
     }
 
+    fn sample_direct_codex_launch_config(worktree: &Path) -> LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(worktree)
+            .branch("feature/demo")
+            .model("gpt-5.6-codex")
+            .session_mode(SessionMode::Continue)
+            .skip_permissions(true)
+            .extra_arg("--search")
+            .build();
+        config.command = "/opt/homebrew/bin/codex".to_string();
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config
+    }
+
+    type ProbeRecords = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+    fn recording_probe(
+        healthy: impl Fn(&str) -> bool + 'static,
+    ) -> (ProbeRecords, Box<HostRunnerProbe>) {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let observed_records = Arc::clone(&records);
+        let probe = move |kind: HostRunnerProbeKind,
+                          command: &str,
+                          args: Vec<String>,
+                          _env: &HashMap<String, String>,
+                          _remove_env: &[String],
+                          _cwd: Option<PathBuf>| {
+            observed_records
+                .lock()
+                .expect("probe records")
+                .push((command.to_string(), args));
+            if healthy(command) {
+                if kind == HostRunnerProbeKind::Metadata {
+                    HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "\"9.9.9\"\n".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    }
+                } else {
+                    HostRunnerProbeOutcome::success()
+                }
+            } else {
+                HostRunnerProbeOutcome::failure_with_stderr("injected probe failure")
+            }
+        };
+        (records, Box::new(probe))
+    }
+
+    fn prepare_test_launch(
+        worktree: &Path,
+        sessions_dir: &Path,
+        config: LaunchConfig,
+        mut probe: Box<HostRunnerProbe>,
+    ) -> Result<PreparedAgentLaunch, String> {
+        let lookup_gwt_bin = |_command: &str| Some(PathBuf::from("/usr/local/bin/gwtd"));
+        prepare_agent_launch_with(
+            worktree,
+            sessions_dir,
+            config,
+            None,
+            |_path| Ok(()),
+            PrepareLaunchDeps {
+                current_exe: Path::new("/usr/local/bin/gwt"),
+                probe_host_runner: probe.as_mut(),
+                lookup_gwt_bin: &lookup_gwt_bin,
+            },
+        )
+    }
+
     fn init_git_repo(path: &Path) {
         fs::create_dir_all(path).expect("create repo dir");
         let init = gwt_core::process::hidden_command("git")
@@ -1751,6 +5031,2495 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_latest_official_package_resolves_one_exact_npx_plan() {
+        let temp = tempdir().expect("tempdir");
+        let prompt = "$gwt-execute #3152";
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("latest")
+            .extra_arg(prompt)
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let mut calls = Vec::new();
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, command, args, _env, _remove_env, _cwd| {
+                calls.push((kind, command.to_string(), args.clone()));
+                match kind {
+                    HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "\"0.116.0\"\n".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    },
+                    HostRunnerProbeKind::Package => HostRunnerProbeOutcome::success(),
+                    HostRunnerProbeKind::Direct | HostRunnerProbeKind::Runner => {
+                        panic!("versioned launch must not use a legacy runner probe")
+                    }
+                }
+            },
+            |_candidate| panic!("healthy exact package must not repair"),
+        )
+        .expect("exact npx plan");
+
+        let plan = report.resolved_package_plan.expect("resolved package plan");
+        assert_eq!(plan.runner_executable, npx.display().to_string());
+        assert_eq!(
+            plan.package_prefix,
+            vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()]
+        );
+        assert_eq!(
+            plan.provenance.requested_selector, "latest",
+            "UI selector remains requested while the runtime plan is exact"
+        );
+        assert_eq!(plan.provenance.resolved_exact_version, "0.116.0");
+        assert_eq!(config.tool_runtime_provenance, Some(plan.provenance));
+        assert_eq!(config.args.last().map(String::as_str), Some(prompt));
+        assert_eq!(
+            calls[0].2,
+            vec![
+                "view".to_string(),
+                "@openai/codex@latest".to_string(),
+                "version".to_string(),
+                "--json".to_string(),
+            ]
+        );
+        assert!(Path::new(&calls[0].1)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("npm.cmd")));
+        assert_eq!(
+            calls[1].2,
+            vec![
+                "--yes".to_string(),
+                "@openai/codex@0.116.0".to_string(),
+                "--version".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_explicit_official_semver_skips_metadata_lookup() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("2.1.210")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let mut calls = Vec::new();
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, args, _env, _remove_env, _cwd| {
+                calls.push((kind, args));
+                HostRunnerProbeOutcome::success()
+            },
+            |_candidate| panic!("healthy exact package must not repair"),
+        )
+        .expect("explicit exact plan");
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, HostRunnerProbeKind::Package);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@2.1.210".to_string(),
+                "--version".to_string(),
+            ]
+        );
+        let provenance = report
+            .resolved_package_plan
+            .expect("resolved package plan")
+            .provenance;
+        assert_eq!(provenance.requested_selector, "2.1.210");
+        assert_eq!(provenance.resolved_exact_version, "2.1.210");
+        assert_eq!(
+            provenance.resolution_reason,
+            ToolRuntimeResolutionReason::RequestedSelector
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_latest_metadata_rejects_ambiguous_json_without_mutating_launch() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("latest")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| match kind {
+                HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: "[\"0.115.0\",\"0.116.0\"]".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                },
+                _ => panic!("invalid metadata must stop before package probe"),
+            },
+            |_candidate| panic!("invalid metadata must not repair"),
+        )
+        .expect_err("metadata must resolve exactly one semver");
+
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("metadata"));
+        assert!(error.contains("semantic version"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_latest_metadata_timeout_preserves_launch_and_stops_before_package_probe() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("latest")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let original = format!("{config:?}");
+        let mut calls = 0;
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Metadata);
+                HostRunnerProbeOutcome::timeout()
+            },
+            |_candidate| panic!("metadata timeout must not repair"),
+        )
+        .expect_err("metadata timeout must fail before package probe");
+
+        assert_eq!(calls, 1);
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("metadata lookup timed out"));
+        assert!(error.contains("15 seconds"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_invalid_persisted_provenance_fails_before_any_probe() {
+        let temp = tempdir().expect("tempdir");
+        let invalid = ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@anthropic-ai/claude-code".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "not-semver".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+        };
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("latest")
+            .tool_runtime_provenance(invalid)
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                panic!("invalid provenance must stop before probe")
+            },
+            |_candidate| panic!("invalid provenance must not repair"),
+        )
+        .expect_err("invalid provenance must fail closed");
+
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("persisted tool runtime provenance is invalid"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_persisted_exact_provenance_skips_metadata_and_reprobes_same_package() {
+        let temp = tempdir().expect("tempdir");
+        let prompt = "$gwt-execute #3456";
+        let provenance = ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@openai/codex".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "0.116.0".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+        };
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("latest")
+            .tool_runtime_provenance(provenance.clone())
+            .extra_arg(prompt)
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let mut calls = Vec::new();
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, args, _env, _remove_env, _cwd| {
+                calls.push((kind, args));
+                HostRunnerProbeOutcome::success()
+            },
+            |_candidate| panic!("healthy persisted exact package must not repair"),
+        )
+        .expect("persisted exact plan");
+
+        assert_eq!(calls.len(), 1, "resume must not resolve latest again");
+        assert_eq!(calls[0].0, HostRunnerProbeKind::Package);
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "--yes".to_string(),
+                "@openai/codex@0.116.0".to_string(),
+                "--version".to_string(),
+            ]
+        );
+        assert_eq!(
+            report.resolved_package_plan.expect("exact plan").provenance,
+            provenance
+        );
+        assert_eq!(config.args.last().map(String::as_str), Some(prompt));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_persisted_installed_fallback_resumes_exact_without_direct_reprobe() {
+        let temp = tempdir().expect("tempdir");
+        let provenance = ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@openai/codex".to_string(),
+            requested_selector: "installed".to_string(),
+            resolved_exact_version: "0.116.0".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::InstalledFallback,
+        };
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("installed")
+            .tool_runtime_provenance(provenance.clone())
+            .build();
+        config.command = temp.path().join("codex.exe").display().to_string();
+        let npx = temp.path().join("node").join("npx.cmd");
+        let mut calls = Vec::new();
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, args, _env, _remove_env, _cwd| {
+                calls.push((kind, args));
+                match kind {
+                    HostRunnerProbeKind::Package => HostRunnerProbeOutcome::success(),
+                    _ => panic!("persisted installed fallback must reuse exact package directly"),
+                }
+            },
+            |_candidate| panic!("healthy persisted exact package must not repair"),
+        )
+        .expect("persisted installed fallback exact plan");
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, HostRunnerProbeKind::Package);
+        assert_eq!(
+            report.resolved_package_plan.expect("plan").provenance,
+            provenance
+        );
+        assert!(is_windows_npx_cmd(&config.command));
+        assert_eq!(
+            config.args.get(1).map(String::as_str),
+            Some("@openai/codex@0.116.0")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unhealthy_installed_runner_resolves_exact_npx_with_fallback_reason() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("installed")
+            .build();
+        config.command = temp.path().join("claude.exe").display().to_string();
+        let npx = temp.path().join("node").join("npx.cmd");
+        let mut calls = Vec::new();
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, command, args, _env, _remove_env, _cwd| {
+                calls.push((kind, command.to_string(), args));
+                match kind {
+                    HostRunnerProbeKind::Direct => {
+                        HostRunnerProbeOutcome::failure_with_stderr("missing installed CLI")
+                    }
+                    HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "\"2.1.210\"".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    },
+                    HostRunnerProbeKind::Package => HostRunnerProbeOutcome::success(),
+                    HostRunnerProbeKind::Runner => {
+                        panic!("targeted launch must not use a legacy runner probe")
+                    }
+                }
+            },
+            |_candidate| panic!("healthy fallback must not repair"),
+        )
+        .expect("installed exact fallback");
+
+        assert!(report.switched_to_fallback);
+        let provenance = report.resolved_package_plan.expect("exact plan").provenance;
+        assert_eq!(provenance.requested_selector, "installed");
+        assert_eq!(provenance.resolved_exact_version, "2.1.210");
+        assert_eq!(
+            provenance.resolution_reason,
+            ToolRuntimeResolutionReason::InstalledFallback
+        );
+        assert_eq!(calls.len(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_installed_fallback_records_fallback_reason() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("installed")
+            .tool_runtime_source_session_id("legacy-session")
+            .build();
+        config.command = temp.path().join("codex.exe").display().to_string();
+        let npx = temp.path().join("node").join("npx.cmd");
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| match kind {
+                HostRunnerProbeKind::Direct => {
+                    HostRunnerProbeOutcome::failure_with_stderr("missing installed CLI")
+                }
+                HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: "\"0.116.0\"".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                },
+                HostRunnerProbeKind::Package => HostRunnerProbeOutcome::success(),
+                HostRunnerProbeKind::Runner => {
+                    panic!("targeted launch must not use a legacy runner probe")
+                }
+            },
+            |_candidate| panic!("healthy fallback must not repair"),
+        )
+        .expect("legacy installed exact fallback");
+
+        assert_eq!(
+            report
+                .resolved_package_plan
+                .expect("exact plan")
+                .provenance
+                .resolution_reason,
+            ToolRuntimeResolutionReason::InstalledFallback
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exact_package_repair_retries_identical_plan_once() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let npx_root = npx_base.join("97540b0888a2deac");
+        let bin_dir = npx_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(bin_dir.join("codex.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        let stderr = format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            bin_dir.join("codex.exe").display()
+        );
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(temp.path())
+            .version("0.116.0")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        let mut probes = Vec::new();
+        let mut repairs = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            Some(npx_base),
+            |kind, _command, args, _env, _remove_env, _cwd| {
+                probes.push((kind, args));
+                if probes.len() == 1 {
+                    HostRunnerProbeOutcome::failure_with_stderr(&stderr)
+                } else {
+                    HostRunnerProbeOutcome::success()
+                }
+            },
+            |_candidate| {
+                repairs += 1;
+                Ok(())
+            },
+        )
+        .expect("one repair and exact retry");
+
+        assert!(report.repaired_npx_cache);
+        assert_eq!(repairs, 1);
+        assert_eq!(probes.len(), 2);
+        assert_eq!(
+            probes[0], probes[1],
+            "repair must retry the same exact plan"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_detection_rejects_multiple_hash_candidates() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let first = create_windows_npx_fixture(&npx_base, "1111111111111111");
+        let second = create_windows_npx_fixture(&npx_base, "2222222222222222");
+        let output = format!(
+            "{}; {}",
+            windows_missing_binary_output(&first),
+            windows_missing_binary_output(&second)
+        );
+
+        assert_eq!(
+            detect_windows_npx_cache_corruption(&output, &npx_base),
+            None,
+            "ambiguous npm cache hashes must fail closed"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_detection_rejects_directory_marker() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let missing = create_windows_npx_fixture(&npx_base, "1111111111111111");
+        let marker = missing.with_file_name("codex.exe.old.1779939935247");
+        fs::remove_file(&marker).expect("remove regular marker");
+        fs::create_dir(&marker).expect("create marker directory");
+
+        assert_eq!(
+            detect_windows_npx_cache_corruption(
+                &windows_missing_binary_output(&missing),
+                &npx_base,
+            ),
+            None,
+            "a marker-shaped directory must not authorize cache deletion"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_detection_rejects_reparse_marker() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let missing = create_windows_npx_fixture(&npx_base, "1111111111111111");
+        let marker = missing.with_file_name("codex.exe.old.1779939935247");
+        fs::remove_file(&marker).expect("remove regular marker");
+        create_windows_directory_junction(&marker, &temp.path().join("outside-marker"));
+
+        assert_eq!(
+            detect_windows_npx_cache_corruption(
+                &windows_missing_binary_output(&missing),
+                &npx_base,
+            ),
+            None,
+            "a marker-shaped reparse point must not authorize cache deletion"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_detection_rejects_reparse_directory_boundaries() {
+        for boundary in ["base", "hash", "package"] {
+            let temp = tempdir().expect("tempdir");
+            let npx_base = temp.path().join("npm-cache").join("_npx");
+            let hash = "1111111111111111";
+            let outside = temp.path().join(format!("outside-{boundary}"));
+
+            let missing = match boundary {
+                "base" => {
+                    let target_base = outside.join("target-base");
+                    let missing = create_windows_npx_fixture(&target_base, hash);
+                    create_windows_directory_junction(&npx_base, &target_base);
+                    npx_base.join(missing.strip_prefix(&target_base).expect("relative binary"))
+                }
+                "hash" => {
+                    fs::create_dir_all(&npx_base).expect("create npx base");
+                    let target_root = outside.join("target-hash");
+                    let missing = create_windows_npx_fixture(&target_root, "package-root");
+                    let target_root = target_root.join("package-root");
+                    create_windows_directory_junction(&npx_base.join(hash), &target_root);
+                    npx_base
+                        .join(hash)
+                        .join(missing.strip_prefix(&target_root).expect("relative binary"))
+                }
+                "package" => {
+                    let package_parent = npx_base.join(hash).join("node_modules").join("@openai");
+                    fs::create_dir_all(&package_parent).expect("create package parent");
+                    let target_package = outside.join("codex");
+                    let bin_dir = target_package.join("bin");
+                    fs::create_dir_all(&bin_dir).expect("create target package bin");
+                    fs::write(bin_dir.join("codex.exe.old.1779939935247"), "binary")
+                        .expect("write old binary marker");
+                    create_windows_directory_junction(
+                        &package_parent.join("codex"),
+                        &target_package,
+                    );
+                    package_parent.join("codex").join("bin").join("codex.exe")
+                }
+                _ => unreachable!(),
+            };
+
+            assert_eq!(
+                detect_windows_npx_cache_corruption(
+                    &windows_missing_binary_output(&missing),
+                    &npx_base,
+                ),
+                None,
+                "{boundary} reparse point must fail closed"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_repair_rejects_hash_root_swap_without_deleting_replacement() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let hash = "1111111111111111";
+        let missing = create_windows_npx_fixture(&npx_base, hash);
+        let candidate = detect_windows_npx_cache_corruption(
+            &windows_missing_binary_output(&missing),
+            &npx_base,
+        )
+        .expect("safe repair candidate");
+        let displaced = temp.path().join("displaced-original");
+        fs::rename(&candidate.npx_root, &displaced).expect("displace detected hash root");
+        fs::create_dir_all(&candidate.npx_root).expect("create swapped replacement");
+        let guard = candidate.npx_root.join("must-survive.txt");
+        fs::write(&guard, "unrelated replacement").expect("write replacement guard");
+
+        let error = repair_windows_npx_cache(&candidate)
+            .expect_err("identity mismatch must abort repair before deletion");
+
+        assert!(guard.is_file(), "swapped replacement must remain untouched");
+        assert!(
+            displaced.is_dir(),
+            "the originally detected cache root must not be deleted through another path"
+        );
+        assert!(error.contains("changed") || error.contains("identity"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_repair_atomically_quarantines_only_the_exact_hash_root() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let missing = create_windows_npx_fixture(&npx_base, "1111111111111111");
+        let sibling_missing = create_windows_npx_fixture(&npx_base, "2222222222222222");
+        let sibling_root = sibling_missing
+            .ancestors()
+            .find(|path| path.parent() == Some(npx_base.as_path()))
+            .expect("sibling hash root")
+            .to_path_buf();
+        let sibling_guard = sibling_root.join("must-survive.txt");
+        fs::write(&sibling_guard, "unrelated hash").expect("write sibling guard");
+        let candidate = detect_windows_npx_cache_corruption(
+            &windows_missing_binary_output(&missing),
+            &npx_base,
+        )
+        .expect("safe repair candidate");
+        let quarantined_path = std::cell::RefCell::new(None);
+
+        repair_windows_npx_cache_with(&candidate, |quarantine| {
+            assert_ne!(quarantine, candidate.npx_root);
+            assert_eq!(quarantine.parent(), Some(npx_base.as_path()));
+            assert!(
+                !candidate.npx_root.exists(),
+                "the exact hash root must be renamed before recursive deletion"
+            );
+            assert!(quarantine.is_dir(), "quarantine must contain the hash root");
+            quarantined_path.replace(Some(quarantine.to_path_buf()));
+            fs::remove_dir_all(quarantine)
+        })
+        .expect("quarantine exact cache root");
+
+        let quarantined_path = quarantined_path
+            .into_inner()
+            .expect("remove callback quarantine path");
+        assert!(!candidate.npx_root.exists());
+        assert!(!quarantined_path.exists());
+        assert!(
+            sibling_guard.is_file(),
+            "sibling hash must remain untouched"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_repair_reports_leftover_quarantine_when_delete_fails() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let missing = create_windows_npx_fixture(&npx_base, "1111111111111111");
+        let candidate = detect_windows_npx_cache_corruption(
+            &windows_missing_binary_output(&missing),
+            &npx_base,
+        )
+        .expect("safe repair candidate");
+        let quarantined_path = std::cell::RefCell::new(None);
+
+        let error = repair_windows_npx_cache_with(&candidate, |quarantine| {
+            quarantined_path.replace(Some(quarantine.to_path_buf()));
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected delete failure",
+            ))
+        })
+        .expect_err("delete failure must preserve the quarantine for manual recovery");
+
+        let quarantined_path = quarantined_path
+            .into_inner()
+            .expect("failed delete quarantine path");
+        assert!(quarantined_path.is_dir());
+        assert!(
+            error.contains(&quarantined_path.display().to_string()),
+            "manual recovery diagnostics must identify the leftover quarantine: {error}"
+        );
+    }
+
+    #[test]
+    fn prepare_agent_launch_falls_back_to_latest_package_when_direct_runner_is_unhealthy() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let config = sample_direct_codex_launch_config(&worktree);
+        let original_args = config.args.clone();
+        let (probes, probe) = recording_probe(|command| !command_matches_runner(command, "codex"));
+
+        let prepared = prepare_test_launch(&worktree, &sessions_dir, config, probe)
+            .expect("healthy latest package fallback");
+
+        assert!(prepared.used_host_package_runner_fallback);
+        assert!(!command_matches_runner(
+            &prepared.process_launch.command,
+            "codex"
+        ));
+        let expected_package = if cfg!(windows) {
+            "@openai/codex@9.9.9"
+        } else {
+            "@openai/codex@latest"
+        };
+        let package_index = prepared
+            .process_launch
+            .args
+            .iter()
+            .position(|arg| arg == expected_package)
+            .expect("Codex package prefix");
+        assert_eq!(
+            &prepared.process_launch.args[package_index + 1..],
+            original_args.as_slice(),
+            "canonical, model, permission, continuation, and extra args must retain their order"
+        );
+        assert_eq!(prepared.session.launch_args, prepared.process_launch.args);
+        let probes = probes.lock().expect("probe records");
+        assert_eq!(probes.len(), if cfg!(windows) { 3 } else { 2 });
+        assert!(command_matches_runner(&probes[0].0, "codex"));
+        assert_eq!(probes[0].1, vec!["--version".to_string()]);
+        assert_eq!(
+            probes
+                .last()
+                .and_then(|probe| probe.1.last())
+                .map(String::as_str),
+            Some("--version")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_latest_runner_is_one_absolute_executable_for_probe_persist_and_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        let bin = worktree.join("tools");
+        fs::create_dir_all(&bin).expect("create relative PATH directory");
+        let bunx = bin.join("bunx");
+        fs::write(&bunx, "#!/bin/sh\nexit 0\n").expect("write bunx");
+        fs::set_permissions(&bunx, fs::Permissions::from_mode(0o755)).expect("chmod bunx");
+        let mut config = sample_direct_codex_launch_config(&worktree);
+        config
+            .env_vars
+            .insert("PATH".to_string(), "tools".to_string());
+        config.remove_env.push("PATH".to_string());
+        let expected = bunx.display().to_string();
+        let expected_for_probe = expected.clone();
+        let (probes, probe) = recording_probe(move |command| command == expected_for_probe);
+
+        let prepared = prepare_test_launch(&worktree, &sessions_dir, config, probe)
+            .expect("healthy absolute latest runner");
+        let persisted = Session::load(&sessions_dir.join(format!("{}.toml", prepared.session.id)))
+            .expect("persisted Session");
+        let probes = probes.lock().expect("probe records");
+
+        assert_eq!(prepared.process_launch.command, expected);
+        assert_eq!(prepared.session.launch_command, expected);
+        assert_eq!(persisted.launch_command, expected);
+        assert_eq!(
+            probes.last().map(|probe| probe.0.as_str()),
+            Some(expected.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_healthy_direct_runner_is_one_absolute_executable_for_probe_persist_and_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        let bin = worktree.join("tools");
+        fs::create_dir_all(&bin).expect("create relative PATH directory");
+        let codex = bin.join("codex");
+        fs::write(&codex, "#!/bin/sh\nprintf 'codex-cli 0.133.0\\n'\n").expect("write codex");
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).expect("chmod codex");
+        let mut config = sample_direct_codex_launch_config(&worktree);
+        config.command = "codex".to_string();
+        config
+            .env_vars
+            .insert("PATH".to_string(), "tools".to_string());
+        config.remove_env.push("PATH".to_string());
+        let expected = codex.display().to_string();
+        let probes = Arc::new(Mutex::new(Vec::<(String, Vec<String>)>::new()));
+        let observed = Arc::clone(&probes);
+        let probe: Box<HostRunnerProbe> =
+            Box::new(move |_kind, command, args, _env, _remove_env, _cwd| {
+                observed
+                    .lock()
+                    .expect("probe records")
+                    .push((command.to_string(), args));
+                HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: "codex-cli 0.133.0\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                }
+            });
+
+        let prepared = prepare_test_launch(&worktree, &sessions_dir, config, probe)
+            .expect("healthy absolute direct runner");
+        let persisted = Session::load(&sessions_dir.join(format!("{}.toml", prepared.session.id)))
+            .expect("persisted Session");
+        let probes = probes.lock().expect("probe records");
+
+        assert_eq!(
+            probes.as_slice(),
+            &[(expected.clone(), vec!["--version".to_string()])]
+        );
+        assert_eq!(prepared.process_launch.command, expected);
+        assert_eq!(prepared.session.launch_command, expected);
+        assert_eq!(persisted.launch_command, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_direct_resolution_candidate_does_not_mutate_launch_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let bin = worktree.join("tools");
+        fs::create_dir_all(&bin).expect("create relative PATH directory");
+        for name in ["codex", "bunx", "npx"] {
+            let runner = bin.join(name);
+            fs::write(&runner, "#!/bin/sh\nexit 1\n").expect("write runner");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).expect("chmod runner");
+        }
+        let mut config = sample_direct_codex_launch_config(&worktree);
+        config.command = "codex".to_string();
+        config
+            .env_vars
+            .insert("PATH".to_string(), "tools".to_string());
+        config.remove_env.push("PATH".to_string());
+        let original = format!("{config:?}");
+        let mut probes = Vec::new();
+
+        let result = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            bin.join("npx").display().to_string(),
+            None,
+            |_kind, command, _args, _env, _remove_env, _cwd| {
+                probes.push(command.to_string());
+                HostRunnerProbeOutcome::failure_with_stderr("unhealthy")
+            },
+            |_candidate| panic!("cache repair must not run"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(format!("{config:?}"), original);
+        assert_eq!(
+            probes.first(),
+            Some(&bin.join("codex").display().to_string())
+        );
+    }
+
+    #[test]
+    fn prepare_agent_launch_rejects_unhealthy_direct_and_package_runners_before_persistence() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let (probes, probe) = recording_probe(|_command| false);
+
+        let result = prepare_test_launch(
+            &worktree,
+            &sessions_dir,
+            sample_direct_codex_launch_config(&worktree),
+            probe,
+        );
+
+        assert!(
+            result.is_err(),
+            "broken direct runner must not be dispatched"
+        );
+        let probes = probes.lock().expect("probe records");
+        assert!(
+            probes.len() >= 2,
+            "direct and at least one package fallback must be probed"
+        );
+        assert!(
+            !sessions_dir.exists()
+                || fs::read_dir(&sessions_dir)
+                    .expect("read sessions dir")
+                    .next()
+                    .is_none(),
+            "Session persistence must not precede runner health"
+        );
+    }
+
+    #[test]
+    fn prepare_agent_launch_preserves_healthy_direct_runner_and_args() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let config = sample_direct_codex_launch_config(&worktree);
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+        let (probes, probe) = recording_probe(|_command| true);
+
+        let prepared = prepare_test_launch(&worktree, &sessions_dir, config, probe)
+            .expect("healthy direct runner");
+
+        assert!(!prepared.used_host_package_runner_fallback);
+        assert_eq!(prepared.process_launch.args, original_args);
+        let probes = probes.lock().expect("probe records");
+        assert_eq!(probes.len(), 1);
+        assert_eq!(prepared.process_launch.command, probes[0].0);
+        assert!(command_matches_runner(
+            &prepared.process_launch.command,
+            "codex"
+        ));
+        if !cfg!(windows) {
+            assert_eq!(prepared.process_launch.command, original_command);
+        }
+        assert_eq!(probes[0].1, vec!["--version".to_string()]);
+    }
+
+    #[test]
+    fn prepare_agent_launch_uses_descriptor_version_argv_for_copilot() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let mut config = AgentLaunchBuilder::new(AgentId::Copilot)
+            .working_dir(&worktree)
+            .build();
+        config.command = "/usr/local/bin/gh".to_string();
+        let (probes, probe) = recording_probe(|_command| true);
+
+        prepare_test_launch(&worktree, &sessions_dir, config, probe)
+            .expect("healthy Copilot direct runner");
+
+        let probes = probes.lock().expect("probe records");
+        assert_eq!(probes.len(), 1);
+        assert_eq!(
+            probes[0].1,
+            vec!["copilot".to_string(), "--version".to_string()]
+        );
+    }
+
+    #[test]
+    fn prepare_agent_launch_does_not_probe_custom_direct_runner() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let config = AgentLaunchBuilder::new(AgentId::Custom("my-agent".into()))
+            .working_dir(&worktree)
+            .extra_arg("--custom")
+            .build();
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+        let (probes, probe) = recording_probe(|_command| false);
+
+        let prepared =
+            prepare_test_launch(&worktree, &sessions_dir, config, probe).expect("custom launch");
+
+        assert!(probes.lock().expect("probe records").is_empty());
+        assert_eq!(prepared.process_launch.command, original_command);
+        assert_eq!(prepared.process_launch.args, original_args);
+    }
+
+    #[test]
+    fn prepare_agent_launch_does_not_probe_direct_runner_after_docker_selection() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project-without-compose");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&project).expect("create project");
+        let mut config = sample_direct_codex_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let (probes, probe) = recording_probe(|_command| false);
+
+        let result = prepare_test_launch(&project, &sessions_dir, config, probe);
+
+        assert!(result.is_err(), "missing Docker compose must fail first");
+        assert_eq!(
+            probes.lock().expect("probe records").len(),
+            0,
+            "host runner probe must not run for Docker"
+        );
+    }
+
+    #[test]
+    fn prepare_agent_launch_preserves_selected_versioned_runner() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let config = sample_versioned_launch_config(&worktree);
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+        let (probes, probe) = recording_probe(|_command| true);
+
+        let prepared = prepare_test_launch(&worktree, &sessions_dir, config, probe)
+            .expect("healthy versioned runner");
+
+        assert_eq!(prepared.used_host_package_runner_fallback, cfg!(windows));
+        let probes = probes.lock().expect("probe records");
+        if cfg!(windows) {
+            assert!(is_windows_npx_cmd(&prepared.process_launch.command));
+            assert_eq!(
+                prepared.process_launch.args.first().map(String::as_str),
+                Some("--yes")
+            );
+            assert_eq!(
+                prepared.process_launch.args.get(1).map(String::as_str),
+                Some("@anthropic-ai/claude-code@9.9.9")
+            );
+            assert_eq!(probes.len(), 2, "metadata and exact package probes");
+        } else {
+            assert_eq!(prepared.process_launch.command, original_command);
+            assert_eq!(prepared.process_launch.args, original_args);
+            assert_eq!(probes.len(), 1, "existing package probe remains unchanged");
+        }
+        assert!(!command_matches_runner(&probes[0].0, "codex"));
+    }
+
+    #[test]
+    fn host_runner_health_does_not_probe_or_mutate_custom_bunx_agent() {
+        let temp = tempdir().expect("tempdir");
+        let custom = CustomCodingAgent {
+            id: "review-bot".to_string(),
+            display_name: "Review Bot".to_string(),
+            agent_type: CustomAgentType::Bunx,
+            command: "@example/review-bot@latest".to_string(),
+            default_args: vec!["--review".to_string()],
+            mode_args: None,
+            skip_permissions_args: Vec::new(),
+            env: HashMap::from([("REVIEW_MODE".to_string(), "strict".to_string())]),
+            supports_resume_picker: false,
+        };
+        let mut config = AgentLaunchBuilder::new(AgentId::Custom("review-bot".to_string()))
+            .custom_agent(custom)
+            .working_dir(temp.path())
+            .extra_arg("--format=json")
+            .build();
+        let original = format!("{config:?}");
+        let mut probe_calls = 0;
+        let mut repair_calls = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                HostRunnerProbeOutcome::success()
+            },
+            |_candidate| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .expect("Custom Bunx launch must bypass built-in runner health policy");
+
+        assert_eq!(report, HostRunnerHealthReport::default());
+        assert_eq!(probe_calls, 0, "Custom Bunx must not be probed");
+        assert_eq!(repair_calls, 0, "Custom Bunx must not trigger cache repair");
+        assert_eq!(
+            format!("{config:?}"),
+            original,
+            "Custom Bunx command, args, and environment must remain byte-identical"
+        );
+    }
+
+    #[test]
+    fn host_runner_health_rejects_initial_npx_timeout_without_mutating_config() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_versioned_launch_config(temp.path());
+        config
+            .env_vars
+            .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
+        config.remove_env.push("REMOVE_SENTINEL".to_string());
+        let original = format!("{config:?}");
+        let mut probe_calls = 0;
+        let fallback = if cfg!(windows) { "npx.cmd" } else { "npx" };
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            fallback.to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                match kind {
+                    HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "\"9.9.9\"".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    },
+                    HostRunnerProbeKind::Package => HostRunnerProbeOutcome::timeout(),
+                    HostRunnerProbeKind::Runner if probe_calls == 1 => {
+                        HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                    }
+                    HostRunnerProbeKind::Runner => HostRunnerProbeOutcome::timeout(),
+                    HostRunnerProbeKind::Direct => {
+                        panic!("versioned runner must not probe direct")
+                    }
+                }
+            },
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect_err("an unproven npx runner must fail closed");
+
+        assert_eq!(probe_calls, 2);
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("npx"));
+        assert!(error.contains("@anthropic-ai/claude-code@"));
+        assert!(error.contains("probe timed out"));
+        assert!(!error.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn host_runner_health_error_does_not_echo_url_userinfo_from_command() {
+        const SECRET: &str = "health-command-secret-sentinel-85207";
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::OpenClaw)
+            .working_dir(temp.path())
+            .build();
+        config.command = format!("https://runner:{SECRET}@example.test/openclaw");
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                HostRunnerProbeOutcome::failure_with_stderr("runner unavailable")
+            },
+            |_candidate| Ok(()),
+        )
+        .expect_err("OpenClaw has no package fallback");
+
+        assert!(
+            !error.contains(SECRET),
+            "health error leaked command userinfo: {error}"
+        );
+        assert!(error.contains("OpenClaw"));
+    }
+
+    #[test]
+    fn host_runner_probe_diagnostic_redacts_nonstandard_environment_value() {
+        const SECRET: &str = "health-probe-jwt-sentinel-24681";
+        let env_vars = HashMap::from([("CI_JOB_JWT".to_string(), SECRET.to_string())]);
+        let diagnostic = HostRunnerProbeOutcome {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: format!("runner echoed {SECRET}"),
+            timed_out: false,
+            error: Some(format!("runtime rejected {SECRET}")),
+        }
+        .diagnostic(&env_vars);
+
+        assert!(diagnostic.contains("exit status 1"));
+        assert!(diagnostic.contains(gwt_core::process_console::REDACTED));
+        assert!(
+            !diagnostic.contains(SECRET),
+            "health diagnostic leaked a nonstandard environment value: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn healthy_direct_report_carries_only_strict_semver_version_evidence() {
+        const SECRET: &str = "version-output-secret-sentinel-95173";
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        config
+            .env_vars
+            .insert("RUNNER_API_TOKEN".to_string(), SECRET.to_string());
+        let mut probe_calls = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: format!("codex-cli 0.133.0 https://user:{SECRET}@example.test/runner"),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy direct runner");
+
+        assert_eq!(probe_calls, 1);
+        let version_output = report.version_output.expect("version output evidence");
+        assert_eq!(version_output, "0.133.0");
+        assert!(!version_output.contains(SECRET));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_runner_health_rejects_npx_timeout_after_cache_repair_without_mutating_config() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let npx_root = npx_base.join("97540b0888a2deac");
+        let bin_dir = npx_root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        let stderr = format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            bin_dir.join("claude.exe").display()
+        );
+        let mut config = sample_versioned_launch_config(temp.path());
+        config
+            .env_vars
+            .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
+        config.remove_env.push("REMOVE_SENTINEL".to_string());
+        let original = format!("{config:?}");
+        let mut probe_calls = 0;
+        let mut repair_calls = 0;
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx.cmd".to_string(),
+            Some(npx_base),
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                match kind {
+                    HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "\"2.1.210\"".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    },
+                    HostRunnerProbeKind::Package if probe_calls == 2 => {
+                        HostRunnerProbeOutcome::failure_with_stderr(&stderr)
+                    }
+                    HostRunnerProbeKind::Package => HostRunnerProbeOutcome::timeout(),
+                    HostRunnerProbeKind::Direct | HostRunnerProbeKind::Runner => {
+                        panic!("targeted versioned launch must not use legacy probes")
+                    }
+                }
+            },
+            |_candidate| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .expect_err("npx must be healthy after repair before launch can continue");
+
+        assert_eq!(probe_calls, 3);
+        assert_eq!(repair_calls, 1);
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("npx"));
+        assert!(error.contains("@anthropic-ai/claude-code@2.1.210"));
+        assert!(error.contains("timed out after npm cache repair"));
+        assert!(!error.contains("must-not-leak"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_prepare_bounds_a_hanging_direct_runner_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        // SPEC-3864: Antigravity has no runtime package route, so a hanging
+        // direct runner cannot be rescued by a bunx/npx fallback.
+        let direct = temp.path().join("agy");
+        fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
+        fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
+            .expect("chmod hanging runner");
+        let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
+            .working_dir(&worktree)
+            .build();
+        config.command = direct.display().to_string();
+
+        let started = std::time::Instant::now();
+        let result = prepare_agent_launch(&worktree, &sessions_dir, config, None, |_path| Ok(()));
+
+        assert!(result.is_err(), "hanging direct runner must fail closed");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(7),
+            "direct runner health must honor the five-second deadline: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_probe_executes_only_the_runner_version_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let marker = temp.path().join("target-package-executed");
+        let args_file = temp.path().join("runner-args.txt");
+        let bunx = temp.path().join("bunx");
+        fs::write(
+            &bunx,
+            "#!/bin/sh\nscript_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprintf '%s\\n' \"$@\" > \"$script_dir/runner-args.txt\"\nif [ \"$1\" != \"--version\" ]; then touch \"$script_dir/target-package-executed\"; fi\nprintf '1.2.3\\n'\n",
+        )
+        .expect("write package runner");
+        fs::set_permissions(&bunx, fs::Permissions::from_mode(0o755))
+            .expect("chmod package runner");
+        let mut config = sample_versioned_launch_config(temp.path());
+        config.command = bunx.display().to_string();
+        config
+            .env_vars
+            .insert("PATH".to_string(), temp.path().display().to_string());
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+
+        let report = resolve_host_runner_health_checked(&mut config)
+            .expect("healthy package-runner executable");
+
+        assert!(!report.switched_to_fallback);
+        assert_eq!(config.command, original_command);
+        assert_eq!(config.args, original_args);
+        assert_eq!(
+            fs::read_to_string(&args_file).expect("runner version argv"),
+            "--version\n",
+        );
+        assert!(
+            !marker.exists(),
+            "non-Windows package health must not execute the cold target package"
+        );
+    }
+
+    #[test]
+    fn package_runner_probe_argv_is_runner_only_on_every_platform() {
+        let bunx = package_runner_probe_args("@openai/codex@latest", false);
+        let npx = package_runner_probe_args("@openai/codex@latest", true);
+
+        assert_eq!(bunx, vec!["--version".to_string()]);
+        assert_eq!(npx, vec!["--version".to_string()]);
+
+        let source = include_str!("prepare.rs");
+        let policy = source
+            .split_once("fn package_runner_probe_args")
+            .and_then(|(_, tail)| tail.split_once("fn host_package_runner_version_spec"))
+            .map(|(policy, _)| policy)
+            .expect("package runner probe policy source");
+        assert!(
+            !policy.contains("cfg(windows)"),
+            "Windows must not execute the cold target package during runner health"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_exit_one_is_not_treated_as_healthy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        for name in ["bunx", "npx"] {
+            let runner = temp.path().join(name);
+            fs::write(&runner, "#!/bin/sh\nexit 1\n").expect("write failing runner");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
+                .expect("chmod failing runner");
+        }
+        let mut config = sample_versioned_launch_config(temp.path());
+        config.command = temp.path().join("bunx").display().to_string();
+        config
+            .env_vars
+            .insert("PATH".to_string(), temp.path().display().to_string());
+        config.remove_env.push("PATH".to_string());
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked(&mut config)
+            .expect_err("exit-one package runners must fail closed");
+
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("package-runner probe failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_binary_availability_uses_absolute_and_effective_path_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let bunx = temp.path().join("bunx");
+        fs::write(&bunx, "#!/bin/sh\nexit 1\n").expect("write runner");
+        fs::set_permissions(&bunx, fs::Permissions::from_mode(0o755)).expect("chmod runner");
+
+        assert!(runner_binary_available(
+            bunx.to_str().expect("UTF-8 path"),
+            &HashMap::new(),
+            &[],
+            None
+        ));
+        assert!(!runner_binary_available(
+            temp.path().join("missing").to_str().expect("UTF-8 path"),
+            &HashMap::new(),
+            &[],
+            None
+        ));
+
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        assert!(runner_binary_available("bunx", &env, &[], None));
+        assert!(!runner_binary_available("npx", &env, &[], None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_binary_availability_rejects_directory_and_non_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let directory = temp.path().join("bunx-directory");
+        fs::create_dir(&directory).expect("create directory candidate");
+        let non_executable = temp.path().join("bunx");
+        fs::write(&non_executable, "#!/bin/sh\nexit 0\n").expect("write runner");
+        fs::set_permissions(&non_executable, fs::Permissions::from_mode(0o644))
+            .expect("remove execute permission");
+
+        assert!(!runner_binary_available(
+            directory.to_str().expect("UTF-8 path"),
+            &HashMap::new(),
+            &[],
+            Some(temp.path())
+        ));
+        assert!(!runner_binary_available(
+            non_executable.to_str().expect("UTF-8 path"),
+            &HashMap::new(),
+            &[],
+            Some(temp.path())
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_binary_availability_uses_effective_path_removal_and_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).expect("create relative PATH directory");
+        let bunx = bin.join("bunx");
+        fs::write(&bunx, "#!/bin/sh\nexit 0\n").expect("write runner");
+        fs::set_permissions(&bunx, fs::Permissions::from_mode(0o755)).expect("chmod runner");
+        let relative_path = HashMap::from([("PATH".to_string(), "bin".to_string())]);
+
+        assert!(runner_binary_available(
+            "bunx",
+            &relative_path,
+            &[],
+            Some(temp.path())
+        ));
+        assert!(
+            !runner_binary_available("sh", &HashMap::new(), &["PATH".to_string()], None),
+            "a removed inherited PATH must not resolve a parent-process binary"
+        );
+        assert!(
+            !runner_binary_available("sh", &HashMap::new(), &["Path".to_string()], None),
+            "effective PATH removal must use the same key matching as selection"
+        );
+        assert!(
+            runner_binary_available(
+                "bunx",
+                &relative_path,
+                &["PATH".to_string()],
+                Some(temp.path())
+            ),
+            "an explicit PATH override is applied after remove_env"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_availability_failure_preserves_the_entire_launch_config() {
+        let temp = tempdir().expect("tempdir");
+        let bunx = temp.path().join("bunx");
+        let npx = temp.path().join("npx");
+        fs::write(&bunx, "not executable").expect("write bunx");
+        fs::write(&npx, "not executable").expect("write npx");
+        let mut config = sample_versioned_launch_config(temp.path());
+        config.command = bunx.display().to_string();
+        config
+            .env_vars
+            .insert("PATH".to_string(), temp.path().display().to_string());
+        config.remove_env.push("PATH".to_string());
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked(&mut config)
+            .expect_err("non-executable package runners must fail closed");
+
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("npx package-runner probe failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_binary_outcome_depends_only_on_availability() {
+        let available = host_package_runner_binary_outcome("/bin/sh", &HashMap::new(), &[], None);
+        assert!(available.success);
+        assert!(!available.timed_out);
+
+        let missing =
+            host_package_runner_binary_outcome("/no/such/runner-xyz", &HashMap::new(), &[], None);
+        assert!(!missing.success);
+        assert!(!missing.timed_out);
+    }
+
+    #[test]
+    fn runner_probe_forwards_failed_stderr_to_agent_console() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "echo probe boom 1>&2 & exit /b 1".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "echo probe boom >&2; exit 1".to_string()],
+            )
+        };
+
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: &command,
+                args,
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(!outcome.success);
+        let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
+        assert!(
+            lines.iter().any(|line| {
+                line.stream == gwt_core::process_console::ProcessStream::Stderr
+                    && line.message.contains("probe boom")
+            }),
+            "expected failed probe stderr in agent console lines: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn runner_probe_redaction_uses_only_nontrivial_secret_like_env_values() {
+        let env = HashMap::from([
+            (
+                "RUNNER_API_TOKEN".to_string(),
+                "probe-token-sentinel-12345".to_string(),
+            ),
+            (
+                "service_key".to_string(),
+                "probe-key-sentinel-67890".to_string(),
+            ),
+            (
+                "DB_PASSWORD".to_string(),
+                "probe-password-sentinel".to_string(),
+            ),
+            ("EMPTY_SECRET".to_string(), String::new()),
+            ("SHORT_TOKEN".to_string(), "on".to_string()),
+            (
+                "ANSI_ONLY_TOKEN".to_string(),
+                "\u{1b}[31m\u{1b}[0m".to_string(),
+            ),
+            ("USER".to_string(), "runner".to_string()),
+        ]);
+        let clean = "runner on ordinary output";
+        let raw = format!(
+            "{clean}: {} / {} / {}",
+            env["RUNNER_API_TOKEN"], env["service_key"], env["DB_PASSWORD"]
+        );
+
+        let redacted = redact_runner_probe_text(&raw, &env);
+
+        assert!(redacted.contains(clean));
+        assert!(redacted.contains("***redacted***"));
+        assert!(!redacted.contains(&env["RUNNER_API_TOKEN"]));
+        assert!(!redacted.contains(&env["service_key"]));
+        assert!(!redacted.contains(&env["DB_PASSWORD"]));
+        assert!(
+            redact_runner_probe_text(clean, &env).contains(clean),
+            "empty, short, and non-secret env values must not destructively rewrite ordinary output"
+        );
+    }
+
+    fn ansi_interleave_runner_probe_secret(secret: &str) -> String {
+        secret
+            .chars()
+            .map(|character| format!("{character}\u{1b}[31m\u{1b}[0m"))
+            .collect()
+    }
+
+    #[test]
+    fn runner_probe_strips_ansi_before_dynamic_secret_redaction() {
+        let secret = "runner-probe-secret-sentinel-ansi-24680";
+        let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), secret.to_string())]);
+        let ansi_split = ansi_interleave_runner_probe_secret(secret);
+
+        let redacted = redact_runner_probe_text(&ansi_split, &env);
+        let downstream_view = gwt_core::process_console::strip_ansi(&redacted);
+
+        assert!(redacted.contains(gwt_core::process_console::REDACTED));
+        assert!(
+            !downstream_view.contains(secret),
+            "ANSI removal must never reconstruct a dynamically redacted secret: {downstream_view:?}"
+        );
+    }
+
+    #[test]
+    fn runner_probe_capture_redacts_ansi_split_secret_prefix_at_capture_boundary() {
+        let secret = "runner-probe-secret-sentinel-boundary-13579";
+        let visible_prefix = &secret[..20];
+        let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), secret.to_string())]);
+        let ansi_prefix = ansi_interleave_runner_probe_secret(visible_prefix);
+        let padding_length = RUNNER_PROBE_CAPTURE_LIMIT_BYTES - ansi_prefix.len();
+        let mut capture = RunnerProbeCapture::default();
+        capture.append("x".repeat(padding_length).as_bytes());
+        capture.append(ansi_prefix.as_bytes());
+        capture.append(b"overflow");
+
+        let rendered = capture.render(&env);
+        let downstream_view = gwt_core::process_console::strip_ansi(&rendered);
+
+        assert!(rendered.contains(gwt_core::process_console::REDACTED));
+        assert!(rendered.contains("truncated"));
+        assert!(
+            !downstream_view.contains(visible_prefix),
+            "ANSI removal must not expose a secret prefix retained at the capture boundary"
+        );
+    }
+
+    #[test]
+    fn runner_probe_truncated_capture_redacts_every_secret_prefix_fragment() {
+        struct Case {
+            secret: &'static str,
+            prefix_chars: usize,
+            cut_inside_next_char: bool,
+        }
+        let cases = [
+            Case {
+                secret: "Q-runner-probe-secret-one",
+                prefix_chars: 1,
+                cut_inside_next_char: false,
+            },
+            Case {
+                secret: "UVWXYZa-runner-probe-secret-seven",
+                prefix_chars: 7,
+                cut_inside_next_char: false,
+            },
+            Case {
+                secret: "ABCDEFGH-runner-probe-secret-eight",
+                prefix_chars: 8,
+                cut_inside_next_char: false,
+            },
+            Case {
+                secret: "秘密鍵runner-probe-secret-multibyte",
+                prefix_chars: 2,
+                cut_inside_next_char: true,
+            },
+        ];
+
+        for (index, case) in cases.iter().enumerate() {
+            let fragment = case
+                .secret
+                .chars()
+                .take(case.prefix_chars)
+                .collect::<String>();
+            let mut retained = fragment.as_bytes().to_vec();
+            if case.cut_inside_next_char {
+                let next = case
+                    .secret
+                    .chars()
+                    .nth(case.prefix_chars)
+                    .expect("next multi-byte secret character")
+                    .to_string();
+                retained.push(next.as_bytes()[0]);
+            }
+            let padding_length = RUNNER_PROBE_CAPTURE_LIMIT_BYTES - retained.len();
+            let captured = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+            {
+                let mut capture = captured.lock().expect("capture lock");
+                capture.append("x".repeat(padding_length).as_bytes());
+                capture.append(&retained);
+                capture.append(b"overflow");
+                assert!(capture.truncated);
+            }
+            let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), case.secret.to_string())]);
+            let outcome_stdout = captured_runner_probe_string(&captured, &env);
+            let hub = gwt_core::process_console::ProcessConsoleHub::new();
+            publish_runner_probe_capture(&hub, index as u64 + 1, &outcome_stdout, "");
+            let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
+
+            assert!(
+                !outcome_stdout.contains(&fragment),
+                "truncated outcome exposed {}-character fragment {fragment:?}",
+                case.prefix_chars
+            );
+            assert!(
+                !lines.iter().any(|line| line.message.contains(&fragment)),
+                "console exposed {}-character fragment {fragment:?}: {lines:?}",
+                case.prefix_chars
+            );
+        }
+    }
+
+    #[test]
+    fn runner_probe_nontruncated_capture_keeps_short_secret_prefix_threshold() {
+        let secret = "QwertyZ-runner-probe-secret-nontruncated";
+        let fragment = &secret[..7];
+        let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), secret.to_string())]);
+        let mut capture = RunnerProbeCapture::default();
+        capture.append(fragment.as_bytes());
+
+        let rendered = capture.render(&env);
+
+        assert!(!capture.truncated);
+        assert_eq!(rendered, fragment);
+    }
+
+    struct PendingDropProbeReader {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for PendingDropProbeReader {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl tokio::io::AsyncRead for PendingDropProbeReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            _buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    struct BytesThenErrorProbeReader {
+        bytes: Option<Vec<u8>>,
+        raw_error: String,
+    }
+
+    impl tokio::io::AsyncRead for BytesThenErrorProbeReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let reader = self.get_mut();
+            if let Some(bytes) = reader.bytes.take() {
+                buffer.put_slice(&bytes);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            std::task::Poll::Ready(Err(std::io::Error::other(reader.raw_error.clone())))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_probe_reader_error_after_bytes_fails_closed_without_raw_detail() {
+        let raw_payload = "reader-error-raw-payload-sentinel-86420";
+        for failing_stream in ["stdout", "stderr"] {
+            let captured = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+            let reader = Some(spawn_runner_probe_stream_capture(
+                BytesThenErrorProbeReader {
+                    bytes: Some(raw_payload.as_bytes().to_vec()),
+                    raw_error: format!("read failed after {raw_payload}"),
+                },
+                Arc::clone(&captured),
+            ));
+            let (mut stdout_reader, mut stderr_reader) = if failing_stream == "stdout" {
+                (reader, None)
+            } else {
+                (None, reader)
+            };
+            while !runner_probe_streams_finished(&stdout_reader, &stderr_reader) {
+                tokio::task::yield_now().await;
+            }
+
+            let error = join_runner_probe_streams(&mut stdout_reader, &mut stderr_reader)
+                .await
+                .expect_err("a read error after captured bytes must fail a successful child");
+
+            assert!(
+                error.contains(failing_stream),
+                "error must identify the stream: {error:?}"
+            );
+            assert!(error.contains("Other"), "error must identify the I/O kind");
+            assert!(
+                !error.contains(raw_payload),
+                "read error detail must never include raw payload: {error:?}"
+            );
+            assert_eq!(
+                captured.lock().expect("capture lock").bytes,
+                raw_payload.as_bytes(),
+                "bytes read before the error must remain available for diagnostics"
+            );
+            let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), raw_payload.to_string())]);
+            let diagnostic = captured_runner_probe_string(&captured, &env);
+            assert!(!diagnostic.contains(raw_payload));
+            assert!(diagnostic.contains(gwt_core::process_console::REDACTED));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_probe_reader_cleanup_aborts_awaits_and_drops_pending_reader() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let capture = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+        let mut reader_task = Some(spawn_runner_probe_stream_capture(
+            PendingDropProbeReader {
+                dropped: Arc::clone(&dropped),
+            },
+            capture,
+        ));
+        tokio::task::yield_now().await;
+
+        abort_and_join_runner_probe_stream(&mut reader_task).await;
+
+        assert!(
+            reader_task.is_none(),
+            "cleanup must consume the task handle"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "cleanup must await cancellation until the reader and its OS pipe handle are dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_probe_reader_cleanup_survives_process_tree_termination_failure() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let capture = Arc::new(Mutex::new(RunnerProbeCapture::default()));
+        let mut stdout_reader = Some(spawn_runner_probe_stream_capture(
+            PendingDropProbeReader {
+                dropped: Arc::clone(&dropped),
+            },
+            capture,
+        ));
+        let mut stderr_reader = None;
+        tokio::task::yield_now().await;
+
+        let cleanup = finish_runner_probe_cleanup(
+            async { false },
+            async { true },
+            &mut stdout_reader,
+            &mut stderr_reader,
+        )
+        .await;
+
+        assert!(!cleanup.process_tree_terminated);
+        assert!(!cleanup.complete());
+        assert!(stdout_reader.is_none());
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "failed tree termination must not leave a gwt reader task or pipe handle behind"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runner_probe_sync_entrypoint_is_safe_inside_tokio_runtime() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "exit /b 0".to_string()],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "exit 0".to_string()],
+            )
+        };
+
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: &command,
+                args,
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(outcome.success, "nested runtime probe failed: {outcome:?}");
+    }
+
+    #[test]
+    fn runner_probe_does_not_inherit_secret_launch_environment() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let secret = "runner-probe-secret-sentinel-24680";
+        let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), secret.to_string())]);
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "if defined RUNNER_API_TOKEN (echo %RUNNER_API_TOKEN% & echo %RUNNER_API_TOKEN% 1>&2 & exit /b 1) else (exit /b 1)"
+                        .to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "printf '%s\\n' \"$RUNNER_API_TOKEN\"; printf '%s\\n' \"$RUNNER_API_TOKEN\" >&2; exit 1"
+                        .to_string(),
+                ],
+            )
+        };
+
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: &command,
+                args,
+                env_vars: &env,
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(!outcome.success);
+        assert!(!outcome.stdout.contains(secret));
+        assert!(!outcome.stderr.contains(secret));
+        assert!(!outcome.diagnostic(&env).contains(secret));
+        let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
+        assert!(!lines.iter().any(|line| line.message.contains(secret)));
+        assert!(outcome.stdout.trim().is_empty());
+        assert!(outcome.stderr.trim().is_empty());
+    }
+
+    #[test]
+    fn runner_probe_never_exposes_nonstandard_secret_environment_names() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let jwt = "runner-probe-jwt-sentinel-13579";
+        let npm_auth = "runner-probe-npm-auth-sentinel-86420";
+        let env = HashMap::from([
+            ("CI_JOB_JWT".to_string(), jwt.to_string()),
+            ("NPM_CONFIG__AUTH".to_string(), npm_auth.to_string()),
+        ]);
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "echo %CI_JOB_JWT% & echo %NPM_CONFIG__AUTH% 1>&2 & exit /b 1".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "printf '%s\n' \"$CI_JOB_JWT\"; printf '%s\n' \"$NPM_CONFIG__AUTH\" >&2; exit 1"
+                        .to_string(),
+                ],
+            )
+        };
+
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: &command,
+                args,
+                env_vars: &env,
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        let all_surfaces = format!(
+            "{}\n{}\n{}\n{}",
+            outcome.stdout,
+            outcome.stderr,
+            outcome.diagnostic(&env),
+            hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap)
+                .into_iter()
+                .map(|line| line.message)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        assert!(!outcome.success);
+        for secret in [jwt, npm_auth] {
+            assert!(
+                !all_surfaces.contains(secret),
+                "runner probe leaked a nonstandard secret environment value: {all_surfaces}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_trace_and_failure_surfaces_never_expose_command_metadata_secrets() {
+        use crate::test_capture::{CaptureLayer, CapturedEvents};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        const ARG_SECRET: &str = "trace-arg-secret-sentinel-48391";
+        const ENV_SECRET: &str = "trace-env-secret-sentinel-72840";
+        const USERINFO_SECRET: &str = "trace-userinfo-secret-sentinel-61935";
+        let command = format!("https://user:{USERINFO_SECRET}@invalid.example/runner");
+        let args = vec![
+            "--endpoint".to_string(),
+            format!("https://user:{ARG_SECRET}@invalid.example/api"),
+        ];
+        let env = HashMap::from([("RUNNER_API_TOKEN".to_string(), ENV_SECRET.to_string())]);
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let events = CapturedEvents::new();
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
+
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            probe_host_runner_bounded_with_hub(
+                HostRunnerProbeRequest {
+                    kind: HostRunnerProbeKind::Direct,
+                    command: &command,
+                    args,
+                    env_vars: &env,
+                    remove_env: &[],
+                    cwd: None,
+                    timeout: Duration::from_secs(1),
+                    poll_interval: Duration::from_millis(10),
+                },
+                &hub,
+            )
+        });
+
+        let all_trace_fields = events
+            .snapshot()
+            .into_iter()
+            .flat_map(|event| event.fields.into_values())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let all_console = hub
+            .snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap)
+            .into_iter()
+            .map(|line| line.message)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let all_failure_surfaces = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            outcome.stdout,
+            outcome.stderr,
+            outcome.diagnostic(&env),
+            all_trace_fields,
+            all_console,
+        );
+
+        for secret in [ARG_SECRET, ENV_SECRET, USERINFO_SECRET] {
+            assert!(
+                !all_failure_surfaces.contains(secret),
+                "probe metadata leaked {secret}: {all_failure_surfaces}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_does_not_inherit_url_environment_value() {
+        const USERINFO_SECRET: &str = "output-userinfo-secret-sentinel-39184";
+        let url = format!("https://runner:{USERINFO_SECRET}@example.test/api");
+        let env = HashMap::from([("PROBE_PUBLIC_URL".to_string(), url)]);
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "sh",
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s\\n' \"$PROBE_PUBLIC_URL\"; printf '%s\\n' \"$PROBE_PUBLIC_URL\" >&2; exit 1"
+                        .to_string(),
+                ],
+                env_vars: &env,
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        let console = hub
+            .snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap)
+            .into_iter()
+            .map(|line| line.message)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diagnostic = outcome.diagnostic(&env);
+        for surface in [
+            outcome.stdout.as_str(),
+            outcome.stderr.as_str(),
+            diagnostic.as_str(),
+            console.as_str(),
+        ] {
+            assert!(
+                !surface.contains(USERINFO_SECRET),
+                "URL userinfo leaked: {surface}"
+            );
+        }
+        assert!(outcome.stdout.trim().is_empty());
+        assert!(outcome.stderr.trim().is_empty());
+        assert!(console.trim().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_does_not_inherit_ansi_split_secret_launch_environment() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let secret = "runner-probe-secret-sentinel-ansi-surface-97531";
+        let ansi_split = ansi_interleave_runner_probe_secret(secret);
+        let env = HashMap::from([
+            ("RUNNER_API_TOKEN".to_string(), secret.to_string()),
+            ("PROBE_ANSI_PAYLOAD".to_string(), ansi_split),
+        ]);
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "sh",
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s\\n' \"$PROBE_ANSI_PAYLOAD\"; printf '%s\\n' \"$PROBE_ANSI_PAYLOAD\" >&2; exit 1"
+                        .to_string(),
+                ],
+                env_vars: &env,
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        let stdout = gwt_core::process_console::strip_ansi(&outcome.stdout);
+        let stderr = gwt_core::process_console::strip_ansi(&outcome.stderr);
+        let diagnostic = gwt_core::process_console::strip_ansi(&outcome.diagnostic(&env));
+        let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
+
+        assert!(
+            !stdout.contains(secret),
+            "stdout exposed secret: {stdout:?}"
+        );
+        assert!(
+            !stderr.contains(secret),
+            "stderr exposed secret: {stderr:?}"
+        );
+        assert!(
+            !diagnostic.contains(secret),
+            "diagnostic exposed secret: {diagnostic:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.message.contains(secret)),
+            "console exposed secret: {lines:?}"
+        );
+        assert!(stdout.trim().is_empty());
+        assert!(stderr.trim().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_rejects_completion_observed_after_absolute_deadline() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let started = Instant::now();
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "sh",
+                args: vec!["-c".to_string(), "sleep 0.02; exit 0".to_string()],
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_millis(200),
+                poll_interval: Duration::from_secs(1),
+            },
+            &hub,
+        );
+
+        assert!(
+            outcome.timed_out,
+            "completion first observed after the absolute execution deadline must fail closed: {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "poll interval must not extend the absolute operation deadline"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_capture_is_bounded_for_large_unbroken_output() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "sh",
+                args: vec![
+                    "-c".to_string(),
+                    "head -c 131072 /dev/zero | tr '\\0' x; exit 1".to_string(),
+                ],
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(!outcome.success);
+        assert!(
+            outcome.stdout.len() <= 16 * 1024 + 64,
+            "probe diagnostics must retain only bounded output, got {} bytes",
+            outcome.stdout.len()
+        );
+        assert!(
+            outcome.stdout.contains("truncated"),
+            "bounded capture should make truncation explicit"
+        );
+    }
+
+    #[cfg(unix)]
+    fn unix_process_exists(pid: u32) -> bool {
+        gwt_core::process::hidden_command("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn terminate_unix_test_process(pid: u32) {
+        let _ = gwt_core::process::hidden_command("kill")
+            .args(["-KILL", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(unix)]
+    fn assert_completed_runner_probe_reaps_stdio_detached_descendant(exit_code: i32) {
+        let temp = tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "/bin/sh",
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "(exec >/dev/null 2>&1; /bin/sleep 6) & printf '%s' \"$!\" > \"$1\"; exit {exit_code}"
+                    ),
+                    "gwt-runner-probe".to_string(),
+                    pid_file.display().to_string(),
+                ],
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+        let pid = fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let exit_deadline = Instant::now() + Duration::from_secs(1);
+        while unix_process_exists(pid) && Instant::now() < exit_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let still_running = unix_process_exists(pid);
+        if still_running {
+            terminate_unix_test_process(pid);
+        }
+
+        assert_eq!(outcome.exit_code, Some(exit_code));
+        assert_eq!(outcome.success, exit_code == 0);
+        assert!(!outcome.timed_out);
+        assert!(
+            outcome.error.is_none(),
+            "unexpected cleanup error: {outcome:?}"
+        );
+        assert!(
+            !still_running,
+            "completed probe descendant {pid} must be terminated for exit {exit_code}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_success_reaps_stdio_detached_descendant() {
+        assert_completed_runner_probe_reaps_stdio_detached_descendant(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_nonzero_exit_reaps_stdio_detached_descendant() {
+        assert_completed_runner_probe_reaps_stdio_detached_descendant(7);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_deadline_includes_pipe_eof_and_kills_descendants() {
+        let temp = tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let started = Instant::now();
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "sh",
+                args: vec![
+                    "-c".to_string(),
+                    "(sleep 6) & printf '%s' \"$!\" > \"$1\"; exit 0".to_string(),
+                    "gwt-runner-probe".to_string(),
+                    pid_file.display().to_string(),
+                ],
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+        let elapsed = started.elapsed();
+        let pid = fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let still_running = unix_process_exists(pid);
+        if still_running {
+            terminate_unix_test_process(pid);
+        }
+
+        assert!(outcome.timed_out, "pipe EOF must share the probe deadline");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "pipe-held descendant must not extend probe return: {elapsed:?}"
+        );
+        assert!(!still_running, "probe descendant {pid} must be terminated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_probe_timeout_kills_pipe_holding_descendant() {
+        let temp = tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "sh",
+                args: vec![
+                    "-c".to_string(),
+                    "(sleep 6) & printf '%s' \"$!\" > \"$1\"; wait".to_string(),
+                    "gwt-runner-probe".to_string(),
+                    pid_file.display().to_string(),
+                ],
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+        let pid = fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let still_running = unix_process_exists(pid);
+        if still_running {
+            terminate_unix_test_process(pid);
+        }
+
+        assert!(outcome.timed_out);
+        assert!(
+            !still_running,
+            "timed-out probe descendant {pid} must be terminated"
+        );
+    }
+
+    #[test]
+    fn runner_probe_process_tree_cleanup_has_no_shell_tree_kill_fallback() {
+        let source = include_str!("prepare.rs");
+        assert!(!source.contains(concat!("task", "kill")));
+        assert!(
+            source.contains(concat!("impl Drop for Runner", "ProbeProcessTree")),
+            "owned process-tree cleanup needs a Drop backstop on every platform"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker() {
+        let temp = tempdir().expect("tempdir");
+        let descendant = temp.path().join("descendant.cmd");
+        let marker = temp.path().join("late-marker.txt");
+        fs::write(
+            &descendant,
+            "@echo off\r\nping 127.0.0.1 -n 3 >nul\r\necho alive>\"%~1\"\r\n",
+        )
+        .expect("write descendant script");
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let outcome = probe_host_runner_bounded_with_hub(
+            HostRunnerProbeRequest {
+                kind: HostRunnerProbeKind::Direct,
+                command: "cmd.exe",
+                args: vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    format!(
+                        "start \"\" /b \"{}\" \"{}\" & exit /b 0",
+                        descendant.display(),
+                        marker.display()
+                    ),
+                ],
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: Some(temp.path().to_path_buf()),
+                timeout: Duration::from_millis(500),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(
+            outcome.timed_out,
+            "descendant-held pipe must hit the deadline"
+        );
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            !marker.exists(),
+            "Job close must kill a dead-root descendant before its delayed marker write"
+        );
+    }
+
     #[test]
     fn prepare_agent_launch_persists_session_and_builds_process_launch() {
         let temp = tempdir().expect("tempdir");
@@ -1766,7 +7535,8 @@ mod tests {
         let expected_project_root = worktree.display().to_string();
         let probe_expected_project_root = expected_project_root.clone();
         let mut probe_host_runner =
-            move |_command: &str,
+            move |kind: HostRunnerProbeKind,
+                  command: &str,
                   _args: Vec<String>,
                   env: &HashMap<String, String>,
                   _remove_env: &[String],
@@ -1775,7 +7545,20 @@ mod tests {
                     env.get("GWT_PROJECT_ROOT").map(String::as_str),
                     Some(probe_expected_project_root.as_str())
                 );
-                false
+                match kind {
+                    HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "\"9.9.9\"".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    },
+                    _ if command_matches_runner(command, "npx") => {
+                        HostRunnerProbeOutcome::success()
+                    }
+                    _ => HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
+                }
             };
         let lookup_gwt_bin =
             |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwtd.exe"));
@@ -1863,48 +7646,196 @@ mod tests {
     }
 
     #[test]
-    fn prepare_agent_launch_exports_session_kind_from_ephemeral_flag() {
-        // SPEC-3247 FR-001 / AS-1: the launch env carries GWT_SESSION_KIND,
-        // derived from LaunchConfig.is_ephemeral (intake for ephemeral,
-        // execution otherwise), so hooks/guidance can branch on the lane.
-        fn prepared_session_kind(is_ephemeral: bool) -> String {
-            let temp = tempdir().expect("tempdir");
-            let worktree = temp.path().join("repo-feature");
-            let sessions_dir = temp.path().join(".gwt").join("sessions");
-            fs::create_dir_all(&worktree).expect("create worktree");
+    fn docker_finalizer_returns_the_exact_compose_exec_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/final\n",
+        )
+        .expect("write compose");
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let runtime = resolved_test_docker_runtime(temp.path());
 
-            let mut config = sample_versioned_launch_config(&worktree);
-            config.is_ephemeral = is_ephemeral;
-            let mut probe_host_runner =
-                |_command: &str,
-                 _args: Vec<String>,
-                 _env: &HashMap<String, String>,
-                 _remove_env: &[String],
-                 _cwd: Option<PathBuf>| false;
-            let lookup_gwt_bin = |_command: &str| Some(PathBuf::from("/usr/local/bin/gwtd"));
-            let prepared = prepare_agent_launch_with(
-                &worktree,
-                &sessions_dir,
-                config,
-                None,
-                |_path| Ok(()),
-                PrepareLaunchDeps {
-                    current_exe: Path::new("/usr/local/bin/gwt"),
-                    probe_host_runner: &mut probe_host_runner,
-                    lookup_gwt_bin: &lookup_gwt_bin,
-                },
-            )
-            .expect("prepare launch");
-            prepared
-                .process_launch
-                .env
-                .get(gwt_skills::GWT_SESSION_KIND_ENV)
-                .cloned()
-                .unwrap_or_default()
-        }
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize Docker launch")
+                .expect("Docker runtime worktree");
+        let workdir_index = config
+            .args
+            .iter()
+            .position(|arg| arg == "-w")
+            .expect("compose exec -w");
 
-        assert_eq!(prepared_session_kind(true), "intake");
-        assert_eq!(prepared_session_kind(false), "execution");
+        assert_eq!(runtime_worktree, "/workspace/final");
+        assert_eq!(config.command, runtime.binary());
+        assert_eq!(config.args.get(workdir_index + 1), Some(&runtime_worktree));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_finalizer_reuses_one_stateful_runtime_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/final\n",
+        )
+        .expect("write compose");
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+counter="$0.count"
+count=0
+if [ -f "$counter" ]; then
+  read count < "$counter"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  printf 'Docker version 28.3.0, build test\n'
+else
+  printf 'podman version 5.4.2\n'
+fi
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+        )
+        .expect("resolve launch runtime once");
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize Docker launch")
+                .expect("Docker runtime worktree");
+
+        assert_eq!(runtime_worktree, "/workspace/final");
+        assert_eq!(config.command, wrapper.to_string_lossy());
+        assert_eq!(
+            fs::read_to_string(wrapper.with_extension("count"))
+                .expect("read wrapper probe count")
+                .trim(),
+            "1",
+            "agent finalization must not re-probe the pinned runtime"
+        );
+    }
+
+    #[test]
+    fn docker_prepare_persists_the_exact_process_worktree_binding() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/final\n",
+        )
+        .expect("write compose");
+
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let session = Session::from_launch_config(&project, "feature/demo", &config);
+        let session_id = session.id.clone();
+        let runtime_path = runtime_state_path(&sessions_dir, &session_id);
+        let container_runtime = resolved_test_docker_runtime(temp.path());
+
+        let prepared = finalize_and_persist_prepared_launch(
+            &project,
+            &sessions_dir,
+            config,
+            session,
+            runtime_path,
+            project.clone(),
+            PreparedLaunchFinalization {
+                used_host_package_runner_fallback: false,
+                container_runtime: Some(&container_runtime),
+            },
+        )
+        .expect("finalize and persist Docker launch");
+        let workdir_index = prepared
+            .process_launch
+            .args
+            .iter()
+            .position(|arg| arg == "-w")
+            .expect("compose exec -w");
+        let process_worktree = prepared
+            .process_launch
+            .args
+            .get(workdir_index + 1)
+            .expect("compose exec worktree");
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let reloaded = Session::load(&session_path).expect("reload persisted Session");
+        let binding = reloaded
+            .docker_runtime_binding
+            .expect("persisted Docker runtime binding");
+
+        assert_eq!(
+            binding.runtime_worktree_path,
+            PathBuf::from(process_worktree)
+        );
+        assert_eq!(
+            binding.project_state_scope_hash,
+            gwt_core::paths::project_scope_hash(&project)
+                .as_str()
+                .to_string()
+        );
+        assert_eq!(
+            reloaded.project_state_root.as_deref(),
+            Some(normalize_child_process_path(&project).as_path())
+        );
+    }
+
+    #[test]
+    fn docker_prepare_does_not_persist_session_when_finalization_fails() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project-without-compose");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&project).expect("create project");
+
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let session = Session::from_launch_config(&project, "feature/demo", &config);
+        let session_path = sessions_dir.join(format!("{}.toml", session.id));
+        let runtime_path = runtime_state_path(&sessions_dir, &session.id);
+        let container_runtime = resolved_test_docker_runtime(temp.path());
+
+        let result = finalize_and_persist_prepared_launch(
+            &project,
+            &sessions_dir,
+            config,
+            session,
+            runtime_path.clone(),
+            project.clone(),
+            PreparedLaunchFinalization {
+                used_host_package_runner_fallback: false,
+                container_runtime: Some(&container_runtime),
+            },
+        );
+
+        assert!(result.is_err(), "missing compose must fail finalization");
+        assert!(!session_path.exists(), "Session TOML must not be created");
+        assert!(
+            !runtime_path.exists(),
+            "runtime state must not precede Docker finalization"
+        );
     }
 
     #[test]
@@ -1914,12 +7845,25 @@ mod tests {
         let sessions_dir = temp.path().join(".gwt").join("sessions");
         fs::create_dir_all(&worktree).expect("create worktree");
 
-        let mut probe_host_runner =
-            |_command: &str,
-             _args: Vec<String>,
-             _env: &HashMap<String, String>,
-             _remove_env: &[String],
-             _cwd: Option<PathBuf>| false;
+        let mut probe_host_runner = |kind: HostRunnerProbeKind,
+                                     command: &str,
+                                     _args: Vec<String>,
+                                     _env: &HashMap<String, String>,
+                                     _remove_env: &[String],
+                                     _cwd: Option<PathBuf>| {
+            match kind {
+                HostRunnerProbeKind::Metadata => HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: "\"9.9.9\"".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                },
+                _ if command_matches_runner(command, "npx") => HostRunnerProbeOutcome::success(),
+                _ => HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
+            }
+        };
         let lookup_gwt_bin =
             |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe"));
         let prepared = prepare_agent_launch_with(
@@ -1955,7 +7899,10 @@ mod tests {
             prepared.process_launch.args,
             vec![
                 "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
+                format!(
+                    "@anthropic-ai/claude-code@{}",
+                    if cfg!(windows) { "9.9.9" } else { "latest" }
+                ),
                 "--print".to_string(),
             ]
         );
@@ -1969,7 +7916,10 @@ mod tests {
             prepared.session.launch_args,
             vec![
                 "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
+                format!(
+                    "@anthropic-ai/claude-code@{}",
+                    if cfg!(windows) { "9.9.9" } else { "latest" }
+                ),
                 "--print".to_string(),
             ]
         );
@@ -1979,7 +7929,8 @@ mod tests {
     fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
-        let content = docker_bundle_override_content("app", &bundle);
+        let content =
+            docker_bundle_override_content("app", &bundle, "docker").expect("Docker override");
 
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
@@ -2008,6 +7959,32 @@ mod tests {
             .and_then(|v| v.as_sequence())
             .expect("volumes must be a sequence");
         assert_eq!(volumes.len(), 1);
+        assert_eq!(
+            service_def
+                .get(serde_yaml::Value::String("extra_hosts".to_string()))
+                .and_then(|v| v.as_sequence())
+                .map(Vec::as_slice),
+            Some(
+                [serde_yaml::Value::String(
+                    gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST.to_string(),
+                )]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn podman_bundle_override_uses_its_reserved_alias_without_docker_mapping() {
+        let bundle = docker_bundle_mounts_for_home(Path::new("/home/example"));
+        let content =
+            docker_bundle_override_content("app", &bundle, "podman").expect("Podman override");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).expect("override YAML");
+
+        assert!(parsed["services"]["app"].get("extra_hosts").is_none());
+        assert_eq!(
+            gwt_docker::ContainerRuntimeKind::Podman.host_bridge_name(),
+            "host.containers.internal"
+        );
     }
 
     #[test]
@@ -2016,14 +7993,20 @@ mod tests {
         let home = tempdir().expect("home tempdir");
         let mut installer_calls = 0;
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
-            installer_calls += 1;
-            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
-                .expect("create bin dir");
-            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
-            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
-            Ok(())
-        })
+        ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |bundle| {
+                installer_calls += 1;
+                fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                    .expect("create bin dir");
+                fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+                fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+                Ok(())
+            },
+        )
         .expect("docker setup");
 
         let bundle = docker_bundle_mounts_for_home(home.path());
@@ -2049,20 +8032,26 @@ mod tests {
         fs::create_dir_all(&bundle.host_gwtd).expect("create gwtd placeholder dir");
         let mut installer_calls = 0;
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
-            installer_calls += 1;
-            if bundle.host_gwt.is_dir() {
-                fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
-            }
-            if bundle.host_gwtd.is_dir() {
-                fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
-            }
-            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
-                .expect("create bin dir");
-            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
-            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
-            Ok(())
-        })
+        ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |bundle| {
+                installer_calls += 1;
+                if bundle.host_gwt.is_dir() {
+                    fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
+                }
+                if bundle.host_gwtd.is_dir() {
+                    fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
+                }
+                fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                    .expect("create bin dir");
+                fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+                fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+                Ok(())
+            },
+        )
         .expect("docker setup");
 
         assert_eq!(installer_calls, 1);
@@ -2080,12 +8069,49 @@ mod tests {
         fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
         fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), "docker", |_| {
             panic!("installer should not run when both bundle binaries exist");
         })
         .expect("docker setup");
 
         assert!(docker_compose_override_path(repo.path()).is_file());
+    }
+
+    #[test]
+    fn docker_binary_setup_reports_managed_override_change_for_recreate() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+
+        let (override_path, first_changed) = ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |_| panic!("installer should not run when both bundle binaries exist"),
+        )
+        .expect("first Docker setup");
+        assert!(
+            first_changed,
+            "first managed override write requires recreate"
+        );
+        assert_eq!(override_path, docker_compose_override_path(repo.path()));
+
+        let (_, second_changed) = ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |_| panic!("installer should not run when both bundle binaries exist"),
+        )
+        .expect("second Docker setup");
+        assert!(
+            !second_changed,
+            "byte-identical managed override must not force a second recreate"
+        );
     }
 
     #[test]
@@ -2124,7 +8150,7 @@ mod tests {
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.docker_service = Some("app".to_string());
         config.command = "codex".to_string();
-        config.args = vec!["--no-alt-screen".to_string()];
+        config.args = crate::canonical_launch_args(&AgentId::Codex);
         config.env_vars = HashMap::from([
             (GWT_SESSION_ID_ENV.to_string(), "sess-123".to_string()),
             (
@@ -2136,10 +8162,13 @@ mod tests {
                 DOCKER_GWTD_BIN_PATH.to_string(),
             ),
         ]);
+        let runtime = resolved_test_docker_runtime(temp.path());
 
-        finalize_docker_agent_launch_config(&project, &mut config).expect("finalize docker");
+        let _runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize docker");
 
-        assert_eq!(config.command, docker_binary_for_launch());
+        assert_eq!(config.command, runtime.binary());
         assert!(config.args.windows(2).any(|pair| {
             pair[0] == "-f" && pair[1] == project.join("docker-compose.yml").display().to_string()
         }));
@@ -2147,6 +8176,17 @@ mod tests {
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
+        assert_eq!(
+            config
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "Docker wrapping must preserve the canonical Default-mode override"
+        );
     }
 
     #[test]
@@ -2359,26 +8399,53 @@ mod tests {
     // gwtd / gwt directly without the ${GWT_BIN_PATH:-gwtd} indirection.
 
     #[test]
+    fn public_gwt_bin_prefers_checkout_sibling_before_foreign_path_install() {
+        let current_exe = PathBuf::from("/checkout/target/debug/gwt");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(&current_exe, |_command| {
+            Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"))
+        });
+
+        assert_eq!(resolved, PathBuf::from("/checkout/target/debug/gwtd"));
+    }
+
+    #[test]
+    fn public_gwt_bin_keeps_stable_path_priority_for_bunx_temp_front_door() {
+        let current_exe = PathBuf::from(
+            r"C:\Temp\bunx-123-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwtd.exe");
+
+        let resolved =
+            resolve_public_gwt_bin_with_lookup(&current_exe, |_command| Some(stable.clone()));
+
+        assert_eq!(resolved, stable);
+    }
+
+    #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
+        let fixture = tempdir().expect("fixture");
+        let bin_dir = fixture.path().join("gwt-bin");
+        let current_exe = bin_dir.join("gwt");
+        let gwtd = bin_dir.join("gwtd");
         let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
-        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
             LaunchRuntimeTarget::Host,
             &current_exe,
-            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+            |_command| Some(gwtd.clone()),
         )
         .expect("install");
 
         assert_eq!(
             env_vars.get(GWT_BIN_PATH_ENV).map(String::as_str),
-            Some("/Applications/GWT.app/Contents/MacOS/gwtd"),
+            Some(gwtd.to_string_lossy().as_ref()),
         );
         let path = env_vars.get("PATH").expect("PATH should be set");
         let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
         assert_eq!(
             entries.first().map(|p| p.as_path()),
-            Some(Path::new("/Applications/GWT.app/Contents/MacOS")),
+            Some(bin_dir.as_path()),
             "GWT_BIN_PATH parent dir must be prepended; got {path}",
         );
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
@@ -2416,7 +8483,7 @@ mod tests {
     fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
         let original_path = test_path(&["/usr/bin", "/bin"]);
         let mut env_vars = HashMap::from([("PATH".to_string(), original_path.clone())]);
-        let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
+        let current_exe = PathBuf::from("/tmp/bunx-123-gwt/bin/gwt");
         // Lookup returns a bare filename (Path::parent => Some(""))
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
@@ -2609,13 +8676,30 @@ mod tests {
             .env_vars
             .insert("PATH".to_string(), test_path(&["/usr/bin", "/bin"]));
 
-        let mut probe_host_runner =
-            |_command: &str,
-             _args: Vec<String>,
-             _env: &HashMap<String, String>,
-             _remove_env: &[String],
-             _cwd: Option<PathBuf>| true;
-        let lookup_gwt_bin = |_command: &str| Some(PathBuf::from("/opt/gwt/bin/gwtd"));
+        let mut probe_host_runner = |kind: HostRunnerProbeKind,
+                                     _command: &str,
+                                     _args: Vec<String>,
+                                     _env: &HashMap<String, String>,
+                                     _remove_env: &[String],
+                                     _cwd: Option<PathBuf>| {
+            if kind == HostRunnerProbeKind::Metadata {
+                HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: "\"9.9.9\"".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                }
+            } else {
+                HostRunnerProbeOutcome::success()
+            }
+        };
+        let bin_dir = temp.path().join("gwt-bin");
+        let current_exe = bin_dir.join("gwt");
+        let gwtd = bin_dir.join("gwtd");
+        let lookup_gwtd = gwtd.clone();
+        let lookup_gwt_bin = move |_command: &str| Some(lookup_gwtd.clone());
 
         let prepared = prepare_agent_launch_with(
             &worktree,
@@ -2624,7 +8708,7 @@ mod tests {
             None,
             |_path| Ok(()),
             PrepareLaunchDeps {
-                current_exe: Path::new("/opt/gwt/bin/gwt"),
+                current_exe: &current_exe,
                 probe_host_runner: &mut probe_host_runner,
                 lookup_gwt_bin: &lookup_gwt_bin,
             },
@@ -2637,7 +8721,7 @@ mod tests {
                 .env
                 .get(GWT_BIN_PATH_ENV)
                 .map(String::as_str),
-            Some("/opt/gwt/bin/gwtd"),
+            Some(gwtd.to_string_lossy().as_ref()),
         );
         let path = prepared
             .process_launch
@@ -2647,10 +8731,428 @@ mod tests {
         let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
         assert_eq!(
             entries.first().map(|p| p.as_path()),
-            Some(Path::new("/opt/gwt/bin")),
+            Some(bin_dir.as_path()),
             "agent process PATH must start with GWT_BIN_PATH parent dir; got {path}",
         );
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
         assert!(entries.contains(&PathBuf::from("/bin")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_runner_resolution_failure_still_emits_an_end_summary() {
+        use crate::test_capture::{CaptureLayer, CapturedEvents};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let temp = tempdir().expect("tempdir");
+        let placeholder = temp.path().join("npx.exe");
+        fs::write(&placeholder, "Error: native binary not installed\r\n")
+            .expect("write unsafe placeholder");
+        let env = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            ("PATHEXT".to_string(), ".EXE".to_string()),
+        ]);
+        let events = CapturedEvents::new();
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            probe_host_runner_outcome(
+                HostRunnerProbeKind::Package,
+                "npx",
+                vec!["--version".to_string()],
+                &env,
+                &[],
+                None,
+            )
+            .success
+        });
+
+        assert!(!result);
+        let summaries = events
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.target == "gwt.process.summary")
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2, "expected balanced start/end events");
+        assert_eq!(
+            summaries[1].fields.get("phase").map(String::as_str),
+            Some("end")
+        );
+        assert_eq!(
+            summaries[1].fields.get("success").map(String::as_str),
+            Some("false")
+        );
+        assert!(summaries[1].fields.contains_key("resolution_error"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #3941: exact-version probe timeout fallback, probe single-flight,
+    // transient launch failure classification.
+    // ---------------------------------------------------------------------
+
+    fn write_cached_package_json(node_modules: &Path, package: &str, version: &str) -> PathBuf {
+        let package_dir = node_modules.join(package);
+        fs::create_dir_all(&package_dir).expect("cached package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            format!(r#"{{"name":"{package}","version":"{version}"}}"#),
+        )
+        .expect("cached package.json");
+        package_dir
+    }
+
+    fn sample_exact_npx_launch_config(worktree: &Path) -> LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(worktree)
+            .branch("feature/demo")
+            .version("0.153.2")
+            .session_mode(SessionMode::Normal)
+            .build();
+        config.command = "npx".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@openai/codex@0.153.2".to_string(),
+            "--full-auto".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(worktree.to_path_buf());
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
+        config
+    }
+
+    #[test]
+    fn local_exact_package_cache_hit_finds_npx_and_bun_entries() {
+        let temp = tempdir().expect("tempdir");
+        let npm_cache = temp.path().join("npm-cache");
+        let cached = write_cached_package_json(
+            &npm_cache.join("_npx").join("0123abcd").join("node_modules"),
+            "@openai/codex",
+            "0.153.2",
+        );
+        write_cached_package_json(
+            &npm_cache.join("_npx").join("ffff0000").join("node_modules"),
+            "@openai/codex",
+            "0.150.0",
+        );
+        let bun_cache = temp.path().join("bun-cache");
+        let bun_dir = bun_cache
+            .join("@anthropic-ai")
+            .join("claude-code@2.1.210@@@1");
+        fs::create_dir_all(&bun_dir).expect("bun cache dir");
+        fs::write(
+            bun_dir.join("package.json"),
+            r#"{"name":"@anthropic-ai/claude-code","version":"2.1.210"}"#,
+        )
+        .expect("bun package.json");
+        let env_vars = HashMap::from([
+            (
+                "npm_config_cache".to_string(),
+                npm_cache.display().to_string(),
+            ),
+            (
+                "BUN_INSTALL_CACHE_DIR".to_string(),
+                bun_cache.display().to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            local_exact_package_cache_hit("@openai/codex", "0.153.2", &env_vars),
+            Some(cached)
+        );
+        assert_eq!(
+            local_exact_package_cache_hit("@anthropic-ai/claude-code", "2.1.210", &env_vars),
+            Some(bun_dir)
+        );
+        assert_eq!(
+            local_exact_package_cache_hit("@openai/codex", "0.153.3", &env_vars),
+            None
+        );
+        assert_eq!(
+            local_exact_package_cache_hit("@anthropic-ai/claude-code", "2.1.2", &env_vars),
+            None,
+            "a version prefix must not match a longer cached version"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_runner_health_continues_after_npx_timeout_when_exact_version_is_cached() {
+        // Issue #3941 AC-1 (probe timeout fixture): the probe proves version
+        // health, it is not the launch gate. A timed-out probe with the exact
+        // version already in the local npx cache keeps the launch alive.
+        let temp = tempdir().expect("tempdir");
+        let npm_cache = temp.path().join("npm-cache");
+        let cached = write_cached_package_json(
+            &npm_cache.join("_npx").join("abc").join("node_modules"),
+            "@openai/codex",
+            "0.153.2",
+        );
+        let mut config = sample_exact_npx_launch_config(temp.path());
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            npm_cache.display().to_string(),
+        );
+        let mut probe_calls = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Runner);
+                HostRunnerProbeOutcome::timeout()
+            },
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect("a cached exact version survives a probe timeout");
+
+        assert_eq!(probe_calls, 1);
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec!["--yes", "@openai/codex@0.153.2", "--full-auto"]
+        );
+        assert!(
+            report.messages.iter().any(|message| {
+                message.contains("probe timed out")
+                    && message.contains(&cached.display().to_string())
+            }),
+            "{:?}",
+            report.messages
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_runner_health_timeout_without_cache_reports_transient_retry_hint() {
+        // Issue #3941 AC-3: the abort message distinguishes the probe timeout,
+        // the cache miss, and the next action, and classifies as transient so
+        // the Issue Monitor retries without spending an attempt.
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_exact_npx_launch_config(temp.path());
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("empty-npm-cache").display().to_string(),
+        );
+        config.env_vars.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            temp.path().join("empty-bun-cache").display().to_string(),
+        );
+        let original = format!("{config:?}");
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome::timeout(),
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect_err("an uncached exact version cannot be proven after a timeout");
+
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("probe timed out"), "{error}");
+        assert!(error.contains("not in the local package cache"), "{error}");
+        assert!(
+            error.contains("npx --yes @openai/codex@0.153.2 --version"),
+            "{error}"
+        );
+        assert!(is_transient_launch_failure(&error), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exact_probe_timeout_continues_when_version_is_cached() {
+        // Issue #3941 AC-1 on the Windows exact-plan path.
+        let temp = tempdir().expect("tempdir");
+        let npm_cache = temp.path().join("npm-cache");
+        let cached = write_cached_package_json(
+            &npm_cache.join("_npx").join("abc").join("node_modules"),
+            "@anthropic-ai/claude-code",
+            "2.1.210",
+        );
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("2.1.210")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            npm_cache.display().to_string(),
+        );
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                assert_eq!(kind, HostRunnerProbeKind::Package);
+                HostRunnerProbeOutcome::timeout()
+            },
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect("a cached exact version survives a probe timeout");
+
+        assert!(report.resolved_package_plan.is_some());
+        assert!(report
+            .messages
+            .iter()
+            .any(|message| message.contains(&cached.display().to_string())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exact_probe_timeout_without_cache_reports_transient_retry_hint() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("2.1.210")
+            .build();
+        let npx = temp.path().join("node").join("npx.cmd");
+        config.command = npx.display().to_string();
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("empty-npm-cache").display().to_string(),
+        );
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            npx.display().to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome::timeout(),
+            |_candidate| panic!("timeout must not attempt cache repair"),
+        )
+        .expect_err("an uncached exact version cannot be proven after a timeout");
+
+        assert!(error.contains("not in the local package cache"), "{error}");
+        assert!(is_transient_launch_failure(&error), "{error}");
+    }
+
+    #[test]
+    fn transient_launch_failure_classifier_covers_probe_timeout_and_fetch_races() {
+        assert!(is_transient_launch_failure(
+            "failed to prepare origin/develop for Start Work: fetch origin: error: fetching ref refs/remotes/origin/develop failed: incorrect old value provided"
+        ));
+        assert!(is_transient_launch_failure(
+            "failed to fetch origin: fetch origin: error: cannot lock ref 'refs/remotes/origin/develop': is at a but expected b"
+        ));
+        assert!(!is_transient_launch_failure(
+            "exact npx package probe failed for @openai/codex@0.153.2. Probe detail: exit status 1."
+        ));
+        assert!(!is_transient_launch_failure(
+            "failed to prepare origin/develop for Start Work: fatal: could not read Username"
+        ));
+    }
+
+    fn single_flight_key(version: &str) -> ProbeSingleFlightKey {
+        ProbeSingleFlightKey {
+            kind: HostRunnerProbeKind::Package,
+            command: "npx".to_string(),
+            args: vec![
+                "--yes".to_string(),
+                format!("@openai/codex@{version}"),
+                "--version".to_string(),
+            ],
+            path: "/usr/local/bin".to_string(),
+        }
+    }
+
+    #[test]
+    fn probe_single_flight_shares_one_in_flight_probe_across_concurrent_launches() {
+        // Issue #3941 AC-2 (同時 launch fixture): four launches in one scan
+        // probe the same exact package; only the first spawns a process and
+        // the rest join its result.
+        let registry = Arc::new(HostRunnerProbeSingleFlight::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..4)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                let runs = Arc::clone(&runs);
+                let release = Arc::clone(&release);
+                thread::spawn(move || {
+                    registry.run(single_flight_key("0.153.2"), || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        release.wait();
+                        HostRunnerProbeOutcome {
+                            stdout: "0.153.2\n".to_string(),
+                            ..HostRunnerProbeOutcome::success()
+                        }
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        // Let every launch reach the registry while the leader is blocked.
+        thread::sleep(Duration::from_millis(300));
+        release.wait();
+
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("probe thread"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "one probe process for four launches"
+        );
+        assert!(results
+            .iter()
+            .all(|(outcome, _)| outcome.success && outcome.stdout == "0.153.2\n"));
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, share)| *share == ProbeShare::Led)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, share)| *share == ProbeShare::Joined)
+                .count(),
+            3
+        );
+
+        // A later launch inside the reuse window shares the proven result.
+        let (reused, share) = registry.run(single_flight_key("0.153.2"), || {
+            panic!("a fresh successful probe must be reused")
+        });
+        assert!(reused.success);
+        assert_eq!(share, ProbeShare::Reused);
+        // A different package spec is a different probe.
+        let (_, share) = registry.run(single_flight_key("0.150.0"), || {
+            HostRunnerProbeOutcome::success()
+        });
+        assert_eq!(share, ProbeShare::Led);
+    }
+
+    #[test]
+    fn probe_single_flight_never_reuses_a_failed_or_timed_out_probe() {
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, first) = registry.run(
+            single_flight_key("0.153.2"),
+            HostRunnerProbeOutcome::timeout,
+        );
+        assert_eq!(first, ProbeShare::Led);
+        let (_, second) = registry.run(single_flight_key("0.153.2"), || {
+            HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
+        });
+        assert_eq!(
+            second,
+            ProbeShare::Led,
+            "a timeout is re-probed, not replayed"
+        );
+        let (_, third) = registry.run(
+            single_flight_key("0.153.2"),
+            HostRunnerProbeOutcome::success,
+        );
+        assert_eq!(
+            third,
+            ProbeShare::Led,
+            "a failure is re-probed, not replayed"
+        );
     }
 }

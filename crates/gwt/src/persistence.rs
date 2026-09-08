@@ -55,11 +55,33 @@ pub enum WindowPlacement {
         order: u32,
         collapsed: bool,
     },
+    /// SPEC-3671 FR-001: the window exists (and stays fully observable through
+    /// `pane.list` / `pane.read` / `pm.message.send`) but is not drawn on the
+    /// canvas. It is mirrored read-only in the owning Issue window's preview
+    /// pane instead, so an Issue Monitor auto-launch never steals the screen.
+    IssuePreview {
+        issue_window_id: String,
+        issue_number: u64,
+    },
 }
 
 impl WindowPlacement {
     pub fn is_canvas(&self) -> bool {
         matches!(self, Self::Canvas)
+    }
+
+    /// SPEC-3671 FR-004: the Rust-side counterpart of the frontend
+    /// `isOffCanvasPlacement()` seam — true for every placement that must not be
+    /// rendered as a top-level canvas window.
+    pub fn is_off_canvas(&self) -> bool {
+        matches!(self, Self::AgentKanban { .. } | Self::IssuePreview { .. })
+    }
+
+    pub fn issue_preview_issue_number(&self) -> Option<u64> {
+        match self {
+            Self::IssuePreview { issue_number, .. } => Some(*issue_number),
+            _ => None,
+        }
     }
 }
 
@@ -93,6 +115,17 @@ impl WindowState {
     pub const Exited: Self = Self::Stopped;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WindowWorktreeForm {
+    #[serde(rename = "intake")]
+    Ephemeral,
+    #[serde(rename = "execution")]
+    BranchBacked,
+    #[default]
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedWindowState {
     pub id: String,
@@ -124,6 +157,12 @@ pub struct PersistedWindowState {
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub agent_color: Option<AgentColor>,
+    /// Worktree form for agent windows. This is computed for frontend chrome
+    /// and defaults to `unknown` for restored windows where no live
+    /// launch/session signal is available. The legacy wire field name remains
+    /// stable for downgrade compatibility.
+    #[serde(default, rename = "lane_kind")]
+    pub worktree_form: WindowWorktreeForm,
     /// Canvas-local tab group id. Windows with the same group id render as
     /// tabs in one floating chrome; ungrouped windows keep legacy behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,14 +172,53 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3885 FR-011: the Issue this agent window belongs to. It is durable and
+    /// independent of `placement`, so Windowize (IssuePreview -> Canvas) keeps the
+    /// Issue header and FR-012's return-to-list knows which row to fold back into.
+    /// `None` is a session with no Issue behind it, which stays a bare terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_issue_number: Option<u64>,
+    /// SPEC-3885 T-020: wire-only moment this window's agent runtime started,
+    /// in milliseconds since the Unix epoch. The Issue row's elapsed time reads
+    /// it so a frontend reload does not restart the clock from the last state
+    /// change it happened to observe. Like `agent_color` it is recomputed per
+    /// broadcast and never read back from disk — a stored timestamp would
+    /// outlive the PTY it describes.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub runtime_started_at_ms: Option<u64>,
+    /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
+    /// window, recomputed per broadcast from the durable PM registration. It
+    /// is never deserialized from disk — a stored flag would drift from
+    /// `pm.json` — matching the `agent_color` wire-only convention above.
+    #[serde(default, skip_deserializing)]
+    pub is_pm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedWindowCanvasState {
     #[serde(default = "default_canvas_viewport")]
     pub viewport: CanvasViewport,
+    #[serde(deserialize_with = "deserialize_restorable_windows")]
     pub windows: Vec<PersistedWindowState>,
     pub next_z_index: u32,
+}
+
+/// Drop windows a newer gwt can no longer describe instead of failing the
+/// whole restore. A retired preset (Issue #3164's Improvement Inbox) still
+/// appears in workspaces saved while that window was open; rejecting the file
+/// would wipe every other window the user had arranged, so an unreadable entry
+/// costs only itself.
+fn deserialize_restorable_windows<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PersistedWindowState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<PersistedWindowState>(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,9 +303,13 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
+                is_pm: false,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -249,9 +331,13 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
+                is_pm: false,
             },
         ],
         next_z_index: 3,
@@ -355,6 +441,56 @@ pub fn save_workspace_state(
     }
     let content = serde_json::to_string_pretty(state)?;
     atomic_write(path, content.as_bytes())
+}
+
+/// Persist a workspace snapshot with a crash-durable acceptance boundary.
+/// Unlike [`save_workspace_state`], scratch-file and parent-directory sync
+/// failures are returned so callers cannot ACK a durable launch delivery
+/// before the exact window is recoverable after restart.
+pub fn save_workspace_state_durable(
+    path: &Path,
+    state: &PersistedWindowCanvasState,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        gwt_core::paths::ensure_dir(parent)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    let content = serde_json::to_string_pretty(state)?;
+    durable_atomic_write_with_parent_sync(path, content.as_bytes(), sync_parent_directory)
+}
+
+fn durable_atomic_write_with_parent_sync(
+    target: &Path,
+    bytes: &[u8],
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "durable workspace target has no parent directory",
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(target).map_err(|error| error.error)?;
+    sync_parent(target)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    // std::fs::File cannot open directory handles portably on Windows. The
+    // scratch file itself is still sync_all'd before the atomic replacement.
+    Ok(())
 }
 
 /// Write `bytes` to `target` via a sibling temp file + rename so callers never
@@ -585,9 +721,13 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -609,9 +749,13 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 6,
@@ -620,6 +764,25 @@ mod tests {
         save_workspace_state(&path, &state).expect("save should succeed");
         let loaded = load_workspace_state(&path).expect("load");
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn durable_workspace_write_surfaces_post_rename_parent_sync_failure() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let state = default_workspace_state();
+        let content = serde_json::to_string_pretty(&state).expect("serialize workspace");
+
+        let error = durable_atomic_write_with_parent_sync(&path, content.as_bytes(), |_| {
+            Err(std::io::Error::other("injected parent sync failure"))
+        })
+        .expect_err("post-rename durability failure must remain visible");
+
+        assert!(error.to_string().contains("injected parent sync failure"));
+        assert_eq!(
+            load_workspace_state(&path).expect("rename completed before sync failure"),
+            state
+        );
     }
 
     #[test]
@@ -655,6 +818,83 @@ mod tests {
         assert!(loaded.windows[0].tab_group_id.is_none());
         assert!(!loaded.windows[0].tab_group_active);
         assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+    }
+
+    #[test]
+    fn load_workspace_state_maps_legacy_lane_wire_to_worktree_form() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-intake",
+      "title": "Ephemeral Agent",
+      "preset": "agent",
+      "geometry": { "x": 0.0, "y": 0.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true,
+      "lane_kind": "intake"
+    },
+    {
+      "id": "agent-execution",
+      "title": "Branch-backed Agent",
+      "preset": "agent",
+      "geometry": { "x": 20.0, "y": 20.0, "width": 640.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true,
+      "lane_kind": "execution"
+    },
+    {
+      "id": "agent-unknown",
+      "title": "Restored Agent",
+      "preset": "agent",
+      "geometry": { "x": 40.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 3,
+      "status": "stopped",
+      "persist": true,
+      "lane_kind": "unknown"
+    }
+  ],
+  "next_z_index": 4
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("legacy lane wire load");
+        assert_eq!(
+            loaded
+                .windows
+                .iter()
+                .map(|window| window.worktree_form)
+                .collect::<Vec<_>>(),
+            vec![
+                WindowWorktreeForm::Ephemeral,
+                WindowWorktreeForm::BranchBacked,
+                WindowWorktreeForm::Unknown,
+            ]
+        );
+
+        let serialized = serde_json::to_value(&loaded).expect("reserialize workspace");
+        let windows = serialized["windows"]
+            .as_array()
+            .expect("serialized windows");
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window["lane_kind"].as_str().expect("legacy lane value"))
+                .collect::<Vec<_>>(),
+            vec!["intake", "execution", "unknown"]
+        );
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.get("worktree_form").is_none()),
+            "canonical Rust field name must not leak into the legacy wire format"
+        );
     }
 
     // SPEC-2008 FR-097: the canvas window model dropped manual
@@ -695,6 +935,133 @@ mod tests {
         assert_eq!(loaded.windows[0].id, "shell-1");
         assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
         assert_eq!(loaded.next_z_index, 2);
+    }
+
+    // SPEC-3671 T-005: adding a third `WindowPlacement` variant must not change how
+    // already-persisted workspaces read. Untagged windows stay `Canvas` and existing
+    // `agent_kanban` blobs keep their lane data.
+    #[test]
+    fn load_workspace_state_reads_placements_written_before_issue_preview() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "shell-1",
+      "title": "Shell",
+      "preset": "shell",
+      "geometry": { "x": 20.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true
+    },
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "ready",
+      "persist": true,
+      "placement": {
+        "kind": "agent_kanban",
+        "board_id": "agent-kanban-1",
+        "lane_id": "active",
+        "order": 2,
+        "collapsed": false
+      }
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("pre-IssuePreview placements must load");
+        assert_eq!(loaded.windows.len(), 2);
+        assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+        assert_eq!(
+            loaded.windows[1].placement,
+            WindowPlacement::AgentKanban {
+                board_id: "agent-kanban-1".to_string(),
+                lane_id: AgentKanbanLane::Active,
+                order: 2,
+                collapsed: false,
+            }
+        );
+    }
+
+    // SPEC-3671 FR-001 / T-006.
+    #[test]
+    fn persisted_window_state_round_trips_issue_preview_placement() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.preset = WindowPreset::Agent;
+        window.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "issue-1".to_string(),
+            issue_number: 3671,
+        };
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"issue_preview\""),
+            "placement kind must be explicit: {json}"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed.placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
+        assert!(!parsed.placement.is_canvas());
+        assert!(parsed.placement.is_off_canvas());
+        assert_eq!(parsed.placement.issue_preview_issue_number(), Some(3671));
+    }
+
+    // SPEC-3671 T-014: a restored `issue_preview` window must not silently degrade to
+    // `Canvas`; that regression is exactly the "12 windows opened at once" incident the
+    // SPEC was filed for.
+    #[test]
+    fn load_workspace_state_restores_issue_preview_without_canvas_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "error",
+      "persist": true,
+      "placement": {
+        "kind": "issue_preview",
+        "issue_window_id": "issue-1",
+        "issue_number": 3671
+      }
+    }
+  ],
+  "next_z_index": 2
+}"#,
+        )
+        .expect("issue preview workspace write");
+
+        let loaded = load_workspace_state(&path).expect("issue_preview placement must load");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(
+            loaded.windows[0].placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
     }
 
     #[test]
@@ -763,6 +1130,50 @@ mod tests {
         .expect("legacy memo workspace write");
 
         let loaded = load_workspace_state(&path).expect("legacy memo load should not fail");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "board-1");
+        assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
+        assert_eq!(loaded.next_z_index, 3);
+    }
+
+    // Issue #3164: the Improvement Inbox preset was retired outright rather
+    // than kept as a legacy `WindowPreset` variant. A workspace saved while
+    // that window was open still names it, so an unknown preset must drop
+    // just its own window instead of failing the whole restore and wiping the
+    // user's layout.
+    #[test]
+    fn load_workspace_state_drops_windows_with_an_unknown_preset() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "improvement-1",
+      "title": "Improvement Inbox",
+      "preset": "improvement",
+      "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true
+    },
+    {
+      "id": "board-1",
+      "title": "Board",
+      "preset": "board",
+      "geometry": { "x": 40.0, "y": 60.0, "width": 520.0, "height": 480.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("retired preset workspace write");
+
+        let loaded = load_workspace_state(&path).expect("unknown preset must not fail the restore");
         assert_eq!(loaded.windows.len(), 1);
         assert_eq!(loaded.windows[0].id, "board-1");
         assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
@@ -859,9 +1270,13 @@ mod tests {
                 dynamic_title_detail: None,
                 agent_id: Some("claude".into()),
                 agent_color: None,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
+                is_pm: false,
             }],
             next_z_index: 2,
         };
@@ -948,9 +1363,13 @@ mod tests {
             dynamic_title_detail: None,
             agent_id: Some("claude".into()),
             agent_color: Some(AgentColor::Yellow),
+            worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
+            runtime_started_at_ms: None,
+            is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         assert!(
@@ -1020,9 +1439,13 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "file-tree-1".to_string(),
@@ -1044,9 +1467,13 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 3,
@@ -1256,9 +1683,13 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -1280,9 +1711,13 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 3,

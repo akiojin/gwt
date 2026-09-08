@@ -7,7 +7,7 @@ allowed-tools: Read, Glob, Grep, Bash
 Build SPEC Command
 ==================
 
-Public task entrypoint for implementation work.
+Transition alias for the unified Execute command.
 
 Usage
 -----
@@ -19,15 +19,15 @@ Usage
 Steps
 -----
 
-1. Load `.claude/skills/gwt-build-spec/SKILL.md` and follow the workflow.
-2. Prefer SPEC mode when a SPEC exists.
+1. Prefer `/gwt:gwt-execute #N` for all Issue-backed execution.
+2. Load `.claude/skills/gwt-execute/SKILL.md` and follow the workflow.
 3. Keep PR lifecycle work under `gwt-manage-pr`.
 
 Examples
 --------
 
 ```text
-/gwt:gwt-build-spec SPEC-5
+/gwt:gwt-execute #5
 ```
 
 ```text

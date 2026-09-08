@@ -13,6 +13,7 @@ use gwt_agent::{
     session::{GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV},
     AgentId, Session,
 };
+use gwt_core::process::hidden_command;
 use gwt_core::{
     paths::gwt_sessions_dir,
     test_support::{ScopedEnvVar, ScopedGwtHome},
@@ -83,13 +84,13 @@ fn with_temp_env(home: &Path, session_id: &str) -> EnvGuard {
 fn init_repo(home: &TempDir) -> PathBuf {
     let repo_path = home.path().join("repo");
     std::fs::create_dir_all(&repo_path).expect("create repo dir");
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg(&repo_path)
         .status()
         .expect("git init")
         .success());
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(&repo_path)
         .args([

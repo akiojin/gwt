@@ -110,6 +110,28 @@ test("Core readable surfaces opt into the text-first app-wide format bridge", ()
   );
 });
 
+test("Task-first Work actions respond to their container without wrapping labels", () => {
+  const rootRule = ruleFor(componentsCss, ".workspace-overview-root");
+  assert.match(rootRule, /container-type:\s*inline-size/);
+
+  const railRule = ruleFor(componentsCss, ".workspace-detail-work-action-rail");
+  assert.match(railRule, /display:\s*flex/);
+  assert.match(railRule, /flex-wrap:\s*wrap/);
+
+  const buttonRule = ruleFor(
+    componentsCss,
+    ".workspace-detail-work-action-rail .wizard-button",
+  );
+  assert.match(buttonRule, /white-space:\s*nowrap/);
+  assert.match(buttonRule, /flex-shrink:\s*0/);
+
+  assert.match(componentsCss, /@container\s*\(max-width:\s*760px\)/);
+  assert.match(
+    componentsCss,
+    /@container\s*\(max-width:\s*760px\)[\s\S]*\.workspace-detail-work-action-rail[\s\S]*flex-direction:\s*column/,
+  );
+});
+
 function ruleFor(css, selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));

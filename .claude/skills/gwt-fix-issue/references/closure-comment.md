@@ -8,7 +8,11 @@ long after the conversation is gone.
 ## When to use
 
 - Post the closure comment on **direct-fix completion**, after `gwt-verify
-  --mode full` returns `Overall: PASS`.
+  --mode full` returns `Overall: PASS` and PR handoff has produced a PR URL or
+  PR number for code-changing work.
+- A pushed branch without a PR is push-only evidence, not completion. In that
+  state, report `PR handoff pending` or `blocked(<reason>)` instead of posting a
+  completion closure.
 - Do **not** use this template when the work is handed off to the SPEC flow
   instead of completed. In that case `gwt-build-spec` owns closure; post a short
   handoff comment only.
@@ -29,9 +33,10 @@ is unproven, the fix is not ready to close.
 The concrete files touched, each with a one-line note on what changed. Use
 `path/to/file:line` form when a specific location matters.
 
-### Commit or PR
+### Commit and PR
 
-The commit hash(es) or PR link that deliver the fix.
+The commit hash(es) and PR URL/number that deliver the fix. For code-changing
+direct fixes, commit-only or push-only is not completion.
 
 ### Verification
 
@@ -62,7 +67,7 @@ must not be delivery blockers for this fix.
 **Changed Files:**
 - `path/to/file.ext` — <what changed>
 
-**Commit / PR:** <hash or PR link>
+**Commit / PR:** <hash and PR URL/number>
 
 **Verification:** `gwt-verify --mode full` → Overall: PASS
 - Runners: <cargo | frontend | Playwright | docs>
@@ -98,5 +103,7 @@ Direct `gh issue comment ...` is not part of the normal path.
   statement.
 - Claiming completion without the `gwt-verify --mode full` `Overall: PASS`
   result in the Verification field.
+- Claiming completion for code-changing work with only a commit hash, pushed
+  branch, or closure comment and no PR URL/number.
 - Listing "various files" or "some changes" instead of concrete paths.
 - Using this template for a SPEC handoff instead of a completed direct fix.

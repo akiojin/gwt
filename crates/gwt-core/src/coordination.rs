@@ -26,7 +26,12 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::BareProjectConfig, paths::gwt_project_dir_for_repo_path, GwtError, Result};
+use crate::{
+    board_escalation::{BoardEscalation, BoardEscalationStore, ESCALATIONS_FILE_NAME},
+    config::BareProjectConfig,
+    paths::gwt_project_dir_for_repo_path,
+    GwtError, Result,
+};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -37,6 +42,18 @@ pub const HOT_PROJECTION_ENTRY_LIMIT: usize = 500;
 pub const EVENT_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
 const EVENT_MANIFEST_VERSION: u32 = 1;
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_EVENT_MANIFEST_WRITE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn fail_next_event_manifest_write() {
+    FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.set(true));
+}
 
 /// Who authored a Board entry: the human operator, an agent session, or
 /// gwt itself (system notices).
@@ -309,6 +326,16 @@ pub struct BoardEntry {
     pub state: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Board entry ids this post closes (Issue #3655). Only a `blocked` entry
+    /// can be named here; anything else is ignored by the escalation fold.
+    ///
+    /// Deliberately separate from `parent_id`: threading says "this reply
+    /// belongs under that post", which is true of any follow-up including the
+    /// ones that report the block is still standing. Resolution is a much
+    /// stronger claim and needs its own explicit word, or an agent chatting in
+    /// a thread would silently retire the request it was discussing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves_entry_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -428,6 +455,7 @@ impl BoardEntry {
             title_summary: None,
             state,
             parent_id,
+            resolves_entry_ids: Vec::new(),
             created_at: now,
             updated_at: now,
             related_topics,
@@ -507,6 +535,8 @@ pub struct BoardEntryDraft {
     pub title: Option<String>,
     pub title_summary: Option<String>,
     pub parent_id: Option<String>,
+    /// Escalation ids this post closes (Issue #3655).
+    pub resolves_entry_ids: Vec<String>,
     pub related_topics: Vec<String>,
     pub related_owners: Vec<String>,
     pub target_owners: Vec<String>,
@@ -530,6 +560,7 @@ impl BoardEntryDraft {
             title: None,
             title_summary: None,
             parent_id: None,
+            resolves_entry_ids: Vec::new(),
             related_topics: Vec::new(),
             related_owners: Vec::new(),
             target_owners: Vec::new(),
@@ -568,6 +599,7 @@ impl BoardEntryDraft {
         );
         entry.title = trimmed_or_none(self.title);
         entry.title_summary = trimmed_or_none(self.title_summary);
+        entry.resolves_entry_ids = sanitize_board_terms(&self.resolves_entry_ids);
         entry.target_owners = sanitize_board_terms(&self.target_owners);
         entry.mentions = normalize_board_mentions(&self.mentions);
         entry.audience = normalize_board_audience(self.audience);
@@ -814,11 +846,47 @@ struct EventSegmentMeta {
     last_entry_id: Option<String>,
 }
 
+enum EventAppendOutcome {
+    ManifestUpdated(EventSegmentManifest),
+    CommittedWithoutManifest { error: String },
+}
+
 /// Snapshot of the whole coordination state handed to consumers (currently
 /// just the Board projection).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoordinationSnapshot {
     pub board: BoardProjection,
+}
+
+/// Result of posting a Board entry when persistence and snapshot refresh have
+/// distinct success boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardPostOutcome {
+    /// The entry was committed and the refreshed snapshot is available.
+    Refreshed(CoordinationSnapshot),
+    /// The entry was committed, but the derived snapshot could not be loaded
+    /// or updated. Callers must not retry the post solely because of this
+    /// refresh failure.
+    CommittedWithoutSnapshot {
+        entry_id: String,
+        refresh_error: String,
+    },
+}
+
+impl BoardPostOutcome {
+    /// Preserve the legacy `post_entry` contract for callers that require a
+    /// refreshed snapshot and cannot consume the typed commit outcome.
+    pub fn into_snapshot(self) -> Result<CoordinationSnapshot> {
+        match self {
+            Self::Refreshed(snapshot) => Ok(snapshot),
+            Self::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error,
+            } => Err(GwtError::Other(format!(
+                "board entry {entry_id} was committed but snapshot refresh failed: {refresh_error}"
+            ))),
+        }
+    }
 }
 
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
@@ -840,6 +908,10 @@ pub fn coordination_events_manifest_path(worktree_root: &Path) -> PathBuf {
 
 pub fn coordination_board_projection_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(BOARD_PROJECTION_FILE_NAME)
+}
+
+pub fn coordination_escalations_path(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join(ESCALATIONS_FILE_NAME)
 }
 
 fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
@@ -881,19 +953,184 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     Ok(CoordinationSnapshot { board: projection })
 }
 
+/// Read the blocked-escalation index (Issue #3655).
+///
+/// The index is a derived file, so a missing or unreadable one is repaired by
+/// replaying the event log rather than reported as an error: a reader asking
+/// "who is blocked?" must never be told "the index is broken" when the answer
+/// is recoverable from history that is already on disk.
+pub fn load_escalation_store(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    ensure_repo_local_files(worktree_root)?;
+    let path = coordination_escalations_path(worktree_root);
+    if path.exists() {
+        match load_json_or_default::<BoardEscalationStore>(&path) {
+            Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+                return Ok(store)
+            }
+            Ok(store) => {
+                tracing::warn!(
+                    version = store.version,
+                    "board escalation index has an unknown version; rebuilding from the event log"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "board escalation index is unreadable; rebuilding from the event log"
+                );
+            }
+        }
+    }
+    with_coordination_lock(worktree_root, || {
+        rebuild_escalation_store_locked(worktree_root)
+    })
+}
+
+/// Every unblock request that is still standing, oldest first.
+pub fn load_open_escalations(worktree_root: &Path) -> Result<Vec<BoardEscalation>> {
+    Ok(load_escalation_store(worktree_root)?.open_escalations())
+}
+
+/// Open escalations concerning one owner (an Issue number as text).
+pub fn load_open_escalations_for_owner(
+    worktree_root: &Path,
+    owner: &str,
+) -> Result<Vec<BoardEscalation>> {
+    Ok(load_escalation_store(worktree_root)?
+        .open_for_owner(owner)
+        .into_iter()
+        .cloned()
+        .collect())
+}
+
+/// How long a closed escalation stays in the index.
+///
+/// Long enough to explain a recently resolved blocker, short enough that a
+/// years-old repository does not carry every unblock request it ever had. Open
+/// escalations are never pruned at any age — an unanswered request is the most
+/// important row in the file.
+const RESOLVED_ESCALATION_RETENTION_DAYS: i64 = 30;
+
+fn resolved_escalation_cutoff() -> DateTime<Utc> {
+    Utc::now() - chrono::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
+}
+
+fn rebuild_escalation_store_in_memory(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let coordination_root = coordination_dir(worktree_root);
+    let mut entries = load_board_entries_from_segments_root(&coordination_root)?;
+    entries.sort_by_key(|entry| entry.created_at);
+    let mut store = BoardEscalationStore::from_entries(entries.iter());
+    store.prune_resolved_before(resolved_escalation_cutoff());
+    Ok(store)
+}
+
+fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let store = rebuild_escalation_store_in_memory(worktree_root)?;
+    write_atomic_json(&coordination_escalations_path(worktree_root), &store)?;
+    Ok(store)
+}
+
+fn load_escalation_store_for_update(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let path = coordination_escalations_path(worktree_root);
+    if !path.exists() {
+        return rebuild_escalation_store_in_memory(worktree_root);
+    }
+    match load_json_or_default::<BoardEscalationStore>(&path) {
+        Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+            Ok(store)
+        }
+        Ok(store) => {
+            tracing::warn!(
+                version = store.version,
+                "board escalation index has an unknown version; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "board escalation index is unreadable; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+    }
+}
+
+/// Re-insert blocked posts that `params.resolves` names but the on-disk index
+/// no longer carries — typically because the index was rebuilt from the hot
+/// Board window (Issue #3690).
+fn restore_lost_resolve_targets(
+    store: &mut BoardEscalationStore,
+    worktree_root: &Path,
+    target_ids: &[String],
+) -> Result<bool> {
+    let mut changed = false;
+    let coordination_root = coordination_dir(worktree_root);
+    for target_id in target_ids {
+        let target_id = target_id.trim();
+        if target_id.is_empty()
+            || store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == target_id)
+        {
+            continue;
+        }
+        let Some(historical) = find_board_entry_in_segments(&coordination_root, target_id)? else {
+            continue;
+        };
+        if store.restore_lost_blocked(&historical) {
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Fold one freshly appended entry into the index, already holding the
+/// coordination lock.
+///
+/// A never-written or unreadable index is rebuilt from the whole log instead
+/// of started from this single entry, so upgrading an existing repository does
+/// not silently discard the escalations that were already open. The incoming
+/// entry is always folded afterwards — a rebuild that dropped the resolve
+/// would leave the PM unable to close overflowed blockers (Issue #3690).
+fn update_escalation_store_locked(worktree_root: &Path, entry: &BoardEntry) -> Result<()> {
+    let path = coordination_escalations_path(worktree_root);
+    let mut store = load_escalation_store_for_update(worktree_root)?;
+    let restored =
+        restore_lost_resolve_targets(&mut store, worktree_root, &entry.resolves_entry_ids)?;
+    let applied = store.apply_entry(entry);
+    let pruned = store.prune_resolved_before(resolved_escalation_cutoff());
+    if restored || applied || pruned || !path.exists() {
+        write_atomic_json(&path, &store)?;
+    }
+    Ok(())
+}
+
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
+    post_entry_outcome(worktree_root, entry)?.into_snapshot()
+}
+
+pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
     let mut entry = entry;
     entry.normalize_audience();
-    append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
+    append_event_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
 }
 
 pub fn append_event(
     worktree_root: &Path,
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
+    append_event_outcome(worktree_root, event)?.into_snapshot()
+}
+
+fn append_event_outcome(
+    worktree_root: &Path,
+    event: &CoordinationEvent,
+) -> Result<BoardPostOutcome> {
     with_coordination_lock(worktree_root, || {
         ensure_repo_local_files(worktree_root)?;
-        append_event_locked(worktree_root, event)
+        append_event_locked_outcome(worktree_root, event)
     })
 }
 
@@ -908,52 +1145,108 @@ fn with_coordination_lock<T>(
         .write(true)
         .truncate(false)
         .open(coordination_lock_path(worktree_root))?;
-    lock.lock_exclusive()?;
+    crate::operation_deadline::lock_exclusive(&lock)?;
 
     let result = operation();
-    let unlock_result = lock.unlock();
-    match (result, unlock_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err.into()),
+    let unlock_result = FileExt::unlock(&lock);
+    if let Err(error) = &unlock_result {
+        tracing::warn!(
+            path = %coordination_lock_path(worktree_root).display(),
+            %error,
+            "coordination operation completed but explicit unlock failed"
+        );
+    }
+    arbitrate_coordination_lock_result(result, unlock_result)
+}
+
+fn arbitrate_coordination_lock_result<T>(
+    operation_result: Result<T>,
+    _unlock_result: std::io::Result<()>,
+) -> Result<T> {
+    operation_result
+}
+
+/// Fold a committed entry into the escalation index, best-effort.
+///
+/// The entry is already durable at this point, so an index failure must not
+/// turn a successful post into an error the caller might retry — that would
+/// duplicate the very unblock request the index exists to track. The index is
+/// derived and self-heals on the next read.
+fn update_escalation_store_after_commit(worktree_root: &Path, event: &CoordinationEvent) {
+    let CoordinationEvent::MessageAppended { entry } = event;
+    if let Err(error) = update_escalation_store_locked(worktree_root, entry) {
+        tracing::warn!(
+            entry_id = %entry.id,
+            %error,
+            "board entry committed but the escalation index could not be updated"
+        );
     }
 }
 
-fn append_event_locked(
+fn append_event_locked_outcome(
     worktree_root: &Path,
     event: &CoordinationEvent,
-) -> Result<CoordinationSnapshot> {
+) -> Result<BoardPostOutcome> {
     let coordination_root = coordination_dir(worktree_root);
     let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
-    let manifest =
-        append_event_to_segments_root(&coordination_root, event, EVENT_SEGMENT_MAX_BYTES)?;
-    let mut projection: BoardProjection =
-        load_json_or_default(&coordination_board_projection_path(worktree_root))?;
-    match event {
-        CoordinationEvent::MessageAppended { entry } => {
-            projection.entries.push(entry.clone());
-            projection.entries.sort_by_key(|entry| entry.created_at);
-            if projection.entries.len() > HOT_PROJECTION_ENTRY_LIMIT {
-                let start = projection.entries.len() - HOT_PROJECTION_ENTRY_LIMIT;
-                projection.entries = projection.entries.split_off(start);
-            }
-            projection.total_entries = manifest.total_entries();
-            projection.has_more_before = projection.total_entries > projection.entries.len();
-            projection.oldest_entry_id = projection.entries.first().map(|entry| entry.id.clone());
-            projection.newest_entry_id = projection.entries.last().map(|entry| entry.id.clone());
-            projection.updated_at = Utc::now();
-        }
-    }
-    let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
-        rebuild_snapshot_from_segments_root(&coordination_root)?
-    } else {
-        CoordinationSnapshot { board: projection }
+    let entry_id = match event {
+        CoordinationEvent::MessageAppended { entry } => entry.id.clone(),
     };
-    write_atomic_json(
-        &coordination_board_projection_path(worktree_root),
-        &snapshot.board,
-    )?;
-    Ok(snapshot)
+    let manifest = match append_event_to_segments_root_outcome(
+        &coordination_root,
+        event,
+        EVENT_SEGMENT_MAX_BYTES,
+    )? {
+        EventAppendOutcome::ManifestUpdated(manifest) => manifest,
+        EventAppendOutcome::CommittedWithoutManifest { error } => {
+            update_escalation_store_after_commit(worktree_root, event);
+            return Ok(BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error: error,
+            });
+        }
+    };
+    update_escalation_store_after_commit(worktree_root, event);
+
+    let refresh_result = (|| -> Result<CoordinationSnapshot> {
+        let mut projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+        match event {
+            CoordinationEvent::MessageAppended { entry } => {
+                projection.entries.push(entry.clone());
+                projection.entries.sort_by_key(|entry| entry.created_at);
+                if projection.entries.len() > HOT_PROJECTION_ENTRY_LIMIT {
+                    let start = projection.entries.len() - HOT_PROJECTION_ENTRY_LIMIT;
+                    projection.entries = projection.entries.split_off(start);
+                }
+                projection.total_entries = manifest.total_entries();
+                projection.has_more_before = projection.total_entries > projection.entries.len();
+                projection.oldest_entry_id =
+                    projection.entries.first().map(|entry| entry.id.clone());
+                projection.newest_entry_id =
+                    projection.entries.last().map(|entry| entry.id.clone());
+                projection.updated_at = Utc::now();
+            }
+        }
+        let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
+            rebuild_snapshot_from_segments_root(&coordination_root)?
+        } else {
+            CoordinationSnapshot { board: projection }
+        };
+        write_atomic_json(
+            &coordination_board_projection_path(worktree_root),
+            &snapshot.board,
+        )?;
+        Ok(snapshot)
+    })();
+
+    Ok(match refresh_result {
+        Ok(snapshot) => BoardPostOutcome::Refreshed(snapshot),
+        Err(error) => BoardPostOutcome::CommittedWithoutSnapshot {
+            entry_id,
+            refresh_error: error.to_string(),
+        },
+    })
 }
 
 fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -1070,6 +1363,12 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
+    // through git — skip the guaranteed exit-128 spawn and use the child
+    // bare repository directly.
+    if !crate::paths::git_repository_discovery_possible(worktree_root) {
+        return coordination_child_bare_repo(worktree_root);
+    }
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
@@ -1396,6 +1695,17 @@ fn append_event_to_segments_root(
     event: &CoordinationEvent,
     max_segment_bytes: u64,
 ) -> Result<EventSegmentManifest> {
+    match append_event_to_segments_root_outcome(coordination_root, event, max_segment_bytes)? {
+        EventAppendOutcome::ManifestUpdated(manifest) => Ok(manifest),
+        EventAppendOutcome::CommittedWithoutManifest { error } => Err(GwtError::Other(error)),
+    }
+}
+
+fn append_event_to_segments_root_outcome(
+    coordination_root: &Path,
+    event: &CoordinationEvent,
+    max_segment_bytes: u64,
+) -> Result<EventAppendOutcome> {
     ensure_segment_storage(coordination_root)?;
     let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
     let mut manifest = load_event_manifest_from_dir(coordination_root)?;
@@ -1450,8 +1760,14 @@ fn append_event_to_segments_root(
         event_bytes.len() as u64,
     );
     manifest.updated_at = Utc::now();
-    write_event_manifest(coordination_root, &manifest)?;
-    Ok(manifest)
+    Ok(match write_event_manifest(coordination_root, &manifest) {
+        Ok(()) => EventAppendOutcome::ManifestUpdated(manifest),
+        Err(error) => EventAppendOutcome::CommittedWithoutManifest {
+            error: format!(
+                "Board event was committed but its segment manifest refresh failed: {error}"
+            ),
+        },
+    })
 }
 
 fn serialized_event_line(event: &CoordinationEvent) -> Result<Vec<u8>> {
@@ -1486,17 +1802,57 @@ fn load_event_manifest(worktree_root: &Path) -> Result<EventSegmentManifest> {
 fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegmentManifest> {
     let path = coordination_events_manifest_path_from_root(coordination_root);
     let manifest: EventSegmentManifest = load_json_or_default(&path)?;
-    if manifest.version == 0 || manifest.segments.is_empty() {
-        Ok(initial_event_manifest())
-    } else if manifest
-        .segments
-        .iter()
-        .any(|segment| segment.entries > 0 && segment.max_updated_at.is_none())
-    {
+    if event_manifest_needs_rebuild(coordination_root, &manifest)? {
         rebuild_event_manifest_from_segments(coordination_root)
     } else {
         Ok(manifest)
     }
+}
+
+fn event_manifest_needs_rebuild(
+    coordination_root: &Path,
+    manifest: &EventSegmentManifest,
+) -> Result<bool> {
+    if manifest.version == 0
+        || manifest.segments.is_empty()
+        || manifest
+            .segments
+            .iter()
+            .any(|segment| segment.entries > 0 && segment.max_updated_at.is_none())
+    {
+        return Ok(true);
+    }
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    let mut stored_files = manifest
+        .segments
+        .iter()
+        .map(|segment| segment.file.as_str())
+        .collect::<Vec<_>>();
+    stored_files.sort_unstable();
+    let mut actual_files = if segments_dir.exists() {
+        std::fs::read_dir(&segments_dir)?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
+                    .then(|| entry.file_name())
+            })
+            .filter_map(|name| name.to_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    actual_files.sort_unstable();
+    if stored_files != actual_files.iter().map(String::as_str).collect::<Vec<_>>() {
+        return Ok(true);
+    }
+    for segment in &manifest.segments {
+        let actual_bytes = segments_dir.join(&segment.file).metadata()?.len();
+        if actual_bytes != segment.bytes {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn legacy_event_log_needs_import(coordination_root: &Path) -> Result<bool> {
@@ -1580,6 +1936,12 @@ fn projection_needs_rebuild(projection: &BoardProjection, manifest: &EventSegmen
 }
 
 fn write_event_manifest(coordination_root: &Path, manifest: &EventSegmentManifest) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.replace(false)) {
+        return Err(GwtError::Other(
+            "injected event manifest write failure".to_string(),
+        ));
+    }
     write_atomic_json(
         &coordination_events_manifest_path_from_root(coordination_root),
         manifest,
@@ -1907,24 +2269,40 @@ pub fn has_recent_post_by(
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
     ensure_repo_local_files(worktree_root)?;
+    Ok(find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)?.is_some())
+}
+
+/// Load one immutable Board entry by its durable id, including entries that
+/// have aged out of the hot projection.
+pub fn load_board_entry(worktree_root: &Path, entry_id: &str) -> Result<Option<BoardEntry>> {
+    ensure_repo_local_files(worktree_root)?;
+    find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)
+}
+
+fn find_board_entry_in_segments(
+    coordination_root: &Path,
+    entry_id: &str,
+) -> Result<Option<BoardEntry>> {
     let entry_id = entry_id.trim();
     if entry_id.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let coordination_root = coordination_dir(worktree_root);
-    let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    let manifest = load_event_manifest_from_dir(coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
     for segment in manifest.segments.into_iter().rev() {
         let path = segments_dir.join(segment.file);
+        if !path.exists() {
+            continue;
+        }
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.id == entry_id {
-                return Ok(true);
+                return Ok(Some(entry));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub fn load_entries_before(
@@ -1990,6 +2368,16 @@ pub fn load_entries_before_for_scope(
 pub trait BoardProvider {
     /// Append a Board entry and return the refreshed snapshot.
     fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot>;
+    /// Append a Board entry while preserving a confirmed commit when only the
+    /// subsequent snapshot refresh fails.
+    fn post_entry_outcome(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardPostOutcome> {
+        self.post_entry(worktree_root, entry)
+            .map(BoardPostOutcome::Refreshed)
+    }
     /// Load the hot projection snapshot.
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
     /// Load the snapshot filtered to an audience scope.
@@ -2048,6 +2436,14 @@ pub struct LocalProvider;
 impl BoardProvider for LocalProvider {
     fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
         post_entry(worktree_root, entry)
+    }
+
+    fn post_entry_outcome(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardPostOutcome> {
+        post_entry_outcome(worktree_root, entry)
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -2124,6 +2520,32 @@ mod tests {
     use crate::test_support::{env_lock, ScopedEnvVar};
 
     #[test]
+    fn committed_operation_result_wins_over_unlock_failure() {
+        let result = arbitrate_coordination_lock_result(
+            Ok("committed"),
+            Err(std::io::Error::other("unlock failed")),
+        );
+
+        assert_eq!(
+            result.expect("committed operation must remain successful"),
+            "committed"
+        );
+    }
+
+    #[test]
+    fn operation_error_wins_when_unlock_also_fails() {
+        let result: Result<()> = arbitrate_coordination_lock_result(
+            Err(GwtError::Other("operation failed".to_string())),
+            Err(std::io::Error::other("unlock failed")),
+        );
+
+        assert!(matches!(
+            result,
+            Err(GwtError::Other(message)) if message == "operation failed"
+        ));
+    }
+
+    #[test]
     fn local_provider_matches_free_functions() {
         // SPEC-2959 FR-002/FR-003: LocalProvider must behave identically to the
         // filesystem free functions it delegates to.
@@ -2197,6 +2619,80 @@ mod tests {
             )
             .unwrap(),
         );
+    }
+
+    #[test]
+    fn post_entry_outcome_reports_commit_when_projection_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+
+        let projection_path = coordination_board_projection_path(dir.path());
+        std::fs::remove_file(&projection_path).unwrap();
+        std::fs::create_dir(&projection_path).unwrap();
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "committed entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let entry_id = entry.id.clone();
+
+        let outcome = post_entry_outcome(dir.path(), entry).unwrap();
+        match outcome {
+            BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id: committed_id,
+                refresh_error,
+            } => {
+                assert_eq!(committed_id, entry_id);
+                assert!(!refresh_error.is_empty());
+            }
+            BoardPostOutcome::Refreshed(_) => {
+                panic!("projection refresh failure must preserve the commit outcome")
+            }
+        }
+
+        std::fs::remove_dir(&projection_path).unwrap();
+        let repaired = load_snapshot(dir.path()).unwrap();
+        assert_eq!(repaired.board.entries.len(), 1);
+        assert_eq!(repaired.board.entries[0].id, entry_id);
+    }
+
+    #[test]
+    fn post_entry_outcome_reports_commit_when_manifest_write_fails_after_event_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "manifest boundary entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let entry_id = entry.id.clone();
+        fail_next_event_manifest_write();
+
+        let outcome = post_entry_outcome(dir.path(), entry)
+            .expect("fsynced event must be reported as committed");
+
+        assert!(matches!(
+            outcome,
+            BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id: committed_id,
+                ..
+            } if committed_id == entry_id
+        ));
+        let repaired = load_snapshot(dir.path()).expect("repair manifest from segments");
+        assert_eq!(repaired.board.entries.len(), 1);
+        assert_eq!(repaired.board.entries[0].id, entry_id);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
     }
 
     #[test]
@@ -2968,7 +3464,15 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "entry-0"));
         assert!(board_entry_exists(dir.path(), "entry-0").unwrap());
+        let historical = load_board_entry(dir.path(), "entry-0")
+            .unwrap()
+            .expect("load entry outside hot projection");
+        assert_eq!(historical.id, "entry-0");
+        assert_eq!(historical.body, "entry-0");
         assert!(!board_entry_exists(dir.path(), "missing-entry").unwrap());
+        assert!(load_board_entry(dir.path(), "missing-entry")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -3452,6 +3956,7 @@ mod tests {
             vec![
                 ".lock".to_string(),
                 "board.latest.json".to_string(),
+                ESCALATIONS_FILE_NAME.to_string(),
                 "events".to_string(),
                 "events.manifest.json".to_string(),
             ]
@@ -4367,5 +4872,349 @@ mod tests {
             assert_eq!(kind.as_str(), value);
         }
         assert!(BoardEntryKind::from_str("mystery").is_err());
+    }
+
+    // ---- Issue #3655: durable blocked-escalation index -------------------
+
+    fn escalation_entry(kind: BoardEntryKind, owner: &str, body: &str) -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            kind,
+            body,
+            None,
+            None,
+            vec![],
+            vec![owner.to_string()],
+        )
+    }
+
+    #[test]
+    fn posting_a_blocked_entry_opens_a_persisted_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        post_entry(dir.path(), blocked.clone()).unwrap();
+
+        assert!(
+            coordination_escalations_path(dir.path()).exists(),
+            "the escalation index must be written next to the board projection"
+        );
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].entry_id, blocked.id);
+        assert_eq!(open[0].body, "事象: 実行不能");
+        assert_eq!(
+            load_escalation_store(dir.path())
+                .unwrap()
+                .open_owner_issue_numbers(),
+            vec![2338]
+        );
+    }
+
+    #[test]
+    fn an_explicit_resolution_post_closes_the_persisted_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_routine_status_post_leaves_the_escalation_standing() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(
+                BoardEntryKind::Status,
+                "2338",
+                "Claude Code is ready for the next instruction on Issue #2338",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            1,
+            "the Stop-gate status post must never retire an unblock request"
+        );
+    }
+
+    #[test]
+    fn the_escalation_survives_scrolling_out_of_the_hot_projection() {
+        // The production failure this index exists for: on a busy board the
+        // blocked post leaves the 500-entry projection within hours, and every
+        // reader that derives "who is blocked" from the timeline goes blind.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            1,
+            "the index must answer independently of the hot projection window"
+        );
+    }
+
+    #[test]
+    fn an_explicit_resolution_closes_an_escalation_that_has_left_the_hot_projection() {
+        // Issue #3690: the PM's only handle is params.resolves with the
+        // durable index id. Once the blocked post has scrolled out of the
+        // 500-entry Board window, that handle must still close the row.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.id == blocked_id),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("the durable index must still carry the overflowed row");
+        assert!(
+            closed.resolved_at.is_some(),
+            "params.resolves must stamp resolved_at even after the Board window has moved on"
+        );
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resolution_recovers_an_escalation_dropped_by_a_hot_window_rebuild() {
+        // Issue #3690 production shape: BoardEscalationStore::from_entries on
+        // the hot projection drops overflowed blocked posts from the in-memory
+        // index. apply_entry then no-ops, the persisted file is left unchanged,
+        // and the wake prompt keeps quoting the open row. Recreate that index
+        // state and require the next params.resolves to fold the historical
+        // blocked post back in and close it.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        write_atomic_json(
+            &coordination_escalations_path(dir.path()),
+            &BoardEscalationStore::default(),
+        )
+        .unwrap();
+        assert!(
+            load_open_escalations(dir.path()).unwrap().is_empty(),
+            "the fixture is the index after a hot-window rebuild, which no longer has the row"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("resolving must recover the historical blocked post into the index");
+        assert!(closed.resolved_at.is_some());
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_lost_escalation_index_is_rebuilt_from_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::remove_file(coordination_escalations_path(dir.path())).unwrap();
+
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1, "a derived file must self-heal from history");
+        assert!(
+            coordination_escalations_path(dir.path()).exists(),
+            "the rebuild must persist so the next read is cheap"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_escalation_index_is_rebuilt_rather_than_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::write(coordination_escalations_path(dir.path()), "{ not json").unwrap();
+
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1);
+    }
+
+    #[test]
+    fn an_index_written_before_this_feature_is_backfilled_on_first_post() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate an existing repository: board history exists, no index does.
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::remove_file(coordination_escalations_path(dir.path())).unwrap();
+
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Status, "2338", "unrelated"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_open_escalations(dir.path()).unwrap().len(),
+            1,
+            "backfilling must replay history instead of starting from the new entry"
+        );
+    }
+
+    #[test]
+    fn resolves_entry_ids_round_trip_through_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = escalation_entry(BoardEntryKind::Decision, "2338", "解消しました");
+        entry.resolves_entry_ids = vec!["some-entry-id".to_string()];
+        post_entry(dir.path(), entry).unwrap();
+
+        let snapshot = rebuild_snapshot_from_segments(dir.path()).unwrap();
+        assert_eq!(
+            snapshot.board.entries[0].resolves_entry_ids,
+            vec!["some-entry-id".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_index_forgets_old_resolved_rows_but_never_an_open_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 古い blocker");
+        stale.created_at = Utc::now() - chrono::Duration::days(120);
+        stale.updated_at = stale.created_at;
+        let stale_id = stale.id.clone();
+        post_entry(dir.path(), stale).unwrap();
+
+        let mut resolution = escalation_entry(BoardEntryKind::Decision, "2338", "解消済み");
+        resolution.created_at = Utc::now() - chrono::Duration::days(119);
+        resolution.updated_at = resolution.created_at;
+        resolution.resolves_entry_ids = vec![stale_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let mut fresh = escalation_entry(BoardEntryKind::Blocked, "3645", "事象: 未解決");
+        fresh.created_at = Utc::now() - chrono::Duration::days(200);
+        fresh.updated_at = fresh.created_at;
+        post_entry(dir.path(), fresh).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        assert!(
+            !store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == stale_id),
+            "a long-closed escalation must not accumulate forever"
+        );
+        assert_eq!(
+            store.open_owner_issue_numbers(),
+            vec![3645],
+            "an unanswered request survives pruning at any age"
+        );
+    }
+
+    #[test]
+    fn a_legacy_entry_without_the_field_still_deserializes() {
+        let entry: BoardEntry = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "blocked",
+            "body": "legacy body",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z",
+        }))
+        .unwrap();
+        assert!(entry.resolves_entry_ids.is_empty());
     }
 }

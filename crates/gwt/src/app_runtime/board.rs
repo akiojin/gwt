@@ -288,6 +288,7 @@ impl AppRuntime {
             .branch(session.branch.clone())
             .session_mode(SessionMode::Resume)
             .resume_session_id(resume_session_id.to_string())
+            .predecessor_session_id(session.id.clone())
             .runtime_target(session.runtime_target)
             .docker_lifecycle_intent(session.docker_lifecycle_intent);
 
@@ -324,6 +325,10 @@ impl AppRuntime {
         if let Some(windows_shell) = session.windows_shell {
             builder = builder.windows_shell(windows_shell);
         }
+        if let Some(provenance) = session.tool_runtime_provenance.clone() {
+            builder = builder.tool_runtime_provenance(provenance);
+        }
+        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         let mut config = builder.build();
         if !session.display_name.trim().is_empty() {
@@ -357,59 +362,40 @@ impl AppRuntime {
         entry: &coordination::BoardEntry,
     ) -> Vec<OutboundEvent> {
         let _ = tab_id;
-        let mut projection =
-            match workspace_projection::load_or_default_workspace_projection(project_root) {
-                Ok(projection) => projection,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        project_root = %project_root.display(),
-                        "failed to load workspace projection for board milestone"
-                    );
-                    return Vec::new();
+        let projection = match workspace_projection::transact_workspace_state(
+            project_root,
+            |projection, work_items, _work_items_persisted| {
+                let Some(event) =
+                    workspace_projection::resolve_workspace_work_event_from_board_entry(
+                        projection, work_items, entry,
+                    )
+                else {
+                    return Ok((projection.clone(), Vec::new()));
+                };
+                let state_cutoff = work_items
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == event.work_item_id)
+                    .map(|item| item.updated_at);
+                if event.work_item_id == projection.id {
+                    projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
                 }
-            };
-        projection.record_board_milestone(entry);
-        if let Err(error) =
-            workspace_projection::save_workspace_projection(project_root, &projection)
-        {
-            tracing::warn!(
-                error = %error,
-                project_root = %project_root.display(),
-                "failed to save workspace projection for board milestone"
-            );
-            return Vec::new();
-        }
-        if board_entry_origin_can_record_workspace_work_event(&projection, entry) {
-            let work_event =
-                workspace_projection::workspace_work_event_from_board_entry(&projection, entry);
-            if let Err(error) =
-                workspace_projection::record_workspace_work_event(project_root, work_event)
-            {
+                Ok((projection.clone(), vec![event]))
+            },
+        ) {
+            Ok(projection) => projection,
+            Err(error) => {
                 tracing::warn!(
                     error = %error,
                     project_root = %project_root.display(),
-                    "failed to record workspace WorkItem event for board milestone"
+                    "failed to persist workspace board milestone"
                 );
+                return Vec::new();
             }
-        }
+        };
 
         self.apply_workspace_projection_title_sync(project_root, &projection)
     }
-}
-
-fn board_entry_origin_can_record_workspace_work_event(
-    projection: &workspace_projection::WorkspaceProjection,
-    entry: &coordination::BoardEntry,
-) -> bool {
-    let Some(session_id) = entry.origin_session_id.as_deref() else {
-        return true;
-    };
-    projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-        .is_some_and(|agent| agent.is_assigned())
 }
 
 fn board_error(client_id: &str, id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {

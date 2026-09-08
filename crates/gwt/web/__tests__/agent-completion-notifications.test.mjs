@@ -81,6 +81,42 @@ test("notifier emits a quiet turn-complete notice only after a long hidden run r
   assert.deepEqual(unread, ["tab-1"]);
 });
 
+test("T-603: notifier does not treat sustained running -> waiting as turn completion", () => {
+  let now = 1_000;
+  const toasts = [];
+  const desktop = [];
+  const unread = [];
+  const notifier = createAgentCompletionNotifier({
+    document: setupDocument({ hidden: true, focused: false }),
+    now: () => now,
+    minRunningMs: 300_000,
+    getDesktopNotificationPermission: () => "granted",
+    showToast: (notice) => toasts.push(notice),
+    showDesktopNotification: (notice) => desktop.push(notice),
+    onProjectUnread: (projectId) => unread.push(projectId),
+  });
+
+  notifier.handleRuntimeState({
+    windowId: "agent-1",
+    runtimeState: "running",
+    windowData: makeWindow(),
+    projectTab: makeProject(),
+  });
+
+  now += 300_001;
+  const notice = notifier.handleRuntimeState({
+    windowId: "agent-1",
+    runtimeState: "waiting",
+    windowData: makeWindow(),
+    projectTab: makeProject(),
+  });
+
+  assert.equal(notice, null);
+  assert.deepEqual(toasts, []);
+  assert.deepEqual(desktop, []);
+  assert.deepEqual(unread, []);
+});
+
 test("notifier suppresses short runs, focused windows, and default desktop permission", () => {
   let now = 10_000;
   const toasts = [];

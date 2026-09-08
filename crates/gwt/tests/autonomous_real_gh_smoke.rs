@@ -22,6 +22,7 @@ use gwt::issue_monitor_gate::{
     classify_acceptance_criteria, classify_ci_rollup, evaluate_autonomous_gate,
     route_autonomous_gate, GateAction, GateDecision,
 };
+use gwt_core::process::hidden_command;
 use gwt_git::branch_protection::fetch_branch_protection;
 use gwt_git::pr_status::{
     fetch_open_pr_number_for_branch, fetch_pr_head_sha, fetch_pr_status_check_rollup,
@@ -106,7 +107,7 @@ fn live_autonomous_merge_against_real_github() {
     let mut merged = false;
     for _ in 0..30 {
         // `gh pr view --json mergeCommit` populated ⇒ merged.
-        let view = std::process::Command::new("gh")
+        let view = hidden_command("gh")
             .args([
                 "pr",
                 "view",

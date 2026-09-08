@@ -14,7 +14,7 @@ layout plus SPEC-2805 Memory):
 | Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + auto-build on first search |
 | Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + auto-build on first search |
 | Project docs | Project documentation files | Per-worktree watcher (gwt GUI) + auto-build on first search |
-| Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + auto-build on first search |
+| Memory | Post-mortem entries in the machine-local work-notes memory log (`~/.gwt/projects/<repo-hash>/work-notes/memory.md`; repo-local `.gwt/work/memory.md` is a read fallback) | Manifest refresh + auto-build on first search |
 | Board | Coordination Board entries | Repo-local event log + auto-build on first search |
 | Discussions | Git-managed discussion notes | Repo-local discussion notes + auto-build on first search |
 
@@ -166,7 +166,7 @@ Run at least 2-3 semantic queries derived from the request before creating any n
 
 - **Spec integration**: find the canonical spec before creating or updating
 - **Issue lookup**: find existing GitHub Issues before creating new ones
-- **Memory lookup**: before fixing a bug, check whether a prior `.gwt/work/memory.md` entry already records the prevention strategy
+- **Memory lookup**: before fixing a bug, check whether a prior work-notes memory entry already records the prevention strategy
 - **Task start**: search for specs, issues, files, and memory related to the assigned feature
 - **Bug investigation**: find issues, files, and memory that might relate to the bug
 - **Duplicate check**: verify no existing spec, issue, or memory covers the same scope

@@ -20,7 +20,10 @@
 pub mod fake;
 pub mod http;
 
-use std::fmt;
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 /// Newtype for an Issue number as returned by the GitHub REST API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -56,7 +59,7 @@ impl UpdatedAt {
 }
 
 /// State of a GitHub Issue (open vs. closed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IssueState {
     Open,
     Closed,
@@ -111,7 +114,7 @@ pub struct SpecSummary {
 }
 
 /// Errors returned by [`IssueClient`] operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
     #[error("issue #{0} not found")]
     NotFound(IssueNumber),
@@ -121,17 +124,65 @@ pub enum ApiError {
     BodyTooLarge,
     #[error("rate limited (retry_after = {retry_after:?})")]
     RateLimited { retry_after: Option<u64> },
+    /// SPEC-3214 FR-011: non-rate-limit 403. Preserves the GitHub-provided
+    /// reason (e.g. "Issues are disabled for this repo") so callers can show
+    /// the specific cause instead of a generic failure.
+    #[error("permission denied: {message}")]
+    PermissionDenied { message: String },
     #[error("network error: {0}")]
     Network(String),
+    #[error("operation timed out: {operation}")]
+    Timeout { operation: String },
+    #[error("failed to parse {operation}: {message}")]
+    Parse { operation: String, message: String },
+    #[error("partial page while reading {operation} after {completed_pages} complete page(s)")]
+    PartialPage {
+        operation: String,
+        completed_pages: usize,
+    },
+    #[error("test transport override rejected: {reason}")]
+    TestOverrideRejected { reason: String },
+    #[error("owner repository mismatch: expected {expected}, got {actual}")]
+    RepositoryMismatch { expected: String, actual: String },
     #[error("authentication required")]
     Unauthorized,
     #[error("unexpected server response: {0}")]
     Unexpected(String),
 }
 
+/// Failure classification for a remote owner mutation.
+///
+/// Callers must not retry [`Self::RemoteOutcomeUnknown`] until an
+/// authoritative marker refresh proves whether the submitted request took
+/// effect.
+#[derive(Debug, thiserror::Error)]
+pub enum OwnerMutationError {
+    #[error("owner mutation was not submitted: {0}")]
+    PreSubmit(#[source] ApiError),
+    #[error("owner mutation outcome is unknown after submission: {0}")]
+    RemoteOutcomeUnknown(#[source] ApiError),
+}
+
+pub type OwnerMutationResult<T> = Result<T, OwnerMutationError>;
+
 /// The abstract GitHub Issue client. All mutating operations return the
 /// post-write server snapshot so callers can atomically update their local
 /// cache.
+/// Fields of a single-request Issue update (Issue #3865). `None` leaves the
+/// field untouched; `Some(vec![])` for `labels` clears them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueFieldsPatch {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub labels: Option<Vec<String>>,
+}
+
+impl IssueFieldsPatch {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.body.is_none() && self.labels.is_none()
+    }
+}
+
 pub trait IssueClient: Send + Sync {
     fn fetch(
         &self,
@@ -143,13 +194,71 @@ pub trait IssueClient: Send + Sync {
 
     fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError>;
 
+    /// Update title / body / labels in one remote request so a partial
+    /// failure cannot leave a half-applied Issue (Issue #3865). Transports
+    /// with a combined update endpoint override this; the default composes
+    /// the single-field patches for test doubles and is not atomic.
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut latest = None;
+        if let Some(title) = &fields.title {
+            latest = Some(self.patch_title(number, title)?);
+        }
+        if let Some(body) = &fields.body {
+            latest = Some(self.patch_body(number, body)?);
+        }
+        if let Some(labels) = &fields.labels {
+            latest = Some(self.set_labels(number, labels)?);
+        }
+        match latest {
+            Some(snapshot) => Ok(snapshot),
+            None => match self.fetch(number, None)? {
+                FetchResult::Updated(snapshot) => Ok(snapshot),
+                FetchResult::NotModified => Err(ApiError::Unexpected(
+                    "unconditional fetch reported not modified".to_string(),
+                )),
+            },
+        }
+    }
+
     fn patch_comment(
         &self,
         comment_id: CommentId,
         new_body: &str,
     ) -> Result<CommentSnapshot, ApiError>;
 
+    /// Mutation-aware comment patch. Generic clients conservatively classify
+    /// their ordinary API error as pre-submit; transports that can distinguish
+    /// response loss must override this method.
+    fn patch_comment_mutation(
+        &self,
+        comment_id: CommentId,
+        new_body: &str,
+    ) -> OwnerMutationResult<CommentSnapshot> {
+        self.patch_comment(comment_id, new_body)
+            .map_err(OwnerMutationError::PreSubmit)
+    }
+
     fn create_comment(&self, number: IssueNumber, body: &str) -> Result<CommentSnapshot, ApiError>;
+
+    /// Mutation-aware comment creation. The stable claim id in `body` makes an
+    /// unknown result reconcilable by a later authoritative fetch.
+    fn create_comment_mutation(
+        &self,
+        number: IssueNumber,
+        body: &str,
+    ) -> OwnerMutationResult<CommentSnapshot> {
+        self.create_comment(number, body)
+            .map_err(OwnerMutationError::PreSubmit)
+    }
+
+    /// Delete an Issue comment. Used by the multipart section writer
+    /// (SPEC-3248 P7C / #3284) to clean up stale part comments after a
+    /// successful index swap.
+    fn delete_comment(&self, comment_id: CommentId) -> Result<(), ApiError>;
 
     fn create_issue(
         &self,
@@ -164,4 +273,366 @@ pub trait IssueClient: Send + Sync {
     fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError>;
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError>;
+}
+
+/// Explicit GitHub repository identity used by owner-resolution operations.
+///
+/// Owner resolution never infers its mutation destination from the source
+/// checkout. Every operation receives one of these values instead.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RepositoryIdentity {
+    owner: String,
+    name: String,
+}
+
+impl RepositoryIdentity {
+    pub fn new(owner: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    pub fn gwt_upstream() -> Self {
+        Self::new("akiojin", "gwt")
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl fmt::Display for RepositoryIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
+/// One absolute deadline shared by auth acquisition and all requests/pages in
+/// an owner-resolution attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolutionDeadline {
+    expires_at: Instant,
+    connect_timeout_cap: Duration,
+}
+
+impl ResolutionDeadline {
+    pub fn new(connect_timeout_cap: Duration, total_timeout: Duration) -> Self {
+        Self::at(
+            Instant::now()
+                .checked_add(total_timeout)
+                .unwrap_or_else(Instant::now),
+            connect_timeout_cap,
+        )
+    }
+
+    pub fn at(expires_at: Instant, connect_timeout_cap: Duration) -> Self {
+        Self {
+            expires_at,
+            connect_timeout_cap,
+        }
+    }
+
+    pub fn expires_at(&self) -> Instant {
+        self.expires_at
+    }
+
+    pub fn reserving(&self, reserve: Duration) -> Self {
+        Self::at(
+            self.expires_at
+                .checked_sub(reserve)
+                .unwrap_or_else(Instant::now),
+            self.connect_timeout_cap,
+        )
+    }
+
+    pub fn remaining(&self, operation: &str) -> Result<Duration, ApiError> {
+        self.expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| ApiError::Timeout {
+                operation: operation.to_string(),
+            })
+    }
+
+    pub fn connect_timeout(&self, operation: &str) -> Result<Duration, ApiError> {
+        let remaining = self.remaining(operation)?;
+        let timeout = remaining.min(self.connect_timeout_cap);
+        if timeout.is_zero() {
+            return Err(ApiError::Timeout {
+                operation: operation.to_string(),
+            });
+        }
+        Ok(timeout)
+    }
+}
+
+/// Opaque token describing the completed upstream generation used for a
+/// collection read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CollectionGeneration(String);
+
+impl CollectionGeneration {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A collection that is returned only after all remote pages completed.
+///
+/// Implementors must return [`ApiError::PartialPage`] instead of constructing
+/// this value when any page or cursor cannot be fetched or parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteCollection<T> {
+    items: Vec<T>,
+    generation: CollectionGeneration,
+}
+
+impl<T> CompleteCollection<T> {
+    pub fn from_complete(items: Vec<T>, generation: CollectionGeneration) -> Self {
+        Self { items, generation }
+    }
+
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+
+    pub fn generation(&self) -> &CollectionGeneration {
+        &self.generation
+    }
+
+    pub fn into_items(self) -> Vec<T> {
+        self.items
+    }
+
+    pub fn into_parts(self) -> (Vec<T>, CollectionGeneration) {
+        (self.items, self.generation)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RepositoryIssueKind {
+    Plain,
+    Spec,
+}
+
+/// Fully materialized plain Issue or SPEC from the authoritative owner corpus.
+/// Pull requests are intentionally not representable in this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryIssue {
+    pub repository: RepositoryIdentity,
+    pub number: IssueNumber,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub state: IssueState,
+    pub kind: RepositoryIssueKind,
+    pub updated_at: UpdatedAt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryComment {
+    pub id: CommentId,
+    pub body: String,
+    pub updated_at: UpdatedAt,
+    pub author_login: Option<String>,
+    pub author_type: Option<RepositoryActorType>,
+    pub author_association: Option<RepositoryAuthorAssociation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RepositoryActorType {
+    User,
+    Bot,
+    Organization,
+    Mannequin,
+    EnterpriseUserAccount,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RepositoryAuthorAssociation {
+    Owner,
+    Member,
+    Collaborator,
+    Contributor,
+    FirstTimer,
+    FirstTimeContributor,
+    Mannequin,
+    None,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRepositoryIssue {
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedPullRequest {
+    pub number: IssueNumber,
+    pub merge_commit_sha: String,
+    pub merged_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryRelease {
+    pub tag_name: String,
+    pub target_commitish: String,
+    pub published_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommitComparisonStatus {
+    Ahead,
+    Behind,
+    Identical,
+    Diverged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitComparison {
+    pub base: String,
+    pub head: String,
+    pub base_commit_sha: String,
+    pub merge_base_commit_sha: String,
+    pub head_commit_sha: String,
+    pub status: CommitComparisonStatus,
+    pub ahead_by: u64,
+    pub behind_by: u64,
+}
+
+impl CommitComparison {
+    pub(crate) fn validate_response(&self, operation: &str) -> Result<(), ApiError> {
+        for (field, oid) in [
+            ("base_commit.sha", self.base_commit_sha.as_str()),
+            ("merge_base_commit.sha", self.merge_base_commit_sha.as_str()),
+            ("head commit sha", self.head_commit_sha.as_str()),
+        ] {
+            if !is_full_commit_oid(oid) {
+                return Err(ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: format!("{field} is not a full commit OID"),
+                });
+            }
+        }
+        if is_full_commit_oid(&self.base) && self.base_commit_sha != self.base {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: "resolved base commit does not match requested commit".to_string(),
+            });
+        }
+        if is_full_commit_oid(&self.head) && self.head_commit_sha != self.head {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: "resolved head commit does not match requested commit".to_string(),
+            });
+        }
+        let valid_forward_shape = match self.status {
+            CommitComparisonStatus::Ahead => {
+                self.ahead_by > 0
+                    && self.behind_by == 0
+                    && self.merge_base_commit_sha == self.base_commit_sha
+                    && self.head_commit_sha != self.base_commit_sha
+            }
+            CommitComparisonStatus::Identical => {
+                self.ahead_by == 0
+                    && self.behind_by == 0
+                    && self.merge_base_commit_sha == self.base_commit_sha
+                    && self.head_commit_sha == self.base_commit_sha
+            }
+            CommitComparisonStatus::Behind | CommitComparisonStatus::Diverged => true,
+        };
+        if !valid_forward_shape {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: "commit comparison ancestry shape is inconsistent".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn is_full_commit_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Deadline-aware, explicitly repository-targeted operations used by Durable
+/// Owner Resolution. This is separate from [`IssueClient`] so SPEC cache
+/// callers retain their existing behavior and pagination contract.
+pub trait OwnerRepositoryClient: Send + Sync {
+    fn list_issues(
+        &self,
+        repository: &RepositoryIdentity,
+        deadline: &ResolutionDeadline,
+    ) -> Result<CompleteCollection<RepositoryIssue>, ApiError>;
+
+    fn list_comments(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> Result<CompleteCollection<RepositoryComment>, ApiError>;
+
+    fn fetch_issue(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> Result<RepositoryIssue, ApiError>;
+
+    fn create_owner_comment(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        body: &str,
+        deadline: &ResolutionDeadline,
+    ) -> OwnerMutationResult<RepositoryComment>;
+
+    fn create_owner_issue(
+        &self,
+        repository: &RepositoryIdentity,
+        input: &CreateRepositoryIssue,
+        deadline: &ResolutionDeadline,
+    ) -> OwnerMutationResult<RepositoryIssue>;
+
+    /// Close an Issue and return a readback-verified closed snapshot.
+    fn close_issue_verified(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> OwnerMutationResult<RepositoryIssue>;
+
+    fn fetch_merged_pull_request(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> Result<Option<MergedPullRequest>, ApiError>;
+
+    fn fetch_release_by_tag(
+        &self,
+        repository: &RepositoryIdentity,
+        tag: &str,
+        deadline: &ResolutionDeadline,
+    ) -> Result<Option<RepositoryRelease>, ApiError>;
+
+    fn compare_commits(
+        &self,
+        repository: &RepositoryIdentity,
+        base: &str,
+        head: &str,
+        deadline: &ResolutionDeadline,
+    ) -> Result<CommitComparison, ApiError>;
 }

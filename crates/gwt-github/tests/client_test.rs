@@ -247,3 +247,42 @@ fn seed_spec(client: &FakeIssueClient, number: u64, title: &str, phase_label: &s
         comments: Vec::new(),
     });
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-3248 P7C bootstrap (#3284): delete_comment contract
+// ---------------------------------------------------------------------------
+
+// RED-46: delete_comment removes the comment and bumps the issue updated_at.
+#[test]
+fn red_46_delete_comment_removes_comment() {
+    let c = FakeIssueClient::new();
+    seed_simple(&c, 3001, "SPEC", "body");
+    let created = c.create_comment(IssueNumber(3001), "comment body").unwrap();
+    let before = c.fetch(IssueNumber(3001), None).unwrap();
+    let before_updated = match before {
+        FetchResult::Updated(s) => s.updated_at,
+        FetchResult::NotModified => panic!("expected Updated"),
+    };
+
+    c.delete_comment(created.id).unwrap();
+
+    let after = c.fetch(IssueNumber(3001), None).unwrap();
+    let snap = match after {
+        FetchResult::Updated(s) => s,
+        FetchResult::NotModified => panic!("expected Updated after delete"),
+    };
+    assert!(
+        snap.comments.iter().all(|cm| cm.id != created.id),
+        "deleted comment must be gone"
+    );
+    assert_ne!(snap.updated_at, before_updated);
+}
+
+// RED-47: deleting an unknown comment returns CommentNotFound.
+#[test]
+fn red_47_delete_unknown_comment_errors() {
+    let c = FakeIssueClient::new();
+    seed_simple(&c, 3002, "SPEC", "body");
+    let err = c.delete_comment(CommentId(99_999)).unwrap_err();
+    assert!(matches!(err, ApiError::CommentNotFound(CommentId(99_999))));
+}

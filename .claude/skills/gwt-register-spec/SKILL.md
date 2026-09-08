@@ -5,6 +5,15 @@ description: "Use when gwt-discussion has produced a finished SPEC design and th
 
 # gwt-register-spec
 
+## Transition alias
+
+`gwt-register-spec` is a temporary alias for `gwt-register-issue`. If this skill
+is invoked from a `gwt-discussion` Register Spec action bundle, continue through
+the matching `gwt-register-issue/SKILL.md` asset from the active provider skill
+tree and use its design-required registration flow. Keep this file only to
+preserve the create-then-edit roundtrip safety notes during the one-release
+alias window.
+
 Sub-skill called from `gwt-discussion` to materialize an already-decided SPEC
 design into a `gwt-spec` GitHub Issue. Encapsulates the canonical 2-step
 `issue.spec.create` → `issue.spec.edit` JSON operation flow so that the
@@ -50,7 +59,7 @@ The skill takes two inputs from the caller:
 
 1. `title` — string. Must match `^SPEC: .+$`. Becomes the GitHub Issue title.
 2. `body_path` — filesystem path. Must point to a UTF-8 markdown file with
-   the canonical 7 sections (see `references/body-template.md`). The H1 inside
+   the canonical 8 sections (see `references/body-template.md`). The H1 inside
    the file must equal `title`.
 
 The caller is responsible for assembling `body_path` from discussion
@@ -111,7 +120,7 @@ See `references/validation-rules.md` for the canonical list. Summary:
 |---|---|
 | Structural | Title matches `^SPEC: .+$` |
 | Structural | H1 in body equals title |
-| Structural | All 7 required sections exist (`背景`, `ユビキタス言語`, `ユーザーシナリオと受け入れシナリオ`, `機能要件`, `成功基準`, `Out of Scope`, `Related Artifacts`) |
+| Structural | All 8 required sections exist (`背景`, `ユビキタス言語`, `ユーザーシナリオと受け入れシナリオ`, `機能要件`, `成功基準`, `受け入れ基準`, `Out of Scope`, `Related Artifacts`) |
 | Structural | `機能要件` contains at least one `FR-NNN` line |
 | Structural | No `[NEEDS CLARIFICATION]` markers anywhere |
 | Format | FR identifiers are contiguous (`FR-001`, `FR-002`, … no gaps) |

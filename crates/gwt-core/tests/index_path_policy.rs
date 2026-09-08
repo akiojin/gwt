@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::fs;
 
 use gwt_core::index::path_policy::{build_project_ignore_matcher, default_index_path_policy};
 use tempfile::tempdir;
@@ -45,7 +45,7 @@ fn index_path_policy_scopes_nested_gitignore_to_own_directory() {
 #[test]
 fn index_path_policy_honors_git_info_exclude() {
     let dir = tempdir().expect("tempdir");
-    Command::new("git")
+    gwt_core::process::hidden_command("git")
         .arg("init")
         .arg(dir.path())
         .output()
@@ -97,6 +97,17 @@ fn index_path_policy_allowlists_shared_knowledge_files_only_under_gwt_work() {
     assert!(policy.is_indexable_path(&matcher, dir.path(), &work.join("discussions.md")));
     // The Work event log under the same directory is not allowlisted.
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &work.join("events.jsonl")));
+    for relative in [
+        format!("events/{}.jsonl", "a".repeat(64)),
+        format!("events/aa/{}.jsonl", "a".repeat(64)),
+        format!("events/.{}.jsonl.create-123-test", "b".repeat(64)),
+        format!("events/bb/.{}.jsonl.create-123-test", "b".repeat(64)),
+    ] {
+        assert!(
+            !policy.is_indexable_path(&matcher, dir.path(), &work.join(relative)),
+            "Work event shards and writer temp residue are coordination records, not project index input"
+        );
+    }
     // Legacy `tasks/` knowledge files are no longer allowlisted.
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &tasks.join("memory.md")));
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &tasks.join("discussions.md")));

@@ -2,9 +2,9 @@
 
 use std::{
     cmp::Reverse,
+    ffi::{OsStr, OsString},
     fs,
     path::{Component, Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -104,43 +104,46 @@ impl RuntimeProvisioner for RealProvisioner {
     }
 
     fn create_venv(&self, python: &BootstrapPython, venv_dir: &Path) -> Result<()> {
-        let mut command = crate::process::hidden_command(&python.program);
-        command
-            .args(python.prefix_args)
-            .arg("-m")
-            .arg("venv")
-            .arg(venv_dir);
-        run_checked(&mut command, "python -m venv")
+        let mut args = os_args(python.prefix_args);
+        args.extend([
+            OsString::from("-m"),
+            OsString::from("venv"),
+            venv_dir.as_os_str().to_os_string(),
+        ]);
+        run_checked(&python.program, &args, "python -m venv")
     }
 
     fn install_requirements(&self, venv_python: &Path, requirements: &Path) -> Result<()> {
         run_checked(
-            crate::process::hidden_command(venv_python)
-                .arg("-m")
-                .arg("pip")
-                .arg("install")
-                .arg("--disable-pip-version-check")
-                .arg("-r")
-                .arg(requirements),
+            venv_python,
+            &[
+                OsString::from("-m"),
+                OsString::from("pip"),
+                OsString::from("install"),
+                OsString::from("--disable-pip-version-check"),
+                OsString::from("-r"),
+                requirements.as_os_str().to_os_string(),
+            ],
             "pip install -r",
         )
     }
 
     fn probe_chromadb(&self, venv_python: &Path) -> Result<()> {
         run_checked(
-            crate::process::hidden_command(venv_python)
-                .arg("-c")
-                .arg("import chromadb"),
+            venv_python,
+            &[OsString::from("-c"), OsString::from("import chromadb")],
             "python -c import chromadb",
         )
     }
 
     fn probe_runner(&self, venv_python: &Path, runner_script: &Path) -> Result<()> {
         run_checked(
-            crate::process::hidden_command(venv_python)
-                .arg(runner_script)
-                .arg("--action")
-                .arg("probe"),
+            venv_python,
+            &[
+                runner_script.as_os_str().to_os_string(),
+                OsString::from("--action"),
+                OsString::from("probe"),
+            ],
             "project index runner probe",
         )
     }
@@ -150,6 +153,7 @@ fn ensure_project_index_runtime_with(
     gwt_home: &Path,
     provisioner: &impl RuntimeProvisioner,
 ) -> Result<ProjectIndexRuntimeReport> {
+    crate::operation_deadline::ensure_remaining("project index runtime ensure")?;
     let mut report = ProjectIndexRuntimeReport::default();
     let runtime_dir = crate::paths::gwt_runtime_dir_from(gwt_home);
     let legacy_runner_path = crate::paths::gwt_runtime_runner_path_from(gwt_home);
@@ -192,6 +196,30 @@ fn ensure_project_index_runtime_with(
         report.dependencies_installed = true;
     }
 
+    // Phase 70 FR-393 (Issue #3264): successful probes are cached for 24h
+    // keyed by runner hash / requirements hash / venv python identity, so
+    // every status / bootstrap / search stops paying two cold Python starts.
+    let probe_cache = runtime_dir.join(PROBE_CACHE_FILE);
+    if !report.venv_created
+        && !report.dependencies_installed
+        && probe_cache_is_valid(&probe_cache, &report, &venv_python)
+    {
+        report.runner_smoke_tested = true;
+        return Ok(report);
+    }
+    // Cross-process probe single-flight: hold the kernel probe lock while
+    // probing / rebuilding, and revalidate the cache after acquiring it —
+    // another process may have finished the same probe while we waited.
+    let _probe_lock = acquire_probe_lock(&runtime_dir)?;
+    if !report.venv_created
+        && !report.dependencies_installed
+        && probe_cache_is_valid(&probe_cache, &report, &venv_python)
+    {
+        report.runner_smoke_tested = true;
+        return Ok(report);
+    }
+    let _ = std::fs::remove_file(&probe_cache);
+
     if let Err(first_probe_error) = provisioner.probe_chromadb(&venv_python) {
         if venv_dir.exists() {
             remove_runtime_dir_for_rebuild(&venv_dir)?;
@@ -228,8 +256,92 @@ fn ensure_project_index_runtime_with(
         }
     }
     report.runner_smoke_tested = true;
+    write_probe_cache(&probe_cache, &report, &venv_python);
 
     Ok(report)
+}
+
+const PROBE_CACHE_FILE: &str = "probe_cache.json";
+const PROBE_LOCK_FILE: &str = "probe.lock";
+const PROBE_CACHE_TTL_SECS: u64 = 24 * 3600;
+
+/// Drop the positive probe cache so the next runtime ensure re-probes.
+/// Callers invoke this when an actual runner invocation failed (FR-393:
+/// invalidate on failure).
+pub fn invalidate_project_index_probe_cache() {
+    let cache = crate::paths::gwt_runtime_dir().join(PROBE_CACHE_FILE);
+    let _ = std::fs::remove_file(cache);
+}
+
+fn acquire_probe_lock(runtime_dir: &Path) -> Result<std::fs::File> {
+    let lock_path = runtime_dir.join(PROBE_LOCK_FILE);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| GwtError::Other(format!("open probe lock: {err}")))?;
+    crate::operation_deadline::lock_exclusive(&lock)
+        .map_err(|err| GwtError::Other(format!("acquire probe lock: {err}")))?;
+    Ok(lock)
+}
+
+fn venv_python_identity(venv_python: &Path) -> String {
+    let modified_ms = std::fs::metadata(venv_python)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    format!("{}:{modified_ms}", venv_python.display())
+}
+
+fn probe_cache_is_valid(
+    cache_path: &Path,
+    report: &ProjectIndexRuntimeReport,
+    venv_python: &Path,
+) -> bool {
+    if !venv_python.exists() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(cache_path) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let field = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+    if field("runner_hash") != Some(report.runner_hash.as_str())
+        || field("requirements_hash") != Some(report.requirements_hash.as_str())
+        || field("venv_python_identity") != Some(venv_python_identity(venv_python).as_str())
+    {
+        return false;
+    }
+    let verified_at_ms = payload
+        .get("verified_at_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    now_ms.saturating_sub(verified_at_ms) < PROBE_CACHE_TTL_SECS * 1000
+}
+
+fn write_probe_cache(cache_path: &Path, report: &ProjectIndexRuntimeReport, venv_python: &Path) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "runner_hash": report.runner_hash,
+        "requirements_hash": report.requirements_hash,
+        "venv_python_identity": venv_python_identity(venv_python),
+        "verified_at_ms": now_ms,
+    });
+    let _ = std::fs::write(cache_path, payload.to_string());
 }
 
 fn content_hash(contents: &str) -> String {
@@ -491,16 +603,14 @@ fn python_version(
     path: &Path,
     prefix_args: &[&str],
 ) -> std::result::Result<(u32, u32, String), String> {
-    let output = crate::process::hidden_command(path)
-        .args(prefix_args)
-        .arg("-c")
-        .arg(PYTHON_VERSION_SNIPPET)
-        .output()
-        .map_err(|e| format!("failed to execute version probe: {e}"))?;
+    let mut args = os_args(prefix_args);
+    args.extend([OsString::from("-c"), OsString::from(PYTHON_VERSION_SNIPPET)]);
+    let output = run_silent(path, &args, "python version probe")
+        .map_err(|error| format!("failed to execute version probe: {error}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.success() {
+        let stderr = output.stderr.trim().to_string();
+        let stdout = output.stdout.trim().to_string();
         let detail = match (stderr.is_empty(), stdout.is_empty()) {
             (true, true) => String::new(),
             (false, true) => stderr,
@@ -509,16 +619,19 @@ fn python_version(
         };
 
         if detail.is_empty() {
-            return Err(format!("version probe exited with {}", output.status));
+            return Err(format!(
+                "version probe exited with {}",
+                display_exit_code(output.exit_code)
+            ));
         }
 
         return Err(format!(
             "version probe exited with {}: {detail}",
-            output.status
+            display_exit_code(output.exit_code)
         ));
     }
 
-    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let version_str = output.stdout.trim().to_string();
     let (major, minor) = parse_python_version(&version_str)?;
     Ok((major, minor, version_str))
 }
@@ -648,19 +761,42 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {
     }
 }
 
-fn run_checked(command: &mut Command, label: &str) -> Result<()> {
-    let output = command.output().map_err(GwtError::Io)?;
-    if output.status.success() {
+fn os_args(values: &[&str]) -> Vec<OsString> {
+    values.iter().map(OsString::from).collect()
+}
+
+fn run_silent(
+    program: impl AsRef<OsStr>,
+    args: &[OsString],
+    label: &str,
+) -> std::io::Result<crate::process_console::SpawnOutput> {
+    crate::operation_deadline::ensure_remaining(label)?;
+    crate::process_console::spawn_logged_blocking(
+        &crate::process_console::ProcessConsoleHub::new(),
+        crate::process_console::ProcessKind::IndexRunner,
+        program.as_ref().to_os_string(),
+        args,
+        crate::process_console::SpawnOptions::new(label).forward_output(false),
+    )
+}
+
+fn run_checked(program: impl AsRef<OsStr>, args: &[OsString], label: &str) -> Result<()> {
+    let output = run_silent(program, args, label).map_err(GwtError::Io)?;
+    if output.success() {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = output.stderr.trim().to_string();
+    let stdout = output.stdout.trim().to_string();
     let detail = if stderr.is_empty() { stdout } else { stderr };
     Err(GwtError::Other(format!(
         "{label} failed with {}: {detail}",
-        output.status
+        display_exit_code(output.exit_code)
     )))
+}
+
+fn display_exit_code(exit_code: Option<i32>) -> String {
+    exit_code.map_or_else(|| "unknown status".to_string(), |code| code.to_string())
 }
 
 #[cfg(test)]
@@ -806,6 +942,53 @@ mod tests {
         assert!(!second.venv_rebuilt);
         assert!(!second.dependencies_installed);
         assert!(second.runner_smoke_tested);
+        // Phase 70 FR-393: the positive probe cache is still valid, so no
+        // probe Python is spawned at all on the second ensure.
+        assert_eq!(provisioner.calls(), Vec::<&'static str>::new());
+    }
+
+    #[test]
+    fn expired_probe_cache_reprobes_and_refreshes() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+        let provisioner = FakeProvisioner::new(root.path());
+
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        provisioner.calls.borrow_mut().clear();
+
+        // Age the cache past its 24h TTL.
+        let cache_path = gwt_home.join("runtime").join(PROBE_CACHE_FILE);
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        payload["verified_at_ms"] = serde_json::json!(0);
+        fs::write(&cache_path, payload.to_string()).unwrap();
+
+        let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        assert!(report.runner_smoke_tested);
+        assert_eq!(provisioner.calls(), vec!["probe_chromadb", "probe_runner"]);
+
+        // A fresh cache was written back: the third ensure skips again.
+        provisioner.calls.borrow_mut().clear();
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        assert_eq!(provisioner.calls(), Vec::<&'static str>::new());
+    }
+
+    #[test]
+    fn mismatched_probe_cache_identity_reprobes() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+        let provisioner = FakeProvisioner::new(root.path());
+
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        provisioner.calls.borrow_mut().clear();
+
+        let cache_path = gwt_home.join("runtime").join(PROBE_CACHE_FILE);
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        payload["venv_python_identity"] = serde_json::json!("another-python:123");
+        fs::write(&cache_path, payload.to_string()).unwrap();
+
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert_eq!(provisioner.calls(), vec!["probe_chromadb", "probe_runner"]);
     }
 
@@ -866,6 +1049,9 @@ mod tests {
         let _ = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         provisioner.calls.borrow_mut().clear();
         provisioner.fail_probe_once.set(true);
+        // A failed runner invocation invalidates the positive probe cache
+        // (FR-393), which is what lets the rebuild path run again.
+        fs::remove_file(gwt_home.join("runtime").join(PROBE_CACHE_FILE)).unwrap();
 
         let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(report.venv_rebuilt);
@@ -892,6 +1078,9 @@ mod tests {
         let _ = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         provisioner.calls.borrow_mut().clear();
         provisioner.fail_runner_probe_once.set(true);
+        // A failed runner invocation invalidates the positive probe cache
+        // (FR-393), which is what lets the rebuild path run again.
+        fs::remove_file(gwt_home.join("runtime").join(PROBE_CACHE_FILE)).unwrap();
 
         let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(report.venv_rebuilt);
@@ -1175,29 +1364,98 @@ mod tests {
         assert!(write_if_changed(&path, "second").unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "second");
 
-        let mut ok = if cfg!(windows) {
-            let mut command = Command::new("cmd");
-            command.args(["/C", "exit 0"]);
-            command
+        let (ok_program, ok_args) = if cfg!(windows) {
+            (
+                OsString::from("cmd"),
+                vec![OsString::from("/C"), OsString::from("exit 0")],
+            )
         } else {
-            let mut command = Command::new("sh");
-            command.args(["-c", "exit 0"]);
-            command
+            (
+                OsString::from("sh"),
+                vec![OsString::from("-c"), OsString::from("exit 0")],
+            )
         };
-        run_checked(&mut ok, "ok").unwrap();
+        run_checked(ok_program, &ok_args, "ok").unwrap();
 
-        let mut failing = if cfg!(windows) {
-            let mut command = Command::new("cmd");
-            command.args(["/C", "echo fail 1>&2 & exit 4"]);
-            command
+        let (failing_program, failing_args) = if cfg!(windows) {
+            (
+                OsString::from("cmd"),
+                vec![
+                    OsString::from("/C"),
+                    OsString::from("echo fail 1>&2 & exit 4"),
+                ],
+            )
         } else {
-            let mut command = Command::new("sh");
-            command.args(["-c", "echo fail >&2; exit 4"]);
-            command
+            (
+                OsString::from("sh"),
+                vec![
+                    OsString::from("-c"),
+                    OsString::from("echo fail >&2; exit 4"),
+                ],
+            )
         };
-        let error = run_checked(&mut failing, "failing")
+        let error = run_checked(failing_program, &failing_args, "failing")
             .unwrap_err()
             .to_string();
         assert!(error.contains("failing failed"));
+    }
+
+    #[test]
+    fn runtime_command_obeys_ambient_operation_deadline() {
+        let (program, args) = if cfg!(windows) {
+            (
+                OsString::from("cmd"),
+                vec![
+                    OsString::from("/C"),
+                    OsString::from("ping -n 4 127.0.0.1 >NUL"),
+                ],
+            )
+        } else {
+            (
+                OsString::from("sh"),
+                vec![OsString::from("-c"), OsString::from("sleep 3")],
+            )
+        };
+        let started = std::time::Instant::now();
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(150),
+        );
+
+        let error = run_silent(program, &args, "runtime deadline fixture")
+            .expect_err("runtime helper must stop at the ambient deadline");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_millis(1_500));
+    }
+
+    #[test]
+    fn runtime_probe_lock_obeys_ambient_operation_deadline() {
+        use fs2::FileExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gwt_home = root.path().join(".gwt");
+        let provisioner = FakeProvisioner::new(root.path());
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).expect("seed runtime");
+        let runtime_dir = crate::paths::gwt_runtime_dir_from(&gwt_home);
+        std::fs::remove_file(runtime_dir.join(PROBE_CACHE_FILE)).expect("invalidate probe cache");
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(runtime_dir.join(PROBE_LOCK_FILE))
+            .expect("open held probe lock");
+        held.lock_exclusive().expect("hold probe lock");
+        let started = std::time::Instant::now();
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(75),
+        );
+
+        let error = ensure_project_index_runtime_with(&gwt_home, &provisioner)
+            .expect_err("contended probe lock must respect the ambient deadline");
+
+        assert!(error.to_string().contains("deadline"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(1_000));
+        FileExt::unlock(&held).expect("release probe lock");
     }
 }

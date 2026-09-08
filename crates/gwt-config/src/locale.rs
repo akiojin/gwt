@@ -56,6 +56,8 @@ pub fn detect_user_locale_from(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+// macOS-only lookup; the `defaults` binary does not exist on Windows so no console window can appear.
+#[allow(clippy::disallowed_methods)]
 fn read_system_locale() -> Option<String> {
     use std::sync::OnceLock;
 

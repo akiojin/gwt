@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{Arc, OnceLock},
 };
 
@@ -23,7 +23,6 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrCreateCall, PrReview, PrRev
 
 pub type IssueClientFactory =
     dyn Fn(&str, &str) -> Result<HttpIssueClient, gwt_github::client::ApiError> + Send + Sync;
-
 pub struct LazyIssueClient {
     owner: String,
     repo: String,
@@ -84,6 +83,13 @@ impl IssueClient for LazyIssueClient {
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.resolve()?.patch_title(number, new_title)
     }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.patch_issue_fields(number, fields)
+    }
 
     fn patch_comment(
         &self,
@@ -99,6 +105,13 @@ impl IssueClient for LazyIssueClient {
         body: &str,
     ) -> Result<gwt_github::client::CommentSnapshot, gwt_github::client::ApiError> {
         self.resolve()?.create_comment(number, body)
+    }
+
+    fn delete_comment(
+        &self,
+        comment_id: gwt_github::client::CommentId,
+    ) -> Result<(), gwt_github::client::ApiError> {
+        self.resolve()?.delete_comment(comment_id)
     }
 
     fn create_issue(
@@ -186,20 +199,20 @@ impl DefaultCliEnv {
         }
     }
 
-    /// Build an env for hook dispatch that deliberately skips
-    /// `gh auth token` resolution. Hook handlers never touch GitHub,
-    /// so forcing them to depend on the user having run `gh auth
-    /// login` would break every Bash tool call on a fresh machine.
+    /// Build an env for hook dispatch without eagerly resolving GitHub auth.
     ///
     /// The inner `HttpIssueClient` is constructed with an empty token
-    /// and empty owner/repo strings; any attempt to actually call it
-    /// would fail (which is fine — the hook code paths go through
-    /// `run_hook`, not the SPEC issue client).
+    /// and empty owner/repo strings.
     pub fn new_for_hooks() -> Self {
+        Self::new_for_hooks_at(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// Build a hook environment for an explicitly resolved worktree.
+    pub fn new_for_hooks_at(repo_path: PathBuf) -> Self {
         Self::new_with_client_factory_and_cache_root(
             "",
             "",
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            repo_path,
             crate::issue_cache::detached_issue_cache_root(),
             Arc::new(|_, _| {
                 let transport = gwt_github::client::http::ReqwestTransport::new()
@@ -303,6 +316,35 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
             .map_err(|err| io::Error::other(err.to_string()))
     }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        crate::cli::pr::fetch_pr_quarantine_context_via_gh(
+            &self.owner,
+            &self.repo,
+            &self.repo_path,
+            number,
+        )
+    }
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        // Issue #3868: the per-PR history lives in the machine-local project
+        // dir so `unchanged_cycles` and held classes survive between resident
+        // PM cycles, whichever worktree the PM reads from. Issue #3891: the
+        // snapshot cache sits next to it for the same reason — every PM and
+        // agent on this machine shares one fetch per TTL.
+        let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path);
+        let history_path = project_dir.join(gwt_git::PR_INVENTORY_HISTORY_FILE);
+        let cache_path = project_dir.join(gwt_git::PR_INVENTORY_CACHE_FILE);
+        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, options)
+            .map_err(|err| io::Error::other(err.to_string()))
+    }
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        crate::cli::pr::probe_github_rate_limit_via_gh(&self.repo_path)
+    }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::pr::mark_pr_ready_via_gh(
@@ -358,6 +400,10 @@ impl CliEnv for DefaultCliEnv {
             job_id,
         )
     }
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
+    }
     fn run_internal_command(
         &mut self,
         args: &[String],
@@ -365,7 +411,7 @@ impl CliEnv for DefaultCliEnv {
     ) -> io::Result<InternalCommandOutput> {
         let current_exe = std::env::current_exe()?;
         let current_exe = dunce::canonicalize(&current_exe).unwrap_or_else(|_| current_exe.clone());
-        let mut child = Command::new(current_exe)
+        let mut child = gwt_core::process::hidden_command(current_exe)
             .args(args.iter().skip(1))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

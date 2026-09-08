@@ -19,16 +19,18 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 
 - The user has a bug report, enhancement idea, docs task, or rough request
 - No existing Issue number or URL is provided
-- The user wants a clear intake path before deciding plain Issue vs SPEC
+- The user wants a clear intake path before deciding plain Issue vs
+  design-required registration
 
-Do not use this for an existing Issue. Use `gwt-fix-issue` instead.
+Do not use this for an existing Issue. Use `gwt-execute #N` instead.
 
 ## Ownership
 
 - Normalize the request and search for duplicates
-- Decide plain Issue vs SPEC
+- Decide plain Issue vs design-required Work Item
 - Create the plain Issue when the work is narrow enough
-- Hand off to the visible SPEC flow when the work needs design first
+- Create a design-required Work Item when discussion has produced complete
+  artifacts, applying the `gwt-spec` design-required tag and section body safely
 
 ## Workflow
 
@@ -36,9 +38,15 @@ Do not use this for an existing Issue. Use `gwt-fix-issue` instead.
 2. Normalize the request into summary, background, expected outcome, and constraints.
 3. Run duplicate search before creating anything. Search both open Issues and existing SPEC owners, using the `gwt-search` skill (a skill, not a PATH command) when possible.
 4. Decide the registration outcome with the `Spec Status` contract below before creating any new owner.
-5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with JSON operation `issue.create`.
-6. When the request reveals a missing or unclear owner SPEC, stop plain-Issue creation and hand off to `gwt-discussion`. (SPEC-2784: gwt-discussion's Action Bundle now includes `Register Spec` which delegates to the `gwt-register-spec` sub-skill so the SPEC Issue is materialized safely via the canonical create→edit→roundtrip flow. This skill does not create SPEC owners itself.)
-7. Return the chosen owner and next step in the current user's language.
+5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with JSON operation `issue.create`, applying the autonomous-eligibility defaults below (`"labels":["auto-merge"]` unless the registration opts out).
+6. When the request needs design first, stop plain-Issue creation and hand off to `gwt-discussion` until the design is complete.
+7. When `gwt-discussion` returns a Register Spec action bundle with a title and body file, create the design-required Work Item from this skill:
+   - validate the body against the canonical SPEC sections
+   - call JSON operation `issue.spec.create`
+   - inject the `spec` body with JSON operation `issue.spec.edit`
+   - perform a roundtrip read with JSON operation `issue.spec.section`
+   - return the Issue number and next step
+8. Return the chosen owner and next step in the current user's language.
 
 ## Spec Status
 
@@ -46,8 +54,8 @@ Classify every intake with one of these values before deciding the owner:
 
 - `ALIGNED`: The request is already well-defined and no spec design work is needed. A plain Issue is allowed when the work is narrow.
 - `IMPLEMENTATION-GAP`: Existing behavior or an owner SPEC already defines the expected outcome, but implementation is missing, broken, or incomplete. A plain Issue is allowed.
-- `SPEC-GAP`: The expected behavior is not specified well enough. Do not create a plain Issue. Route to `gwt-discussion` and update the owner SPEC first.
-- `SPEC-AMBIGUOUS`: Existing SPECs or issue history conflict, overlap, or leave the decision unclear. Do not create a plain Issue. Route to `gwt-discussion` and resolve the owner SPEC path first.
+- `SPEC-GAP`: The expected behavior is not specified well enough. Do not create a plain Issue. Route to `gwt-discussion`; once design is complete, create a design-required Work Item through the safe `issue.spec.create` -> `issue.spec.edit` -> roundtrip flow.
+- `SPEC-AMBIGUOUS`: Existing SPECs or issue history conflict, overlap, or leave the decision unclear. Do not create a plain Issue. Route to `gwt-discussion`; once ownership is resolved, either update the existing owner or create a design-required Work Item through the safe flow.
 
 If duplicate search finds an existing owner SPEC, treat that SPEC as the decision anchor. Do not create a second owner for `SPEC-GAP` or `SPEC-AMBIGUOUS`.
 
@@ -55,9 +63,53 @@ If duplicate search finds an existing owner SPEC, treat that SPEC as the decisio
 
 - Agent-facing Issue workflow must use gwtd JSON operations `issue.*` as the canonical surface.
 - Direct `gh issue ...` commands are not part of the normal path.
-- Do not create both a plain Issue and a SPEC for the same request.
+- Do not create both a plain Issue and a design-required Work Item for the same request.
 - Plain Issue creation is valid only for `ALIGNED` or `IMPLEMENTATION-GAP`.
-- `SPEC-GAP` and `SPEC-AMBIGUOUS` are stop rules that route back to `gwt-discussion`.
+- `SPEC-GAP` and `SPEC-AMBIGUOUS` are stop rules until `gwt-discussion` produces a complete design or existing owner update path.
+- Design-required registration must apply the `gwt-spec` design-required tag and use `issue.spec.create`, `issue.spec.edit`, and a roundtrip `issue.spec.section` read.
+
+## Autonomous Eligibility Defaults
+
+The registration template produces Issues that qualify for autonomous
+resolution by the Issue Monitor by default (acceptance-criteria checkboxes
+plus the `auto-merge` label):
+
+- The plain Issue body MUST contain an `## Acceptance Criteria` section with
+  `- [ ] AC-N:` checkbox lines. Every criterion is one verifiable statement.
+- Readiness format (what the Issue Monitor's classifier actually reads):
+  - Recognized headings: `## Acceptance Criteria`, `## 受け入れ基準`,
+    `## 受け入れ条件`. `## 成功基準` is not scanned.
+  - Items: `- [ ] AC-N: <text>` checkbox lines directly under that heading
+    (parsing stops at the next heading). A `- [ ]` line without the `AC-N:`
+    prefix is also accepted and numbered by position (`AC-1`, `AC-2`, …);
+    the prefix is recommended, not required, because it keeps ids stable
+    across edits.
+  - Do not mix the two styles in one block. When any item carries an
+    explicit `AC-N:`, only those items become criteria and every
+    un-prefixed `- [ ]` line in the same block is dropped from the
+    readiness snapshot and from the review verdict. Put notes and
+    sub-tasks outside the acceptance block.
+  - Design-required (`gwt-spec`) Issues keep the block in the `spec`
+    section; the classifier reads it wherever the storage layer placed that
+    section (body or comment), so no body rewrite is needed.
+  - When readiness fails, the `needs_human` reason names the missing
+    element (no recognized heading, or a heading with no checklist items).
+    Fix it with `issue.edit` / `issue.spec.edit`, then run
+    `issue.monitor.requeue`.
+- Pass `"labels":["auto-merge"]` to JSON operation `issue.create` by default:
+
+  ```json
+  {"schema_version":1,"operation":"issue.create","params":{"title":"fix: ...","body":"...","labels":["auto-merge"]}}
+  ```
+
+- **Explicit opt-out**: omit the `auto-merge` label only when the user asks
+  for human review, or the change touches surfaces where auto-merge is
+  forbidden (hooks/gates, launch authority, release machinery, security
+  boundaries). State the opt-out reason in the Issue body `## Notes`.
+- Alignment: the Issue Monitor treats `auto-merge` + AC checkboxes as the
+  autonomous-eligibility signal; an opted-out Issue stays on the human gate.
+- The `issue.create` operation itself stays neutral: `labels` is optional and
+  no label is applied unconditionally. The default lives in this template.
 
 ## Required Plain Issue Body Structure
 
@@ -77,6 +129,11 @@ If duplicate search finds an existing owner SPEC, treat that SPEC as the decisio
 ## Related SPECs
 
 (- SPEC-1234, or `- None` when no owner SPEC applies)
+
+## Acceptance Criteria
+
+- [ ] AC-1: (one verifiable completion statement)
+- [ ] AC-2: (add one line per criterion)
 
 ## Expected Outcome
 

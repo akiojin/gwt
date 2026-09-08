@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     fs,
     path::{Component, Path, PathBuf},
-    process::Command,
     sync::OnceLock,
 };
 
@@ -184,7 +183,7 @@ fn build_scoped_gitignore(base: &Path, files: Vec<PathBuf>) -> Option<ScopedGiti
 }
 
 fn git_info_exclude_path(root: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = crate::process::hidden_command("git")
         .arg("-C")
         .arg(root)
         .arg("rev-parse")

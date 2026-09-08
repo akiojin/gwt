@@ -57,6 +57,12 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead>;
+    /// Issue #3891 AC-3: raw `gh api rate_limit` payload (a free endpoint).
+    fn probe_github_rate_limit(&mut self) -> io::Result<String>;
     fn create_pr(
         &mut self,
         base: &str,
@@ -74,6 +80,10 @@ pub trait CliEnv {
         add_labels: &[String],
     ) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext>;
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus>;
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus>;
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
@@ -84,6 +94,8 @@ pub trait CliEnv {
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary>;
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String>;
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
+    /// Issue #3515: re-run a failed run or job. Returns the outcome line.
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn run_internal_command(
         &mut self,
         args: &[String],
@@ -134,6 +146,13 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.inner.patch_title(number, new_title)
     }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.inner.patch_issue_fields(number, fields)
+    }
     fn patch_comment(
         &self,
         comment_id: gwt_github::client::CommentId,
@@ -147,6 +166,12 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         body: &str,
     ) -> Result<gwt_github::client::CommentSnapshot, gwt_github::client::ApiError> {
         self.inner.create_comment(number, body)
+    }
+    fn delete_comment(
+        &self,
+        comment_id: gwt_github::client::CommentId,
+    ) -> Result<(), gwt_github::client::ApiError> {
+        self.inner.delete_comment(comment_id)
     }
     fn create_issue(
         &self,

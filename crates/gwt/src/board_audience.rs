@@ -52,11 +52,7 @@ fn push_workspace_for_session(
     projection: &WorkspaceProjection,
     session_id: &str,
 ) -> bool {
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(session_id) else {
         return false;
     };
     if let Some(workspace_id) = workspace_id_for_agent(projection, agent) {
@@ -74,7 +70,7 @@ fn push_workspace_for_agent(
     if target.is_empty() {
         return;
     }
-    for agent in &projection.agents {
+    for agent in projection.assigned_agents() {
         let agent_matches = agent.agent_id.eq_ignore_ascii_case(target)
             || agent.display_name.eq_ignore_ascii_case(target);
         if !agent_matches {
@@ -96,11 +92,7 @@ pub fn current_session_board_scope(
     let Some(projection) = load_workspace_projection(repo_path)? else {
         return Ok(BoardAudienceScope::All);
     };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(session_id) else {
         return Ok(BoardAudienceScope::All);
     };
     if agent.is_unassigned() {
@@ -323,6 +315,43 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_session_mentions_use_latest_workspace() {
+        let older = Utc::now();
+        let mut stale = agent(
+            "duplicate-session",
+            WorkspaceAgentAffiliationStatus::Assigned,
+            Some("ws-stale"),
+        );
+        stale.updated_at = older;
+        let mut current = agent(
+            "duplicate-session",
+            WorkspaceAgentAffiliationStatus::Assigned,
+            Some("ws-current"),
+        );
+        current.updated_at = older + chrono::Duration::seconds(1);
+        let projection = projection_with("", vec![stale, current]);
+
+        let mut session_audience = Vec::new();
+        assert!(push_workspace_for_session(
+            &mut session_audience,
+            &projection,
+            "duplicate-session"
+        ));
+        assert_eq!(session_audience, vec!["ws-current".to_string()]);
+
+        let mut mention_audience = Vec::new();
+        collect_mention_audience(
+            &mut mention_audience,
+            Some(&projection),
+            &[
+                mention(BoardMentionTargetKind::Session, "duplicate-session"),
+                mention(BoardMentionTargetKind::Agent, "codex"),
+            ],
+        );
+        assert_eq!(mention_audience, vec!["ws-current".to_string()]);
+    }
+
+    #[test]
     fn session_scope_reads_projection_from_disk() {
         let _guard = crate::env_test_lock()
             .lock()
@@ -373,6 +402,50 @@ mod tests {
         assert_eq!(
             current_session_board_scope(repo, Some("s-unassigned")).unwrap(),
             BoardAudienceScope::Broadcast
+        );
+    }
+
+    #[test]
+    fn duplicate_session_scope_ignores_stale_assignment() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        let older = Utc::now();
+        let mut stale = agent(
+            "duplicate-session",
+            WorkspaceAgentAffiliationStatus::Assigned,
+            Some("ws-stale"),
+        );
+        stale.updated_at = older;
+        let mut current = agent(
+            "duplicate-session",
+            WorkspaceAgentAffiliationStatus::Unassigned,
+            None,
+        );
+        current.updated_at = older + chrono::Duration::seconds(1);
+        save_workspace_projection(repo, &projection_with("ws-stale", vec![stale, current]))
+            .unwrap();
+
+        assert_eq!(
+            current_session_board_scope(repo, Some("duplicate-session")).unwrap(),
+            BoardAudienceScope::Broadcast
+        );
+        assert_eq!(
+            gui_default_board_scope(repo).unwrap(),
+            BoardAudienceScope::Broadcast
+        );
+        assert_eq!(
+            post_audience_for_session(
+                repo,
+                Some("duplicate-session"),
+                &[mention(BoardMentionTargetKind::Agent, "codex")],
+                false,
+            )
+            .unwrap(),
+            None
         );
     }
 

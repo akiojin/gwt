@@ -27,8 +27,13 @@ thiserror.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 dunce.workspace = true
+libc.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
+gwt-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 serde_yaml.workspace = true
 tracing-subscriber.workspace = true

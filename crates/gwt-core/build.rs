@@ -39,6 +39,9 @@ fn tracked_skill_markdowns(
     workspace_root: &std::path::Path,
     skills_dir: &std::path::Path,
 ) -> Vec<PathBuf> {
+    // Build scripts run at compile time with a console already attached (no GUI
+    // window-flash risk) and cannot depend on gwt-core's hidden_command helper.
+    #[allow(clippy::disallowed_methods)]
     let git_output = std::process::Command::new("git")
         .arg("-C")
         .arg(workspace_root)

@@ -224,12 +224,17 @@ test("Add Window surface buttons use the same reopen path as rail and palette co
   );
 });
 
-test("work surface aliases are normalized before singleton lookup", () => {
+test("surface aliases are normalized before singleton lookup", () => {
   const normalizeBody = extractFunctionBody(appSource, "normalizeSurfacePreset");
   assert.match(
     normalizeBody,
     /preset\s*===\s*"branches"[\s\S]*preset\s*===\s*"workspace"[\s\S]*return\s+"work"/,
     "branches and legacy workspace presets must normalize to work",
+  );
+  assert.match(
+    normalizeBody,
+    /preset\s*===\s*"spec"[\s\S]*return\s+"issue"/,
+    "legacy SPEC windows must normalize to the canonical Issue surface",
   );
 
   const focusBody = extractFunctionBody(appSource, "focusOrSpawnPreset");
@@ -241,7 +246,7 @@ test("work surface aliases are normalized before singleton lookup", () => {
   assert.match(
     focusBody,
     /normalizeSurfacePreset\(w\.preset\)\s*===\s*preset/,
-    "existing legacy workspace windows must match canonical work requests",
+    "existing legacy windows must match canonical surface requests",
   );
 });
 
