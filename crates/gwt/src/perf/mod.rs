@@ -19,7 +19,8 @@ pub use record::{PerfRecord, PerfStream, PerfUnit, PerfViolationDetails};
 
 pub use budget::PerfBudgets;
 pub use global::{
-    install, install_from_settings, is_installed, record_operation, record_route, RouteTimer,
+    install, install_appending_to_established_log_from_settings, install_from_settings,
+    is_installed, record_operation, record_route, RouteTimer,
 };
 pub use route::PerfRoute;
 
@@ -42,9 +43,29 @@ pub struct PerfSink {
 
 impl PerfSink {
     /// Build a sink from the current performance settings.
+    ///
+    /// Establishes `~/.gwt/logs/perf/` when the kill switch is on. Only the
+    /// always-on GUI process should use this; see
+    /// [`PerfSink::appending_to_established_log`] for short-lived processes.
     pub fn from_config(config: &PerfConfig) -> io::Result<Self> {
         let store = if config.enabled {
             Some(PerfStore::new(config.retention_days)?)
+        } else {
+            None
+        };
+        Ok(Self { store })
+    }
+
+    /// Build a sink that appends only to an already-established perf log.
+    ///
+    /// Issue #4145: `gwtd` runs once per hook, per agent call and per contract
+    /// test, so it must not be the process that brings a perf log into
+    /// existence. Against a HOME the GUI has never collected in — a hermetic
+    /// container fixture, most of all — this is a no-op sink and the HOME stays
+    /// byte-identical.
+    pub fn appending_to_established_log(config: &PerfConfig) -> io::Result<Self> {
+        let store = if config.enabled {
+            PerfStore::open_established(config.retention_days)?
         } else {
             None
         };

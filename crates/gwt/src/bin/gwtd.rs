@@ -48,11 +48,17 @@ fn main() -> ExitCode {
         _ => {}
     }
 
-    // SPEC #3700 FR-002 / Issue #4145 AC-1: install the always-on performance
-    // collector before any operation runs, so `gwtd` operation durations reach
-    // ~/.gwt/logs/perf/. Fail-open: an unwritable log directory or a disabled
-    // kill switch leaves every later `record_*` call a no-op.
-    gwt::perf::install_from_settings();
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: measure this operation's duration
+    // when the GUI has already established perf collection on this HOME.
+    //
+    // `gwtd` deliberately never creates the perf log: it runs once per hook,
+    // per agent call and per contract test, and
+    // `crates/gwt/tests/workspace_cli_test.rs` asserts that a forwarded
+    // `workspace.update` leaves the container HOME byte-identical. Creating a
+    // daily log there would be exactly the read-repair that contract forbids.
+    // Fail-open besides: a disabled kill switch or an unwritable log leaves
+    // every later `record_*` call a no-op.
+    gwt::perf::install_appending_to_established_log_from_settings();
 
     let code = match argv.get(1).map(String::as_str) {
         None => run_json_envelope_cli(&argv),

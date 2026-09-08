@@ -44,8 +44,17 @@ pub struct PerfRuntime {
 impl PerfRuntime {
     /// Build a runtime from the persisted performance settings.
     pub fn from_config(config: &PerfConfig) -> io::Result<Self> {
+        Self::with_sink(PerfSink::from_config(config)?, config)
+    }
+
+    /// Build a runtime that appends only to an already-established perf log.
+    pub fn appending_to_established_log(config: &PerfConfig) -> io::Result<Self> {
+        Self::with_sink(PerfSink::appending_to_established_log(config)?, config)
+    }
+
+    fn with_sink(sink: PerfSink, config: &PerfConfig) -> io::Result<Self> {
         Ok(Self {
-            sink: PerfSink::from_config(config)?,
+            sink,
             budgets: PerfBudgets::resolve(&config.budgets),
             smoother: ViolationSmoother::new(),
             governor: SelfBudgetGovernor::new(config.self_budget_cpu_percent),
@@ -168,6 +177,19 @@ pub fn install(config: &PerfConfig) -> bool {
 pub fn install_from_settings() -> bool {
     let settings = gwt_config::Settings::load().unwrap_or_default();
     install(&settings.perf)
+}
+
+/// Install a collector that appends only to an already-established perf log.
+///
+/// The entry point for short-lived processes: `gwtd` measures its own
+/// operations when the GUI has already established collection on this HOME, and
+/// writes nothing at all otherwise.
+pub fn install_appending_to_established_log_from_settings() -> bool {
+    let settings = gwt_config::Settings::load().unwrap_or_default();
+    let Ok(runtime) = PerfRuntime::appending_to_established_log(&settings.perf) else {
+        return false;
+    };
+    GLOBAL.set(Mutex::new(runtime)).is_ok()
 }
 
 /// Whether a collector has been installed in this process.
@@ -309,6 +331,46 @@ mod tests {
         let records = read_all();
         assert_eq!(records.len(), 1);
         assert!(records[0].is_sample());
+    }
+
+    /// Issue #4145: a short-lived `gwtd` invocation must leave a HOME the GUI
+    /// has never collected in byte-identical. `workspace_cli_test.rs` asserts
+    /// exactly this for every forwarded `workspace.update`, so the append-only
+    /// sink is what keeps that contract intact.
+    #[test]
+    fn the_append_only_sink_never_establishes_the_perf_log() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime = PerfRuntime::appending_to_established_log(&PerfConfig::default())
+            .expect("perf runtime");
+
+        runtime.record_operation("workspace.update", Duration::from_millis(35), false);
+        runtime.record_route(PerfRoute::ProjectSwitch, Duration::from_millis(12));
+
+        assert!(!runtime.is_enabled());
+        assert!(
+            !gwt_logs_dir().join("perf").exists(),
+            "gwtd must never bring the perf log into existence"
+        );
+    }
+
+    /// Once the GUI has established collection, the same append-only sink does
+    /// record — otherwise the `op` stream would be permanently empty.
+    #[test]
+    fn the_append_only_sink_records_into_an_established_perf_log() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        fs::create_dir_all(gwt_logs_dir().join("perf")).expect("establish perf log");
+        let mut runtime = PerfRuntime::appending_to_established_log(&PerfConfig::default())
+            .expect("perf runtime");
+
+        runtime.record_operation("issue.view", Duration::from_millis(9), true);
+
+        assert!(runtime.is_enabled());
+        let records = read_all();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].target, "gwtd:issue.view");
+        assert_eq!(records[0].role.as_deref(), Some("read"));
     }
 
     #[test]
