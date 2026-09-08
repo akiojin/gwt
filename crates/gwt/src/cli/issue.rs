@@ -6070,6 +6070,7 @@ mod tests {
             idle_window_counts: std::collections::BTreeMap::new(),
             generation_reclaim: None,
             review_windows: Vec::new(),
+            issue_cache: None,
         };
 
         let blocked = agent_status_blocked_by_claim(&status, 4077).expect("blocked row");
