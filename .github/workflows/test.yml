@@ -17,7 +17,7 @@ jobs:
       - name: Install tray + GTK dependencies (Linux)
         run: |
           sudo bash scripts/ci-apt.sh update
-          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb dbus
         timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -33,11 +33,15 @@ jobs:
         timeout-minutes: 25
       # Issue #4134 AC-4: four tests cost 226s here and 3.9s on macOS for the
       # same nine spawn/stop cycles, so the wait is inside one `gwt` lifetime
-      # under Xvfb rather than in the serialization. `--nocapture` publishes the
-      # per-phase attribution the fixture prints, which is the only way a run
-      # says whether the cost is startup or a SIGTERM that never lands.
+      # under Xvfb rather than in the serialization. The instrumented run showed
+      # shutdown at 0.03s and startup at a flat 25.10s — GDBus's default call
+      # timeout. `xvfb-run` gives the GTK event loop a display but no session
+      # bus, so `dbus-run-session` supplies the other half of a headless GTK
+      # environment. `--nocapture` keeps the per-phase attribution visible, so
+      # a run that still reports ~25s refutes that explanation instead of
+      # hiding it.
       - name: Run stable server port real-binary tests (Xvfb)
-        run: xvfb-run -a cargo test -p gwt --all-features --test stable_server_port -- --ignored --test-threads=1 --nocapture
+        run: dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port -- --ignored --test-threads=1 --nocapture
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         run: |
