@@ -1957,7 +1957,12 @@ fn commit_local_issue_monitor_effect_result(
                             .inbox_item(*issue_number)
                             .map(|item| item.issue.clone())
                         {
-                            latest.record_blocked_by_claim(issue, winner.owner, winner.expires_at);
+                            latest.record_blocked_by_claim(
+                                issue,
+                                winner.owner.clone(),
+                                winner.expires_at.clone(),
+                                Some(winner.claim_id.as_str()),
+                            );
                         }
                     }
                     1
