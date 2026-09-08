@@ -4543,6 +4543,17 @@ mod tests {
                 .is_some(),
             "the offline fallback reports the GitHub budget too: {out}"
         );
+        // Issue #4009 AC-4: free space is measured from the live host at call
+        // time, so its numbers cannot be part of a fixed projection. Assert it
+        // reaches the surface, then compare the queue projection without it.
+        assert!(
+            status
+                .as_object_mut()
+                .expect("status object")
+                .remove("disk_space")
+                .is_some(),
+            "the offline fallback reports host free space too: {out}"
+        );
         assert_eq!(
             status,
             serde_json::json!({
