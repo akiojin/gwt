@@ -446,13 +446,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let Some(profiles) = params.get("profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
-            let profiles =
-                serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfile>>(profiles.clone())
-                    .map_err(|error| {
-                    CliParseError::InvalidJson(format!(
-                        "profiles must be an array of launch profiles with agent_id: {error}"
-                    ))
-                })?;
+            // Issue #4079 AC-3: keep the caller's element shape. Parsing
+            // straight into a full profile cannot tell an omitted field from
+            // one explicitly cleared, so a reorder reset the pool's settings.
+            let profiles = serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfilePatch>>(
+                profiles.clone(),
+            )
+            .map_err(|error| {
+                CliParseError::InvalidJson(format!(
+                    "profiles must be an array of launch profiles with agent_id: {error}"
+                ))
+            })?;
             let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
                 .map(|value| {
                     u8::try_from(value).map_err(|_| {
@@ -479,6 +483,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .contains_key("include")
                 .then(|| parse_pr_inventory_include(&optional_string_vec(params, "include")?))
                 .transpose()?,
+            force_reason: optional_string(params, "force_reason")?,
         }),
         // Issue #3891 AC-3: GitHub API budget observation.
         "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
@@ -2322,12 +2327,29 @@ mod tests {
         assert_eq!(project_root, None);
         assert_eq!(usage_threshold_percent, Some(70));
         assert_eq!(profiles.len(), 2);
-        assert_eq!(profiles[0].agent_id, "codex");
-        assert_eq!(profiles[0].model, None);
-        assert!(profiles[0].prefer_for.is_empty());
-        assert_eq!(profiles[1].agent_id, "claude");
-        assert_eq!(profiles[1].model.as_deref(), Some("opus"));
-        assert_eq!(profiles[1].prefer_for, vec!["kind:spec".to_string()]);
+        assert_eq!(profiles[0].profile.agent_id, "codex");
+        assert_eq!(profiles[0].profile.model, None);
+        assert!(profiles[0].profile.prefer_for.is_empty());
+        assert_eq!(profiles[1].profile.agent_id, "claude");
+        assert_eq!(profiles[1].profile.model.as_deref(), Some("opus"));
+        assert_eq!(
+            profiles[1].profile.prefer_for,
+            vec!["kind:spec".to_string()]
+        );
+        // Issue #4079 AC-3: the parse keeps which keys the caller wrote, so an
+        // omitted field can inherit instead of resetting to Default.
+        assert_eq!(
+            profiles[0].provided,
+            std::collections::BTreeSet::from(["agent_id".to_string()])
+        );
+        assert_eq!(
+            profiles[1].provided,
+            std::collections::BTreeSet::from([
+                "agent_id".to_string(),
+                "model".to_string(),
+                "prefer_for".to_string(),
+            ])
+        );
 
         assert!(matches!(
             err("issue.monitor.profiles.set", json!({})),
@@ -3375,6 +3397,7 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
+                force_reason: None,
             })
         ));
         assert!(matches!(
@@ -3387,6 +3410,7 @@ mod tests {
                 escalate_after_cycles: Some(2),
                 refresh: false,
                 include: None,
+                force_reason: None,
             })
         ));
         // Issue #3891: refresh bypasses the TTL cache / throttle; include

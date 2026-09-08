@@ -180,6 +180,13 @@ body cannot hold `plan` / `tasks` sections.
   usage threshold apply), so a held provider never stalls the queue while
   another candidate exists. Prefer adding a candidate over stopping the
   Monitor when one provider hits its limit.
+  An element that names only `agent_id` keeps the settings already saved for
+  that provider (model / reasoning / version / permissions / Docker / shell),
+  so a plain reorder changes nothing else; a provider that is new to the pool
+  inherits the saved head's `skip_permissions`, `docker_lifecycle_intent`,
+  `windows_shell` and `runtime_target`. Write a field explicitly (`"model":
+  null`, `"prefer_for": []`) to clear it. The reply's `changes` list names
+  every omitted field that was inherited or reset (Issue #4079).
 
 ## Observing the running agents
 

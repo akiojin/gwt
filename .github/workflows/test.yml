@@ -217,6 +217,18 @@ jobs:
           cargo test -p gwt --lib process::tests -- --test-threads=1
           cargo test -p gwt-core --lib daemon_pipe_name -- --test-threads=1
         timeout-minutes: 20
+      # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
+      # can tell the Issue Monitor its silence is a wait rather than a stall.
+      # Both the acceptance of a declaration and its durable prefs fallback are
+      # host-state contracts, so they are pinned on the Windows job rather than
+      # inferred from the Linux run.
+      - name: Run Issue Monitor wait declaration contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --lib cli::issue::tests::monitor_wait_ -- --test-threads=1
+          cargo test -p gwt --lib issue_monitor::tests::wait_declaration_ -- --test-threads=1
+          cargo test -p gwt --lib issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1
+        timeout-minutes: 15
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15

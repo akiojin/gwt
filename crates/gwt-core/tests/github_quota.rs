@@ -49,6 +49,17 @@ fn rest_api_paths_are_classified_as_rest() {
         vec!["api", "repos/{owner}/{repo}/pulls?state=all&per_page=20"],
         vec!["api", "-X", "GET", "repos/o/r/commits/abc/status"],
         vec!["api", "--paginate", "repos/o/r/pulls"],
+        // SPEC #4093 AC-3: the Issue Monitor hot paths moved to these routes.
+        vec![
+            "api",
+            "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1",
+        ],
+        vec!["api", "repos/o/r/issues?state=open&sort=updated&direction=desc&per_page=100&page=2"],
+        vec!["api", "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"],
+        vec![
+            "api",
+            "repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1",
+        ],
     ] {
         assert_eq!(
             github_quota::classify_gh_args(&args),

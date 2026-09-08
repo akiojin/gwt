@@ -1051,8 +1051,14 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh refresh failed\r\n\
   exit /b 1\r\n\
 )\r\n\
+set \"gwt_arg1=%~1\"\r\n\
+set \"gwt_arg2=%~2\"\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
-  if /I \"%1 %2\"==\"pr list\" (\r\n\
+  if /I \"%gwt_arg2:~0,26%\"==\"repos/{owner}/{repo}/pulls\" (\r\n\
+    echo []\r\n\
+    exit /b 0\r\n\
+  )\r\n\
+  if /I \"%gwt_arg1% %gwt_arg2%\"==\"pr list\" (\r\n\
     echo []\r\n\
     exit /b 0\r\n\
   )\r\n\
@@ -1082,7 +1088,12 @@ exit /b 0\r\n",
 	  printf '%s\n' 'gh refresh failed' >&2
 	  exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+# SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync.
+case "$1 $2" in
+  "api repos/{owner}/{repo}/pulls?state=closed"*) merged_pulls_query=1 ;;
+  *) merged_pulls_query=0 ;;
+esac
+if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && { [ "$merged_pulls_query" = "1" ] || { [ "$1" = "pr" ] && [ "$2" = "list" ]; }; }; then
   printf '%s\n' '[]'
   exit 0
 fi
@@ -1090,7 +1101,7 @@ if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ]; then
   printf '%s\n' 'gh refresh failed' >&2
   exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && { [ "$merged_pulls_query" = "1" ] || { [ "$1" = "pr" ] && [ "$2" = "list" ]; }; }; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
 fi
@@ -1368,6 +1379,7 @@ fn sample_window(
         tab_group_active: false,
         session_id: None,
         linked_issue_number: None,
+        runtime_started_at_ms: None,
         is_pm: false,
     }
 }
@@ -7647,6 +7659,7 @@ fn issue_monitor_autonomous_record(
         wait: None,
         needs_human_kind: None,
         steering: None,
+        review_dispatch_hold: None,
     }
 }
 
@@ -42895,6 +42908,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -49070,6 +49084,167 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     assert!(profile.skip_permissions);
 }
 
+fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
+    gwt::IssueMonitorLaunchProfile {
+        agent_id: agent_id.to_string(),
+        model: None,
+        reasoning: None,
+        version: None,
+        session_mode: Default::default(),
+        skip_permissions: false,
+        codex_fast_mode: false,
+        runtime_target: Default::default(),
+        docker_service: None,
+        docker_lifecycle_intent: Default::default(),
+        windows_shell: None,
+        prefer_for: Vec::new(),
+    }
+}
+
+#[test]
+fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
+    // Issue #4079 AC-1: with `[claude, codex]` saved, an Agent Settings save
+    // for codex must make codex candidate 1 — and the `launch_profile` mirror
+    // the Monitor launches from. The pre-#4079 upsert rewrote the index-1
+    // codex entry and left claude launching.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+    let request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("develop")
+            .model("gpt-6-astra")
+            .build(),
+    ));
+
+    runtime.save_issue_monitor_profile_from_launch_request(
+        session,
+        IssueMonitorProfileSaveContext {
+            client_id: "client-1".to_string(),
+            issue_number: None,
+            pool: seeded.launch_profile_pool(),
+        },
+        request,
+    );
+
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    let pool = prefs.launch_profile_pool();
+    assert_eq!(
+        pool.iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["codex"],
+        "the chosen agent takes candidate 1"
+    );
+    assert_eq!(pool[0].model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(
+        prefs.launch_profile.as_ref().map(|p| p.agent_id.as_str()),
+        Some("codex"),
+        "the compatibility mirror follows the head"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_previews_the_pool_head_replacement() {
+    // Issue #4079 AC-2: with more than one provider in the pool the form must
+    // say which candidate the save writes, and its preview of the resulting
+    // pool summary must be what the Monitor reports afterwards.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    let impact = view
+        .issue_monitor_pool_impact
+        .as_ref()
+        .expect("Agent Settings must preview its effect on the candidate pool");
+    assert_eq!(impact.action, "replace_head");
+    assert_eq!(impact.agent_id, "codex");
+    assert_eq!(
+        impact.replaced_agent_id.as_deref(),
+        Some("claude"),
+        "the operator must see which candidate is switched out"
+    );
+    assert!(
+        impact.detail.contains(&impact.resulting_summary),
+        "the note states the summary the Monitor will report: {impact:?}"
+    );
+    let previewed_summary = impact.resulting_summary.clone();
+
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    wait_for_recorded_event(
+        "issue monitor settings runtime resolution",
+        &recorded_events,
+        |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        },
+    );
+    let resolved_event = {
+        let mut events = recorded_events.lock().expect("event log");
+        events
+            .iter()
+            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .map(|index| events.remove(index))
+            .expect("runtime resolved event")
+    };
+    let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+        unreachable!("matched above")
+    };
+    runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    let saved_summary =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+            .status_view()
+            .launch_profile_summary;
+    assert_eq!(
+        saved_summary, previewed_summary,
+        "the previewed summary must be the one the Monitor reports after the save"
+    );
+}
+
 #[test]
 fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_launching() {
     let _env_lock = env_test_lock()
@@ -49237,6 +49412,7 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
             issue_number: None,
+            pool: Vec::new(),
         },
         request,
     );
@@ -49537,9 +49713,11 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
 }
 
 #[test]
-fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
-    // SPEC #3914 FR-003 / US-7: saving a second provider from Agent settings
-    // appends it to the pool instead of replacing the saved profile.
+fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider() {
+    // SPEC #3914 FR-003 / US-7, amended by Issue #4079 AC-1: saving another
+    // provider from Agent settings is a switch, so it takes candidate 1 and the
+    // `launch_profile` mirror. Appending a candidate is a `profiles.set`
+    // operation, not something the settings form does behind the operator.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -49568,6 +49746,7 @@ fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
             issue_number: None,
+            pool: Vec::new(),
         },
         request,
     );
@@ -49583,15 +49762,16 @@ fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
         pool.iter()
             .map(|profile| profile.agent_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["claude", "codex"]
+        vec!["codex"],
+        "the chosen provider replaces candidate 1"
     );
     assert_eq!(
         persisted
             .launch_profile
             .as_ref()
             .map(|profile| profile.agent_id.as_str()),
-        Some("claude"),
-        "the compatibility mirror keeps the pool head"
+        Some("codex"),
+        "the compatibility mirror follows the pool head"
     );
 }
 
@@ -60711,6 +60891,98 @@ fn workspace_view_marks_only_the_registered_pm_window() {
         vec!["tab-1::agent-1"],
         "exactly the registered PM session's window is marked"
     );
+}
+
+/// SPEC #3885 T-020 (Issue #4082 AC-1): the workspace view carries the moment
+/// the agent's PTY runtime started, so the Issue row's elapsed time survives a
+/// frontend reload instead of restarting from the last observed state change.
+/// The field is wire-only: the persisted image never learns it.
+#[test]
+fn workspace_view_carries_the_runtime_start_time_for_live_agent_windows() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows = vec![
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running),
+        sample_window("agent-2", WindowPreset::Agent, WindowProcessStatus::Running),
+    ];
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let before_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
+    let after_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+
+    let view = runtime.workspace_view_for_tab(runtime.tab("tab-1").expect("tab"));
+    let live = view
+        .windows
+        .iter()
+        .find(|window| window.id == "tab-1::agent-1")
+        .expect("live agent window");
+    let started = live
+        .runtime_started_at_ms
+        .expect("a window with a live PTY runtime reports when it started");
+    assert!(
+        (before_ms..=after_ms).contains(&started),
+        "start time {started} must fall inside the install window {before_ms}..={after_ms}"
+    );
+    let idle = view
+        .windows
+        .iter()
+        .find(|window| window.id == "tab-1::agent-2")
+        .expect("agent window without a runtime");
+    assert_eq!(
+        idle.runtime_started_at_ms, None,
+        "no PTY runtime means no start time"
+    );
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .all(|window| window.runtime_started_at_ms.is_none()),
+        "the start time is wire-only and never enters the persisted image"
+    );
+    // The wire field must not be readable back from disk either.
+    let json = serde_json::json!({
+        "id": "agent-9",
+        "title": "Agent",
+        "preset": "agent",
+        "geometry": { "x": 0, "y": 0, "width": 100, "height": 100 },
+        "z_index": 1,
+        "status": "running",
+        "runtime_started_at_ms": 1_700_000_000_000u64,
+    });
+    let restored: gwt::PersistedWindowState =
+        serde_json::from_value(json).expect("window state deserializes");
+    assert_eq!(restored.runtime_started_at_ms, None);
+
+    runtime.stop_window_runtime("tab-1::agent-1");
 }
 
 #[test]
