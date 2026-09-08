@@ -872,6 +872,32 @@ pub fn owner_generation_hold_for_project(
     ))
 }
 
+/// Issue #4161: read the Prepared transactions fencing `owner_number`'s
+/// current generation from the repository's owner ledger tree.
+///
+/// Resolved from the project root like [`owner_generation_hold_for_project`],
+/// because the Issue Monitor asks about owners whose worktree publication does
+/// not exist: the launch it is about to retry is the one that never happened.
+pub fn blocking_prepared_transactions_for_project(
+    project_root: &Path,
+    owner_number: u64,
+) -> io::Result<Vec<BlockingPreparedTransaction>> {
+    let owner_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root)
+        .join("trusted")
+        .join("execution-owners")
+        .join(format!("owner-{owner_number}"));
+    let Some(contents) = read_owner_ledger_from_dir(&owner_dir)? else {
+        return Ok(Vec::new());
+    };
+    let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
+        invalid_generation_data(format!("malformed generation ledger: {error}"))
+    })?;
+    Ok(blocking_prepared_transactions(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &ledger,
+    ))
+}
+
 /// Issue #3964: a sidecar's PID namespace names the Host that wrote it only
 /// while that PID still belongs to the same process. The OS recycles PIDs; in
 /// production four holders' sidecars named PIDs that had become a browser
@@ -1567,34 +1593,53 @@ fn startup_active_reaper_event_is_owned(
     event.operation_id.as_deref() == Some(startup_active_reaper_operation_id(&expected).as_str())
 }
 
-fn current_generation_has_prepared_transaction(
-    ledger: &ExecutionGenerationLedger,
+/// The successor attempts that are still Prepared against `generation_id`.
+///
+/// The attempt log is append-only, so aborting an operation appends an Aborted
+/// event and leaves its Prepared event behind. Only the latest event per
+/// operation id describes what still targets the generation (Issue #4161).
+fn latest_prepared_successors_for_generation<'a>(
+    ledger: &'a ExecutionGenerationLedger,
     generation_id: &str,
-) -> bool {
-    let mut continuation_operations = std::collections::HashSet::new();
-    let prepared_continuation = ledger
+) -> Vec<&'a ContinuationAttempt> {
+    let mut operations = std::collections::HashSet::new();
+    ledger
         .continuation_attempts
         .iter()
         .rev()
-        .filter(|attempt| continuation_operations.insert(attempt.request.operation_id.as_str()))
-        .any(|attempt| {
+        .filter(|attempt| operations.insert(attempt.request.operation_id.as_str()))
+        .filter(|attempt| {
             attempt.predecessor.generation_id == generation_id
                 && attempt.status == ContinuationAttemptStatus::Prepared
-        });
-    if prepared_continuation {
-        return true;
-    }
+        })
+        .collect()
+}
 
-    let mut takeover_operations = std::collections::HashSet::new();
+/// The same-generation takeovers that are still Prepared against
+/// `generation_id`, resolved per operation id like the successors above.
+fn latest_prepared_takeovers_for_generation<'a>(
+    ledger: &'a ExecutionGenerationLedger,
+    generation_id: &str,
+) -> Vec<&'a GenerationTakeoverAttempt> {
+    let mut operations = std::collections::HashSet::new();
     ledger
         .takeover_attempts
         .iter()
         .rev()
-        .filter(|attempt| takeover_operations.insert(attempt.request.operation_id.as_str()))
-        .any(|attempt| {
+        .filter(|attempt| operations.insert(attempt.request.operation_id.as_str()))
+        .filter(|attempt| {
             attempt.generation_id == generation_id
                 && attempt.status == GenerationTakeoverAttemptStatus::Prepared
         })
+        .collect()
+}
+
+fn current_generation_has_prepared_transaction(
+    ledger: &ExecutionGenerationLedger,
+    generation_id: &str,
+) -> bool {
+    !latest_prepared_successors_for_generation(ledger, generation_id).is_empty()
+        || !latest_prepared_takeovers_for_generation(ledger, generation_id).is_empty()
 }
 
 fn startup_reaper_publication_is_complete(
@@ -2497,6 +2542,11 @@ pub struct OwnerExecutionDiagnosis {
     /// Whether the generation reaper is allowed to release this generation as
     /// it stands. `false` for a live holder and for every ambiguous reading.
     pub reclaimable: bool,
+    /// Issue #4161: the Prepared successors/takeovers that still fence this
+    /// generation. While this is non-empty every fresh launch is refused, so
+    /// the recovery route is to release them before launching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_prepared_transactions: Vec<BlockingPreparedTransaction>,
     pub recommended_recovery: String,
     pub recommended_recovery_reason: String,
     pub warnings: Vec<String>,
@@ -2518,6 +2568,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         holder_worktree: None,
         holder_runtime: None,
         reclaimable: false,
+        blocking_prepared_transactions: Vec::new(),
         recommended_recovery: "gwt-execute".to_string(),
         recommended_recovery_reason:
             "No execution generation exists for this owner; a fresh launch can take it.".to_string(),
@@ -2675,6 +2726,19 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
                         .to_string();
             }
         }
+    }
+    // Issue #4161: a Prepared successor/takeover fences the generation whatever
+    // its status is, so it decides the recovery route. Recommending a launch
+    // that the fence will refuse is how an owner became unlaunchable from both
+    // the Issue Monitor and the GUI with no route out.
+    diagnosis.blocking_prepared_transactions =
+        blocking_prepared_transactions(&sessions_dir, &ledger);
+    if !diagnosis.blocking_prepared_transactions.is_empty() {
+        diagnosis.recommended_recovery = "execution.release_prepared".to_string();
+        diagnosis.recommended_recovery_reason = format!(
+            "{} Prepared transaction(s) still fence this generation and refuse every launch; release them with the execution.release_prepared JSON operation, then launch.",
+            diagnosis.blocking_prepared_transactions.len()
+        );
     }
     diagnosis
 }
@@ -6910,6 +6974,17 @@ fn abort_generation_takeover_in_context(
     request: &GenerationTakeoverRequest,
     reason: &str,
 ) -> io::Result<GenerationTakeoverAttempt> {
+    abort_generation_takeover_bound_to(context, request, &context.worktree_binding_hash, reason)
+}
+
+/// Abort a Prepared takeover recorded against `expected_worktree_binding_hash`.
+/// See [`abort_successor_bound_to`] for why the hash is a parameter.
+fn abort_generation_takeover_bound_to(
+    context: &GenerationTransactionContext,
+    request: &GenerationTakeoverRequest,
+    expected_worktree_binding_hash: &str,
+    reason: &str,
+) -> io::Result<GenerationTakeoverAttempt> {
     let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
         io::Error::new(
             ErrorKind::NotFound,
@@ -6917,7 +6992,7 @@ fn abort_generation_takeover_in_context(
         )
     })?;
     let latest =
-        latest_generation_takeover_attempt(&ledger, request, &context.worktree_binding_hash)?
+        latest_generation_takeover_attempt(&ledger, request, expected_worktree_binding_hash)?
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "takeover attempt is missing"))?
             .clone();
     match latest.status {
@@ -7544,13 +7619,15 @@ pub fn prepare_exact_manual_launch_successor(
                         "manual predecessor status changed before successor preparation",
                     ));
                 }
-                if ledger.continuation_attempts.iter().any(|attempt| {
-                    attempt.predecessor.generation_id == current.identity.generation_id
-                        && attempt.status == ContinuationAttemptStatus::Prepared
-                }) || ledger.takeover_attempts.iter().any(|attempt| {
-                    attempt.generation_id == current.identity.generation_id
-                        && attempt.status == GenerationTakeoverAttemptStatus::Prepared
-                }) {
+                // Issue #4161: the attempt logs are append-only, so an aborted
+                // operation keeps its original Prepared event forever. Only the
+                // latest event per operation says whether anything still
+                // targets this generation; scanning raw events fenced settled
+                // owners permanently.
+                if current_generation_has_prepared_transaction(
+                    &ledger,
+                    &current.identity.generation_id,
+                ) {
                     return Err(generation_conflict(
                         "manual successor refuses while a Prepared successor or takeover targets the current generation",
                     ));
@@ -7840,13 +7917,9 @@ pub fn prepare_exact_terminal_active_successor(
                     "exact-terminal successor requires a current Active generation",
                 ));
             }
-            if ledger.continuation_attempts.iter().any(|attempt| {
-                attempt.predecessor.generation_id == current.identity.generation_id
-                    && attempt.status == ContinuationAttemptStatus::Prepared
-            }) || ledger.takeover_attempts.iter().any(|attempt| {
-                attempt.generation_id == current.identity.generation_id
-                    && attempt.status == GenerationTakeoverAttemptStatus::Prepared
-            }) {
+            // Issue #4161: same append-only reading as the manual route above.
+            if current_generation_has_prepared_transaction(&ledger, &current.identity.generation_id)
+            {
                 return Err(generation_conflict(
                         "exact-terminal successor refuses while a Prepared successor or takeover targets the current generation",
                     ));
@@ -8053,13 +8126,28 @@ fn abort_successor_in_context(
     request: &SuccessorRequest,
     reason: &str,
 ) -> io::Result<ContinuationAttempt> {
+    abort_successor_bound_to(context, request, &context.worktree_binding_hash, reason)
+}
+
+/// Abort a Prepared successor recorded against `expected_worktree_binding_hash`.
+///
+/// Every launch-owned abort passes the caller's own worktree, so the binding
+/// hash fences the operation to the worktree that prepared it. Issue #4161's
+/// operator release runs from wherever the operator happens to be and passes
+/// the attempt's own recorded binding instead.
+fn abort_successor_bound_to(
+    context: &GenerationTransactionContext,
+    request: &SuccessorRequest,
+    expected_worktree_binding_hash: &str,
+    reason: &str,
+) -> io::Result<ContinuationAttempt> {
     let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
         io::Error::new(
             ErrorKind::NotFound,
             "owner generation ledger is not initialized",
         )
     })?;
-    let latest = latest_operation_attempt(&ledger, request, &context.worktree_binding_hash)?
+    let latest = latest_operation_attempt(&ledger, request, expected_worktree_binding_hash)?
         .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "successor attempt is missing"))?
         .clone();
     match latest.status {
@@ -8161,6 +8249,296 @@ where
             gwt_agent::SessionPathState::Present(_) => Ok(false),
             gwt_agent::SessionPathState::Error(error) => Err(error),
         })
+    })
+}
+
+/// Issue #4161: one still-Prepared successor or takeover that targets an
+/// owner's current generation.
+///
+/// A Prepared attempt is an intent, not authority: it exists so exactly one
+/// launch can win the successor CAS. While it is alive every other successor
+/// is refused, so an owner whose launch died between preparation and
+/// settlement can be reported and released instead of being unlaunchable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockingPreparedTransaction {
+    /// `successor` or `takeover`.
+    pub kind: &'static str,
+    pub operation_id: String,
+    /// The Session the attempt would hand the generation to.
+    pub candidate_session_id: String,
+    /// `missing`, `unreadable`, or the durable `AgentStatus` name.
+    pub candidate_session_state: String,
+    pub prepared_at: DateTime<Utc>,
+}
+
+impl BlockingPreparedTransaction {
+    /// Whether this fence can no longer clear itself.
+    ///
+    /// A launch prepares its successor before persisting the candidate
+    /// Session, so an absent Session is also what a launch in flight looks
+    /// like for a moment. Past `PREPARED_TRANSACTION_RELEASE_GRACE` that
+    /// launch has had every chance to activate or abort, and a Session that
+    /// still does not exist is never going to.
+    #[must_use]
+    pub fn is_stale_at(&self, now: DateTime<Utc>) -> bool {
+        self.candidate_session_state == "missing"
+            && now.signed_duration_since(self.prepared_at) >= PREPARED_TRANSACTION_RELEASE_GRACE
+    }
+}
+
+/// One entry of a [`release_blocking_prepared_transactions`] result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparedTransactionReleaseEntry {
+    #[serde(flatten)]
+    pub transaction: BlockingPreparedTransaction,
+    /// Why a transaction was kept. Absent for a released one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_because: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparedTransactionReleaseOutcome {
+    pub status: &'static str,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    pub released: Vec<PreparedTransactionReleaseEntry>,
+    pub retained: Vec<PreparedTransactionReleaseEntry>,
+}
+
+/// How long a Prepared attempt whose candidate Session never materialized is
+/// left alone before a blanket release may abort it.
+///
+/// A launch prepares its successor before persisting the candidate Session, so
+/// "the Session is missing" is also what an in-flight launch looks like for a
+/// moment. That moment is bounded by pane creation; a launch still holding a
+/// Prepared attempt long after it is one that is never coming back. Naming an
+/// exact `operation_id` bypasses the wait, because the operator then releases
+/// something they read out of `execution.status` themselves.
+const PREPARED_TRANSACTION_RELEASE_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+
+fn describe_candidate_session(sessions_dir: &Path, session_id: &str) -> String {
+    match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
+        gwt_agent::SessionPathState::Present(session) => format!("{:?}", session.status),
+        gwt_agent::SessionPathState::Missing => "missing".to_string(),
+        gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
+    }
+}
+
+/// Report every Prepared successor/takeover that still fences `ledger`'s
+/// current generation.
+#[must_use]
+pub fn blocking_prepared_transactions(
+    sessions_dir: &Path,
+    ledger: &ExecutionGenerationLedger,
+) -> Vec<BlockingPreparedTransaction> {
+    let Some(current) = ledger.current_generation() else {
+        return Vec::new();
+    };
+    let generation_id = current.identity.generation_id.as_str();
+    let mut blocking: Vec<_> = latest_prepared_successors_for_generation(ledger, generation_id)
+        .into_iter()
+        .map(|attempt| BlockingPreparedTransaction {
+            kind: "successor",
+            operation_id: attempt.request.operation_id.clone(),
+            candidate_session_id: attempt.request.initial_session_id.clone(),
+            candidate_session_state: describe_candidate_session(
+                sessions_dir,
+                &attempt.request.initial_session_id,
+            ),
+            prepared_at: attempt.recorded_at,
+        })
+        .chain(
+            latest_prepared_takeovers_for_generation(ledger, generation_id)
+                .into_iter()
+                .map(|attempt| BlockingPreparedTransaction {
+                    kind: "takeover",
+                    operation_id: attempt.request.operation_id.clone(),
+                    candidate_session_id: attempt.request.to_session_id.clone(),
+                    candidate_session_state: describe_candidate_session(
+                        sessions_dir,
+                        &attempt.request.to_session_id,
+                    ),
+                    prepared_at: attempt.recorded_at,
+                }),
+        )
+        .collect();
+    blocking.sort_by(|left, right| {
+        left.prepared_at
+            .cmp(&right.prepared_at)
+            .then_with(|| left.operation_id.cmp(&right.operation_id))
+    });
+    blocking
+}
+
+/// Release the Prepared successors/takeovers that fence `owner`'s current
+/// generation, so a fresh launch can mint its successor again (Issue #4161).
+///
+/// A transaction is released only while its candidate Session is genuinely
+/// absent, proven under that Session's own path lease so a launch cannot
+/// materialize it between the check and the commit. Releasing is always safe
+/// for a launch that does come back: an Aborted attempt fails its own
+/// activation CAS instead of corrupting the owner.
+pub fn release_blocking_prepared_transactions(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    sessions_dir: &Path,
+    operation_id: Option<&str>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> io::Result<PreparedTransactionReleaseOutcome> {
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "releasing a Prepared execution transaction requires a non-empty params.reason",
+        ));
+    }
+    let operation_id = operation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let Some(current) = ledger.current_generation().cloned() else {
+            return Ok(PreparedTransactionReleaseOutcome {
+                status: "no_blocking_prepared_transaction",
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                generation_id: None,
+                released: Vec::new(),
+                retained: Vec::new(),
+            });
+        };
+        let generation_id = current.identity.generation_id.clone();
+        let blocking = blocking_prepared_transactions(sessions_dir, &ledger);
+        if let Some(operation_id) = operation_id {
+            if !blocking
+                .iter()
+                .any(|transaction| transaction.operation_id == operation_id)
+            {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "no Prepared transaction {operation_id} targets the current generation"
+                    ),
+                ));
+            }
+        }
+        let mut released = Vec::new();
+        let mut retained = Vec::new();
+        for transaction in blocking {
+            if operation_id.is_some_and(|requested| requested != transaction.operation_id) {
+                continue;
+            }
+            if operation_id.is_none()
+                && now.signed_duration_since(transaction.prepared_at)
+                    < PREPARED_TRANSACTION_RELEASE_GRACE
+            {
+                retained.push(PreparedTransactionReleaseEntry {
+                    transaction,
+                    retained_because: Some("prepared_within_grace_period"),
+                });
+                continue;
+            }
+            let aborted = release_one_prepared_transaction_in_context(
+                context,
+                sessions_dir,
+                &generation_id,
+                &transaction,
+                reason,
+            )?;
+            let entry = PreparedTransactionReleaseEntry {
+                transaction,
+                retained_because: (!aborted).then_some("candidate_session_present"),
+            };
+            if aborted {
+                released.push(entry);
+            } else {
+                retained.push(entry);
+            }
+        }
+        Ok(PreparedTransactionReleaseOutcome {
+            // Never answer "nothing was fencing this owner" for a fence that
+            // was found and kept: `retained` is the caller's cue to read
+            // `retained_because` and decide, not a success.
+            status: match (released.is_empty(), retained.is_empty()) {
+                (false, _) => "released",
+                (true, false) => "retained",
+                (true, true) => "no_blocking_prepared_transaction",
+            },
+            owner_kind: owner.kind,
+            owner_number: owner.number,
+            generation_id: Some(generation_id),
+            released,
+            retained,
+        })
+    })
+}
+
+/// Abort one still-Prepared transaction while its candidate Session is proven
+/// absent under that Session's path lease. `Ok(false)` means the Session was
+/// there after all and the transaction was left alone.
+fn release_one_prepared_transaction_in_context(
+    context: &GenerationTransactionContext,
+    sessions_dir: &Path,
+    generation_id: &str,
+    transaction: &BlockingPreparedTransaction,
+    reason: &str,
+) -> io::Result<bool> {
+    gwt_agent::with_session_path_lease(sessions_dir, &transaction.candidate_session_id, |state| {
+        match state {
+            gwt_agent::SessionPathState::Present(_) => Ok(false),
+            gwt_agent::SessionPathState::Error(error) => Err(error),
+            gwt_agent::SessionPathState::Missing => {
+                let ledger =
+                    load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+                        io::Error::new(
+                            ErrorKind::NotFound,
+                            "owner generation ledger is not initialized",
+                        )
+                    })?;
+                if transaction.kind == "successor" {
+                    let Some(attempt) =
+                        latest_prepared_successors_for_generation(&ledger, generation_id)
+                            .into_iter()
+                            .find(|attempt| {
+                                attempt.request.operation_id == transaction.operation_id
+                            })
+                            .cloned()
+                    else {
+                        return Ok(false);
+                    };
+                    abort_successor_bound_to(
+                        context,
+                        &attempt.request,
+                        &attempt.worktree_binding_hash,
+                        reason,
+                    )?;
+                } else {
+                    let Some(attempt) =
+                        latest_prepared_takeovers_for_generation(&ledger, generation_id)
+                            .into_iter()
+                            .find(|attempt| {
+                                attempt.request.operation_id == transaction.operation_id
+                            })
+                            .cloned()
+                    else {
+                        return Ok(false);
+                    };
+                    abort_generation_takeover_bound_to(
+                        context,
+                        &attempt.request,
+                        &attempt.worktree_binding_hash,
+                        reason,
+                    )?;
+                }
+                Ok(true)
+            }
+        }
     })
 }
 
@@ -10129,6 +10507,15 @@ pub enum ExecutionCommand {
     /// Return the current session's terminal Blocked record to Active only
     /// after fresh, derived, post-block verification evidence exists.
     Reopen {
+        reason: String,
+    },
+    /// Issue #4161: abort the Prepared successors/takeovers that fence an
+    /// owner's current generation and refuse every launch. Owner-addressed
+    /// like [`ExecutionCommand::OwnerStatus`], because the operator releasing
+    /// the fence is never the Session that left it behind.
+    ReleasePrepared {
+        owner: ExecutionOwnerKey,
+        operation_id: Option<String>,
         reason: String,
     },
 }
@@ -12981,6 +13368,44 @@ fn blocked_build_abort_guidance(record: &ExecutionControlRecord) -> String {
     )
 }
 
+/// Issue #4161: release the Prepared transactions that fence an owner's
+/// current generation.
+///
+/// Owner-addressed and deliberately not bound to the caller's own execution
+/// record: the Session that left the fence behind is gone, and the operator
+/// clearing it — a PM agent that cannot touch the GUI included — is working
+/// from somewhere else in the same repository.
+fn run_release_prepared(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: Option<&str>,
+    reason: &str,
+    now: DateTime<Utc>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let outcome = match release_blocking_prepared_transactions(
+        worktree,
+        owner,
+        &gwt_core::paths::gwt_sessions_dir(),
+        operation_id,
+        reason,
+        now,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            out.push_str(&format!("execution: release_prepared refused — {error}\n"));
+            return Ok(2);
+        }
+    };
+    out.push_str(&serde_json::to_string_pretty(&outcome).map_err(|error| {
+        SpecOpsError::from(ApiError::Unexpected(format!(
+            "failed to serialize prepared transaction release: {error}"
+        )))
+    })?);
+    out.push('\n');
+    Ok(0)
+}
+
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
 /// settlement binds to the session that owns the record.
 pub(super) fn run<E: CliEnv>(
@@ -12999,6 +13424,21 @@ pub(super) fn run<E: CliEnv>(
         })?);
         out.push('\n');
         return Ok(0);
+    }
+    if let ExecutionCommand::ReleasePrepared {
+        owner,
+        operation_id,
+        reason,
+    } = &command
+    {
+        return run_release_prepared(
+            &worktree,
+            *owner,
+            operation_id.as_deref(),
+            reason,
+            Utc::now(),
+            out,
+        );
     }
     if matches!(&command, ExecutionCommand::Status) {
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
@@ -13190,6 +13630,7 @@ pub(super) fn run<E: CliEnv>(
     let result = match command {
         ExecutionCommand::Status
         | ExecutionCommand::OwnerStatus { .. }
+        | ExecutionCommand::ReleasePrepared { .. }
         | ExecutionCommand::Adopt { .. }
         | ExecutionCommand::Repair { .. }
         | ExecutionCommand::Continue { .. }
@@ -15120,6 +15561,179 @@ mod tests {
             assert_eq!(prepared.predecessor_status, status);
             assert_eq!(prepared.request.source, source);
         }
+    }
+
+    /// Issue #4161: the attempt logs are append-only, so aborting a Prepared
+    /// successor appends an Aborted event and leaves the original Prepared
+    /// event in place. A guard that scans raw events instead of the latest
+    /// event per operation therefore fences the generation forever: every
+    /// later launch is refused, the Issue Monitor records the same failure on
+    /// every scan, and the owner can only be worked on under a new number.
+    #[test]
+    fn aborted_successor_does_not_fence_a_completed_generation_forever() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "completed-fence-predecessor";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        assert!(matches!(
+            settle(dir.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor = ExactManualLaunchPredecessor {
+            sessions_dir: &sessions_dir,
+            session: None,
+            runtime: None,
+            binding: &binding,
+            status: SuccessorPredecessorStatus::Completed,
+            terminal_reason: "unused for an already-terminal predecessor",
+        };
+
+        let first = successor_request(
+            "completed-fence-first",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_exact_manual_launch_successor(dir.path(), owner, &first, predecessor)
+            .expect("the first launch prepares its successor");
+        abort_successor(
+            dir.path(),
+            owner,
+            &first,
+            "Host exited before activating the fresh launch successor",
+        )
+        .expect("the first launch aborts its Prepared successor");
+
+        let second = successor_request(
+            "completed-fence-second",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        let prepared =
+            prepare_exact_manual_launch_successor(dir.path(), owner, &second, predecessor)
+                .expect("an aborted successor must not fence the current generation");
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
+        assert_eq!(prepared.request.operation_id, second.operation_id);
+    }
+
+    /// Issue #4161 AC-3 / AC-4: a launch that died between preparing its
+    /// successor and settling it leaves a Prepared attempt whose candidate
+    /// Session never existed. Nothing retires it, so the owner refuses every
+    /// later launch. The diagnosis has to name the release route, and the
+    /// release has to be reachable without the GUI.
+    #[test]
+    fn leaked_prepared_successor_is_reported_and_released_by_owner_operation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "leaked-prepared-predecessor";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        assert!(matches!(
+            settle(dir.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor = ExactManualLaunchPredecessor {
+            sessions_dir: &sessions_dir,
+            session: None,
+            runtime: None,
+            binding: &binding,
+            status: SuccessorPredecessorStatus::Completed,
+            terminal_reason: "unused for an already-terminal predecessor",
+        };
+        let leaked = successor_request(
+            "leaked-prepared-launch",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_exact_manual_launch_successor(dir.path(), owner, &leaked, predecessor)
+            .expect("the dead launch prepared its successor");
+
+        let fenced = diagnose_owner(dir.path(), owner);
+        assert_eq!(fenced.recommended_recovery, "execution.release_prepared");
+        assert_eq!(fenced.blocking_prepared_transactions.len(), 1);
+        let blocking = &fenced.blocking_prepared_transactions[0];
+        assert_eq!(blocking.kind, "successor");
+        assert_eq!(blocking.operation_id, leaked.operation_id);
+        assert_eq!(blocking.candidate_session_state, "missing");
+
+        let now = Utc::now();
+        let held = release_blocking_prepared_transactions(
+            dir.path(),
+            owner,
+            &sessions_dir,
+            None,
+            "operator release without naming the operation",
+            now,
+        )
+        .expect("a blanket release reports what it kept");
+        assert_eq!(held.status, "retained");
+        assert_eq!(
+            held.retained
+                .first()
+                .and_then(|entry| entry.retained_because),
+            Some("prepared_within_grace_period"),
+            "a launch may still be between preparing its successor and persisting its Session"
+        );
+
+        let released = release_blocking_prepared_transactions(
+            dir.path(),
+            owner,
+            &sessions_dir,
+            Some(&leaked.operation_id),
+            "the launch that prepared this successor is gone",
+            now,
+        )
+        .expect("naming the operation releases it now");
+        assert_eq!(released.status, "released");
+        assert_eq!(released.released.len(), 1);
+        assert!(released.retained.is_empty());
+
+        assert!(diagnose_owner(dir.path(), owner)
+            .blocking_prepared_transactions
+            .is_empty());
+        let successor = successor_request(
+            "leaked-prepared-relaunch",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_exact_manual_launch_successor(dir.path(), owner, &successor, predecessor)
+            .expect("the launch the diagnosis recommends must be accepted after the release");
     }
 
     #[test]

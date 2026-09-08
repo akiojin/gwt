@@ -700,6 +700,14 @@ fn run_monitor_launch_now<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Issue #4161 AC-5: same fence as `issue.monitor.requeue`. Promoting a row
+    // whose every launch is refused only moves the same failure to the head of
+    // the queue.
+    if let Some(refusal) = monitor_prepared_generation_fence_refusal(&project_root, number) {
+        out.push_str(&refusal.to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
@@ -1355,6 +1363,16 @@ fn run_monitor_requeue<E: CliEnv>(
     // foreign claim outlives this operation, and answering `requeued` while it
     // is live is the false `queued` the PM read for 29 minutes.
     let blocked_by_claim = monitor_projection_blocked_by_claim(&project_root, number);
+    // Issue #4161 AC-5: a Prepared successor/takeover fences the owner's
+    // execution generation and refuses every launch, and nothing clears it on
+    // its own. Releasing the failure hold here would answer `requeued` and let
+    // the next scan fail with the same message forever, so refuse now and name
+    // the operation that actually clears the fence.
+    if let Some(refusal) = monitor_prepared_generation_fence_refusal(&project_root, number) {
+        out.push_str(&refusal.to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, (outcome, completion_hold_cleared)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -1481,6 +1499,46 @@ fn run_monitor_requeue<E: CliEnv>(
     // The release itself is committed even when the follow-up scan authority is
     // unavailable; scan delivery is reported truthfully in the JSON fields.
     Ok(0)
+}
+
+/// Issue #4161 AC-5: the refusal an operation that puts an issue back in the
+/// launch queue owes its caller while a Prepared transaction fences the
+/// owner's execution generation.
+///
+/// Only a fence that can no longer clear itself refuses: a launch that is
+/// materializing right now holds a Prepared transaction too, and the scan it
+/// is already running is exactly what the caller wants. A stale fence, by
+/// contrast, refuses every launch forever, so answering "queued" is a lie the
+/// caller can only discover one scan later. `None` means nothing durable
+/// fences the owner and the caller may proceed; an unreadable ledger also
+/// answers `None`, because a diagnosis that cannot be made is not evidence
+/// that the launch will fail.
+fn monitor_prepared_generation_fence_refusal(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Option<serde_json::Value> {
+    let now = chrono::Utc::now();
+    let fence: Vec<_> = crate::cli::execution_state::blocking_prepared_transactions_for_project(
+        project_root,
+        number,
+    )
+    .ok()?
+    .into_iter()
+    .filter(|transaction| transaction.is_stale_at(now))
+    .collect();
+    if fence.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "number": number,
+        "status": "refused",
+        "refusal": "prepared_generation_fence",
+        "detail": format!(
+            "{} Prepared execution transaction(s) fence issue #{number}'s generation and refuse every launch; clear them with the execution.release_prepared JSON operation, then requeue",
+            fence.len()
+        ),
+        "blocking_prepared_transactions": fence,
+    }))
 }
 
 /// Issue #4077 AC-3: the claim a `BlockedByClaim` row is waiting on.
@@ -6223,6 +6281,136 @@ mod tests {
         .expect("requeue runs");
         assert_eq!(code, 1);
         assert!(out.contains("not_held"), "{out}");
+    }
+
+    /// Issue #4161 AC-5: a Prepared execution transaction refuses every launch
+    /// and never expires, so releasing the failure hold would answer
+    /// `requeued` and let the next scan record the identical failure. The
+    /// operation has to refuse now and name the release route instead.
+    #[test]
+    fn monitor_requeue_refuses_while_a_prepared_transaction_fences_the_generation() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        crate::cli::execution_state::save(
+            &repo,
+            &crate::cli::execution_state::ExecutionControlRecord {
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                primary_session_id: "fenced-holder".to_string(),
+                entrypoint: "$gwt-execute".to_string(),
+                bundled_required_owners: Vec::new(),
+                status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                blocked_reason: None,
+                missing_verification: None,
+                launched_at: chrono::Utc::now(),
+                settled_at: None,
+                completion_evidence: None,
+                transfers: Vec::new(),
+                recoveries: Vec::new(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save execution record");
+        crate::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize the owner ledger");
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &repo,
+            owner,
+            &crate::cli::execution_state::SuccessorRequest {
+                operation_id: "fence-operation".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "fence-binding".to_string(),
+                initial_session_id: "fence-candidate".to_string(),
+                entrypoint: "continue-work".to_string(),
+                // Old enough that the launch which prepared it has had every
+                // chance to activate or abort; its candidate Session never
+                // materialized, so nothing will clear this on its own.
+                requested_at: chrono::Utc::now() - chrono::Duration::hours(2),
+            },
+        )
+        .expect("leave a Prepared transaction behind");
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "manual successor refuses while a Prepared successor or takeover targets the current generation".to_string(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+        assert_eq!(code, 1, "{out}");
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("refusal is JSON");
+        assert_eq!(response["status"], "refused");
+        assert_eq!(response["refusal"], "prepared_generation_fence");
+        assert_eq!(
+            response["blocking_prepared_transactions"][0]["operation_id"],
+            "fence-operation"
+        );
+        assert!(
+            response["detail"]
+                .as_str()
+                .expect("detail text")
+                .contains("execution.release_prepared"),
+            "{out}"
+        );
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused recovery must be zero-mutation"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: Some(repo),
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now runs");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("prepared_generation_fence"), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "promoting a fenced row must not reorder the queue either"
+        );
     }
 
     #[test]

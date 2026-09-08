@@ -3730,6 +3730,14 @@ pub struct AutonomousIssueRecord {
     /// the refusal lasts (same-PR review window alive, or `max_active` full).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_dispatch_hold: Option<AutonomousReviewDispatchHold>,
+    /// Issue #4161 AC-6: what the previous launch attempt failed with.
+    ///
+    /// The inbox row's `error_message` is cleared the moment the retry
+    /// launches, so it cannot answer whether the ladder is making progress.
+    /// Kept beside `attempts` because it qualifies them: attempts spent on one
+    /// unchanging refusal are attempts that proved the refusal deterministic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_message: Option<String>,
 }
 
 /// Issue #3844: what a launched agent declared it is waiting for.
@@ -3996,6 +4004,7 @@ impl AutonomousIssueRecord {
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         }
     }
 }
@@ -6156,6 +6165,23 @@ impl IssueMonitorState {
         record.attempts
     }
 
+    /// Issue #4161 AC-6: whether an autonomous launch failure has spent its
+    /// attempts and says exactly what the previous one said.
+    ///
+    /// The previous message is read from the autonomous record, the only place
+    /// that survives the relaunch which clears the inbox row. An unchanging
+    /// message after the attempt cap means the refusal is deterministic — a
+    /// fenced execution generation, a missing profile — and no later scan can
+    /// resolve it on its own.
+    fn autonomous_launch_failure_is_unchanging(&self, issue_number: u64, message: &str) -> bool {
+        if self.attempt_count(issue_number) < self.autonomous_tuning.max_attempts {
+            return false;
+        }
+        self.autonomous_record(issue_number)
+            .and_then(|record| record.last_failure_message.as_deref())
+            == Some(message)
+    }
+
     /// SPEC #3200 T-022: set the lifecycle phase of an issue's current attempt.
     pub fn set_autonomous_phase(&mut self, issue_number: u64, phase: AutonomousPhase) {
         self.autonomous_record_mut(issue_number).phase = phase;
@@ -6228,6 +6254,10 @@ impl IssueMonitorState {
         // wait out a reset that no longer gates anything.
         record.retry_hold_reason = None;
         record.retry_hold_provider = None;
+        // Issue #4161 AC-6: the inbox row's error is wiped the moment the
+        // retry launches, so the ladder's own record is the only place that
+        // can say whether the next failure is new information.
+        record.last_failure_message = Some(message.clone());
         if attempt >= max {
             self.request_autonomous_steering(
                 issue_number,
@@ -13455,6 +13485,27 @@ impl IssueMonitorState {
         // below is preserved for every non-autonomous issue.
         if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            // Issue #4161 AC-6: the retry ladder keeps retrying past its own
+            // attempt cap, so a launch that is refused deterministically —
+            // every attempt failing with the identical message — is retried on
+            // every scan forever and writes the same row into the error ledger
+            // each time. Once the attempts are spent and nothing about the
+            // failure has changed, no further scan can discover anything new:
+            // hand it to a human instead of looping. Deliberately scoped to
+            // launch failures, so the gate remediation paths that must never
+            // park (Issue #3944 AC-3) keep their ladder.
+            if self.autonomous_launch_failure_is_unchanging(issue_number, &message) {
+                let attempt = self.attempt_count(issue_number);
+                let max = self.autonomous_tuning.max_attempts;
+                self.escalate_to_needs_human(
+                    issue_number,
+                    NeedsHumanKind::UserChoiceRequired,
+                    format!(
+                        "autonomous launch attempts exhausted ({attempt}/{max}) with an unchanging failure: {message}"
+                    ),
+                );
+                return;
+            }
             self.record_autonomous_failure(issue_number, message, &now);
             return;
         }
@@ -14777,6 +14828,7 @@ mod tests {
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         };
         let disk = IssueMonitorPrefs {
             launch_profile: Some(profile.clone()),
@@ -14898,6 +14950,7 @@ mod tests {
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         };
         save_issue_monitor_prefs(
             &path,
@@ -14965,6 +15018,7 @@ mod tests {
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -15032,6 +15086,7 @@ mod tests {
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         };
         let older_disk = IssueMonitorPrefs {
             legacy_git_launch_failure_migration_version: 0,
@@ -15088,6 +15143,7 @@ mod tests {
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         };
         let mut stale = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
@@ -23738,6 +23794,80 @@ mod tests {
         assert!(
             monitor.retry_ready(42, "2026-06-29T01:00:00Z"),
             "relaunchable once the backoff window passes"
+        );
+    }
+
+    /// Issue #4161 AC-6: a launch that is refused deterministically — every
+    /// attempt returning the identical message — is retried on every scan
+    /// forever and writes the same row into the error ledger each time. Once
+    /// the attempts are spent and nothing about the failure has changed, the
+    /// row goes to a human instead of back into the ladder.
+    #[test]
+    fn unchanging_launch_failure_past_the_attempt_cap_needs_a_human() {
+        let fence = "manual successor refuses while a Prepared successor or takeover targets the current generation";
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.autonomous_tuning.max_attempts = 2;
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+
+        monitor.record_agent_issue_failed(42, fence);
+        assert_eq!(monitor.attempt_count(42), 1);
+        monitor.complete_active_launch(42, "tab-1::agent-1b");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_agent_issue_failed(42, fence);
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the ladder still owns the row while attempts remain"
+        );
+
+        monitor.complete_active_launch(42, "tab-1::agent-1c");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_agent_issue_failed(42, fence);
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman)
+        );
+        assert!(
+            !monitor.queue.contains(&42),
+            "an escalated row must not be retried by the next scan"
+        );
+        assert!(
+            monitor
+                .failed_issues
+                .get(&42)
+                .is_some_and(|reason| reason.contains("unchanging") && reason.contains(fence)),
+            "the hold names why no further scan can help: {:?}",
+            monitor.failed_issues.get(&42)
+        );
+    }
+
+    /// A failure that keeps changing is still the retry ladder's business: the
+    /// attempt cap alone is not a human decision (Issue #3944 AC-2).
+    #[test]
+    fn changing_launch_failure_past_the_attempt_cap_stays_in_the_ladder() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.autonomous_tuning.max_attempts = 2;
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+
+        monitor.record_agent_issue_failed(42, "profile probe failed");
+        monitor.complete_active_launch(42, "tab-1::agent-1b");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_agent_issue_failed(42, "worktree materialization failed");
+        monitor.complete_active_launch(42, "tab-1::agent-1c");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_agent_issue_failed(42, "provider returned 503");
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
         );
     }
 

@@ -776,6 +776,54 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.release_prepared" => {
+            // Issue #4161: owner-addressed like `execution.status`, because the
+            // Session that left the Prepared fence behind is gone and the
+            // operator clearing it is somewhere else in the same repository.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            let reason = required_string(params, "reason")?;
+            let operation_id = optional_string(params, "operation_id")?;
+            reject_unknown_params(
+                params,
+                &["issue", "spec", "reason", "operation_id"],
+                "execution.release_prepared",
+            )?;
+            let owner = match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared requires params.issue or params.spec"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared owner number must be greater than zero"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+                (None, Some(number)) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number,
+                },
+            };
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id,
+                    reason,
+                },
+            )
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -3265,6 +3313,61 @@ mod tests {
             ),
             CliParseError::InvalidJson(message)
                 if message.contains("only accepts params.operation_id")
+        ));
+        // Issue #4161: the release is owner-addressed, so the owner is
+        // required rather than inferred from the caller's own record.
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "the launch that prepared it is gone"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id: None,
+                    ..
+                }
+            ) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 4161,
+                }
+        ));
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"spec": 4161, "reason": "stale fence", "operation_id": "fresh-launch-7"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    operation_id: Some(operation_id),
+                    ..
+                }
+            ) if operation_id == "fresh-launch-7"
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"reason": "stale fence"})),
+            CliParseError::InvalidJson(message)
+                if message.contains("requires params.issue or params.spec")
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"issue": 4161})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "spec": 4161, "reason": "stale fence"})
+            ),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "stale fence", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("does not accept the parameter unexpected")
         ));
     }
 
