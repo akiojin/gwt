@@ -7150,6 +7150,12 @@ def _issue_status_v2(
     reason = "ready"
     healthy = True
     repair_required = False
+    # Issue #4132: distinguish a store that contradicts itself (only a rebuild
+    # can settle it) from one that is internally consistent and merely trails
+    # the Issue cache. Every `issue.create` / `issue.comment` moves the cache
+    # ahead of the built index, so treating that drift as corruption made the
+    # issues scope unsearchable within minutes of every rebuild.
+    source_drift = False
 
     if not exists or not count_ok:
         reason = "collection_missing"
@@ -7167,22 +7173,29 @@ def _issue_status_v2(
         if (
             indexed_document_count is not None
             and document_count != indexed_document_count
-        ) or (
+        ):
+            reason = "count_mismatch"
+            healthy = False
+            repair_required = True
+        elif (
             current_source_document_count is not None
             and document_count != current_source_document_count
         ):
             reason = "count_mismatch"
             healthy = False
             repair_required = True
+            source_drift = True
         elif current_fingerprint and indexed_fingerprint != current_fingerprint:
             reason = "source_cache_changed"
             healthy = False
             repair_required = True
+            source_drift = True
 
     status: Dict[str, Any] = {
         "exists": exists,
         "healthy": healthy,
         "repair_required": repair_required,
+        "source_drift": source_drift,
         "document_count": document_count,
         "reason": reason,
         "legacy_residue_detected": False,
@@ -7852,8 +7865,8 @@ def _classify_scope_for_search(
 
     - ``missing``: store was never built.
     - ``corrupt``: store exists but needs repair before it can be trusted.
-    - ``stale``: verified store is intact but its TTL expired — serve it and
-      queue a refresh.
+    - ``stale``: verified store is intact but its source moved on (TTL expiry
+      or Issue-cache drift) — serve it and queue a refresh.
     - ``fresh``: healthy and current.
     """
     if scope == "issues":
@@ -7864,6 +7877,13 @@ def _classify_scope_for_search(
             if health.get("ttl_remaining_seconds") == 0:
                 return "stale", health
             return "fresh", health
+        # Issue #4132: an index that still agrees with its own manifest and
+        # only trails the Issue cache is behind, not broken. Serving it keeps
+        # the gwt-search preflight usable while the queued refresh catches up;
+        # blocking it made every agent's duplicate check fail with
+        # INDEX_NOT_READY after the first `issue.create` following a rebuild.
+        if health.get("source_drift"):
+            return "stale", health
         return "corrupt", health
     health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
     if not health.get("exists"):
