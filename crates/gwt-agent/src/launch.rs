@@ -1817,8 +1817,12 @@ impl AgentLaunchBuilder {
             args.push("--yolo".to_string());
         }
 
-        args.push("--enable".to_string());
-        args.push("goals".to_string());
+        // No `--enable goals`: codex-cli removed the flag and rejects unknown
+        // `--enable` values before it reads the config, so emitting it aborts
+        // the launch with `Unknown feature flag: goals` (Issue #4127). Gating on
+        // `parsed_version` is not an option either — `codex@latest` leaves the
+        // version undetected (Issue #3481), which is exactly the launch path
+        // that must keep working.
 
         // Web search args
         if let Some(ref ver) = parsed_version {
@@ -2711,18 +2715,41 @@ mod tests {
         );
     }
 
+    /// codex-cli 0.116.0 removed the `goals` feature flag and rejects unknown
+    /// `--enable` values before it even reads the config, so emitting it kills
+    /// the launch outright (Issue #4127). Version discovery cannot be trusted to
+    /// gate it either — `codex@latest` leaves `version` empty (Issue #3481) —
+    /// so the flag must never be emitted, detected version or not.
     #[test]
-    fn build_codex_enables_goal_feature_by_default() {
-        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+    fn build_codex_never_enables_goals_feature_flag() {
+        for version in ["", "0.89.0", "0.115.0", "0.116.0"] {
+            let mut builder = AgentLaunchBuilder::new(AgentId::Codex);
+            if !version.is_empty() {
+                builder = builder.version(version);
+            }
+            let config = builder.build();
 
-        assert!(config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+            assert!(
+                !config
+                    .args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--enable" && pair[1] == "goals"),
+                "Codex launch must not enable the removed `goals` feature flag (version {version:?}): {:?}",
+                config.args
+            );
+            assert!(
+                !config
+                    .args
+                    .iter()
+                    .any(|arg| normalize_config_override_for_test(arg) == "features.goals=true"),
+                "Codex launch must not enable `goals` through a config override (version {version:?}): {:?}",
+                config.args
+            );
+        }
     }
 
     #[test]
-    fn build_codex_resume_and_continue_keep_goal_feature_enabled() {
+    fn build_codex_resume_and_continue_do_not_enable_goals_feature_flag() {
         let resume = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
             .resume_session_id("sess-123")
@@ -2731,7 +2758,7 @@ mod tests {
             .session_mode(SessionMode::Continue)
             .build();
 
-        assert!(resume
+        assert!(!resume
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
@@ -2739,7 +2766,7 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "resume" && pair[1] == "sess-123"));
-        assert!(continue_last
+        assert!(!continue_last
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
@@ -2747,6 +2774,10 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+    }
+
+    fn normalize_config_override_for_test(value: &str) -> String {
+        value.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
     #[test]

@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    CoordinatorError, HeavyLease, IndexCoordinator, JobAdmission, JobOutcome, JobPriority,
-    TargetJobGuard,
+    CoordinatorError, HeavyHolderKind, HeavyLease, HeavyLeaseStatus, IndexCoordinator,
+    JobAdmission, JobOutcome, JobPriority, TargetJobGuard, VERIFICATION_RESERVATION_TTL,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -381,28 +381,107 @@ fn describe_foreign(list: &[ForeignHeavyProcess]) -> String {
     parts.join(", ")
 }
 
-fn describe_holder(coordinator: &IndexCoordinator) -> String {
-    match coordinator.heavy_lease_status() {
-        Ok(status) if status.held => format!(
-            "verification lease held by {} (pid {}, {}s left)",
-            status.target.as_deref().unwrap_or("unknown target"),
-            status
-                .owner
-                .as_ref()
-                .map(|owner| owner.pid.to_string())
-                .unwrap_or_else(|| "?".to_string()),
-            status.remaining_ms.unwrap_or(0) / 1000
-        ),
-        Ok(_) => "verification lease was contended".to_string(),
-        Err(err) => format!("verification lease status unavailable: {err}"),
+/// What the current holder is, and when it is worth coming back
+/// (Issue #4140 AC-3, Issue #4086 AC-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HolderNotice {
+    detail: String,
+    /// How long until the holder hands the lease back. `None` when the holder
+    /// publishes neither a TTL nor batch progress, so no honest estimate
+    /// exists.
+    retry_after: Option<Duration>,
+}
+
+/// Render one lease status into a refusal detail and an ETA.
+///
+/// The detail names the holder's *kind* (Issue #4086 AC-4), not just its
+/// target: `repo--issues` only reads as "a background index job is in front
+/// of me" to someone who already knows the target naming scheme, and that
+/// was the difference between waiting the full 45 minutes and rerunning.
+///
+/// The ETA prefers the holder's own estimate — remaining batches × batch
+/// duration for an index job — over the raw TTL remainder, because a
+/// 10-minute cap says nothing about a job that has two batches left.
+/// `remaining_ms` is `None` for a lease taken without a TTL, and reporting
+/// that as `0s left` told agents the host was about to free up when the
+/// holder was in fact unbounded — the background issue index job was exactly
+/// that holder.
+fn holder_notice(status: &HeavyLeaseStatus) -> HolderNotice {
+    if !status.held {
+        return HolderNotice {
+            detail: "verification lease was contended".to_string(),
+            retry_after: None,
+        };
+    }
+    let kind = status
+        .holder_kind
+        .unwrap_or(HeavyHolderKind::Other)
+        .as_str();
+    let target = status.target.as_deref().unwrap_or("unknown target");
+    let pid = status
+        .owner
+        .as_ref()
+        .map(|owner| owner.pid.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let progress = match (status.remaining_batches, status.estimated_remaining_ms) {
+        (Some(batches), Some(estimate)) => {
+            format!(", {batches} batches ≈ {}s", estimate / 1000)
+        }
+        _ => String::new(),
+    };
+    let retry_after = status
+        .estimated_remaining_ms
+        .or(status.remaining_ms)
+        .map(Duration::from_millis);
+    match status.remaining_ms {
+        Some(remaining_ms) => HolderNotice {
+            detail: format!(
+                "verification lease held by {kind} {target} (pid {pid}, {}s left{progress})",
+                remaining_ms / 1000
+            ),
+            retry_after,
+        },
+        None => HolderNotice {
+            detail: format!(
+                "verification lease held by {kind} {target} (pid {pid}, no TTL — it releases \
+                 only when its job finishes{progress})"
+            ),
+            retry_after,
+        },
     }
 }
 
-fn deferred(started: Instant, max_wait: Duration, detail: &str) -> SpecOpsError {
+fn describe_holder(coordinator: &IndexCoordinator) -> HolderNotice {
+    match coordinator.heavy_lease_status() {
+        Ok(status) => holder_notice(&status),
+        Err(err) => HolderNotice {
+            detail: format!("verification lease status unavailable: {err}"),
+            retry_after: None,
+        },
+    }
+}
+
+/// A refusal must always leave the caller with a next step: an ETA when the
+/// holder published one, and otherwise the trigger to watch for plus the
+/// queue entry point that needs no execution authority (Issue #4140 AC-3).
+fn deferred(
+    started: Instant,
+    max_wait: Duration,
+    detail: &str,
+    retry_after: Option<Duration>,
+) -> SpecOpsError {
+    let next = match retry_after {
+        Some(retry_after) => format!(
+            "rerun `verify.run` in about {}s, when the current holder's lease lapses",
+            retry_after.as_secs()
+        ),
+        None => "rerun `verify.run` once the host quiets down, or claim the next turn with \
+                 `verify.lease.acquire`"
+            .to_string(),
+    };
     unexpected(format!(
-        "verify: deferred — host busy for {}s (budget {}s): {detail}; rerun `verify.run` once \
-         the host quiets down or `verify.lease.acquire` is granted — the wait counts as one \
-         gwt-verify lease attempt",
+        "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — the wait counts \
+         as one gwt-verify lease attempt",
         started.elapsed().as_secs(),
         max_wait.as_secs()
     ))
@@ -494,6 +573,7 @@ pub(crate) fn admit<E: CliEnv>(
                         started,
                         max_wait,
                         "another verification claimant in this worktree owns the target job",
+                        None,
                     ));
                 }
                 notice.maybe_post(
@@ -516,9 +596,22 @@ pub(crate) fn admit<E: CliEnv>(
                     let _ = guard.complete(JobOutcome::Failed {
                         message: "host admission deferred".to_string(),
                     });
-                    return Err(deferred(started, max_wait, &holder));
+                    // Issue #4086 AC-1: the rerun must be admitted before any
+                    // background index job that queues in the meantime.
+                    let _ = coordinator.reserve_heavy(
+                        &key,
+                        JobPriority::ManualRebuild,
+                        VERIFICATION_RESERVATION_TTL,
+                        Some("verify.run deferred"),
+                    );
+                    return Err(deferred(
+                        started,
+                        max_wait,
+                        &holder.detail,
+                        holder.retry_after,
+                    ));
                 }
-                notice.maybe_post(env, started, max_wait, &holder);
+                notice.maybe_post(env, started, max_wait, &holder.detail);
             }
             Err(err) => {
                 let _ = guard.complete(JobOutcome::Failed {
@@ -554,7 +647,7 @@ pub(crate) fn admit<E: CliEnv>(
             held.settle(JobOutcome::Failed {
                 message: "host admission deferred".to_string(),
             });
-            return Err(deferred(started, max_wait, &detail));
+            return Err(deferred(started, max_wait, &detail, None));
         }
         notice.maybe_post(env, started, max_wait, &detail);
         sleep_until(deadline);
@@ -709,6 +802,74 @@ mod tests {
         );
         let err = resolve_max_wait(Some(MAX_WAIT_SECS + 1)).unwrap_err();
         assert!(err.to_string().contains("max_wait_secs"), "{err}");
+    }
+
+    /// Issue #4140 AC-3: a holder with a TTL must publish a usable ETA, and a
+    /// holder without one must say so instead of reading as "0s left" — the
+    /// index job's untimed lease is exactly the case that misled agents into
+    /// waiting indefinitely.
+    #[test]
+    fn holder_notice_reports_an_eta_only_when_the_holder_has_a_ttl() {
+        let timed = holder_notice(&HeavyLeaseStatus {
+            held: true,
+            target: Some("repo--issues".to_string()),
+            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                pid: 32420,
+                start_id: "start".to_string(),
+            }),
+            remaining_ms: Some(320_000),
+            ..HeavyLeaseStatus::default()
+        });
+        assert_eq!(timed.retry_after, Some(Duration::from_secs(320)));
+        assert!(timed.detail.contains("repo--issues"), "{}", timed.detail);
+        assert!(timed.detail.contains("320s left"), "{}", timed.detail);
+
+        let untimed = holder_notice(&HeavyLeaseStatus {
+            held: true,
+            target: Some("repo--issues".to_string()),
+            remaining_ms: None,
+            ..HeavyLeaseStatus::default()
+        });
+        assert_eq!(untimed.retry_after, None);
+        assert!(
+            !untimed.detail.contains("0s left"),
+            "an untimed lease must not claim it is about to lapse: {}",
+            untimed.detail
+        );
+        assert!(untimed.detail.contains("no TTL"), "{}", untimed.detail);
+
+        let free = holder_notice(&HeavyLeaseStatus::default());
+        assert_eq!(free.retry_after, None);
+        assert!(free.detail.contains("contended"), "{}", free.detail);
+    }
+
+    /// Issue #4140 AC-3: every refusal carries a concrete next step, so an
+    /// agent never has to guess whether waiting again is pointless.
+    #[test]
+    fn deferred_always_names_a_retry_trigger() {
+        let with_eta = deferred(
+            Instant::now(),
+            Duration::from_secs(300),
+            "verification lease held by repo--issues",
+            Some(Duration::from_secs(320)),
+        )
+        .to_string();
+        assert!(with_eta.contains("deferred"), "{with_eta}");
+        assert!(with_eta.contains("about 320s"), "{with_eta}");
+        assert!(with_eta.contains("verify.run"), "{with_eta}");
+
+        let without_eta = deferred(
+            Instant::now(),
+            Duration::from_secs(300),
+            "heavy processes of other worktrees still running",
+            None,
+        )
+        .to_string();
+        assert!(without_eta.contains("verify.run"), "{without_eta}");
+        assert!(
+            without_eta.contains("verify.lease.acquire"),
+            "a refusal with no ETA must still name the queue entry point: {without_eta}"
+        );
     }
 
     /// How long a released lease may still read as held before the release is
@@ -1030,6 +1191,18 @@ mod tests {
         assert!(
             message.contains(&other.file_stem()),
             "the refusal must name the holder: {message}"
+        );
+        // Issue #4086: a deferred run leaves its turn reserved so the rerun
+        // is admitted before any background index job.
+        let key = verification_lease::verification_key(&mut env).unwrap();
+        assert!(
+            lease_root.coordinator.heavy_reservation_path(&key).exists(),
+            "a deferred admission must reserve the next turn — {}",
+            lease_root.describe()
+        );
+        assert_eq!(
+            lease_root.coordinator.heavy_lease_status().unwrap().pending,
+            1
         );
     }
 

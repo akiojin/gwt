@@ -111,6 +111,10 @@ impl LaunchWizardState {
             opencode_needs_setup: show_opencode_options
                 && self.agent_needs_configuration("opencode"),
             agent_setup: self.agent_setup_view(show_manual_setup),
+            // Issue #4079 AC-2: only the app runtime knows the saved candidate
+            // pool, so it fills this in when the wizard is the Issue Monitor
+            // Agent Settings form.
+            issue_monitor_pool_impact: None,
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_choices.providers.clone(),
             hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
