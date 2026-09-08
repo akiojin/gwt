@@ -157,7 +157,9 @@ pub enum IssueCommand {
     /// and optionally the usage threshold.
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
-        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
+        /// saved candidate's value instead of resetting to `Default`.
+        profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
@@ -213,6 +215,13 @@ pub enum IssueCommand {
     /// Issue #3883 AC-6: put the still-running agent windows back under slot
     /// accounting. Additive only — no pane is closed and no slot is taken
     /// away — so it is safe to run against a project mid-flight.
+    /// Issue #4084 AC-5: release idle launched windows on the operator's
+    /// authority, or (with `dry_run`) report only what would be released.
+    MonitorReleaseIdle {
+        project_root: Option<std::path::PathBuf>,
+        number: Option<u64>,
+        dry_run: bool,
+    },
     MonitorReconcile {
         project_root: Option<std::path::PathBuf>,
     },
@@ -256,11 +265,15 @@ pub enum PrCommand {
     List {
         stale_after_hours: Option<i64>,
         escalate_after_cycles: Option<u32>,
-        /// Issue #3891: bypass the TTL cache and the budget throttle.
+        /// Issue #3891: bypass the TTL cache. SPEC #4093 FR-008: the budget
+        /// throttle still applies; see `force_reason`.
         refresh: bool,
         /// Issue #3891 AC-2: heavy fields to hydrate; `None` keeps the crate
         /// default (checks, no body).
         include: Option<gwt_git::PrInventoryInclude>,
+        /// SPEC #4093 FR-008: one-step override of the reserve / burst
+        /// throttle, with the reason. Never bypasses an open refusal window.
+        force_reason: Option<String>,
     },
     Create {
         base: String,

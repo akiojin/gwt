@@ -1,10 +1,13 @@
 //! Codex hook trust-state registration for gwt-managed project hooks.
 
 use std::{
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
+use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -20,6 +23,12 @@ const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
 /// "this hook is safe" — trust still requires an exact match against a command
 /// gwt emits.
 const GWT_HOOK_TRANSPORT_MARKERS: &[&str] = &[" hook event ", " hook gwt-self-improvement-stop"];
+/// How long a mutation waits for another writer to finish before giving up.
+/// Sized for a burst of concurrent launches against a large shared config, not
+/// for a wedged holder: past it, failing with the lock path beats hanging the
+/// launch forever.
+const CODEX_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MANAGED_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
@@ -303,28 +312,34 @@ pub fn register_codex_managed_hook_trust_for_mode(
         });
     }
 
-    let mut root = read_codex_config(config_path)?;
-    let root_table = root.as_table_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Codex config root must be a TOML table",
-        )
+    // Issue #4071: read, mutate and publish as one critical section. A
+    // concurrent launch that reads between our read and our write would
+    // otherwise write back a copy without our entries.
+    with_codex_config_lock(config_path, || {
+        let mut root = read_codex_config(config_path)?;
+        let root_table = root.as_table_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Codex config root must be a TOML table",
+            )
+        })?;
+        let hooks_table = ensure_child_table(root_table, "hooks")?;
+        let state_table = ensure_child_table(hooks_table, "state")?;
+
+        for entry in &trusted_entries {
+            let hook_state = ensure_child_table(state_table, &entry.key)?;
+            enable_hook_unless_explicitly_disabled(hook_state);
+            hook_state.insert(
+                "trusted_hash".to_string(),
+                toml::Value::String(entry.trusted_hash.clone()),
+            );
+        }
+
+        let rendered = toml::to_string_pretty(&root).map_err(|err| {
+            io::Error::other(format!("Codex config TOML serialize failed: {err}"))
+        })?;
+        write_text_atomically(config_path, &rendered)
     })?;
-    let hooks_table = ensure_child_table(root_table, "hooks")?;
-    let state_table = ensure_child_table(hooks_table, "state")?;
-
-    for entry in &trusted_entries {
-        let hook_state = ensure_child_table(state_table, &entry.key)?;
-        enable_hook_unless_explicitly_disabled(hook_state);
-        hook_state.insert(
-            "trusted_hash".to_string(),
-            toml::Value::String(entry.trusted_hash.clone()),
-        );
-    }
-
-    let rendered = toml::to_string_pretty(&root)
-        .map_err(|err| io::Error::other(format!("Codex config TOML serialize failed: {err}")))?;
-    write_text_atomically(config_path, &rendered)?;
 
     Ok(CodexHookTrustReport {
         config_path: config_path.to_path_buf(),
@@ -344,7 +359,70 @@ fn command_hook_trusted_hash_for_test(
     command_hook_trusted_hash(event_name_snake, matcher, command)
 }
 
-fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
+/// Run one read-modify-write of the Codex config under a cross-process lock.
+///
+/// Issue #4071: `$CODEX_HOME/config.toml` is a single file shared by every
+/// Codex agent on the machine — every gwt launch across every project, plus
+/// manual `codex` sessions gwt does not manage. Registration reads the whole
+/// file, mutates it, and writes it back, so two concurrent launches that both
+/// read the pre-write bytes each serialize their own copy and the later writer
+/// silently drops the earlier one's entries. That is how a burst of launches
+/// left freshly registered worktrees untrusted (Codex then stops on `Hooks
+/// need review`) and how 6,444 hand-added `enabled = true` rows disappeared on
+/// the next launch.
+///
+/// The lock lives on a sibling `<config>.gwt-lock` file rather than on the
+/// config itself, because the write publishes through `rename` and would
+/// otherwise replace the very inode the lock is held on. It is advisory, so it
+/// only serializes gwt against gwt; the atomic rename keeps every other reader
+/// from ever seeing a half-written file.
+pub(crate) fn with_codex_config_lock<T>(
+    config_path: &Path,
+    body: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_path = codex_config_lock_path(config_path);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    let deadline = Instant::now() + CODEX_CONFIG_LOCK_TIMEOUT;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out after {}s waiting for the Codex config lock {}: {error}",
+                        CODEX_CONFIG_LOCK_TIMEOUT.as_secs(),
+                        lock_path.display()
+                    ),
+                ));
+            }
+            Err(_) => std::thread::sleep(CODEX_CONFIG_LOCK_POLL_INTERVAL),
+        }
+    }
+
+    let result = body();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+fn codex_config_lock_path(config_path: &Path) -> PathBuf {
+    let mut name = config_path
+        .file_name()
+        .map_or_else(|| OsString::from("config.toml"), OsString::from);
+    name.push(".gwt-lock");
+    config_path.with_file_name(name)
+}
+
+pub(crate) fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
     if !path.exists() {
         return Ok(toml::Value::Table(toml::Table::new()));
     }
@@ -362,7 +440,7 @@ fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
     })
 }
 
-fn ensure_child_table<'a>(
+pub(crate) fn ensure_child_table<'a>(
     table: &'a mut toml::Table,
     key: &str,
 ) -> io::Result<&'a mut toml::Table> {
@@ -1692,5 +1770,222 @@ enabled = false
             register_codex_managed_hook_trust(dir.path(), &dir.path().join("codex-config.toml"))
                 .unwrap();
         assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+    }
+
+    /// A worktree whose managed hooks are already generated, ready to register
+    /// against a shared Codex config.
+    fn worktree_with_generated_hooks() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        dir
+    }
+
+    fn trust_state(config_path: &Path) -> toml::Table {
+        let parsed: toml::Value =
+            toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+        parsed["hooks"]["state"].as_table().unwrap().clone()
+    }
+
+    /// Issue #4071: `$CODEX_HOME/config.toml` is one file shared by every Codex
+    /// agent on the machine, and registration is a read-modify-write. Without
+    /// serialization two concurrent launches both read the pre-write file and
+    /// the later writer drops the earlier one's entries — the launch then fails
+    /// on `Hooks need review` for a worktree gwt had just registered.
+    #[test]
+    fn concurrent_registrations_keep_every_worktree_entry() {
+        const WORKTREES: usize = 8;
+
+        let shared = tempfile::tempdir().unwrap();
+        let config_path = shared.path().join("config.toml");
+        // A shared config is never empty in practice: other projects' trust
+        // state is what a lost update destroys.
+        fs::write(
+            &config_path,
+            r#"model = "gpt-6-astra"
+
+[hooks.state."/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:08adeab2"
+"#,
+        )
+        .unwrap();
+
+        let worktrees: Vec<_> = (0..WORKTREES)
+            .map(|_| worktree_with_generated_hooks())
+            .collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKTREES));
+
+        std::thread::scope(|scope| {
+            for worktree in &worktrees {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let config_path = config_path.clone();
+                let worktree = worktree.path().to_path_buf();
+                scope.spawn(move || {
+                    barrier.wait();
+                    register_codex_managed_hook_trust(&worktree, &config_path).unwrap();
+                });
+            }
+        });
+
+        let state = trust_state(&config_path);
+        for worktree in &worktrees {
+            let hooks_path =
+                dunce::canonicalize(worktree.path().join(".codex/hooks.json")).unwrap();
+            for event_name in [
+                "session_start",
+                "user_prompt_submit",
+                "pre_tool_use",
+                "post_tool_use",
+                "stop",
+            ] {
+                let key = format!("{}:{event_name}:0:0", hooks_path.display());
+                let entry = state.get(&key).unwrap_or_else(|| {
+                    panic!(
+                        "concurrent registration lost a trust entry: {key}\nstate keys: {:?}",
+                        state.keys().collect::<Vec<_>>()
+                    )
+                });
+                assert_eq!(
+                    entry.get("enabled").and_then(toml::Value::as_bool),
+                    Some(true),
+                    "concurrent registration must keep the entry enabled: {key}"
+                );
+            }
+        }
+        assert!(
+            state.contains_key("/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0"),
+            "another project's trust entry must survive concurrent registration"
+        );
+    }
+
+    /// Issue #4071: the same lost update, made deterministic. Another writer
+    /// holds the shared config across its own read-modify-write; a registration
+    /// that starts while it is held must publish on top of that writer's
+    /// result, not on the bytes it read before.
+    #[test]
+    fn registration_waits_for_another_writer_and_keeps_its_entry() {
+        const FOREIGN_KEY: &str = "/Workbench/160-Idina/.codex/hooks.json:stop:0:0";
+
+        let worktree = worktree_with_generated_hooks();
+        let config_path = worktree.path().join("codex-config.toml");
+        fs::write(&config_path, "model = \"gpt-6-astra\"\n").unwrap();
+
+        let holder_has_lock = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                with_codex_config_lock(&config_path, || {
+                    holder_has_lock.wait();
+                    // Long enough for an unserialized registration to read the
+                    // pre-write file and publish over this entry.
+                    std::thread::sleep(Duration::from_millis(300));
+                    let mut root = read_codex_config(&config_path)?;
+                    let root_table = root.as_table_mut().unwrap();
+                    let hooks_table = ensure_child_table(root_table, "hooks")?;
+                    let state_table = ensure_child_table(hooks_table, "state")?;
+                    let entry = ensure_child_table(state_table, FOREIGN_KEY)?;
+                    entry.insert("enabled".to_string(), toml::Value::Boolean(true));
+                    let rendered = toml::to_string_pretty(&root).unwrap();
+                    write_text_atomically(&config_path, &rendered)
+                })
+                .unwrap();
+            });
+
+            holder_has_lock.wait();
+            register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+        });
+
+        let state = trust_state(&config_path);
+        assert!(
+            state.contains_key(FOREIGN_KEY),
+            "the concurrent writer's entry was lost: {:?}",
+            state.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.len(),
+            6,
+            "both writers' entries must survive: {:?}",
+            state.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Issue #4071: the shared config also carries other projects' trust state,
+    /// manually added entries and top-level Codex settings. Registration is a
+    /// partial update — everything it does not own comes back unchanged.
+    #[test]
+    fn registration_preserves_other_projects_state_and_top_level_settings() {
+        let worktree = worktree_with_generated_hooks();
+        let config_path = worktree.path().join("codex-config.toml");
+        let before = r#"model = "gpt-6-astra"
+model_reasoning_effort = "medium"
+
+[features]
+web_search = true
+
+[hooks.state."/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:08adeab2"
+
+[hooks.state."/Workbench/event-magazine/work/issue-2/.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:legacy-without-enabled"
+
+[model_providers.gwt-anthropic]
+name = "Anthropic"
+base_url = "http://127.0.0.1:1234/v1"
+
+[projects."/Workbench/gwt/develop"]
+trust_level = "trusted"
+"#;
+        fs::write(&config_path, before).unwrap();
+        let before: toml::Value = toml::from_str(before).unwrap();
+
+        register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+
+        let after: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        for key in [
+            "model",
+            "model_reasoning_effort",
+            "model_providers",
+            "projects",
+            "features",
+        ] {
+            assert_eq!(
+                after.get(key),
+                before.get(key),
+                "registration must not disturb the shared config's `{key}`"
+            );
+        }
+        for foreign_key in [
+            "/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0",
+            "/Workbench/event-magazine/work/issue-2/.codex/hooks.json:stop:0:0",
+        ] {
+            assert_eq!(
+                after["hooks"]["state"].get(foreign_key),
+                before["hooks"]["state"].get(foreign_key),
+                "another project's trust entry must survive verbatim: {foreign_key}"
+            );
+        }
+    }
+
+    /// Issue #4071: a worktree is launched many times. The second registration
+    /// must add nothing and drop nothing — same entries, `enabled` intact.
+    #[test]
+    fn repeated_registration_is_idempotent() {
+        let worktree = worktree_with_generated_hooks();
+        let config_path = worktree.path().join("codex-config.toml");
+
+        register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+        let first = fs::read_to_string(&config_path).unwrap();
+        let first_state = trust_state(&config_path);
+
+        register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            first,
+            "a repeated registration must not change the shared config"
+        );
+        assert_eq!(first_state.len(), 5);
+        assert_eq!(trust_state(&config_path), first_state);
     }
 }
