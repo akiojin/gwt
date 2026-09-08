@@ -27,12 +27,28 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// lines attribute it: the CI step runs with `--nocapture` so a run says
 /// whether the wait is startup or shutdown, and whether shutdown ended on
 /// SIGTERM or on the hard kill after `SHUTDOWN_TIMEOUT`.
+///
+/// The first instrumented run (PR #4144, run 34190754660) answered it:
+/// shutdown costs 0.03s, and startup costs 25.10s on eight of the nine
+/// spawns — a number that does not vary, so it is a timer rather than work.
+/// See `A11Y_BUS_OPT_OUT` for what the timer is.
 fn report_phase(phase: &str, detail: &str, elapsed: Duration) {
     eprintln!(
         "stable_server_port: {phase} {detail} in {:.2}s",
         elapsed.as_secs_f64()
     );
 }
+
+/// Issue #4134 AC-4: `gwt` builds its `tao::EventLoop` — and with it GTK — long
+/// before the embedded server publishes a URL, so anything GTK blocks on is
+/// charged to every spawn's startup. Under `xvfb-run` there is no session bus,
+/// and GTK's ATK bridge still tries to reach the accessibility bus; libdbus
+/// gives up after its default 25-second timeout. That is the 25.10s the
+/// instrumentation measured, to two decimal places, on spawn after spawn.
+/// Opting the child out of the bridge removes the wait without changing what
+/// the test proves — the assertions are about ports and config, not a11y.
+/// macOS and Windows ignore both variables.
+const A11Y_BUS_OPT_OUT: [(&str, &str); 2] = [("NO_AT_BRIDGE", "1"), ("GTK_A11Y", "none")];
 
 struct StablePortFixture {
     _temp: tempfile::TempDir,
@@ -112,6 +128,7 @@ impl StablePortFixture {
             .env_remove("GWT_FORCE_NEW_INSTANCE")
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        command.envs(A11Y_BUS_OPT_OUT);
         if forced_secondary {
             command.env("GWT_FORCE_NEW_INSTANCE", "1");
         }
