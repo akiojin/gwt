@@ -437,6 +437,7 @@ fn parse_pr_list() {
             escalate_after_cycles: None,
             refresh: false,
             include: None,
+            force_reason: None,
         })
     );
 }
