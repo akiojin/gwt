@@ -79,6 +79,7 @@ pub(super) fn run<E: CliEnv>(
             | IssueCommand::SpecEditSectionJson { .. }
             | IssueCommand::SpecEditSectionJsonBody { .. }
             | IssueCommand::SpecList { .. }
+            | IssueCommand::SpecAudit { .. }
             | IssueCommand::SpecCreate { .. }
             | IssueCommand::SpecCreateBody { .. }
             | IssueCommand::SpecCreateJson { .. }
