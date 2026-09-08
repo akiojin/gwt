@@ -3700,6 +3700,7 @@ fn sample_runtime_with_events(
         pending_launch_wizard_materializations: HashMap::new(),
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
+        project_open_started: None,
         pending_pm_launches: HashMap::new(),
         pending_pm_closes: HashMap::new(),
         pm_sessions: HashMap::new(),

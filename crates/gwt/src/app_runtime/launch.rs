@@ -2870,6 +2870,17 @@ impl AppRuntime {
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
         let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
+        // request, so the pane-create route is the span from that stamp to this
+        // completion — worktree resolution, Docker probing and the PTY spawn
+        // included. Recorded before the entry is dropped below.
+        if let Some((_, (_, started_at))) = self
+            .inflight_launches
+            .iter()
+            .find(|(_, (pending_window_id, _))| pending_window_id == &window_id)
+        {
+            gwt::perf::record_route(gwt::perf::PerfRoute::PaneCreate, started_at.elapsed());
+        }
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -3713,6 +3724,12 @@ impl AppRuntime {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return Self::status_events(window_id, WindowProcessStatus::Running, None);
         }
+        // Issue #4145 AC-1: a process pane is created synchronously here —
+        // shell resolution, env, resource policy and the PTY spawn all happen
+        // before this returns — so one guard is the whole pane-create route for
+        // the non-agent half of the surface. Agent panes are asynchronous and
+        // are recorded from `handle_launch_complete` instead.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneCreate);
 
         let project_root = self
             .tab(tab_id)

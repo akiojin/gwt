@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
+    sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock, RwLock},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -3293,6 +3293,7 @@ mod tests {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
+            project_open_started: None,
             pending_pm_launches: HashMap::new(),
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
@@ -8332,6 +8333,26 @@ fn apply_agent_frontend_dispatch_outcome(
     }
 }
 
+/// Issue #4145 AC-1: the startup route is measured from the first statement of
+/// `main` to the moment the canvas reports its bounds, so the sample covers
+/// everything a person waits through — logging init, session restore, worktree
+/// enumeration, the embedded server bind and the first render.
+static PROCESS_STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Record the startup route exactly once per process.
+///
+/// The canvas can report bounds again after a reconnect; only the first report
+/// is the startup a user experienced.
+fn record_startup_perf_route_once() {
+    static RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RECORDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(started) = PROCESS_STARTED_AT.get() {
+        gwt::perf::record_route(gwt::perf::PerfRoute::Startup, started.elapsed());
+    }
+}
+
 /// Record the descriptor ceiling the process runs under (Issue #4142 AC-3).
 /// A raise that fell short of [`gwt_core::fd_limit::MIN_SOFT_FD_LIMIT`] is a
 /// warning rather than a fatal error: gwt still runs, it just cannot host many
@@ -8369,6 +8390,7 @@ fn log_startup_fd_limit(raise: gwt_core::fd_limit::FdLimitRaise) {
 }
 
 fn main() -> std::io::Result<()> {
+    let _ = PROCESS_STARTED_AT.set(std::time::Instant::now());
     let argv: Vec<String> = std::env::args().collect();
     // POSIX bound launches still host the gate here (the gate `exec`s the target
     // so the gated PID survives). Windows routes it to the console-subsystem
@@ -8444,6 +8466,12 @@ fn main() -> std::io::Result<()> {
             eprintln!("gwt logging init failed: {error}");
         })
         .ok();
+
+    // SPEC #3700 / Issue #4145 AC-1: install the always-on performance
+    // collector next to the logging subscriber, before any startup step that
+    // can be measured. Fail-open — a disabled kill switch or an unwritable log
+    // directory leaves every later `record_*` call a no-op.
+    gwt::perf::install_from_settings();
 
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
@@ -8959,6 +8987,10 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
+                // Issue #4145 AC-1: the canvas reporting its bounds is the
+                // app's own definition of "ready", and the gate agent panes
+                // wait on, so it closes the startup route.
+                let canvas_ready = matches!(event, FrontendEvent::StartupAutoResumeReady { .. });
                 // Phase 0 perf instrumentation (measure-first): time the handler
                 // on the main event-loop thread so a synchronous repo-scaling
                 // handler that freezes the GUI is diagnosable, and inter-event
@@ -8966,6 +8998,9 @@ fn main() -> std::io::Result<()> {
                 let dispatch_kind = frontend_event_kind_label(&event);
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                if canvas_ready {
+                    record_startup_perf_route_once();
+                }
                 let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
                 if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
                     tracing::warn!(
