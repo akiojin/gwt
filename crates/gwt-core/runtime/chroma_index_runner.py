@@ -127,6 +127,7 @@ def _pending_higher_priority(than: str) -> bool:
     except OSError:
         return False
     rank = _QOS_PRIORITY_RANK.get(than, 99)
+    now_ms = int(time.time() * 1000)
     for path in entries:
         if path.suffix != ".json":
             continue
@@ -134,9 +135,54 @@ def _pending_higher_priority(than: str) -> bool:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        # Issue #4086: a reservation is a claimant with no live process behind
+        # it; it counts only until its deadline (the Rust side sweeps it).
+        reserved_until = data.get("reserved_until_ms")
+        if isinstance(reserved_until, (int, float)) and reserved_until <= now_ms:
+            continue
         if _QOS_PRIORITY_RANK.get(data.get("priority"), 99) < rank:
             return True
     return False
+
+
+HEAVY_PROGRESS_FILENAME = "heavy.progress.json"
+
+
+def _heavy_target_stem(repo_hash: str, scope: str, worktree_hash: Optional[str] = None) -> str:
+    """Coordinator target stem, mirroring `TargetKey::file_stem` on the Rust
+    side (`<repo>--<scope>[--<worktree>]`, non-alphanumerics replaced)."""
+
+    def sanitize(part: str) -> str:
+        return "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in part)
+
+    stem = f"{sanitize(repo_hash)}--{sanitize(scope)}"
+    if worktree_hash:
+        stem += f"--{sanitize(worktree_hash)}"
+    return stem
+
+
+def _write_heavy_progress(
+    target: str, done: int, total: int, batch_size: int, batch_ms: int
+) -> None:
+    """Publish batch progress next to the heavy ticket (Issue #4086 AC-4) so
+    a refused verification claimant can estimate the remaining wait. Best
+    effort: a failure here never fails the build."""
+    path = _coordinator_root() / HEAVY_PROGRESS_FILENAME
+    payload = {
+        "target": target,
+        "done": int(done),
+        "total": int(total),
+        "batch_size": int(batch_size),
+        "batch_ms": int(max(batch_ms, 0)),
+        "updated_at_ms": int(time.time() * 1000),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 INDEX_PATH_POLICY_FILE = "index_path_policy.json"
@@ -4928,10 +4974,19 @@ def _index_files_full_with_staging(
                 if rel not in staged_ids:
                     pending_paths.append(fpath)
 
+            heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
             for start in range(0, len(pending_paths), EMBED_CHECKPOINT_BATCH):
                 batch_paths = pending_paths[start : start + EMBED_CHECKPOINT_BATCH]
+                batch_started = time.monotonic()
                 newly_embedded += embed_documents_for_paths(batch_paths, root, collection)
                 done = len(staged_ids) + newly_embedded
+                _write_heavy_progress(
+                    heavy_target,
+                    done,
+                    total,
+                    EMBED_CHECKPOINT_BATCH,
+                    int((time.monotonic() - batch_started) * 1000),
+                )
                 _write_continuation(
                     continuation_path,
                     scope=scope,
@@ -7231,8 +7286,16 @@ def action_index_issues_v2(
     db_root: Optional[Path] = None,
     respect_ttl: bool = False,
     ttl_minutes: int = ISSUE_TTL_MINUTES_DEFAULT,
+    qos: str = "interactive",
 ) -> dict:
-    """Index GitHub Issues using the v2 layout. Respects TTL on demand."""
+    """Index GitHub Issues using the v2 layout. Respects TTL on demand.
+
+    Issue #4086 AC-2: the build embeds in `EMBED_CHECKPOINT_BATCH` batches.
+    A background build yields at the batch boundary while a higher-priority
+    claimant (a verification reservation) is pending on the heavy lease and
+    leaves a resumable staging continuation; the next run resumes without
+    re-embedding staged issues. Progress is published for AC-4.
+    """
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
 
     if respect_ttl:
@@ -7267,19 +7330,46 @@ def action_index_issues_v2(
     )
 
     staging = _staging_dir_for(db_path)
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
-    with acquire_lock(staging, exclusive=True):
-        issues = _load_cached_issue_documents(repo_hash)
-        source = _issue_cache_source_snapshot(repo_hash)
+    continuation_path = staging / CONTINUATION_FILENAME
+    issues = _load_cached_issue_documents(repo_hash)
+    source = _issue_cache_source_snapshot(repo_hash)
+    fingerprint = source["fingerprint"]
+    total = len(issues)
+    heavy_target = _heavy_target_stem(repo_hash, "issues")
 
+    continuation = _read_continuation(continuation_path)
+    if continuation is not None and (
+        continuation.get("scope") != "issues"
+        or continuation.get("fingerprint") != fingerprint
+    ):
+        # The Issue cache moved since the parked build: restart staging.
+        continuation = None
+    if continuation is None:
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    newly_embedded = 0
+    yielded = False
+    staged_count = 0
+    with acquire_lock(staging, exclusive=True):
         client, collection = _make_chroma_collection_repairing(staging, V2_ISSUES_COLLECTION)
         try:
-            if issues:
+            staged_ids: set = set()
+            if continuation is not None:
+                try:
+                    staged_ids = set(collection.get().get("ids") or [])
+                except Exception:  # pragma: no cover - defensive chroma fallback
+                    staged_ids = set()
+            pending: List[Dict[str, Any]] = [
+                issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
+            ]
+            for start in range(0, len(pending), EMBED_CHECKPOINT_BATCH):
+                batch_issues = pending[start : start + EMBED_CHECKPOINT_BATCH]
+                batch_started = time.monotonic()
                 ids: List[str] = []
                 documents: List[str] = []
                 metadatas: List[Dict[str, Any]] = []
-                for issue in issues:
+                for issue in batch_issues:
                     number = issue.get("number", 0)
                     title = issue.get("title", "")
                     body = issue.get("body", "")
@@ -7296,16 +7386,62 @@ def action_index_issues_v2(
                             "labels": ",".join(labels),
                         }
                     )
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-
+                collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+                newly_embedded += len(ids)
+                done = len(staged_ids) + newly_embedded
+                _write_continuation(
+                    continuation_path,
+                    scope="issues",
+                    fingerprint=fingerprint,
+                    done=done,
+                    total=total,
+                )
+                _write_heavy_progress(
+                    heavy_target,
+                    done,
+                    total,
+                    EMBED_CHECKPOINT_BATCH,
+                    int((time.monotonic() - batch_started) * 1000),
+                )
+                emit_progress(
+                    {
+                        "phase": "indexing",
+                        "scope": "issues",
+                        "done": done,
+                        "total": total,
+                    }
+                )
+                remaining = len(pending) - (start + len(batch_issues))
+                if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
+                    yielded = True
+                    break
+            staged_count = len(staged_ids) + newly_embedded
         finally:
             _close_chroma_client(client)
+
+    if yielded:
+        emit_progress(
+            {
+                "phase": "yielded",
+                "scope": "issues",
+                "staged": staged_count,
+                "total": total,
+            }
+        )
+        return {
+            "ok": True,
+            "scope": "issues",
+            "yielded": True,
+            "resumable": True,
+            "indexed": staged_count,
+            "total": total,
+            "newly_embedded": newly_embedded,
+        }
+    # The continuation only describes an unfinished staging build.
+    try:
+        continuation_path.unlink()
+    except OSError:
+        pass
 
     def _commit_issue_meta():
         # Meta (TTL / source fingerprint) is only advanced once the new
@@ -7342,7 +7478,12 @@ def action_index_issues_v2(
             "total": len(issues),
         }
     )
-    return {"ok": True, "scope": "issues", "indexed": len(issues)}
+    return {
+        "ok": True,
+        "scope": "issues",
+        "indexed": len(issues),
+        "newly_embedded": newly_embedded,
+    }
 
 
 # ---------------------------------------------------------------------
@@ -9023,6 +9164,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     project_root=args.project_root,
                     respect_ttl=args.respect_ttl,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0

@@ -596,6 +596,12 @@ fn format_verify_help() -> String {
         "  TTL, so no agent polls another agent's process. Default TTL is 45",
         "  minutes (params.ttl_minutes); the holder self-releases when it",
         "  lapses, and a killed holder releases at once.",
+        "  A refusal reports holder_kind (verification | index | other) and",
+        "  estimated_remaining_ms (remaining_batches for an index job), and",
+        "  reserves the caller's turn: background index jobs defer to it until",
+        "  a retry is granted or the reservation lapses (Issue #4086).",
+        "  verify.lease.release with an index job's lease_id answers `yield",
+        "  requested`: the runner releases at its next batch boundary.",
         "",
     ]
     .join("
