@@ -18,6 +18,7 @@ pub mod daemon_runtime;
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
+pub mod disk_space;
 pub mod error_report;
 pub mod file_content;
 pub mod file_tree;
