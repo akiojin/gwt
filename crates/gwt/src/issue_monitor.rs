@@ -1112,22 +1112,29 @@ impl IssueMonitorPrefs {
         self.launch_profiles = pool;
     }
 
-    /// SPEC #3914 FR-003: GUI / CLI save semantics. A candidate for a provider
-    /// already in the pool replaces that entry in place (keeping its routing
-    /// tags when the incoming profile carries none, because the settings form
-    /// has no tag input); a new provider appends at the end.
-    pub fn upsert_launch_profile(&mut self, mut profile: IssueMonitorLaunchProfile) {
+    /// SPEC #3914 FR-003 / Issue #4079 AC-1: GUI Agent Settings save semantics.
+    ///
+    /// The settings form is a *switch*, so the saved profile becomes the pool
+    /// head — the `launch_profile` compatibility mirror and the candidate the
+    /// Monitor launches first. Before #4079 the save upserted by provider, so
+    /// picking a provider that already sat at index 1 rewrote that entry and
+    /// left index 0 (and therefore the effective agent) untouched.
+    ///
+    /// Candidates below the head are kept; a later candidate for the same
+    /// provider is folded away by the pool's per-provider uniqueness. Routing
+    /// tags describe a candidate rather than the head slot, so they survive
+    /// only when the head keeps its provider (the form has no tag input).
+    pub fn set_head_launch_profile(&mut self, mut profile: IssueMonitorLaunchProfile) {
         let mut pool = self.launch_profile_pool();
-        let key = normalize_issue_monitor_provider(&profile.agent_id);
-        let existing = pool.iter().position(|candidate| {
-            key.is_some() && normalize_issue_monitor_provider(&candidate.agent_id) == key
-        });
-        match existing {
-            Some(index) => {
-                if profile.prefer_for.is_empty() {
-                    profile.prefer_for = std::mem::take(&mut pool[index].prefer_for);
+        match pool.first_mut() {
+            Some(head) => {
+                if profile.prefer_for.is_empty()
+                    && normalize_issue_monitor_provider(&head.agent_id)
+                        == normalize_issue_monitor_provider(&profile.agent_id)
+                {
+                    profile.prefer_for = std::mem::take(&mut head.prefer_for);
                 }
-                pool[index] = profile;
+                *head = profile;
             }
             None => pool.push(profile),
         }
@@ -1573,6 +1580,187 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             hermes: Default::default(),
         }
     }
+}
+
+/// Issue #4079: one `issue.monitor.profiles.set` element exactly as the caller
+/// wrote it.
+///
+/// `profiles.set` is the only way to reorder the candidate pool, and a reorder
+/// is normally written as `[{agent_id: codex}, {agent_id: claude}]`. Parsing
+/// that straight into [`IssueMonitorLaunchProfile`] silently reset every
+/// omitted field to `Default` (dropping `skip_permissions`, the Docker
+/// lifecycle intent and the Windows shell), so the pool has to know which keys
+/// the caller actually provided to tell "omitted" from "explicitly cleared".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueMonitorLaunchProfilePatch {
+    /// The element parsed as a full profile. Fields the caller omitted carry
+    /// their `Default` here and are resolved by [`merge_issue_monitor_profiles_set`].
+    pub profile: IssueMonitorLaunchProfile,
+    /// Field names the caller actually provided.
+    pub provided: BTreeSet<String>,
+}
+
+impl IssueMonitorLaunchProfilePatch {
+    /// A patch that provides every field, i.e. the pre-#4079 behaviour.
+    pub fn complete(profile: IssueMonitorLaunchProfile) -> Self {
+        Self {
+            provided: ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+            profile,
+        }
+    }
+}
+
+impl Serialize for IssueMonitorLaunchProfilePatch {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut object = launch_profile_object(&self.profile);
+        object.retain(|key, _| key == "agent_id" || self.provided.contains(key));
+        object.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let provided = object.keys().cloned().collect();
+        let profile =
+            IssueMonitorLaunchProfile::deserialize(serde_json::Value::Object(object.clone()))
+                .map_err(serde::de::Error::custom)?;
+        Ok(Self { profile, provided })
+    }
+}
+
+/// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
+/// the candidate and can never be inherited.
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 11] = [
+    "model",
+    "reasoning",
+    "version",
+    "session_mode",
+    "skip_permissions",
+    "codex_fast_mode",
+    "runtime_target",
+    "docker_service",
+    "docker_lifecycle_intent",
+    "windows_shell",
+    "prefer_for",
+];
+
+/// Issue #4079 AC-4: fields a provider that is not in the pool yet can inherit
+/// from the saved head profile. They are wizard-level choices (how the agent is
+/// run) rather than provider-specific ones (which model, which reasoning), so
+/// carrying them onto a new provider is safe; carrying a model is not.
+const ISSUE_MONITOR_SHARED_LAUNCH_PROFILE_FIELDS: [&str; 4] = [
+    "skip_permissions",
+    "docker_lifecycle_intent",
+    "windows_shell",
+    "runtime_target",
+];
+
+/// Issue #4079 AC-5: what happened to one field the caller left out of a
+/// `profiles.set` element.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueMonitorProfilesSetChange {
+    /// Position of the element in the submitted pool.
+    pub index: usize,
+    pub agent_id: String,
+    pub field: String,
+    /// `inherited` when a saved value filled the omitted field, `reset` when
+    /// nothing could fill it and the field fell back to its default.
+    pub action: String,
+    /// Where the stored value came from: `pool`, `launch_profile`, or `default`.
+    pub source: String,
+    pub value: serde_json::Value,
+}
+
+fn launch_profile_object(
+    profile: &IssueMonitorLaunchProfile,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut object = serde_json::to_value(profile)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    // `prefer_for` is skipped when empty, but the merge needs every field
+    // present so an omitted key can be told from an absent value.
+    object
+        .entry("prefer_for".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    object
+}
+
+/// Issue #4079 AC-3/AC-4/AC-5: resolve a submitted pool against the pool that
+/// is currently saved.
+///
+/// A field the caller omitted is taken from the candidate already saved for the
+/// same provider; a provider that is new to the pool inherits the saved head's
+/// shared fields instead. Anything with no source left falls back to its
+/// default, and every omitted field is reported so the caller can see what was
+/// carried over and what was reset.
+pub fn merge_issue_monitor_profiles_set(
+    current_pool: &[IssueMonitorLaunchProfile],
+    saved_head: Option<&IssueMonitorLaunchProfile>,
+    patches: &[IssueMonitorLaunchProfilePatch],
+) -> (
+    Vec<IssueMonitorLaunchProfile>,
+    Vec<IssueMonitorProfilesSetChange>,
+) {
+    let mut merged_profiles = Vec::with_capacity(patches.len());
+    let mut changes = Vec::new();
+    let shared = saved_head.map(launch_profile_object);
+    for (index, patch) in patches.iter().enumerate() {
+        let key = normalize_issue_monitor_provider(&patch.profile.agent_id);
+        let base = current_pool
+            .iter()
+            .find(|candidate| {
+                key.is_some() && normalize_issue_monitor_provider(&candidate.agent_id) == key
+            })
+            .map(launch_profile_object);
+        let mut object = launch_profile_object(&patch.profile);
+        for field in ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS {
+            if patch.provided.contains(field) {
+                continue;
+            }
+            let inherited = base
+                .as_ref()
+                .and_then(|base| base.get(field).cloned())
+                .map(|value| (value, "pool"))
+                .or_else(|| {
+                    if !ISSUE_MONITOR_SHARED_LAUNCH_PROFILE_FIELDS.contains(&field) {
+                        return None;
+                    }
+                    shared
+                        .as_ref()
+                        .and_then(|shared| shared.get(field).cloned())
+                        .map(|value| (value, "launch_profile"))
+                });
+            let (action, source, value) = match inherited {
+                Some((value, source)) => ("inherited", source, value),
+                None => (
+                    "reset",
+                    "default",
+                    object
+                        .get(field)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                ),
+            };
+            object.insert(field.to_string(), value.clone());
+            changes.push(IssueMonitorProfilesSetChange {
+                index,
+                agent_id: patch.profile.agent_id.clone(),
+                field: field.to_string(),
+                action: action.to_string(),
+                source: source.to_string(),
+                value,
+            });
+        }
+        let profile = IssueMonitorLaunchProfile::deserialize(serde_json::Value::Object(object))
+            .unwrap_or_else(|_| patch.profile.clone());
+        merged_profiles.push(profile);
+    }
+    (merged_profiles, changes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -15226,31 +15414,201 @@ mod tests {
     }
 
     #[test]
-    fn upsert_launch_profile_replaces_the_same_agent_and_appends_new_ones() {
+    fn set_head_launch_profile_replaces_the_pool_head_and_keeps_same_provider_tags() {
         let mut prefs = IssueMonitorPrefs::default();
         let mut claude = test_launch_profile("claude");
         claude.prefer_for = vec!["kind:spec".to_string()];
-        prefs.upsert_launch_profile(claude.clone());
-        prefs.upsert_launch_profile(test_launch_profile("codex"));
+        prefs.set_head_launch_profile(claude.clone());
+        assert_eq!(
+            prefs.launch_profile.as_ref().map(|p| p.agent_id.as_str()),
+            Some("claude")
+        );
+
         let mut claude_again = test_launch_profile("Claude Code");
         claude_again.model = Some("opus".to_string());
-        prefs.upsert_launch_profile(claude_again);
+        prefs.set_head_launch_profile(claude_again);
+        let pool = prefs.launch_profile_pool();
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].model.as_deref(), Some("opus"));
+        assert_eq!(
+            pool[0].prefer_for,
+            vec!["kind:spec".to_string()],
+            "a same-provider re-save without routing tags keeps the existing tags"
+        );
+        assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+    }
+
+    #[test]
+    fn set_head_launch_profile_switches_the_head_agent_instead_of_updating_a_later_candidate() {
+        // Issue #4079 AC-1: the Agent Settings form is a *switch*. With
+        // `[claude, codex]` saved, choosing codex must make codex the head (and
+        // the `launch_profile` compatibility mirror), not silently rewrite the
+        // index-1 candidate while the monitor keeps launching claude.
+        let mut prefs = IssueMonitorPrefs::default();
+        let mut codex = test_launch_profile("codex");
+        codex.prefer_for = vec!["type:perf".to_string()];
+        prefs.set_launch_profile_pool(vec![test_launch_profile("claude"), codex]);
+
+        let mut chosen = test_launch_profile("codex");
+        chosen.model = Some("gpt-6-astra".to_string());
+        prefs.set_head_launch_profile(chosen);
 
         let pool = prefs.launch_profile_pool();
         assert_eq!(
             pool.iter()
                 .map(|profile| profile.agent_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Claude Code", "codex"],
-            "same provider replaces in place, new provider appends"
+            vec!["codex"],
+            "the head is replaced by the chosen agent and the folded duplicate is dropped"
         );
-        assert_eq!(pool[0].model.as_deref(), Some("opus"));
-        assert_eq!(
-            pool[0].prefer_for,
-            vec!["kind:spec".to_string()],
-            "a GUI re-save without routing tags keeps the existing tags"
+        assert_eq!(pool[0].model.as_deref(), Some("gpt-6-astra"));
+        assert!(
+            pool[0].prefer_for.is_empty(),
+            "routing tags describe a candidate, not the head slot, so a switch drops them"
         );
         assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+    }
+
+    #[test]
+    fn profiles_set_patch_keeps_omitted_fields_of_the_same_provider() {
+        // Issue #4079 AC-3: a reorder written as `[{agent_id}, {agent_id}]`
+        // must not reset the candidates it reorders.
+        let mut codex = test_launch_profile("codex");
+        codex.model = Some("gpt-6-astra".to_string());
+        codex.reasoning = Some("high".to_string());
+        codex.version = Some("0.9.1".to_string());
+        codex.skip_permissions = true;
+        codex.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Start;
+        codex.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
+        codex.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        codex.prefer_for = vec!["kind:spec".to_string()];
+        let claude = test_launch_profile("claude");
+        let pool = vec![claude.clone(), codex.clone()];
+
+        let patches: Vec<IssueMonitorLaunchProfilePatch> = serde_json::from_value(
+            serde_json::json!([{"agent_id": "codex"}, {"agent_id": "claude"}]),
+        )
+        .expect("parse sparse patches");
+        let (merged, changes) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+
+        assert_eq!(merged, vec![codex.clone(), claude]);
+        assert!(
+            changes.iter().any(|change| change.index == 0
+                && change.field == "skip_permissions"
+                && change.action == "inherited"
+                && change.source == "pool"
+                && change.value == serde_json::json!(true)),
+            "the inherited skip_permissions must be reported: {changes:?}"
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|change| change.action == "inherited" && change.source == "pool"),
+            "nothing is reset when both providers are already in the pool: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn profiles_set_patch_respects_explicitly_cleared_fields() {
+        let mut codex = test_launch_profile("codex");
+        codex.model = Some("gpt-6-astra".to_string());
+        codex.skip_permissions = true;
+        codex.prefer_for = vec!["kind:spec".to_string()];
+        let pool = vec![codex.clone()];
+
+        let patches: Vec<IssueMonitorLaunchProfilePatch> = serde_json::from_value(
+            serde_json::json!([{"agent_id": "codex", "model": null, "prefer_for": []}]),
+        )
+        .expect("parse patches");
+        let (merged, changes) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+
+        assert_eq!(merged[0].model, None, "an explicit null clears the model");
+        assert!(
+            merged[0].prefer_for.is_empty(),
+            "an explicit [] clears tags"
+        );
+        assert!(
+            merged[0].skip_permissions,
+            "an omitted field is still inherited"
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|change| change.field != "model" && change.field != "prefer_for"),
+            "provided fields are not reported as inherited or reset: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn profiles_set_patch_inherits_shared_fields_for_a_provider_new_to_the_pool() {
+        // Issue #4079 AC-4: a provider with no candidate yet takes the saved
+        // head's wizard-level fields, but not its provider-specific model.
+        let mut codex = test_launch_profile("codex");
+        codex.model = Some("gpt-6-astra".to_string());
+        codex.skip_permissions = true;
+        codex.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Start;
+        codex.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
+        codex.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        let pool = vec![codex.clone()];
+
+        let patches: Vec<IssueMonitorLaunchProfilePatch> = serde_json::from_value(
+            serde_json::json!([{"agent_id": "codex"}, {"agent_id": "claude"}]),
+        )
+        .expect("parse patches");
+        let (merged, changes) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+
+        assert!(merged[1].skip_permissions);
+        assert_eq!(
+            merged[1].docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Start
+        );
+        assert_eq!(
+            merged[1].windows_shell,
+            Some(gwt_agent::WindowsShellKind::PowerShell7)
+        );
+        assert_eq!(
+            merged[1].runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(
+            merged[1].model, None,
+            "a provider-specific model is never carried onto another provider"
+        );
+        assert!(
+            changes.iter().any(|change| change.index == 1
+                && change.field == "windows_shell"
+                && change.source == "launch_profile"),
+            "the shared inheritance source must be reported: {changes:?}"
+        );
+        assert!(
+            changes.iter().any(|change| change.index == 1
+                && change.field == "model"
+                && change.action == "reset"
+                && change.source == "default"),
+            "a field with no source must be reported as reset: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn set_head_launch_profile_keeps_the_candidates_below_the_head() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![
+            test_launch_profile("claude"),
+            test_launch_profile("codex"),
+        ]);
+        let mut hermes = test_launch_profile("hermes");
+        hermes.model = Some("h-1".to_string());
+        prefs.set_head_launch_profile(hermes);
+
+        assert_eq!(
+            prefs
+                .launch_profile_pool()
+                .iter()
+                .map(|profile| profile.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hermes", "codex"],
+            "only index 0 is replaced; later candidates stay in the pool"
+        );
     }
 
     fn usage_account(
