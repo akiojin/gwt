@@ -682,7 +682,7 @@ impl AppRuntime {
     /// Monitor binding, so only the identity-free facts — a closed Issue or
     /// a settled execution — can refuse it; `RevokedLaunch` needs the exact
     /// window and is never inferred from a missing one.
-    pub(crate) fn restore_admission(
+    pub(crate) fn restore_work_terminality(
         &self,
         session: &gwt_agent::Session,
         project_root: &Path,

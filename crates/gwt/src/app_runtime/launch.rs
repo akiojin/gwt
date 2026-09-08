@@ -3981,9 +3981,6 @@ impl AppRuntime {
             );
         }
         self.window_details.remove(id);
-        // Issue #4143 (AC-3): the PTY exists, so this window is no longer an
-        // empty restore artifact and a later failure must stay visible.
-        self.automatic_restore_launch_windows.remove(id);
         // Publish the PTY handle to the WebSocket fast-path registry BEFORE
         // inserting the runtime so that the first `terminal_input` from the
         // frontend (which can arrive immediately after `TerminalStatus`) has a
@@ -3991,6 +3988,9 @@ impl AppRuntime {
         // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
         self.register_pty_writer(id, &pane);
         self.runtimes.insert(id.to_string(), runtime);
+        // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
+        // the pre-PTY failure guard.
+        self.restore_launch_windows.remove(id);
     }
 
     /// Issue #3475: start the authenticated SessionStart readiness deadline for

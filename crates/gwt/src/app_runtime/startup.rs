@@ -25,7 +25,7 @@ use std::{
 };
 
 use super::continuation::ActiveOwnerLiveness;
-use super::terminal_convergence::RestoreAdmission;
+use super::terminal_convergence::{RestoreAdmission, TerminalCloseReason};
 use super::{
     combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
     plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
@@ -72,11 +72,10 @@ pub(super) enum RestoreRefusal {
     NoProjectTab,
     TabNotRestorable,
     /// The linked Work is canonically terminal.
-    TerminalWork(super::terminal_convergence::TerminalCloseReason),
+    TerminalWork(TerminalCloseReason),
     /// The canonical Work facts could not be read, so "still live" could not
     /// be established. The placeholder is kept.
     TerminalFactsUnreadable(&'static str),
-    NotResumeMode,
 }
 
 impl RestoreRefusal {
@@ -94,7 +93,6 @@ impl RestoreRefusal {
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
             Self::TerminalWork(reason) => format!("terminal_work:{}", reason.as_str()),
             Self::TerminalFactsUnreadable(cause) => format!("terminal_facts_unreadable:{cause}"),
-            Self::NotResumeMode => "not_resume_mode".to_string(),
         }
     }
 
@@ -157,13 +155,14 @@ impl RestoreAdmissionLog {
             .join(", ")
     }
 
-    fn emit_summary(&self, restored: usize) {
+    fn emit_summary(&self, scope: &str, restored: usize) {
         tracing::info!(
             target: "gwt.restore.admission",
+            scope,
             restored,
             suppressed = self.suppressed,
             reasons = %self.reasons(),
-            "startup session restore admission summary"
+            "session restore admission summary"
         );
     }
 }
@@ -706,11 +705,12 @@ impl AppRuntime {
                 admission.refuse(&session.id, RestoreRefusal::TabNotRestorable);
                 continue;
             }
-            // Issue #3927 (SPEC #3340 FR-047) / Issue #4143 (AC-2),
-            // predicate 2: the canonical terminal predicate fences automatic
-            // restore. A settled, closed, or revoked Issue-linked window is
-            // marked restore-disabled and its placeholder removed instead of
-            // respawning; a window whose facts are unreadable is left alone.
+            // Issue #4143 (AC-2): the affirmative restore admission (Issue
+            // #3927 / FR-047 is its terminal half). A settled, closed, or
+            // revoked Issue-linked window is marked restore-disabled and its
+            // placeholder removed; a Session with no resumable conversation, or
+            // one whose Work facts cannot be read, keeps its placeholder but
+            // never spends a PTY on a launch that continues nothing.
             let project_root = tab.project_root.clone();
             let placeholder_window_id = tab
                 .workspace
@@ -719,22 +719,13 @@ impl AppRuntime {
                 .iter()
                 .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
                 .map(|window| combined_window_id(&tab_id, &window.id));
-            match self.restore_admission(&session, &project_root, placeholder_window_id.as_deref())
+            if let Err(refusal) =
+                self.restore_admission(&session, &project_root, placeholder_window_id.as_deref())
             {
-                RestoreAdmission::RefuseTerminal(reason) => {
-                    admission.refuse(&session.id, RestoreRefusal::TerminalWork(reason));
+                admission.refuse(&session.id, refusal);
+                if let RestoreRefusal::TerminalWork(reason) = refusal {
                     self.refuse_terminal_session_restore(&tab_id, &session.id, reason);
-                    continue;
                 }
-                RestoreAdmission::RefuseUnprovable(cause) => {
-                    admission.refuse(&session.id, RestoreRefusal::TerminalFactsUnreadable(cause));
-                    continue;
-                }
-                RestoreAdmission::Admit => {}
-            }
-            let config = launch_config_from_persisted_session(&session);
-            if config.session_mode != gwt_agent::SessionMode::Resume {
-                admission.refuse(&session.id, RestoreRefusal::NotResumeMode);
                 continue;
             }
             let project_state_root = session
@@ -755,7 +746,41 @@ impl AppRuntime {
         }
         // Issue #4143 (AC-4): one line the operator can read to see why the
         // canvas came back with fewer windows than it had.
-        admission.emit_summary(self.pending_startup_auto_resume_sessions.len());
+        admission.emit_summary(
+            "startup restore",
+            self.pending_startup_auto_resume_sessions.len(),
+        );
+    }
+
+    /// Issue #4143 (AC-2): decide whether automatic restore may spawn
+    /// `session`.
+    ///
+    /// Admission is affirmative: the linked Work must be readably non-terminal
+    /// *and* the Session must carry a conversation the agent CLI can resume.
+    /// The terminal check runs first so a used-up window is still cleaned up
+    /// (restore-disabled, placeholder removed) even when its conversation is
+    /// also unresumable.
+    pub(super) fn restore_admission(
+        &self,
+        session: &gwt_agent::Session,
+        project_root: &Path,
+        window_id: Option<&str>,
+    ) -> Result<(), RestoreRefusal> {
+        match self.restore_work_terminality(session, project_root, window_id) {
+            RestoreAdmission::RefuseTerminal(reason) => {
+                return Err(RestoreRefusal::TerminalWork(reason))
+            }
+            RestoreAdmission::RefuseUnprovable(cause) => {
+                return Err(RestoreRefusal::TerminalFactsUnreadable(cause))
+            }
+            RestoreAdmission::Admit => {}
+        }
+        if launch_config_from_persisted_session(session).session_mode
+            != gwt_agent::SessionMode::Resume
+        {
+            return Err(RestoreRefusal::NoResumeSession);
+        }
+        Ok(())
     }
 
     /// Reap every integrity-valid stale Active owner visible in the fixed
@@ -1051,10 +1076,12 @@ impl AppRuntime {
                 {
                     // Issue #4143 (AC-3): mark the in-flight automatic restore
                     // so a failure before PTY start closes the empty pane
-                    // instead of persisting it into the next generation.
+                    // instead of persisting it into the next generation. A
+                    // restart the operator asked for is deliberately unmarked:
+                    // that pane is the diagnostic they are waiting for.
                     if origin == RestoreOrigin::Automatic {
-                        self.automatic_restore_launch_windows
-                            .insert(window_id.clone());
+                        self.restore_launch_windows
+                            .insert(window_id.clone(), Some(session.id.clone()));
                     }
                     self.pending_auto_resume_sources
                         .insert(window_id, session.id);
@@ -1184,6 +1211,8 @@ impl AppRuntime {
         restores: Vec<PreparedProjectWindowRestore>,
     ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
+        let mut admission = RestoreAdmissionLog::default();
+        let mut restored = 0usize;
         for restore in restores {
             let window_id = match &restore {
                 PreparedProjectWindowRestore::Agent { session, .. } => {
@@ -1220,34 +1249,22 @@ impl AppRuntime {
                     {
                         continue;
                     }
-                    // Issue #3927 (SPEC #3340 FR-047) / Issue #4143 (AC-2):
-                    // same restore fence as startup auto-resume.
+                    // Issue #4143 (AC-2): same affirmative admission as startup
+                    // auto-resume, which the Open Project path never applied —
+                    // an unresumable Session was silently relaunched fresh here.
                     let project_root = self
                         .tab(tab_id)
                         .map(|tab| tab.project_root.clone())
                         .unwrap_or_default();
-                    match self.restore_admission(&session, &project_root, Some(&combined)) {
-                        RestoreAdmission::RefuseTerminal(reason) => {
-                            tracing::info!(
-                                target: "gwt.restore.admission",
-                                session_id = %session.id,
-                                reason = %RestoreRefusal::TerminalWork(reason).label(),
-                                "session restore refused"
-                            );
+                    if let Err(refusal) =
+                        self.restore_admission(&session, &project_root, Some(&combined))
+                    {
+                        admission.refuse(&session.id, refusal);
+                        if let RestoreRefusal::TerminalWork(reason) = refusal {
                             self.refuse_terminal_session_restore(tab_id, &session.id, reason);
                             events.push(self.workspace_state_broadcast());
-                            continue;
                         }
-                        RestoreAdmission::RefuseUnprovable(cause) => {
-                            tracing::info!(
-                                target: "gwt.restore.admission",
-                                session_id = %session.id,
-                                reason = %RestoreRefusal::TerminalFactsUnreadable(cause).label(),
-                                "session restore refused"
-                            );
-                            continue;
-                        }
-                        RestoreAdmission::Admit => {}
+                        continue;
                     }
                     let mut spawned = self.spawn_restored_agent_session(
                         tab_id,
@@ -1256,15 +1273,22 @@ impl AppRuntime {
                         fallback_geometry,
                         RestoreOrigin::Automatic,
                     );
+                    restored += 1;
                     events.append(&mut spawned);
                 }
                 PreparedProjectWindowRestore::Process {
                     window_id,
                     preset,
                     geometry,
-                } => events.extend(self.start_window(tab_id, &window_id, preset, geometry)),
+                } => {
+                    // Issue #4143 (AC-3): a restored process window spends a PTY
+                    // too, so its pre-PTY failure must not persist either.
+                    self.restore_launch_windows.insert(combined.clone(), None);
+                    events.extend(self.start_window(tab_id, &window_id, preset, geometry));
+                }
             }
         }
+        admission.emit_summary("open project restore", restored);
         events
     }
 

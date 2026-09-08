@@ -362,6 +362,10 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
+        // Issue #4143 (AC-3): read the automatic-restore guard before anything
+        // below can publish an Error status for this window. The launch is over
+        // either way, so the marker is consumed here.
+        let restored_launch = self.restore_launch_windows.remove(&window_id);
         let user_detail = Self::user_facing_launch_error_detail(&detail);
         let issue_monitor_issue_number = launch_feedback_context
             .as_ref()
@@ -385,11 +389,6 @@ impl AppRuntime {
             .is_some_and(|context| context.issue_monitor_autonomous_submit_started);
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
-        // Issue #4143 (AC-3): this launch was started by an automatic restore,
-        // so the failure happened before any PTY existed and the pane holds
-        // nothing but this one error line. Consume the marker here: the
-        // launch is over either way.
-        let automatic_restore = self.automatic_restore_launch_windows.remove(&window_id);
         if self.tracked_window_exists(&window_id) {
             self.launch_error_terminal_details
                 .insert(window_id.clone(), user_detail.clone());
@@ -446,19 +445,34 @@ impl AppRuntime {
                 }
                 return events;
             }
-            // Issue #4143 (AC-3): a restore nobody asked for produced an empty
-            // pane. Persisting it makes the next generation restore it again —
-            // the mechanism that grew 135 `Launch failed before PTY started.`
-            // windows across restarts. `log_window_launch_error` above already
-            // put the concrete reason in gwt.log and in the error ledger that
-            // backs `errors.list`, so the diagnostic outlives the pane.
-            if automatic_restore {
-                tracing::warn!(
-                    target: "gwt::agent_launch",
-                    window_id = %window_id,
-                    "closing the automatically restored window that failed before PTY start"
-                );
-                events.extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+            // Issue #4143 (AC-3): an automatic restore that failed before its
+            // PTY started must not survive as a persistent Error window.
+            // Keeping it made the failures self-propagating: the window
+            // persisted, the next start restored it, and the next failure added
+            // another one — the mechanism that grew 135 `Launch failed before
+            // PTY started.` panes across restarts. The concrete reason is
+            // already in gwt.log and in the host error ledger that backs
+            // `errors.list` (`log_window_launch_error` above), so the
+            // diagnostic outlives the pane.
+            if let Some(source_session_id) = restored_launch {
+                if self.window_lookup.contains_key(&window_id) {
+                    tracing::warn!(
+                        target: "gwt::agent_launch",
+                        window_id = %window_id,
+                        session_id = source_session_id.as_deref().unwrap_or("-"),
+                        "closing the automatically restored window that failed before PTY start"
+                    );
+                    events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                }
+                // The window is gone, so nothing keeps the Session out of the
+                // next start's restore set except the Session itself.
+                if let Some(session_id) = source_session_id.as_deref() {
+                    super::startup::mark_auto_resume_source_completed(
+                        &self.sessions_dir,
+                        session_id,
+                    );
+                }
             }
             return events;
         }
