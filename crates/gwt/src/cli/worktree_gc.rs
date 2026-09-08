@@ -33,6 +33,12 @@ pub enum WorktreeCommand {
         /// Also reclaim worktrees whose HEAD is not merged (AC-3). Never
         /// overrides the running-process exclusion.
         include_unmerged: bool,
+        /// Also reclaim the shared base-branch workspaces (`develop`,
+        /// `main`, …). Off by default: those are shared surfaces, and the
+        /// rebuild is a cost paid by whoever touches them next rather than by
+        /// the operator running the sweep. Never overrides the
+        /// running-process, tracked-launch or current-worktree exclusions.
+        include_protected_workspaces: bool,
     },
 }
 
@@ -46,6 +52,9 @@ pub(crate) struct WorktreeProbe {
     pub branch: Option<String>,
     /// The repository's main worktree; never a candidate.
     pub is_main: bool,
+    /// The worktree holds a shared base branch (`develop`, `main`, …) rather
+    /// than a per-launch branch.
+    pub is_base_branch_workspace: bool,
     /// `<root>/target` exists.
     pub has_build_artifacts: bool,
     /// Processes whose cwd or executable lies under `root` (`name (pid N)`).
@@ -89,17 +98,25 @@ pub(crate) struct GcPlan {
     pub kept: Vec<GcKept>,
 }
 
+/// The two opt-ins that widen the sweep. Both are off by default and neither
+/// can reach a worktree something is using.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GcOptions {
+    pub include_unmerged: bool,
+    pub include_protected_workspaces: bool,
+}
+
 /// Judge every probed worktree. Pure, so each exclusion branch is a unit
 /// test (AC-5).
 pub(crate) fn plan(
     probes: Vec<WorktreeProbe>,
     base: &str,
-    include_unmerged: bool,
+    options: GcOptions,
     protected: &[ProtectedRoot],
 ) -> GcPlan {
     let mut plan = GcPlan::default();
     for probe in probes {
-        match keep_reason(&probe, base, include_unmerged, protected) {
+        match keep_reason(&probe, base, options, protected) {
             Some(reason) => plan.kept.push(GcKept {
                 worktree: probe.root,
                 branch: probe.branch,
@@ -122,7 +139,7 @@ pub(crate) fn plan(
 fn keep_reason(
     probe: &WorktreeProbe,
     base: &str,
-    include_unmerged: bool,
+    options: GcOptions,
     protected: &[ProtectedRoot],
 ) -> Option<String> {
     if probe.is_main {
@@ -143,12 +160,23 @@ fn keep_reason(
             probe.tracked_sessions.join(", ")
         ));
     }
+    // A base-branch workspace is an ancestor of the base by definition, so
+    // the merge rule alone would always select it — and on this host that is
+    // the single largest `target/` there is. It is shared, so the rebuild
+    // lands on whoever opens it next rather than on the operator sweeping.
+    // Reclaimable, but only when somebody asks for it by name.
+    if !options.include_protected_workspaces && probe.is_base_branch_workspace {
+        return Some(
+            "shared base-branch workspace (pass include_protected_workspaces:true to reclaim)"
+                .to_string(),
+        );
+    }
     if !probe.has_build_artifacts {
         return Some(format!("no {BUILD_ARTIFACT_DIR}/ directory"));
     }
     match &probe.merged {
         Err(error) => Some(format!("merge state unknown: {error}")),
-        Ok(false) if !include_unmerged => Some(format!(
+        Ok(false) if !options.include_unmerged => Some(format!(
             "not merged into origin/{base} (pass include_unmerged:true to reclaim)"
         )),
         Ok(_) => None,
@@ -165,11 +193,20 @@ pub(super) fn run<E: CliEnv>(
             dry_run,
             base,
             include_unmerged,
+            include_protected_workspaces,
         } => {
             let base =
                 base.unwrap_or_else(|| gwt_git::pr_status::SETTLEMENT_BASE_BRANCH.to_string());
             let repo_path = env.repo_path().to_path_buf();
-            let report = run_gc(&repo_path, &base, include_unmerged, dry_run)?;
+            let report = run_gc(
+                &repo_path,
+                &base,
+                GcOptions {
+                    include_unmerged,
+                    include_protected_workspaces,
+                },
+                dry_run,
+            )?;
             out.push_str(
                 &serde_json::to_string_pretty(&report).map_err(super::serde_as_api_error)?,
             );
@@ -198,6 +235,7 @@ struct GcReport {
     dry_run: bool,
     base: String,
     include_unmerged: bool,
+    include_protected_workspaces: bool,
     candidates: Vec<GcCandidate>,
     kept: Vec<GcKept>,
     reclaimable_bytes: u64,
@@ -210,7 +248,7 @@ struct GcReport {
 fn run_gc(
     repo_path: &Path,
     base: &str,
-    include_unmerged: bool,
+    options: GcOptions,
     dry_run: bool,
 ) -> Result<GcReport, SpecOpsError> {
     let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
@@ -235,6 +273,7 @@ fn run_gc(
         .enumerate()
         .map(|(index, (root, branch))| WorktreeProbe {
             root: root.clone(),
+            is_base_branch_workspace: branch.as_deref().is_some_and(gwt_git::is_protected_branch),
             branch: branch.clone(),
             is_main: index == 0,
             has_build_artifacts: root.join(BUILD_ARTIFACT_DIR).is_dir(),
@@ -244,7 +283,7 @@ fn run_gc(
         })
         .collect();
     let protected = protected_roots(&repo_path, &root_paths);
-    let mut plan = plan(probes, base, include_unmerged, &protected);
+    let mut plan = plan(probes, base, options, &protected);
     for candidate in &mut plan.candidates {
         candidate.bytes = directory_size(&candidate.target);
     }
@@ -279,7 +318,8 @@ fn run_gc(
     Ok(GcReport {
         dry_run,
         base: base.to_string(),
-        include_unmerged,
+        include_unmerged: options.include_unmerged,
+        include_protected_workspaces: options.include_protected_workspaces,
         candidates: plan.candidates,
         kept: plan.kept,
         reclaimable_bytes,
@@ -501,11 +541,21 @@ fn unexpected(message: String) -> SpecOpsError {
 mod tests {
     use super::*;
 
+    /// Both opt-ins on, for the tests that assert an exclusion no option can
+    /// override.
+    fn both_opt_ins() -> GcOptions {
+        GcOptions {
+            include_unmerged: true,
+            include_protected_workspaces: true,
+        }
+    }
+
     fn probe(root: &str) -> WorktreeProbe {
         WorktreeProbe {
             root: PathBuf::from(root),
             branch: Some(format!("work/{}", root.rsplit('/').next().unwrap_or(root))),
             is_main: false,
+            is_base_branch_workspace: false,
             has_build_artifacts: true,
             active_processes: Vec::new(),
             tracked_sessions: Vec::new(),
@@ -524,7 +574,12 @@ mod tests {
     /// AC-1: a merged worktree with no process and a `target/` is reclaimed.
     #[test]
     fn merged_idle_worktree_with_build_artifacts_is_a_candidate() {
-        let plan = plan(vec![probe("/work/issue-1")], "develop", false, &[]);
+        let plan = plan(
+            vec![probe("/work/issue-1")],
+            "develop",
+            GcOptions::default(),
+            &[],
+        );
         assert_eq!(plan.candidates.len(), 1, "{plan:?}");
         assert_eq!(plan.candidates[0].worktree, Path::new("/work/issue-1"));
         assert_eq!(
@@ -541,7 +596,7 @@ mod tests {
     fn worktree_with_an_active_process_is_kept_with_the_process_named() {
         let mut busy = probe("/work/issue-2");
         busy.active_processes = vec!["claude.exe (pid 4242)".to_string()];
-        let plan = plan(vec![busy], "develop", true, &[]);
+        let plan = plan(vec![busy], "develop", both_opt_ins(), &[]);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         let reason = kept_reason(&plan, "/work/issue-2");
         assert!(reason.starts_with("active process"), "{reason}");
@@ -554,7 +609,7 @@ mod tests {
     fn worktree_with_a_tracked_launch_is_kept_with_the_session_named() {
         let mut launched = probe("/work/issue-3");
         launched.tracked_sessions = vec!["session-abc".to_string()];
-        let plan = plan(vec![launched], "develop", false, &[]);
+        let plan = plan(vec![launched], "develop", GcOptions::default(), &[]);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         let reason = kept_reason(&plan, "/work/issue-3");
         assert!(reason.starts_with("tracked launch"), "{reason}");
@@ -567,7 +622,7 @@ mod tests {
     fn unmerged_worktree_is_kept_by_default() {
         let mut unmerged = probe("/work/issue-4");
         unmerged.merged = Ok(false);
-        let plan = plan(vec![unmerged], "develop", false, &[]);
+        let plan = plan(vec![unmerged], "develop", GcOptions::default(), &[]);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         let reason = kept_reason(&plan, "/work/issue-4");
         assert!(reason.contains("origin/develop"), "{reason}");
@@ -580,7 +635,7 @@ mod tests {
     fn include_unmerged_reclaims_an_unmerged_idle_worktree() {
         let mut unmerged = probe("/work/issue-5");
         unmerged.merged = Ok(false);
-        let plan = plan(vec![unmerged], "develop", true, &[]);
+        let plan = plan(vec![unmerged], "develop", both_opt_ins(), &[]);
         assert_eq!(plan.candidates.len(), 1, "{plan:?}");
     }
 
@@ -590,7 +645,7 @@ mod tests {
     fn unknown_merge_state_is_kept_with_the_error() {
         let mut unknown = probe("/work/issue-6");
         unknown.merged = Err("git rev-parse HEAD failed".to_string());
-        let plan = plan(vec![unknown], "develop", true, &[]);
+        let plan = plan(vec![unknown], "develop", both_opt_ins(), &[]);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         let reason = kept_reason(&plan, "/work/issue-6");
         assert!(reason.contains("git rev-parse HEAD failed"), "{reason}");
@@ -607,7 +662,7 @@ mod tests {
             root: PathBuf::from("/work/issue-7"),
             reason: "current worktree".to_string(),
         }];
-        let plan = plan(vec![main, current], "develop", true, &protected);
+        let plan = plan(vec![main, current], "develop", both_opt_ins(), &protected);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         assert_eq!(kept_reason(&plan, "/repo"), "main worktree");
         assert_eq!(kept_reason(&plan, "/work/issue-7"), "current worktree");
@@ -618,9 +673,62 @@ mod tests {
     fn worktree_without_build_artifacts_is_kept() {
         let mut clean = probe("/work/issue-8");
         clean.has_build_artifacts = false;
-        let plan = plan(vec![clean], "develop", false, &[]);
+        let plan = plan(vec![clean], "develop", GcOptions::default(), &[]);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         assert!(kept_reason(&plan, "/work/issue-8").contains("no target/"));
+    }
+
+    /// The shared `develop` workspace is merged into the base by definition,
+    /// so nothing but this rule keeps the largest `target/` on the host out
+    /// of an unqualified sweep.
+    #[test]
+    fn shared_base_branch_workspace_is_kept_by_default() {
+        let mut shared = probe("/work/develop");
+        shared.branch = Some("develop".to_string());
+        shared.is_base_branch_workspace = true;
+
+        let plan = plan(vec![shared], "develop", GcOptions::default(), &[]);
+
+        assert!(plan.candidates.is_empty(), "{plan:?}");
+        let reason = kept_reason(&plan, "/work/develop");
+        assert!(reason.contains("shared base-branch workspace"), "{reason}");
+        assert!(reason.contains("include_protected_workspaces"), "{reason}");
+    }
+
+    /// ...and an operator who understands the rebuild cost can still ask for
+    /// it by name.
+    #[test]
+    fn include_protected_workspaces_reclaims_the_shared_workspace() {
+        let mut shared = probe("/work/develop");
+        shared.branch = Some("develop".to_string());
+        shared.is_base_branch_workspace = true;
+
+        let plan = plan(
+            vec![shared],
+            "develop",
+            GcOptions {
+                include_protected_workspaces: true,
+                ..GcOptions::default()
+            },
+            &[],
+        );
+
+        assert_eq!(plan.candidates.len(), 1, "{plan:?}");
+    }
+
+    /// The opt-in widens exactly one rule: a shared workspace something is
+    /// running in stays kept, with the process reason.
+    #[test]
+    fn include_protected_workspaces_never_overrides_a_running_process() {
+        let mut shared = probe("/work/develop");
+        shared.branch = Some("develop".to_string());
+        shared.is_base_branch_workspace = true;
+        shared.active_processes = vec!["cargo (pid 1)".to_string()];
+
+        let plan = plan(vec![shared], "develop", both_opt_ins(), &[]);
+
+        assert!(plan.candidates.is_empty(), "{plan:?}");
+        assert!(kept_reason(&plan, "/work/develop").starts_with("active process"));
     }
 
     /// The process exclusion wins over every other reason: the operator must
@@ -630,7 +738,7 @@ mod tests {
         let mut both = probe("/work/issue-9");
         both.active_processes = vec!["cargo.exe (pid 1)".to_string()];
         both.merged = Ok(false);
-        let plan = plan(vec![both], "develop", false, &[]);
+        let plan = plan(vec![both], "develop", GcOptions::default(), &[]);
         assert!(kept_reason(&plan, "/work/issue-9").starts_with("active process"));
     }
 
@@ -692,6 +800,7 @@ mod tests {
                 dry_run: true,
                 base: None,
                 include_unmerged: false,
+                include_protected_workspaces: false,
             },
             &mut out,
         )
@@ -722,6 +831,7 @@ mod tests {
                 dry_run: false,
                 base: Some("develop".to_string()),
                 include_unmerged: false,
+                include_protected_workspaces: false,
             },
             &mut out,
         )

@@ -681,8 +681,12 @@ quota:
   sizes and every kept worktree with its reason; rerun with
   `dry_run:false` to delete. Never pass `include_unmerged:true` on your
   own — an unmerged worktree is someone's uncommitted build state; ask
-  the owner first. Running worktrees are excluded by the operation
-  itself, so it is safe to run while agents are active.
+  the owner first. `include_protected_workspaces:true` reclaims the
+  shared `develop` / `main` workspaces, which are the single largest
+  caches on the host; it is the right call only once the host is tight
+  enough that the rebuild the next opener pays is worth it. Running
+  worktrees are excluded by the operation itself, so it is safe to run
+  while agents are active.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -1770,6 +1774,7 @@ mod tests {
             "`worktree.gc_build_artifacts`",
             "`dry_run:false`",
             "`include_unmerged:true`",
+            "`include_protected_workspaces:true`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

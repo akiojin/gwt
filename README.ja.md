@@ -338,8 +338,10 @@ Priority の変更と daemon 不在時の設定変更は、実行中 instance �
 で、候補とそのサイズ、および除外した worktree とその理由（`active process …` /
 `tracked launch …` / `not merged …`）を報告します。削除するには `dry_run: false`
 を、未マージの idle worktree も対象にするには `include_unmerged: true` を渡します。
-稼働中の worktree、main worktree、呼び出し元の worktree、実行中の `gwtd` を置く
-worktree には決して触れません。
+共有の base ブランチ workspace（`develop` / `main`）は、リビルド代償を次に触る人が
+負うことになるため既定で除外され、`include_protected_workspaces: true` を明示した
+場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
+実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
 ### Autonomous モード（opt-in）
 

@@ -361,10 +361,12 @@ whose HEAD is merged into `origin/<base>` (`base` defaults to `develop`) and
 that has neither a running process nor a live gwt launch. An unqualified call
 is a dry run that lists the candidates with their sizes and every kept
 worktree with its reason (`active process …`, `tracked launch …`, `not
-merged …`); pass `dry_run: false` to delete, and `include_unmerged: true` to
-also reclaim idle unmerged worktrees. Running worktrees, the main worktree,
-the calling worktree, and the worktree hosting the running `gwtd` are never
-touched.
+merged …`); pass `dry_run: false` to delete, `include_unmerged: true` to
+also reclaim idle unmerged worktrees, and `include_protected_workspaces: true`
+to also reclaim the shared base-branch workspaces (`develop`, `main`), which
+are kept by default because their rebuild lands on whoever opens them next.
+Running worktrees, the main worktree, the calling worktree, and the worktree
+hosting the running `gwtd` are never touched, whatever the flags say.
 
 ### Autonomous mode (opt-in)
 

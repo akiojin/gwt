@@ -227,7 +227,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
             reject_unknown_params(
                 params,
-                &["dry_run", "base", "include_unmerged"],
+                &[
+                    "dry_run",
+                    "base",
+                    "include_unmerged",
+                    "include_protected_workspaces",
+                ],
                 "worktree.gc_build_artifacts",
             )?;
             CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
@@ -236,6 +241,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
                 base: optional_string(params, "base")?,
                 include_unmerged: optional_bool(params, "include_unmerged")?.unwrap_or(false),
+                include_protected_workspaces: optional_bool(
+                    params,
+                    "include_protected_workspaces",
+                )?
+                .unwrap_or(false),
             })
         }
         "intake.outcome.record" | "intake.outcome-record" => {
@@ -1948,29 +1958,38 @@ mod tests {
                 dry_run,
                 base,
                 include_unmerged,
+                include_protected_workspaces,
             }) => {
                 assert!(dry_run);
                 assert!(base.is_none());
                 assert!(!include_unmerged);
+                assert!(!include_protected_workspaces);
             }
             other => panic!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
-    fn worktree_gc_build_artifacts_accepts_apply_base_and_include_unmerged() {
+    fn worktree_gc_build_artifacts_accepts_apply_base_and_both_opt_ins() {
         match ok(
             "worktree.gc-build-artifacts",
-            json!({ "dry_run": false, "base": "main", "include_unmerged": true }),
+            json!({
+                "dry_run": false,
+                "base": "main",
+                "include_unmerged": true,
+                "include_protected_workspaces": true,
+            }),
         ) {
             CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
                 dry_run,
                 base,
                 include_unmerged,
+                include_protected_workspaces,
             }) => {
                 assert!(!dry_run);
                 assert_eq!(base.as_deref(), Some("main"));
                 assert!(include_unmerged);
+                assert!(include_protected_workspaces);
             }
             other => panic!("unexpected command: {other:?}"),
         }
