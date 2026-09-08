@@ -675,6 +675,22 @@ quota:
   refusal in a row (1 → 2 → 4 → 8 minutes, capped at 15) and no gwt
   process issues GraphQL calls inside it; wait for `backoff_until`
   instead of retrying.
+- `issue.monitor.status` also carries `disk_space`: the volumes the
+  worktrees and the verification coordinator live on, and a `warning`
+  once one falls below 20 GiB or 5% free. A full host stops every
+  `verify.run` on it at once (`No space left on device`), so treat the
+  warning as a fleet blocker, not a per-Issue one. Reclaim with JSON
+  operation `worktree.gc_build_artifacts`: the default call is a dry run
+  listing the `target/` caches of merged, idle worktrees with their
+  sizes and every kept worktree with its reason; rerun with
+  `dry_run:false` to delete. Never pass `include_unmerged:true` on your
+  own — an unmerged worktree is someone's uncommitted build state; ask
+  the owner first. `include_protected_workspaces:true` reclaims the
+  shared `develop` / `main` workspaces, which are the single largest
+  caches on the host; it is the right call only once the host is tight
+  enough that the rebuild the next opener pays is worth it. Running
+  worktrees are excluded by the operation itself, so it is safe to run
+  while agents are active.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -1754,6 +1770,23 @@ mod tests {
             "`backoff_until`",
             "`sources_last_minute`",
             "capped at 15",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #4009 AC-4: the disk-space warning and the reclaim operation are
+    /// named where the PM reads the queue, so a filling host is acted on
+    /// before every `verify.run` on it fails.
+    #[test]
+    fn contract_points_the_pm_at_disk_space_and_the_reclaim_operation() {
+        let body = body();
+        for phrase in [
+            "`disk_space`",
+            "`worktree.gc_build_artifacts`",
+            "`dry_run:false`",
+            "`include_unmerged:true`",
+            "`include_protected_workspaces:true`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
