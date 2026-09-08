@@ -855,6 +855,14 @@ Board naming the holder. Your part:
 - A Board post from a waiting agent names the lease holder. Read
   `verify.lease.status` and arbitrate the order — tell the holder to
   release or the waiter to keep waiting — instead of relaunching either.
+- `verify.lease.status` names `holder_kind`. When it is `index` (a
+  background `chroma_index_runner` job, Issue #4086), verification
+  already outranks it: a refused agent leaves a reservation the runner
+  yields to at its next batch boundary, and `estimated_remaining_ms` /
+  `remaining_batches` say how long that is. To force the order yourself,
+  run `verify.lease.release` with the index lease's `lease_id`: it answers
+  `yield requested` and leaves the same reservation instead of failing
+  with "no control channel".
 - An agent whose `current_focus` says it is waiting for the lease, or
   whose row carries a `waiting` declaration, is waiting, not stuck. Do
   not stop it on `last_activity_at` alone.
