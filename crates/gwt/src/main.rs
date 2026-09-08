@@ -8332,6 +8332,42 @@ fn apply_agent_frontend_dispatch_outcome(
     }
 }
 
+/// Record the descriptor ceiling the process runs under (Issue #4142 AC-3).
+/// A raise that fell short of [`gwt_core::fd_limit::MIN_SOFT_FD_LIMIT`] is a
+/// warning rather than a fatal error: gwt still runs, it just cannot host many
+/// panes, and the log line is what makes that explicable afterwards.
+fn log_startup_fd_limit(raise: gwt_core::fd_limit::FdLimitRaise) {
+    let Some(after) = raise.after else {
+        return;
+    };
+    let hard = if after.hard == u64::MAX {
+        "unlimited".to_string()
+    } else {
+        after.hard.to_string()
+    };
+    let before_soft = raise.before.map(|limit| limit.soft).unwrap_or(after.soft);
+    if raise.meets_minimum() {
+        tracing::info!(
+            target: "gwt::startup::fd_limit",
+            soft_before = before_soft,
+            soft_after = after.soft,
+            hard = %hard,
+            requested = raise.requested.unwrap_or(after.soft),
+            "raised soft RLIMIT_NOFILE"
+        );
+    } else {
+        tracing::warn!(
+            target: "gwt::startup::fd_limit",
+            soft_before = before_soft,
+            soft_after = after.soft,
+            hard = %hard,
+            minimum = gwt_core::fd_limit::MIN_SOFT_FD_LIMIT,
+            error = raise.error.as_deref().unwrap_or("none"),
+            "soft RLIMIT_NOFILE stayed below the minimum gwt needs for concurrent PTY panes"
+        );
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
     // POSIX bound launches still host the gate here (the gate `exec`s the target
@@ -8408,6 +8444,14 @@ fn main() -> std::io::Result<()> {
             eprintln!("gwt logging init failed: {error}");
         })
         .ok();
+
+    // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
+    // and every live PTY pane costs three descriptors, so the process runs out
+    // of file descriptors at roughly 80 concurrent agents — after which PTY
+    // creation, daemon connect, Issue Monitor prefs reads and tokio runtime
+    // builds all fail with `Too many open files`. Raise the ceiling before any
+    // pane can spawn, and record the value the process actually ended up with.
+    log_startup_fd_limit(gwt_core::fd_limit::raise_soft_fd_limit());
 
     // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
     // (tray-resident) route so VPN-reachable hosts can run
