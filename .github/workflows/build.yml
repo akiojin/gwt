@@ -17,6 +17,8 @@ jobs:
         timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       - name: Build workspace targets
         run: cargo build -p gwt-core -p gwt --all-features
@@ -29,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-windows
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Check Windows compilation
         run: cargo check -p gwt-core -p gwt
@@ -50,7 +52,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-macos
+          shared-key: macos-workspace
         continue-on-error: true
       - name: Check macOS compilation
         run: cargo check -p gwt-core -p gwt
