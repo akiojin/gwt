@@ -631,9 +631,7 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     is_ephemeral: bool,
 ) -> io::Result<ManagedAssetMaterialization> {
     with_managed_asset_lock(worktree, || {
-        let targets = managed_targets_for_agent(agent_id)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let targets = refresh_targets_for_agent(worktree, agent_id);
         let hook_bin = materialize_managed_gwt_assets_for_targets(
             worktree,
             &targets,
@@ -818,6 +816,24 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
         AgentId::GrokBuild => Some(ManagedAssetTarget::ClaudeCode),
         AgentId::Antigravity | AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
     }
+}
+
+/// Targets a launch refresh must write: the launched provider plus every
+/// managed provider surface the worktree already carries (#3233). Writing only
+/// the launched provider left an existing mirror (e.g. `.codex/skills`) frozen
+/// at whatever the previous build materialized, so a bundle asset added since
+/// then appeared on one side only and broke `.claude` / `.codex` parity.
+fn refresh_targets_for_agent(worktree: &Path, agent_id: &AgentId) -> Vec<ManagedAssetTarget> {
+    // An agent with no managed surface of its own (Gemini, Copilot, …) still
+    // launches inside a worktree whose existing `.claude` / `.codex` surfaces
+    // must not be left frozen, so start from the optional primary instead of
+    // returning early.
+    let mut targets: Vec<ManagedAssetTarget> =
+        managed_targets_for_agent(agent_id).into_iter().collect();
+    for existing in detect_existing_managed_asset_targets(worktree) {
+        push_existing_target(&mut targets, true, existing);
+    }
+    targets
 }
 
 fn detect_existing_managed_asset_targets(worktree: &Path) -> Vec<ManagedAssetTarget> {
