@@ -262,7 +262,9 @@ mod wrapper {
     use super::*;
 
     use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, Output};
+    use std::process::Output;
+
+    use gwt_core::process::{resolved_command, ProcessPlanRequest};
 
     struct Harness {
         dir: PathBuf,
@@ -294,9 +296,10 @@ mod wrapper {
 
         fn run(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
             let script = repo_root().join(CI_APT);
-            let mut command = Command::new("bash");
-            command.arg(script);
-            command.args(args);
+            let mut argv = vec![script.to_string_lossy().into_owned()];
+            argv.extend(args.iter().map(|arg| (*arg).to_string()));
+            let mut command =
+                resolved_command(ProcessPlanRequest::new("bash").args(argv)).expect("resolve bash");
             command.env("GWT_APT_STATE_DIR", self.path("state"));
             // No dpkg lock in the harness; the probe is the only lock source.
             command.env("GWT_APT_LOCK_PROBE", self.path("no-lock"));
