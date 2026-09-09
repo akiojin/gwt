@@ -986,6 +986,9 @@ fn run_coordinated_issue_index(
             // published in the heavy ticket, so `verify.lease.status` and the
             // `verify.run` refusal can quote a real deadline instead of the
             // `0s left` an untimed lease used to report (Issue #4140 AC-3).
+            // The cap stays the 10-minute one from #4140 rather than the
+            // generic `INDEX_HEAVY_LEASE_TTL`: this job is the holder that
+            // starved verification, so it gets the tighter bound.
             let heavy = match guard
                 .acquire_heavy_with_ttl(ISSUE_INDEX_HEAVY_TIMEOUT, ISSUE_INDEX_HEAVY_MAX_HOLD)
             {

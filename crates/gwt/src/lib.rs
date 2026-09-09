@@ -18,6 +18,7 @@ pub mod daemon_runtime;
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
+pub mod disk_space;
 pub mod error_report;
 pub mod file_content;
 pub mod file_tree;
@@ -49,6 +50,7 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
+pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
@@ -147,29 +149,29 @@ pub use issue_monitor::{
     AutonomousSteeringRequest, AutonomousWaitDeclaration, AutonomousWaitOutcome,
     EligibilityDecision, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
     IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorExecutionSettlement,
-    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorFailure,
-    IssueMonitorIdleKind, IssueMonitorIdlePaneClose, IssueMonitorIdleReconciliation,
-    IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow, IssueMonitorInboxItem,
-    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchBindingReconciliation,
-    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate,
-    IssueMonitorLaunchProfilePatch, IssueMonitorLaunchProfileSource,
-    IssueMonitorLaunchProfileSwitchError, IssueMonitorLaunchRequest,
-    IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
-    IssueMonitorPrefs, IssueMonitorPrefsReset, IssueMonitorProfilesSetChange,
-    IssueMonitorProviderQuotaHold, IssueMonitorProviderQuotaHoldClearOutcome,
-    IssueMonitorProviderQuotaHoldEvidence, IssueMonitorProviderQuotaHoldRelease,
-    IssueMonitorProviderQuotaPollerWindow, IssueMonitorProviderUsageLimitOutcome,
-    IssueMonitorReadiness, IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
-    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver, IssueMonitorScanDriverKind,
-    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch,
-    IssueMonitorStopOutcome, IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts,
-    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl, IssueMonitorUpdateDrainReason,
-    IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
-    LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement,
-    MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect,
-    AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
+    IssueMonitorClaimIdentity, IssueMonitorConfig, IssueMonitorControlReceipt,
+    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorExecutionSettlement, IssueMonitorFailedIssue, IssueMonitorFailoverOutcome,
+    IssueMonitorFailure, IssueMonitorIdleKind, IssueMonitorIdlePaneClose,
+    IssueMonitorIdleReconciliation, IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
+    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
+    IssueMonitorLaunchProfileSource, IssueMonitorLaunchProfileSwitchError,
+    IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue,
+    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorPrefsReset,
+    IssueMonitorProfilesSetChange, IssueMonitorProviderQuotaHold,
+    IssueMonitorProviderQuotaHoldClearOutcome, IssueMonitorProviderQuotaHoldEvidence,
+    IssueMonitorProviderQuotaHoldRelease, IssueMonitorProviderQuotaPollerWindow,
+    IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness, IssueMonitorReleasedFailure,
+    IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver,
+    IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
+    IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
+    IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
+    IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
+    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
+    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
+    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
