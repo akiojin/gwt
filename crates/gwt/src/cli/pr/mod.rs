@@ -5,12 +5,15 @@
 //! - `gh.rs`: every `gh` CLI / graphql wrapper, plus the small response-shape
 //!   parsers (`parse_pr_checks_*`, `parse_available_fields`, ...) that exist
 //!   solely to interpret gh output.
+//! - `types.rs`: the plain `pr.*` response / call shapes, re-exported from
+//!   `crate::cli` so existing call sites keep their paths.
 //!
 //! All `gh.rs` items are re-exported via `pub(super) use gh::*;` so external
 //! callers (`cli::env`, `cli::run`, `cli::tests`) keep accessing them via
 //! `super::pr::name` / `crate::cli::pr::name` exactly as before.
 
 mod gh;
+pub(crate) mod types;
 
 #[allow(unused_imports)]
 pub(super) use gh::{
@@ -434,6 +437,7 @@ pub(super) fn run<E: CliEnv>(
             escalate_after_cycles,
             refresh,
             include,
+            force_reason,
         } => {
             let defaults = gwt_git::PrInventoryOptions::default();
             let options = gwt_git::PrInventoryOptions {
@@ -442,6 +446,7 @@ pub(super) fn run<E: CliEnv>(
                     .unwrap_or(defaults.escalate_after_cycles),
                 refresh,
                 include: include.unwrap_or(defaults.include),
+                force_reason,
             };
             let read = env
                 .list_open_prs(&options)
@@ -822,10 +827,18 @@ fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let mut escalate_after_cycles: Option<u32> = None;
     let mut refresh = false;
     let mut include: Option<gwt_git::PrInventoryInclude> = None;
+    let mut force_reason: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--refresh" => refresh = true,
+            "--force-reason" => {
+                i += 1;
+                let reason = args
+                    .get(i)
+                    .ok_or(CliParseError::MissingFlag("--force-reason"))?;
+                force_reason = Some(reason.to_string());
+            }
             "--include" => {
                 i += 1;
                 let raw = args.get(i).ok_or(CliParseError::MissingFlag("--include"))?;
@@ -880,6 +893,7 @@ fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
         escalate_after_cycles,
         refresh,
         include,
+        force_reason,
     })
 }
 
@@ -966,6 +980,22 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
             })
         })
         .collect();
+    // Issue #4074 FR-005: branches whose commits have nowhere to land ride
+    // along with the PR rows, so one PM read covers both the PRs in flight and
+    // the work that never got one.
+    let unlanded: Vec<serde_json::Value> = read
+        .unlanded_branches
+        .iter()
+        .map(|branch| {
+            serde_json::json!({
+                "branch": branch.branch,
+                "owner_issue": branch.owner_issue,
+                "ahead": branch.ahead,
+                "last_commit_at": branch.last_commit_at,
+                "has_open_pr": branch.has_open_pr,
+            })
+        })
+        .collect();
     // Issue #3891: provenance and cost of the read travel with the rows so a
     // cached or throttled inventory is never mistaken for a live one.
     let payload = serde_json::json!({
@@ -976,6 +1006,8 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         "throttled": read.throttled,
         "github_calls": read.github_calls,
         "pull_requests": rows,
+        "unlanded_branch_count": unlanded.len(),
+        "unlanded_branches": unlanded,
     });
     match serde_json::to_string_pretty(&payload) {
         Ok(rendered) => {
@@ -1095,7 +1127,7 @@ mod tests {
             dwell_hours: Some(5),
             stale_after_hours: 72,
             default_action_executable: false,
-            blocker: Some("owner_relaunch_refused_unique_commits".to_string()),
+            blocker: Some("owner_issue_closed".to_string()),
             fallback: Some(gwt_git::PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string()),
             unchanged_cycles: 2,
             escalate_after_cycles: 3,
@@ -2288,6 +2320,49 @@ mod tests {
         assert!(env.client.call_log().is_empty());
     }
 
+    /// Issue #4074 AC-4: the branches whose commits never reached a PR are part
+    /// of the same read the PM already makes, so a ten-day residue like #3551
+    /// cannot hide behind "no open PR mentions it".
+    #[test]
+    fn pr_family_run_reports_unlanded_branches_beside_the_pr_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr_inventory(vec![seeded_inventory_item()]);
+        env.pr_unlanded_branches = vec![gwt_git::UnlandedBranch {
+            branch: "work/issue-3551".to_string(),
+            owner_issue: Some(3551),
+            ahead: 3,
+            last_commit_at: Some("2026-08-27T04:00:00Z".parse().expect("commit date")),
+            has_open_pr: false,
+        }];
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: false,
+                include: None,
+                force_reason: None,
+            },
+            &mut out,
+        )
+        .expect("run pr list");
+
+        assert_eq!(code, 0);
+        for field in [
+            "\"unlanded_branch_count\": 1",
+            "\"branch\": \"work/issue-3551\"",
+            "\"owner_issue\": 3551",
+            "\"ahead\": 3",
+            "\"last_commit_at\": \"2026-08-27T04:00:00Z\"",
+            "\"has_open_pr\": false",
+        ] {
+            assert!(out.contains(field), "missing {field}: {out}");
+        }
+    }
+
     #[test]
     fn pr_family_run_renders_open_pr_inventory_json() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2302,6 +2377,7 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
+                force_reason: None,
             },
             &mut out,
         )
@@ -2334,7 +2410,7 @@ mod tests {
             "\"stale_after_hours\": 72",
             "\"lifecycle_source\": \"observed\"",
             "\"default_action_executable\": false",
-            "\"blocker\": \"owner_relaunch_refused_unique_commits\"",
+            "\"blocker\": \"owner_issue_closed\"",
             "\"fallback\": \"PM triages",
             "\"unchanged_cycles\": 2",
             "\"escalate_after_cycles\": 3",
@@ -2369,6 +2445,7 @@ mod tests {
                 escalate_after_cycles: Some(2),
                 refresh: false,
                 include: None,
+                force_reason: None,
             }
         );
         let bare: Vec<String> = vec!["list".to_string()];
@@ -2379,6 +2456,7 @@ mod tests {
                 escalate_after_cycles: None,
                 refresh: false,
                 include: None,
+                force_reason: None,
             }
         );
         let budgeted: Vec<String> = ["list", "--refresh", "--include", "checks,body"]
@@ -2395,6 +2473,7 @@ mod tests {
                     checks: true,
                     body: true
                 }),
+                force_reason: None,
             }
         );
     }
@@ -2412,6 +2491,7 @@ mod tests {
                 escalate_after_cycles: Some(2),
                 refresh: false,
                 include: None,
+                force_reason: None,
             },
             &mut out,
         )

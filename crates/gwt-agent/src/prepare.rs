@@ -8224,7 +8224,7 @@ fi
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.docker_service = Some("app".to_string());
         config.command = "codex".to_string();
-        config.args = vec!["--no-alt-screen".to_string()];
+        config.args = crate::canonical_launch_args(&AgentId::Codex);
         config.env_vars = HashMap::from([
             (GWT_SESSION_ID_ENV.to_string(), "sess-123".to_string()),
             (
@@ -8250,6 +8250,17 @@ fi
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
+        assert_eq!(
+            config
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "Docker wrapping must preserve the canonical Default-mode override"
+        );
     }
 
     #[test]

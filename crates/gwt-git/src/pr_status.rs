@@ -5,7 +5,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
-use gwt_core::github_quota::GitHubQuota;
+use gwt_core::github_quota::{GitHubQuota, RATE_LIMITED_ERROR_CODE};
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -77,17 +77,22 @@ arrange a rerun → regression: arrange a fresh launch → neither possible: esc
 
 /// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6) and the
 /// budget behaviour of the read itself (Issue #3891).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInventoryOptions {
     /// Hours without an `updated_at` bump before a row is `stale`.
     pub stale_after_hours: i64,
     /// Unchanged consecutive observations before a row is `escalation_due`.
     pub escalate_after_cycles: u32,
-    /// Bypass the TTL cache and the budget throttle: the caller needs the live
-    /// state for a decision. Default `false` (periodic, non-essential read).
+    /// Bypass the TTL cache: the caller needs the live state for a decision.
+    /// Default `false` (periodic, non-essential read). SPEC #4093 FR-008: a
+    /// refresh still honors the GitHub budget (refusal window, reserve, burst)
+    /// and answers from the stale cache when throttled.
     pub refresh: bool,
     /// Heavy per-PR fields to hydrate on top of the light list query.
     pub include: PrInventoryInclude,
+    /// One-step override of the reserve / burst throttle, with the reason the
+    /// decision cannot wait. Never bypasses an open refusal window.
+    pub force_reason: Option<String>,
 }
 
 impl Default for PrInventoryOptions {
@@ -97,6 +102,7 @@ impl Default for PrInventoryOptions {
             escalate_after_cycles: PR_ESCALATE_AFTER_UNCHANGED_CYCLES,
             refresh: false,
             include: PrInventoryInclude::default(),
+            force_reason: None,
         }
     }
 }
@@ -461,18 +467,6 @@ fn owner_issue(fields: &PrInventoryFields) -> Option<u64> {
         .or_else(|| launch_ref_issue(&fields.head_ref_name))
 }
 
-/// Whether the PR head is the launch ref the Issue Monitor would fresh-launch
-/// the owner from — the exact case its unique-commits guard refuses.
-fn head_is_owner_launch_ref(fields: &PrInventoryFields) -> bool {
-    launch_ref_issue(&fields.head_ref_name).is_some_and(|head_issue| {
-        fields.closing_issues.is_empty()
-            || fields
-                .closing_issues
-                .iter()
-                .any(|issue| issue.number == head_issue)
-    })
-}
-
 /// Classify one open PR into the PM inventory taxonomy with default thresholds.
 pub fn classify_pr_lifecycle(
     fields: &PrInventoryFields,
@@ -539,16 +533,14 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         }
     };
     let owner = owner_issue(fields);
+    // Issue #4074 AC-2: a head sitting on the owner's own launch ref used to be
+    // a blocker because the fresh-launch guard refused any ref with unique
+    // commits. The guard now inherits that ref, so the relaunch is executable
+    // and only a missing or closed owner still blocks it.
     let blocker = if owner_issue_closed {
         Some("owner_issue_closed")
-    } else if class.relaunches_owner() {
-        if owner.is_none() {
-            Some("owner_unknown")
-        } else if head_is_owner_launch_ref(fields) {
-            Some("owner_relaunch_refused_unique_commits")
-        } else {
-            None
-        }
+    } else if class.relaunches_owner() && owner.is_none() {
+        Some("owner_unknown")
     } else {
         None
     };
@@ -808,6 +800,131 @@ pub struct PrInventoryRead {
     pub throttled: Option<String>,
     /// Budget-spending `gh` calls this read made (the free probe excluded).
     pub github_calls: u32,
+    /// Issue #4074 FR-005: `work/issue-*` branches with commits and no open PR
+    /// to land them. Read from local refs, so it stays truthful even when the
+    /// PR rows came from cache.
+    pub unlanded_branches: Vec<UnlandedBranch>,
+}
+
+/// The base every `work/issue-*` branch is expected to land on.
+pub const UNLANDED_BRANCH_BASE_REF: &str = "origin/develop";
+
+/// One remote `work/issue-*` branch carrying commits the base does not have
+/// (Issue #4074 FR-005), before the open-PR filter is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlandedBranchProbe {
+    pub branch: String,
+    pub ahead: usize,
+    pub last_commit_at: Option<DateTime<Utc>>,
+}
+
+/// A branch whose commits have nowhere to land: unique work against
+/// `origin/develop` and no open PR carrying it (Issue #4074 FR-005 / AC-4).
+///
+/// `has_open_pr` is part of the row rather than implied by the collection so a
+/// single row stays self-describing; the inventory itself only lists branches
+/// where it is false, which is the set a PM must triage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlandedBranch {
+    pub branch: String,
+    /// Issue named by the launch ref, when the branch is one.
+    pub owner_issue: Option<u64>,
+    pub ahead: usize,
+    pub last_commit_at: Option<DateTime<Utc>>,
+    pub has_open_pr: bool,
+}
+
+/// Keep the branches a PM must triage, oldest residue first.
+///
+/// Pure so the stocktake rule is testable without a repository: a branch is
+/// unlanded when it has unique commits and no open PR head points at it.
+pub fn classify_unlanded_branches(
+    probes: Vec<UnlandedBranchProbe>,
+    open_pr_head_refs: &[String],
+) -> Vec<UnlandedBranch> {
+    let mut rows: Vec<UnlandedBranch> = probes
+        .into_iter()
+        .filter(|probe| probe.ahead > 0)
+        .filter(|probe| {
+            !open_pr_head_refs
+                .iter()
+                .any(|head| head.as_str() == probe.branch)
+        })
+        .map(|probe| UnlandedBranch {
+            owner_issue: launch_ref_issue(&probe.branch),
+            branch: probe.branch,
+            ahead: probe.ahead,
+            last_commit_at: probe.last_commit_at,
+            has_open_pr: false,
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        left.last_commit_at
+            .cmp(&right.last_commit_at)
+            .then_with(|| left.branch.cmp(&right.branch))
+    });
+    rows
+}
+
+/// Parse `git for-each-ref --format=%(refname:short)%09%(committerdate:iso-strict)`
+/// output into branch names stripped of their `origin/` prefix.
+pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<Utc>>)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (reference, date) = line.split_once('\t')?;
+            let branch = reference.trim().strip_prefix("origin/")?;
+            (!branch.is_empty()).then(|| {
+                (
+                    branch.to_string(),
+                    DateTime::parse_from_rfc3339(date.trim())
+                        .ok()
+                        .map(|value| value.with_timezone(&Utc)),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Read the remote `work/issue-*` branches that are not merged into `base_ref`
+/// and count how far each is ahead.
+///
+/// `git for-each-ref --no-merged` narrows the set in one local command so the
+/// per-branch `rev-list` stays bounded by the residue, not by branch count.
+pub fn collect_unlanded_work_branches(
+    repo_path: &Path,
+    base_ref: &str,
+) -> std::result::Result<Vec<UnlandedBranchProbe>, String> {
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(committerdate:iso-strict)",
+            "--no-merged",
+            base_ref,
+            "refs/remotes/origin/work/",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let mut probes = Vec::new();
+    for (branch, last_commit_at) in
+        parse_unlanded_branch_refs(&String::from_utf8_lossy(&output.stdout))
+    {
+        let Ok(divergence) =
+            crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
+        else {
+            continue;
+        };
+        probes.push(UnlandedBranchProbe {
+            branch,
+            ahead: divergence.ahead,
+            last_commit_at,
+        });
+    }
+    Ok(probes)
 }
 
 /// Fetch open PRs, classify them, and fold the read into the per-project
@@ -829,6 +946,17 @@ pub fn fetch_pr_inventory_tracked(
         options,
         run_gh_command,
     )?;
+    // Issue #4074 FR-005: the stocktake is local git, so it costs no GitHub
+    // budget and is never served stale beside a cached PR list. A git failure
+    // degrades the inventory to empty rather than failing the whole read.
+    let open_pr_head_refs: Vec<String> = read
+        .items
+        .iter()
+        .map(|item| item.head_ref_name.clone())
+        .collect();
+    read.unlanded_branches = collect_unlanded_work_branches(repo_path, UNLANDED_BRANCH_BASE_REF)
+        .map(|probes| classify_unlanded_branches(probes, &open_pr_head_refs))
+        .unwrap_or_default();
     let mut history = PrInventoryHistory::load(history_path);
     history.observe(&mut read.items, now, options);
     if let Err(error) = history.save(history_path) {
@@ -880,26 +1008,34 @@ where
                     cache_age_secs: Some(age),
                     throttled: None,
                     github_calls: 0,
+                    unlanded_branches: Vec::new(),
                 });
             }
         }
-        if let Some(reason) = periodic_read_throttle(repo_path, ledger, now, &mut run_gh) {
-            if cache.fetched_at.is_some() {
-                return Ok(PrInventoryRead {
-                    items: cache.items(now, options)?,
-                    source: "stale-cache",
-                    fetched_at: cache.fetched_at,
-                    cache_age_secs: cache_age,
-                    throttled: Some(reason),
-                    github_calls: 0,
-                });
-            }
-            return Err(GwtError::Git(format!(
-                "pr inventory unobservable: the GitHub budget throttled this read and no \
-                 cached snapshot exists ({reason}); pass refresh:true only if the decision \
-                 at hand needs the live inventory"
-            )));
+    }
+    // SPEC #4093 FR-008 / AC-10: an explicit refresh skips the TTL cache but
+    // still honors the budget. An open refusal window is never bypassed; the
+    // reserve / burst guards yield to a one-step override that names its reason.
+    let throttle = periodic_read_throttle(repo_path, ledger, now, &mut run_gh).filter(|reason| {
+        options.force_reason.is_none() || reason.starts_with(RATE_LIMITED_ERROR_CODE)
+    });
+    if let Some(reason) = throttle {
+        if cache.fetched_at.is_some() {
+            return Ok(PrInventoryRead {
+                items: cache.items(now, options)?,
+                source: "stale-cache",
+                fetched_at: cache.fetched_at,
+                cache_age_secs: cache_age,
+                throttled: Some(reason),
+                github_calls: 0,
+                unlanded_branches: Vec::new(),
+            });
         }
+        return Err(GwtError::Git(format!(
+            "pr inventory unobservable: the GitHub budget throttled this read and no \
+             cached snapshot exists ({reason}); a refresh honors the reserve too — pass \
+             force_reason:<why> to override it outside a refusal window"
+        )));
     }
 
     let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
@@ -955,6 +1091,7 @@ where
         cache_age_secs: Some(0),
         throttled: None,
         github_calls,
+        unlanded_branches: Vec::new(),
     })
 }
 
@@ -970,7 +1107,7 @@ fn periodic_read_throttle<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let policy = ThrottlePolicy::default();
+    let policy = ThrottlePolicy::current();
     let mut snapshot = ledger.snapshot(now);
     if github_budget::probe_is_stale(&snapshot, &policy) {
         if let Ok(output) = run_gh(repo_path, &["api", "rate_limit"]) {
@@ -1356,12 +1493,12 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
-/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
-/// call. A transient failure returns an `Err` (the caller keeps work as
-/// launched) rather than an empty set, so closing the active slot only happens
-/// on a positive merge signal.
+/// Branches (PR head refs) whose PR has merged, from the differential sync
+/// behind [`fetch_merged_pr_deliveries`]. A transient failure returns an `Err`
+/// (the caller keeps work as launched) rather than an empty set, so closing
+/// the active slot only happens on a positive merge signal.
 pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
-    fetch_merged_pr_deliveries_with(repo_path, run_gh_command).map(|merged| merged.branches)
+    fetch_merged_pr_deliveries(repo_path).map(|merged| merged.branches)
 }
 
 /// The base branch whose merges deliver a work branch (Issue #3917). `main`
@@ -1388,37 +1525,54 @@ pub struct MergedPrDeliveries {
     pub deliveries: std::collections::BTreeMap<String, MergedPrDelivery>,
 }
 
-/// Fetch merged PRs with their delivery identity (`number`, `mergeCommit`,
-/// `mergedAt`, `baseRefName`) in the same single query the branch-only
-/// reconciliation already pays for.
+/// Merged PRs with their delivery identity (`number`, merge SHA, `mergedAt`,
+/// base), accumulated by the differential REST sync of
+/// [`crate::merged_pr_sync`] (SPEC #4093 FR-003). One scan costs a bounded
+/// number of REST requests and no GraphQL, whatever the merged-PR count.
 pub fn fetch_merged_pr_deliveries(repo_path: &Path) -> Result<MergedPrDeliveries> {
-    fetch_merged_pr_deliveries_with(repo_path, run_gh_command)
+    crate::merged_pr_sync::sync_merged_pr_deliveries(repo_path)
 }
 
-fn fetch_merged_pr_deliveries_with<F>(repo_path: &Path, mut run_gh: F) -> Result<MergedPrDeliveries>
-where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
-{
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--json",
-            "headRefName,state,number,mergeCommit,mergedAt,baseRefName",
-            "--state",
-            "merged",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list merged: {}",
-            output.stderr.trim()
-        )));
+/// One merged head branch as a delivery source: the branch plus, when the
+/// row carried a PR number, its delivery identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedPrRow {
+    pub(crate) head_ref: String,
+    pub(crate) delivery: Option<MergedPrDelivery>,
+}
+
+impl MergedPrDeliveries {
+    /// Fold merged rows into branches plus the latest `develop` delivery per
+    /// branch. Rows without a PR number still count as merged branches but
+    /// cannot be settled.
+    pub(crate) fn from_rows(rows: impl IntoIterator<Item = MergedPrRow>) -> Self {
+        let mut merged = Self::default();
+        for row in rows {
+            merged.branches.insert(row.head_ref.clone());
+            let Some(delivery) = row.delivery else {
+                continue;
+            };
+            // Issue #3917: only a merge into the integration branch delivers the
+            // work. A later merge of the same head branch into `main` (release) or
+            // any other base must not become the branch's settlement delivery.
+            if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
+                continue;
+            }
+            let newer = match merged.deliveries.get(&row.head_ref) {
+                None => true,
+                Some(current) => match (&delivery.merged_at, &current.merged_at) {
+                    (Some(candidate), Some(existing)) if candidate != existing => {
+                        candidate > existing
+                    }
+                    _ => delivery.number > current.number,
+                },
+            };
+            if newer {
+                merged.deliveries.insert(row.head_ref, delivery);
+            }
+        }
+        merged
     }
-    parse_merged_pr_deliveries(&output.stdout)
 }
 
 /// Parse `gh pr list --json headRefName,state,number,mergeCommit,mergedAt,baseRefName`
@@ -1427,65 +1581,37 @@ where
 pub fn parse_merged_pr_deliveries(json: &str) -> Result<MergedPrDeliveries> {
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
-    let mut merged = MergedPrDeliveries::default();
-    for value in &arr {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(String::from)
+    };
+    let rows = arr.iter().filter_map(|value| {
         let is_merged = value
             .get("state")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
         if !is_merged {
-            continue;
+            return None;
         }
-        let Some(branch) = value
-            .get("headRefName")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        merged.branches.insert(branch.to_string());
-        let Some(number) = value.get("number").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(String::from)
-        };
-        let delivery = MergedPrDelivery {
-            number,
-            merge_sha: value
-                .get("mergeCommit")
-                .and_then(|commit| commit.get("oid"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|sha| !sha.is_empty())
-                .map(String::from),
-            base_ref: text("baseRefName"),
-            merged_at: text("mergedAt"),
-        };
-        // Issue #3917: only a merge into the integration branch delivers the
-        // work. A later merge of the same head branch into `main` (release) or
-        // any other base must not become the branch's settlement delivery.
-        if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
-            continue;
-        }
-        let newer = match merged.deliveries.get(branch) {
-            None => true,
-            Some(current) => match (&delivery.merged_at, &current.merged_at) {
-                (Some(candidate), Some(existing)) if candidate != existing => candidate > existing,
-                _ => delivery.number > current.number,
-            },
-        };
-        if newer {
-            merged.deliveries.insert(branch.to_string(), delivery);
-        }
-    }
-    Ok(merged)
+        let head_ref = text(value, "headRefName")?;
+        let delivery = value
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .map(|number| MergedPrDelivery {
+                number,
+                merge_sha: value
+                    .get("mergeCommit")
+                    .and_then(|commit| text(commit, "oid")),
+                base_ref: text(value, "baseRefName"),
+                merged_at: text(value, "mergedAt"),
+            });
+        Some(MergedPrRow { head_ref, delivery })
+    });
+    Ok(MergedPrDeliveries::from_rows(rows))
 }
 
 /// Read one PR body for delegation evidence (Issue #3917 AC-2).
@@ -1952,40 +2078,38 @@ fn try_fetch_open_pr_numbers_by_branch_with<F>(
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--json",
-            "number,headRefName",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list open inventory: {}",
-            output.stderr.trim()
-        )));
-    }
-    parse_open_pr_numbers_by_branch(&output.stdout)
+    // SPEC #4093 FR-002: the inventory is a paged REST read (`core` budget,
+    // one request per 100 rows), never `gh pr list` (GraphQL).
+    let pages = crate::gh_rest::read_pages_with("repos/{owner}/{repo}/pulls?state=open", |path| {
+        let output = run_gh(repo_path, &["api", path]).map_err(|error| error.to_string())?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            Err(output.stderr.trim().to_string())
+        }
+    })
+    .map_err(|error| GwtError::Git(format!("gh api pulls open inventory: {error}")))?;
+    Ok(open_pr_numbers_by_branch(&pages.rows))
 }
 
-/// Parse `gh pr list --json number,headRefName` into `branch -> open PR
-/// number`. Rows without a head ref are dropped; the highest number per branch
-/// wins.
+/// Parse an open-PR list (REST `head.ref` / `number`, or the GraphQL
+/// `headRefName` spelling) into `branch -> open PR number`. Rows without a
+/// head ref are dropped; the highest number per branch wins.
 pub fn parse_open_pr_numbers_by_branch(
     json: &str,
 ) -> Result<std::collections::HashMap<String, u64>> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json)
         .map_err(|error| GwtError::Other(format!("gh pr list open inventory JSON: {error}")))?;
+    Ok(open_pr_numbers_by_branch(&arr))
+}
+
+fn open_pr_numbers_by_branch(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
     let mut index = std::collections::HashMap::new();
-    for value in &arr {
+    for value in rows {
         let Some(branch) = value
-            .get("headRefName")
+            .get("head")
+            .and_then(|head| head.get("ref"))
+            .or_else(|| value.get("headRefName"))
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -2000,7 +2124,7 @@ pub fn parse_open_pr_numbers_by_branch(
             *best = number;
         }
     }
-    Ok(index)
+    index
 }
 
 #[cfg(test)]
@@ -2482,9 +2606,10 @@ where
 mod tests {
     use super::*;
 
-    /// Issue #3963 AC-2: the scan reads every open PR in ONE `gh pr list` call
+    /// Issue #3963 AC-2: the scan reads every open PR in one inventory read
     /// and resolves each candidate branch from that index, so the number of
-    /// GitHub calls no longer grows with the queue.
+    /// GitHub calls no longer grows with the queue. SPEC #4093 AC-3: that read
+    /// is the paged REST endpoint, never `gh pr list` (GraphQL).
     #[test]
     fn open_pr_numbers_by_branch_are_read_in_one_call_and_keep_the_highest_number() {
         let mut calls: Vec<Vec<String>> = Vec::new();
@@ -2492,7 +2617,7 @@ mod tests {
             calls.push(args.iter().map(|arg| arg.to_string()).collect());
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"[{"number":7,"headRefName":"work/issue-43"},{"number":9,"headRefName":"work/issue-43"},{"number":8,"headRefName":"work/issue-44"},{"number":10,"headRefName":""}]"#.to_string(),
+                stdout: r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#.to_string(),
                 stderr: String::new(),
             })
         })
@@ -2502,14 +2627,8 @@ mod tests {
         assert_eq!(
             calls[0],
             [
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "number,headRefName",
-                "--limit",
-                "999"
+                "api",
+                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"
             ]
         );
         assert_eq!(
@@ -2680,39 +2799,6 @@ mod tests {
             parsed.branches.contains("work/issue-50") && parsed.branches.contains("work/issue-51"),
             "branch-only reconciliation keeps every merged head branch"
         );
-    }
-
-    #[test]
-    fn fetch_merged_pr_deliveries_requests_delivery_fields() {
-        let mut seen = Vec::new();
-        let parsed = fetch_merged_pr_deliveries_with(Path::new("/repo"), |_, args| {
-            seen.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-            Ok(GhCliOutput {
-                success: true,
-                stdout: r#"[{"headRefName":"work/issue-1","state":"MERGED","number":3,"mergeCommit":{"oid":"c0ffee"},"baseRefName":"develop"}]"#.to_string(),
-                stderr: String::new(),
-            })
-        })
-        .unwrap();
-        assert_eq!(seen.len(), 1);
-        let args = &seen[0];
-        assert_eq!(&args[..2], &["pr", "list"]);
-        let fields = args[args.iter().position(|a| a == "--json").unwrap() + 1].clone();
-        for field in [
-            "headRefName",
-            "state",
-            "number",
-            "mergeCommit",
-            "mergedAt",
-            "baseRefName",
-        ] {
-            assert!(
-                fields.split(',').any(|f| f == field),
-                "missing {field} in {fields}"
-            );
-        }
-        assert!(args.iter().any(|a| a == "merged"));
-        assert_eq!(parsed.deliveries["work/issue-1"].number, 3);
     }
 
     #[test]
@@ -3953,8 +4039,11 @@ mod tests {
         assert_eq!(decision.default_action, "escalate: no update for 24h");
     }
 
+    /// Issue #4074 AC-2: the launch guard now inherits a launch ref carrying
+    /// unique commits instead of refusing it, so a relaunch of the owner on
+    /// its own branch is an action the Monitor can actually take.
     #[test]
-    fn relaunch_actions_on_the_owner_launch_ref_are_not_executable() {
+    fn relaunch_actions_on_the_owner_launch_ref_are_executable() {
         let mut fields = sample_inventory_fields();
         fields.mergeable = "CONFLICTING".to_string();
         fields.head_ref_name = "work/issue-10".to_string();
@@ -3964,42 +4053,97 @@ mod tests {
         }];
         let decision = classify_pr_lifecycle(&fields, now_3868());
         assert_eq!(decision.class, PrLifecycleClass::Conflicted);
-        assert!(!decision.default_action_executable);
-        assert_eq!(
-            decision.blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
-        );
-        assert_eq!(
-            decision.fallback.as_deref(),
-            Some(PR_FALLBACK_WHEN_NOT_EXECUTABLE)
-        );
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+        assert_eq!(decision.fallback, None);
 
         fields.mergeable = "MERGEABLE".to_string();
         fields.ci_status = "FAILURE".to_string();
         let decision = classify_pr_lifecycle(&fields, now_3868());
         assert_eq!(decision.class, PrLifecycleClass::CiRed);
-        assert!(!decision.default_action_executable);
-        assert_eq!(
-            decision.blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
-        );
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
     }
 
     #[test]
     fn relaunch_actions_on_a_launch_ref_without_closing_issues_name_the_owner_from_the_head() {
         // #3726 / #3598 / #3593 in the wild: no `Closes #N`, head on
-        // `work/issue-<n>`. The launch ref itself names the owner and is what
-        // the Monitor's unique-commits guard refuses.
+        // `work/issue-<n>`. The launch ref itself names the owner, and since
+        // Issue #4074 the relaunch inherits that ref rather than being refused.
         let mut fields = sample_inventory_fields();
         fields.mergeable = "CONFLICTING".to_string();
         fields.head_ref_name = "work/issue-3712".to_string();
         fields.closing_issues = vec![];
         let decision = classify_pr_lifecycle(&fields, now_3868());
         assert_eq!(decision.owner_issue, Some(3712));
-        assert!(!decision.default_action_executable);
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+    }
+
+    // ---- Issue #4074 FR-005 / AC-4: unlanded branch stocktake ----
+
+    fn unlanded_probe(branch: &str, ahead: usize, last_commit_at: &str) -> UnlandedBranchProbe {
+        UnlandedBranchProbe {
+            branch: branch.to_string(),
+            ahead,
+            last_commit_at: Some(last_commit_at.parse().expect("commit date")),
+        }
+    }
+
+    #[test]
+    fn unlanded_inventory_keeps_branches_with_commits_and_no_open_pr() {
+        // #3551 in the wild: commits pushed 2026-08-27, no PR, ten days idle.
+        let probes = vec![
+            unlanded_probe("work/issue-3551", 3, "2026-08-27T04:00:00Z"),
+            unlanded_probe("work/issue-4090", 1, "2026-09-07T01:00:00Z"),
+            unlanded_probe("work/issue-4100", 0, "2026-09-07T02:00:00Z"),
+        ];
+        let rows = classify_unlanded_branches(probes, &["work/issue-4090".to_string()]);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].branch, "work/issue-3551");
+        assert_eq!(rows[0].owner_issue, Some(3551));
+        assert_eq!(rows[0].ahead, 3);
         assert_eq!(
-            decision.blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
+            rows[0].last_commit_at,
+            Some("2026-08-27T04:00:00Z".parse().expect("commit date"))
+        );
+        assert!(!rows[0].has_open_pr);
+    }
+
+    #[test]
+    fn unlanded_inventory_orders_the_longest_residue_first() {
+        let rows = classify_unlanded_branches(
+            vec![
+                unlanded_probe("work/issue-4069", 1, "2026-09-06T00:00:00Z"),
+                unlanded_probe("work/issue-3551", 2, "2026-08-27T04:00:00Z"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work/issue-3551", "work/issue-4069"]
+        );
+    }
+
+    #[test]
+    fn unlanded_branch_refs_parse_into_branch_and_last_commit_date() {
+        let stdout = "origin/work/issue-3551\t2026-08-27T13:00:00+09:00\n\
+             origin/work/issue-4069\t2026-09-06T09:00:00+09:00\n\
+             refs/tags/v1\t2026-09-06T09:00:00+09:00\n";
+        assert_eq!(
+            parse_unlanded_branch_refs(stdout),
+            vec![
+                (
+                    "work/issue-3551".to_string(),
+                    Some("2026-08-27T04:00:00Z".parse().expect("date"))
+                ),
+                (
+                    "work/issue-4069".to_string(),
+                    Some("2026-09-06T00:00:00Z".parse().expect("date"))
+                ),
+            ]
         );
     }
 
@@ -4267,11 +4411,8 @@ mod tests {
         assert_eq!(items[0].lifecycle, "CI-RED");
         assert_eq!(items[0].dwell_hours, Some(1));
         assert_eq!(items[0].stale_after_hours, 72);
-        assert!(!items[0].default_action_executable);
-        assert_eq!(
-            items[0].blocker.as_deref(),
-            Some("owner_relaunch_refused_unique_commits")
-        );
+        assert!(items[0].default_action_executable);
+        assert_eq!(items[0].blocker, None);
         assert_eq!(items[0].lifecycle_source, "observed");
         assert_eq!(items[0].unchanged_cycles, 0);
     }
@@ -4603,26 +4744,78 @@ mod tests {
         assert_eq!(gh.calls, vec!["api rate_limit".to_string()]);
     }
 
+    /// SPEC #4093 AC-10: `refresh:true` skips the TTL cache but not the
+    /// budget. Below the reserve it answers from the stale cache; a one-step
+    /// override with a reason reads live; an open refusal window is never
+    /// bypassed (the 2026-09-06 refusals were exactly such reads).
     #[test]
-    fn inventory_refresh_bypasses_cache_and_throttle() {
+    fn inventory_refresh_skips_the_cache_but_honors_reserve_and_window() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let ledger = BudgetLedger::at(&tmp.path().join("budget"));
         let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891(),
+            &PrInventoryOptions::default(),
+        )
+        .expect("warm");
+        gh.calls.clear();
         gh.probe_remaining = 50;
-        let options = PrInventoryOptions {
+        // Past the probe's max age, so the refresh re-probes (free) and sees
+        // the exhausted window before spending.
+        let later = now_3891()
+            + chrono::Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1);
+        let refresh = PrInventoryOptions {
             refresh: true,
             ..PrInventoryOptions::default()
         };
-        let read = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("read");
-        assert_eq!(read.source, "github");
+
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &refresh).expect("read");
+        assert_eq!(read.source, "stale-cache");
+        let reason = read.throttled.expect("throttle reason");
+        assert!(reason.contains("budget_reserve"), "{reason}");
+        assert_eq!(
+            gh.calls,
+            vec!["api rate_limit".to_string()],
+            "below the reserve a refresh probes (free) and spends nothing"
+        );
+
+        gh.calls.clear();
+        let forced = PrInventoryOptions {
+            refresh: true,
+            force_reason: Some("PM merge decision needs live checks".to_string()),
+            ..PrInventoryOptions::default()
+        };
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
+        assert_eq!(read.source, "github", "the override reads live");
         assert!(
             gh.calls.iter().any(|call| call.starts_with("pr list")),
             "{:?}",
             gh.calls
         );
+
+        gh.calls.clear();
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: later + chrono::Duration::seconds(300),
+            },
+            later,
+        );
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
+        assert_eq!(
+            read.source, "stale-cache",
+            "an open window beats the override"
+        );
+        let reason = read.throttled.expect("window reason");
+        assert!(reason.starts_with(RATE_LIMITED_ERROR_CODE), "{reason}");
         assert!(
-            !gh.calls.iter().any(|call| call == "api rate_limit"),
-            "an explicit refresh is essential and never probes to throttle itself: {:?}",
+            !gh.calls.iter().any(|call| call.starts_with("pr list")),
+            "no GraphQL spawn inside the window: {:?}",
             gh.calls
         );
     }

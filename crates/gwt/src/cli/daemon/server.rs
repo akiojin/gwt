@@ -3752,7 +3752,12 @@ fn try_commit_issue_monitor_effect_result(
                             .inbox_item(*issue_number)
                             .map(|item| item.issue.clone())
                         {
-                            candidate.record_blocked_by_claim(issue, claim.owner, claim.expires_at);
+                            candidate.record_blocked_by_claim(
+                                issue,
+                                claim.owner.clone(),
+                                claim.expires_at.clone(),
+                                Some(claim.claim_id.as_str()),
+                            );
                         }
                     }
                     settled = true;
@@ -3772,8 +3777,9 @@ fn try_commit_issue_monitor_effect_result(
                         {
                             candidate.record_blocked_by_claim(
                                 issue,
-                                winning_claim.owner,
-                                winning_claim.expires_at,
+                                winning_claim.owner.clone(),
+                                winning_claim.expires_at.clone(),
+                                Some(winning_claim.claim_id.as_str()),
                             );
                         }
                     }
@@ -4345,6 +4351,18 @@ fn scan_issue_monitor_once_blocking(
             let mut probe_deferred = std::collections::BTreeSet::new();
             let mut probe_deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> =
                 None;
+            // SPEC #4093 FR-005: read the linked PRs of the whole claim
+            // frontier in one bulk query; the per-candidate probe below
+            // answers from it and only spawns for a candidate it missed.
+            let (_, probe_frontier) = monitor.claim_probe_plan(active_cap);
+            let probe_batch = crate::issue_monitor_worker::LinkedPrProbeBatch::prefetch(
+                &owner,
+                &repo,
+                loaded
+                    .issues
+                    .iter()
+                    .filter(|issue| probe_frontier.contains(&issue.number)),
+            );
             let prepared = monitor.try_prepare_claim_effects_with_probe_confirmed(
                 &monitor_owner,
                 &now,
@@ -4358,8 +4376,11 @@ fn scan_issue_monitor_once_blocking(
                     else {
                         return Ok(crate::issue_monitor::ClaimProbeOutcome::Claimable);
                     };
-                    match crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
-                        &owner, &repo, issue,
+                    match crate::issue_monitor_worker::try_issue_completed_by_merged_pr_with(
+                        &owner,
+                        &repo,
+                        issue,
+                        Some(&probe_batch),
                     ) {
                         Ok(completed) => Ok(
                             crate::issue_monitor::ClaimProbeOutcome::from_completed(completed),
@@ -5342,21 +5363,35 @@ if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
   done
   rm -f "$owner_marker" || exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+# SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync,
+# never `gh pr list --state merged` (GraphQL).
+case "$1 $2" in
+  "api repos/{owner}/{repo}/pulls?state=closed"*)
+    merged_pulls_query=1
+    ;;
+  *)
+    merged_pulls_query=0
+    ;;
+esac
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$merged_pulls_query" = "1" ]; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
 fi
-if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$merged_pulls_query" = "1" ]; then
   if [ "$(git rev-parse --is-bare-repository 2>/dev/null)" != "true" ]; then
     printf '%s\n' 'gh merged query ran outside child bare repository' >&2
     exit 1
   fi
-  printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED"}]'
+  printf '%s\n' '[{"number":7,"head":{"ref":"work/issue-43"},"base":{"ref":"develop"},"merged_at":"2026-09-01T00:00:00Z","merge_commit_sha":"c0ffee","updated_at":"2026-09-01T00:00:00Z"}]'
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "settle_close" ] || [ "$GWT_FAKE_GH_MODE" = "settle_unmet" ] || [ "$GWT_FAKE_GH_MODE" = "settle_delegated" ]; then
   # Issue #3917: one merged delivery for work/issue-43 plus the readbacks the
   # settlement proposal may need (PR body, Issue comments).
+  if [ "$merged_pulls_query" = "1" ]; then
+    printf '%s\n' '[{"number":7,"head":{"ref":"work/issue-43"},"base":{"ref":"develop"},"merged_at":"2026-09-01T00:00:00Z","merge_commit_sha":"c0ffee","updated_at":"2026-09-01T00:00:00Z"}]'
+    exit 0
+  fi
   if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
     printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED","number":7,"mergeCommit":{"oid":"c0ffee"},"mergedAt":"2026-09-01T00:00:00Z","baseRefName":"develop"}]'
     exit 0
@@ -5414,8 +5449,10 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   if [ -n "$GWT_FAKE_GH_CALL_LOG" ]; then
     printf '%s\n' "$*" >> "$GWT_FAKE_GH_CALL_LOG"
   fi
+  # The REST list is paged: only the first page carries rows, like GitHub
+  # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
-    *"issue list"*)
+    *"issue list"* | *"/issues?"*"&page=1")
       cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
       exit 0
       ;;
@@ -5425,7 +5462,7 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
 fi
 if [ "$GWT_FAKE_GH_MODE" = "open_pr_readback_hang" ]; then
   case "$*" in
-    *"pr list --state open --json number,headRefName"*)
+    *"/pulls?state=open"*)
       # Issue #3933 / #3963: the one open-PR inventory readback outlives every
       # plausible budget. It must degrade that readback alone, not the scan.
       sleep 30
@@ -5437,7 +5474,7 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_readback_hang" ]; then
 fi
 if [ "$GWT_FAKE_GH_MODE" = "issue_list_fail" ]; then
   case "$*" in
-    *"issue list"*)
+    *"issue list"* | *"/issues?"*)
       printf '%s\n' 'gh issue list failed' >&2
       exit 1
       ;;
@@ -7682,6 +7719,7 @@ exit 0
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -7788,6 +7826,7 @@ exit 0
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -9852,8 +9891,14 @@ exit 0
         let calls = fs::read_to_string(&call_log).expect("gh call log");
         let open_pr_reads = calls
             .lines()
-            .filter(|line| line.starts_with("pr list") && line.contains("--state open"))
+            .filter(|line| line.starts_with("api repos/{owner}/{repo}/pulls?state=open"))
             .count();
+        assert!(
+            !calls
+                .lines()
+                .any(|line| line.starts_with("pr list") || line.starts_with("issue list")),
+            "SPEC #4093 AC-3: the scan's list readbacks are REST, never GraphQL:\n{calls}"
+        );
         assert_eq!(
             open_pr_reads, 1,
             "one open-PR inventory per scan, not one per candidate:\n{calls}"
@@ -10192,7 +10237,9 @@ exit 0
     /// process is open, the scan issues no GraphQL call at all, still completes
     /// from the cached candidates, defers the candidate whose pre-launch
     /// readback was refused instead of aborting the pass, and reports the
-    /// throttle together with the next attempt time.
+    /// throttle together with the next attempt time. SPEC #4093 FR-003: the
+    /// merged-PR readback lives on the REST budget now, so a GraphQL window
+    /// no longer defers merge reconciliation at all.
     #[test]
     fn a_persisted_rate_limit_window_defers_the_readback_and_the_scan_completes() {
         let _env_lock = crate::env_test_lock()
@@ -10248,7 +10295,8 @@ exit 0
             enabled: true,
             max_active_agents: 2,
             launch_profile: Some(sample_issue_monitor_profile()),
-            // An active launch makes merge reconciliation spend GraphQL too.
+            // An active launch makes the scan run merge reconciliation, which
+            // reads merged PRs over REST and must not be caught by the window.
             launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "window-43".to_string(),
@@ -10288,12 +10336,15 @@ exit 0
             "continued_with_previous_candidates",
             "continued_with_deferred_candidates",
             "#44",
-            "merge-reconciliation",
             gwt_core::github_quota::RATE_LIMITED_ERROR_CODE,
             "retry_after_secs=",
         ] {
             assert!(last_error.contains(expected), "{expected}: {last_error}");
         }
+        assert!(
+            !last_error.contains("merge-reconciliation"),
+            "the REST merged-PR sync completes inside a GraphQL window: {last_error}"
+        );
         assert!(
             last_error.contains(&format!(
                 "reset_at={}",
@@ -10438,6 +10489,204 @@ exit 0
     /// process-wide and collects whatever a concurrently running test spawns
     /// through the same fake. The pre-spawn gate refuses before recording, so a
     /// zero count is exactly "nothing was spawned".
+    /// SPEC #4093 AC-3 / T-5: with the GraphQL budget exhausted (a persisted
+    /// refusal window), the scan still loads its candidates live and
+    /// reconciles merged work, because both readbacks are REST. Only the
+    /// per-candidate `issue view` readback (still GraphQL) is deferred.
+    #[test]
+    fn a_scan_completes_on_the_rest_budget_while_the_graphql_window_is_open() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "merge_success");
+
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = workspace_home.join("repo.git");
+        fs::create_dir_all(&workspace_home).expect("create workspace home");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&bare_repo)
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        git_remote_add_origin(&bare_repo, "https://github.com/example/repo.git");
+        let now = chrono::Utc::now();
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 0,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(60),
+            },
+            now,
+        );
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            workspace_home,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "window-43".to_string(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("the scan completes on the REST budget");
+
+        assert_eq!(
+            scanned.status_view().active_count,
+            0,
+            "the merged delivery for work/issue-43 was reconciled over REST"
+        );
+        let last_error = scanned.status_view().last_error.unwrap_or_default();
+        assert!(
+            !last_error.contains("candidate-load failed for example/repo"),
+            "the live candidate list is a REST read: {last_error}"
+        );
+        assert!(
+            !last_error.contains("merge-reconciliation"),
+            "merged PRs are read over REST: {last_error}"
+        );
+        assert_no_graphql_spawn_was_recorded();
+        let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
+        assert!(
+            snapshot.local["core"].calls_last_hour >= 2,
+            "the issue list and the merged-PR sync are counted on the REST budget: {:?}",
+            snapshot.local
+        );
+        gwt_core::github_budget::BudgetLedger::global()
+            .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
+    /// SPEC #4093 AC-8 (Issue #3737 AC-1/AC-2/AC-6): once the persisted
+    /// window's `reset_at` has passed, the very next scan spends GraphQL
+    /// again — nothing is deferred, no toggle is needed — and the rate-limit
+    /// text left by the earlier scan is gone from `last_error`.
+    #[test]
+    fn an_expired_rate_limit_window_defers_nothing_on_the_next_scan() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed the previous successful candidate result");
+        // The window a previous scan persisted has already reset.
+        let now = chrono::Utc::now();
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 0,
+                remaining: 0,
+                reset_at: now - chrono::Duration::seconds(1),
+            },
+            now - chrono::Duration::seconds(120),
+        );
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        monitor.record_scan_error(
+            "2026-08-25T00:20:17Z",
+            "github_rate_limited: resource=graphql remaining=0 reset_at=2026-08-25T00:26:46Z",
+        );
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("the scan after the window completes");
+
+        let last_error = scanned.status_view().last_error.unwrap_or_default();
+        assert!(
+            !last_error.contains(gwt_core::github_quota::RATE_LIMITED_ERROR_CODE),
+            "the earlier refusal is not carried forward: {last_error}"
+        );
+        assert!(
+            !last_error.contains("continued_with_deferred_candidates"),
+            "nothing is deferred once the window has reset: {last_error}"
+        );
+        let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
+        assert!(
+            snapshot.local["graphql"].calls_last_hour >= 1,
+            "the per-candidate readback spends GraphQL again: {:?}",
+            snapshot.local
+        );
+        assert!(
+            scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 44,
+                    ..
+                }
+            )),
+            "the confirmed candidate is claimed without a toggle: {:?}",
+            scanned.pending_effects()
+        );
+        gwt_core::github_budget::BudgetLedger::global()
+            .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
     fn assert_no_graphql_spawn_was_recorded() {
         let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
         assert_eq!(
@@ -11471,6 +11720,7 @@ exit 0
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -11962,6 +12212,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14210,6 +14461,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14274,6 +14526,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14391,6 +14644,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -14408,6 +14662,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -14475,6 +14730,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15087,6 +15343,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15226,6 +15483,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15360,6 +15618,7 @@ exit 1
                 wait: None,
                 needs_human_kind: None,
                 steering: None,
+                review_dispatch_hold: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15713,6 +15972,7 @@ exit 1
             wait: None,
             needs_human_kind: None,
             steering: None,
+            review_dispatch_hold: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -15937,6 +16197,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -16948,6 +17209,7 @@ exit 1
                     wait: None,
                     needs_human_kind: None,
                     steering: None,
+                    review_dispatch_hold: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -17239,6 +17501,7 @@ exit 1
             wait: None,
             needs_human_kind: None,
             steering: None,
+            review_dispatch_hold: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,
