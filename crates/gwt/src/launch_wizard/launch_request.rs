@@ -12,6 +12,17 @@ impl LaunchWizardState {
             .selected_agent()
             .cloned()
             .ok_or_else(|| "Agent option is unavailable".to_string())?;
+        // SPEC-3864 FR-013 / Scenario 1: refuse inside the wizard when neither
+        // `Installed` nor a runtime `latest` route can launch this built-in,
+        // instead of failing later in preflight.
+        if selected_agent.custom_agent.is_none()
+            && self.current_version_options_for(&selected_agent).is_empty()
+        {
+            return Err(format!(
+                "{} is not installed and has no runtime package route; use the setup action in the Agent section first",
+                selected_agent.name
+            ));
+        }
 
         // SPEC-1921 FR-090 (2026-05-18 amendment) / T295: when a saved
         // Quick Start entry recorded `AgentId::Custom("<old-id>")` for a
@@ -56,29 +67,22 @@ impl LaunchWizardState {
             (None, None) => {}
         }
 
-        // SPEC-3214 Phase 3: an intake session launches an ephemeral, detached
-        // worktree on the base ref and creates NO branch — bypass all
-        // branch/worktree wiring below.
-        if let Some(base_ref) = &self.context.ephemeral_base_ref {
-            builder = builder.ephemeral(Some(base_ref.clone()));
-        } else {
-            if !self.is_new_branch {
-                if let Some(worktree_path) = &self.context.worktree_path {
-                    builder = builder.working_dir(worktree_path.clone());
-                }
+        if !self.is_new_branch {
+            if let Some(worktree_path) = &self.context.worktree_path {
+                builder = builder.working_dir(worktree_path.clone());
             }
+        }
 
-            if !self.branch_name.is_empty() {
-                builder = builder.branch(self.branch_name.clone());
-            }
+        if !self.branch_name.is_empty() {
+            builder = builder.branch(self.branch_name.clone());
+        }
 
-            if self.is_new_branch {
-                builder = builder.base_branch(
-                    self.base_branch_name
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
-                );
-            }
+        if self.is_new_branch {
+            builder = builder.base_branch(
+                self.base_branch_name
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+            );
         }
 
         if let Some(model) = self.explicit_model_for_launch() {
@@ -220,20 +224,6 @@ impl LaunchWizardState {
             // user has picked a branch — there is no reserved fallback name.
             return Err("Select a branch to open before launching".to_string());
         }
-        if self.wizard_mode == LaunchWizardMode::Intake {
-            // SPEC-3214 FR-001: intake launches are branch-free and get a
-            // disposable detached worktree from the launch runtime. Clearing
-            // branch/base/working_dir here is the invariant guard — no wizard
-            // state may leak a named branch into an intake launch.
-            // #3374: the ephemeral base ref is NOT branch state — it is the
-            // intake base (e.g. `origin/develop`). Clearing it made the launch
-            // runtime fall back to `HEAD` and materialize a stale worktree.
-            config.is_ephemeral = true;
-            config.ephemeral_base_ref = self.context.ephemeral_base_ref.clone();
-            config.branch = None;
-            config.base_branch = None;
-            config.working_dir = None;
-        }
         Ok(config)
     }
 
@@ -272,6 +262,21 @@ impl LaunchWizardState {
             command_override: None,
             command_args_override: None,
         })
+    }
+
+    /// Issue #4079 AC-2: the launch profile this wizard would save right now.
+    ///
+    /// The Issue Monitor Agent Settings form previews its own effect on the
+    /// candidate pool, and it must preview the exact profile the save writes —
+    /// so it reads it through the same builder the save uses. `None` when the
+    /// current selection is not a launchable agent target.
+    pub fn preview_launch_profile(&self) -> Option<crate::IssueMonitorLaunchProfile> {
+        match self.build_launch_request().ok()? {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                Some(crate::IssueMonitorLaunchProfile::from(config.as_ref()))
+            }
+            LaunchWizardLaunchRequest::Shell(_) => None,
+        }
     }
 
     pub(super) fn build_launch_request(&self) -> Result<LaunchWizardLaunchRequest, String> {
@@ -391,55 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn build_launch_config_for_intake_is_ephemeral_and_branchless() {
-        // SPEC-3214 Phase 3: an intake session wizard produces an ephemeral,
-        // branchless LaunchConfig (detached `.intake-*` worktree on the base
-        // ref), never a named branch.
-        let mut state = LaunchWizardState::open_with(
-            intake_context("origin/develop"),
-            sample_agent_options(),
-            Vec::new(),
-        );
-        state.agent_id = "codex".to_string();
-
-        let config = state.build_launch_config().expect("intake launch config");
-        assert!(config.is_ephemeral, "intake launch is ephemeral");
-        assert_eq!(config.ephemeral_base_ref.as_deref(), Some("origin/develop"));
-        assert!(config.branch.is_none(), "intake launch creates no branch");
-        assert!(
-            config.base_branch.is_none(),
-            "intake launch reserves no base branch"
-        );
-    }
-
-    #[test]
-    fn build_launch_config_for_intake_wizard_mode_keeps_ephemeral_base_ref() {
-        // #3374: the production intake path goes through
-        // `mark_as_ephemeral_intake`, which sets `wizard_mode = Intake`. The
-        // Intake invariant guard must clear branch state WITHOUT wiping the
-        // ephemeral base ref — losing it makes the launch runtime fall back to
-        // `HEAD` (the possibly months-stale main checkout), which is exactly
-        // the stale-intake-worktree bug.
-        let mut state = LaunchWizardState::open_with(
-            context(branch("develop"), "develop"),
-            sample_agent_options(),
-            Vec::new(),
-        );
-        state.mark_as_ephemeral_intake("origin/develop");
-
-        let config = state.build_launch_config().expect("intake launch config");
-        assert!(config.is_ephemeral, "intake launch is ephemeral");
-        assert_eq!(
-            config.ephemeral_base_ref.as_deref(),
-            Some("origin/develop"),
-            "the Intake invariant guard must keep the ephemeral base ref"
-        );
-        assert!(config.branch.is_none(), "intake launch creates no branch");
-        assert!(config.base_branch.is_none());
-        assert!(config.working_dir.is_none());
-    }
-
-    #[test]
     fn build_launch_config_for_codex_resume_uses_resume_session_id() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -503,7 +459,7 @@ mod tests {
                 agent_id: "codex".to_string(),
             });
             state.apply(LaunchWizardAction::SetModel {
-                model: "gpt-5.4".to_string(),
+                model: "gpt-5.5".to_string(),
             });
             state.apply(LaunchWizardAction::SetReasoning {
                 reasoning: "high".to_string(),
@@ -1030,7 +986,10 @@ mod tests {
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "hermes".to_string(),
         });
-        state.set_hermes_provider_choices(vec!["zai".to_string(), "ollama-launch".to_string()]);
+        state.set_hermes_launch_choices(gwt_skills::HermesLaunchChoices {
+            providers: vec!["zai".to_string(), "ollama-launch".to_string()],
+            ..Default::default()
+        });
         state.apply(LaunchWizardAction::SetHermesOption {
             field: "provider".to_string(),
             value: "openrouter".to_string(),
@@ -1054,6 +1013,68 @@ mod tests {
         );
     }
 
+    // Issue #3863 AC-1/AC-2/AC-3: candidates enumerated from the user's
+    // config are exposed per field, and model candidates follow the selected
+    // provider (blank provider = config default provider).
+    #[test]
+    fn hermes_choice_options_follow_selected_provider() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        state.set_hermes_launch_choices(gwt_skills::HermesLaunchChoices {
+            providers: vec!["zai".to_string(), "ollama-launch".to_string()],
+            default_provider: Some("zai".to_string()),
+            models_by_provider: [
+                ("zai".to_string(), vec!["glm-5.2".to_string()]),
+                ("ollama-launch".to_string(), vec!["qwen3.5".to_string()]),
+            ]
+            .into_iter()
+            .collect(),
+            profiles: vec!["concise".to_string(), "pirate".to_string()],
+            toolsets: vec!["terminal".to_string(), "web".to_string()],
+            skills: vec!["github".to_string()],
+        });
+
+        let view = state.view();
+        assert_eq!(view.hermes_provider, "");
+        assert_eq!(view.hermes_model_options, vec!["glm-5.2"]);
+        assert_eq!(view.hermes_profile_options, vec!["concise", "pirate"]);
+        assert_eq!(view.hermes_toolset_options, vec!["terminal", "web"]);
+        assert_eq!(view.hermes_skill_options, vec!["github"]);
+
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "ollama-launch".to_string(),
+        });
+        assert_eq!(state.view().hermes_model_options, vec!["qwen3.5"]);
+
+        // A free-text ("Other…") provider has no known models; the model
+        // field degrades to config default + Other.
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+        assert!(state.view().hermes_model_options.is_empty());
+    }
+
     #[test]
     fn hermes_needs_setup_flag_is_exposed_only_for_hermes() {
         let mut options = sample_agent_options();
@@ -1074,12 +1095,18 @@ mod tests {
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
         });
-        state.set_hermes_needs_setup(true);
+        state.set_agent_needs_configuration("hermes", true);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "hermes".to_string(),
         });
-        assert!(state.view().hermes_needs_setup);
+        let view = state.view();
+        assert!(view.hermes_needs_setup);
+        // SPEC-3864 FR-006: the generic affordance carries the configure hint.
+        let setup = view.agent_setup.expect("configure affordance");
+        assert_eq!(setup.agent_id, "hermes");
+        assert_eq!(setup.kind, "configure");
+        assert!(setup.detail.contains("hermes setup"), "{}", setup.detail);
 
         // Non-Hermes agents never surface the needs-setup hint.
         state.apply(LaunchWizardAction::SetAgent {
@@ -1189,12 +1216,17 @@ mod tests {
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
         });
-        state.set_opencode_needs_setup(true);
+        state.set_agent_needs_configuration("opencode", true);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "opencode".to_string(),
         });
-        assert!(state.view().opencode_needs_setup);
+        let view = state.view();
+        assert!(view.opencode_needs_setup);
+        let setup = view.agent_setup.expect("configure affordance");
+        assert_eq!(setup.agent_id, "opencode");
+        assert_eq!(setup.kind, "configure");
+        assert!(setup.detail.contains("auth login"), "{}", setup.detail);
 
         // Non-OpenCode agents never surface the needs-setup hint.
         state.apply(LaunchWizardAction::SetAgent {
@@ -1203,10 +1235,199 @@ mod tests {
         assert!(!state.view().opencode_needs_setup);
     }
 
+    fn uninstalled_antigravity_state() -> LaunchWizardState {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "agy".to_string(),
+            name: "Antigravity CLI".to_string(),
+            available: false,
+            installed_version: None,
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "agy".to_string(),
+        });
+        state
+    }
+
+    /// SPEC-3864 FR-003 / FR-005 / FR-013 (AC-3 / AC-5): an uninstalled
+    /// pre-install agent offers no `Installed` entry, no version picker, and
+    /// an install affordance instead.
+    #[test]
+    fn uninstalled_preinstall_agent_exposes_install_affordance_instead_of_installed() {
+        let state = uninstalled_antigravity_state();
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "agy");
+        assert!(
+            view.version_options.is_empty(),
+            "no Installed / latest entry may be offered: {:?}",
+            view.version_options
+        );
+        assert!(!view.show_version);
+        assert_eq!(view.selected_version, "");
+        let setup = view.agent_setup.expect("install affordance");
+        assert_eq!(setup.agent_id, "agy");
+        assert_eq!(setup.kind, "install");
+        assert!(setup.title.contains("not installed"), "{}", setup.title);
+        assert!(
+            setup
+                .detail
+                .contains("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+            "{}",
+            setup.detail
+        );
+        assert_eq!(
+            setup.action_label.as_deref(),
+            Some("Install Antigravity CLI")
+        );
+        let agy = view
+            .agent_options
+            .iter()
+            .find(|option| option.value == "agy")
+            .expect("agy option");
+        assert_eq!(agy.description.as_deref(), Some("Not installed"));
+    }
+
+    fn uninstalled_openclaw_state() -> LaunchWizardState {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "openclaw".to_string(),
+            name: "OpenClaw".to_string(),
+            available: false,
+            installed_version: None,
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "openclaw".to_string(),
+        });
+        state
+    }
+
+    /// SPEC-3864 FR-009 (AC-8) / Scenario 2: OpenClaw is not on PATH, but its
+    /// npm route still offers `latest`. The wizard must present `latest`
+    /// (never `Installed`), skip the install affordance, and build a launch
+    /// config pinned to the `latest` route instead of refusing.
+    #[test]
+    fn uninstalled_npm_routed_agent_launches_through_latest() {
+        let state = uninstalled_openclaw_state();
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "openclaw");
+        assert!(view.show_version);
+        let version_values: Vec<&str> = view
+            .version_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+        assert!(
+            version_values.contains(&"latest"),
+            "latest must stay reachable without an installed executable: {version_values:?}"
+        );
+        assert!(
+            !version_values.contains(&"installed"),
+            "an unresolvable executable must not be offered as Installed: {version_values:?}"
+        );
+        assert_eq!(view.selected_version, "latest");
+        assert_eq!(
+            view.agent_setup, None,
+            "a runtime latest route means no install affordance is needed"
+        );
+
+        let config = state
+            .build_launch_config()
+            .expect("the latest route must launch without a local install");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::OpenClaw);
+        assert_eq!(config.tool_version.as_deref(), Some("latest"));
+    }
+
+    /// SPEC-3864 Scenario 1: launching an agent with neither `Installed` nor
+    /// `latest` is refused inside the wizard, so it never reaches
+    /// `Launch failed before PTY started`.
+    #[test]
+    fn submit_refuses_agent_without_installed_or_latest_route() {
+        let mut state = uninstalled_antigravity_state();
+        let error = state
+            .build_launch_config()
+            .expect_err("no launchable route must refuse");
+        assert!(error.contains("Antigravity CLI"), "{error}");
+        assert!(error.contains("not installed"), "{error}");
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            state.completion.is_none(),
+            "submit must not produce a launch: {:?}",
+            state.completion
+        );
+        assert!(state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not installed")));
+    }
+
+    /// SPEC-3864 FR-007: the install affordance runs the descriptor's install
+    /// command in an in-pane host shell.
+    #[test]
+    fn run_agent_setup_for_install_route_launches_installer_shell() {
+        let mut state = uninstalled_antigravity_state();
+        state.apply(LaunchWizardAction::RunAgentSetup);
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Shell(config) => {
+                    assert_eq!(config.display_name, "Antigravity CLI Setup");
+                    assert_eq!(config.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+                    assert_eq!(config.working_dir, state.context.worktree_path);
+                    let args = config
+                        .command_args_override
+                        .as_ref()
+                        .expect("command args override");
+                    assert!(
+                        args.iter().any(|arg| arg.contains(
+                            "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+                        )),
+                        "{args:?}"
+                    );
+                    assert!(config.command_override.is_some());
+                }
+                other => panic!("expected shell launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    /// SPEC-3864 FR-006: a synthetic setup request for an agent that needs
+    /// nothing is an error, not a silent no-op launch.
+    #[test]
+    fn run_agent_setup_without_affordance_reports_error() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.set_agent_id("claude");
+        state.apply(LaunchWizardAction::RunAgentSetup);
+        assert!(state.completion.is_none());
+        assert!(state.error.is_some(), "expected an error");
+    }
+
     #[test]
     fn run_opencode_setup_yields_shell_completion_with_auth_login_command() {
-        // SPEC-3151 FR-010: the in-pane setup launcher produces a Host shell
-        // launch running `<opencode runner> auth login`.
+        // SPEC-3151 FR-010 / SPEC-3864 FR-006: the generic in-pane setup
+        // launcher produces a Host shell launch running
+        // `<opencode runner> auth login` from the descriptor's setup args.
         let mut options = sample_agent_options();
         options.push(AgentOption {
             id: "opencode".to_string(),
@@ -1220,9 +1441,10 @@ mod tests {
         ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
         let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
         state.set_agent_id("opencode");
+        state.set_agent_needs_configuration("opencode", true);
         state.version = "latest".to_string();
 
-        state.apply(LaunchWizardAction::RunOpenCodeSetup);
+        state.apply(LaunchWizardAction::RunAgentSetup);
 
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
@@ -1258,13 +1480,17 @@ mod tests {
     }
 
     #[test]
-    fn run_opencode_setup_action_deserializes_from_frontend_wire_tag() {
-        // SPEC-3151 FR-010: the frontend dispatches `{"kind":"run_opencode_setup"}`.
+    fn run_agent_setup_action_deserializes_from_frontend_wire_tags() {
+        // SPEC-3864 FR-006: the frontend dispatches `{"kind":"run_agent_setup"}`;
+        // the SPEC-3151 `run_opencode_setup` tag stays accepted as an alias.
+        let action: LaunchWizardAction =
+            serde_json::from_str(r#"{"kind":"run_agent_setup"}"#).expect("deserialize action");
+        assert_eq!(action, LaunchWizardAction::RunAgentSetup);
         // Default snake_case would produce `run_open_code_setup`, so the variant
         // carries an explicit serde rename; this locks the wire contract.
         let action: LaunchWizardAction =
             serde_json::from_str(r#"{"kind":"run_opencode_setup"}"#).expect("deserialize action");
-        assert_eq!(action, LaunchWizardAction::RunOpenCodeSetup);
+        assert_eq!(action, LaunchWizardAction::RunAgentSetup);
     }
 
     #[test]
@@ -1475,36 +1701,6 @@ mod tests {
         assert_eq!(config.branch.as_deref(), Some("feature-foo"));
         assert!(config.base_branch.is_none());
         assert!(!config.is_ephemeral, "continue-on-branch is not ephemeral");
-    }
-
-    /// SPEC-3214 T-020 / FR-001: the Intake wizard mode builds an ephemeral
-    /// launch — no branch, no base branch, no pre-resolved working dir — so
-    /// the launch runtime materializes a disposable `.intake-*` detached
-    /// worktree instead of a named-branch worktree.
-    #[test]
-    fn open_intake_hides_branch_controls_and_builds_ephemeral_config() {
-        let state = LaunchWizardState::open_intake_with_previous_profiles(
-            context(branch("develop"), "develop"),
-            sample_agent_options(),
-            Vec::new(),
-            LaunchWizardPreviousProfiles::default(),
-        );
-
-        let view = state.view();
-        assert_eq!(view.mode, LaunchWizardMode::Intake);
-        assert!(
-            !view.show_branch_controls,
-            "intake sessions have no branch to pick"
-        );
-
-        let config = state.build_launch_config().expect("intake launch config");
-        assert!(config.is_ephemeral, "intake launches must be ephemeral");
-        assert!(config.branch.is_none(), "no named branch may be involved");
-        assert!(config.base_branch.is_none());
-        assert!(
-            config.working_dir.is_none(),
-            "the ephemeral worktree is materialized at launch time"
-        );
     }
 
     #[test]

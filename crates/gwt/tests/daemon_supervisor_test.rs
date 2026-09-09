@@ -69,7 +69,9 @@ fn seed_live_endpoint(gwt_home: &Path, project_root: &Path, pid: u32) -> Runtime
         pid,
         gwt_home.join("daemon.sock").display().to_string(),
         "auth-token".to_string(),
-        "9.99.0".to_string(),
+        // Issue #4038 (AC-6): a daemon of another version is retired, so a
+        // reusable fixture endpoint must report this build's version.
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     persist_endpoint(&scope.endpoint_path(gwt_home), &endpoint).expect("persist endpoint");
     scope
@@ -119,6 +121,8 @@ fn ensure_running_starts_a_daemon_when_no_endpoint_is_published() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -146,6 +150,8 @@ fn ensure_running_reuses_a_live_daemon_endpoint_instead_of_spawning() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -174,6 +180,8 @@ fn ensure_running_does_not_start_a_second_daemon_while_the_first_is_still_starti
     let inputs = || DaemonEnsureInputs {
         gwt_home: fixture.gwt_home.clone(),
         is_process_alive: &always_alive,
+        expected_daemon_version: env!("CARGO_PKG_VERSION"),
+        retire_stale_daemon: &|_| {},
     };
 
     let first = supervisor
@@ -201,6 +209,8 @@ fn ensure_running_replaces_a_daemon_that_exited() {
     let inputs = || DaemonEnsureInputs {
         gwt_home: fixture.gwt_home.clone(),
         is_process_alive: &always_alive,
+        expected_daemon_version: env!("CARGO_PKG_VERSION"),
+        retire_stale_daemon: &|_| {},
     };
 
     let first = supervisor
@@ -241,6 +251,8 @@ fn ensure_running_starts_a_daemon_when_the_published_endpoint_owner_is_dead() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &never_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -265,6 +277,8 @@ fn ensure_running_reports_the_reason_when_the_daemon_cannot_be_started() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect_err("spawn failure must be reported");
@@ -272,6 +286,33 @@ fn ensure_running_reports_the_reason_when_the_daemon_cannot_be_started() {
     assert!(
         error.contains("gwtd binary could not be resolved"),
         "the failure reason must reach the caller: {error}"
+    );
+    supervisor.shutdown();
+}
+
+#[test]
+fn ensure_running_records_a_daemon_fault_in_the_error_ledger() {
+    let fixture = fixture();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(&fixture.gwt_home);
+    let supervisor = DaemonSupervisor::with_spawner(|_context: &DaemonSpawnContext<'_>| {
+        Err(std::io::Error::other("gwtd binary could not be resolved"))
+    });
+
+    let error = supervisor
+        .ensure_running(&fixture.project_root)
+        .expect_err("spawn failure must be reported");
+    assert!(
+        error.contains("gwtd binary could not be resolved"),
+        "{error}"
+    );
+
+    let listed = gwt_core::error_ledger::list_since(None).expect("list");
+    assert!(
+        listed.iter().any(|row| {
+            row.kind == gwt_core::error_ledger::ErrorKind::DaemonFault
+                && row.message.contains("gwtd binary could not be resolved")
+        }),
+        "daemon fault must land in the error ledger: {listed:?}"
     );
     supervisor.shutdown();
 }
@@ -327,6 +368,8 @@ fn supervisor_resolves_against_the_current_daemon_protocol_version() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -362,6 +405,8 @@ fn the_spawn_context_anchors_the_daemon_diagnostic_log_next_to_its_endpoint() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");

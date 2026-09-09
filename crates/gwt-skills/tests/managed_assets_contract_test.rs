@@ -277,6 +277,153 @@ fn browser_check_launch_script_unsets_ambient_runtime_override() {
     assert_eq!(fs::read_to_string(log).unwrap(), "unset\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_never_persists_a_path_local_checkout_daemon() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // PR #3520 review (PRRT_kwDOPLof2M6YcffL): when PATH resolves `gwtd` only
+    // to a checkout-local build, the persisted fallback must never be that
+    // absolute path. The stable install wins when present; otherwise the
+    // logical `gwtd` name is the explicit fail-open state, guarded at hook
+    // runtime by `command -v` in every generated hook config.
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let local_bin_dir = repo.path().join("target/debug");
+    fs::create_dir_all(&local_bin_dir).expect("target/debug");
+    let local_gwtd = local_bin_dir.join("gwtd");
+    fs::write(&local_gwtd, "#!/bin/sh\nexit 0\n").expect("write checkout-local gwtd");
+    fs::set_permissions(&local_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make checkout-local gwtd executable");
+
+    let script = format!(
+        "{}\nprintf '%s\\n' \"$CHECK_HOOK_BIN\"",
+        browser_check_shell_block("hook-authority")
+    );
+    // Only the checkout-local build resolves `gwtd`; POSIX utilities such as
+    // `grep` stay available because the resolver legitimately depends on them.
+    let path = std::env::join_paths([
+        local_bin_dir.clone(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .expect("compose checkout-local PATH");
+    for inherited in [None, Some(local_gwtd.display().to_string())] {
+        let mut command = hidden_command("/bin/bash");
+        command
+            .args(["-c", &script])
+            .env("PATH", &path)
+            .env_remove("GWT_HOOK_BIN");
+        if let Some(inherited) = &inherited {
+            command.env("GWT_HOOK_BIN", inherited);
+        }
+        let output = command
+            .output()
+            .expect("run authority resolver with checkout-local PATH");
+        assert!(output.status.success(), "{:?}", output);
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_ne!(
+            selected,
+            local_gwtd.display().to_string(),
+            "inherited={inherited:?}: the rejected checkout daemon was restored"
+        );
+        assert!(
+            !selected.contains("target/"),
+            "inherited={inherited:?}: a checkout-local path leaked into CHECK_HOOK_BIN: {selected}"
+        );
+        assert!(
+            selected == "gwtd" || (selected.starts_with('/') && Path::new(&selected).is_file()),
+            "inherited={inherited:?}: fallback must be the logical name or a stable install: {selected}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_repair_fails_closed_with_guidance_when_jq_is_missing() {
+    // PR #3520 review (PRRT_kwDOPLof2M6YcfOI): the mandatory repair/audit
+    // block depends on `jq`, which is neither a README requirement nor part of
+    // the browser-check preflight. Without an explicit preflight the block
+    // dies with `jq: command not found` and misreports the GUI as broken.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty_path = dir.path().join("tools");
+    fs::create_dir_all(&empty_path).expect("empty PATH dir");
+
+    let output = hidden_command("/bin/bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("PATH", &empty_path)
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", dir.path().join("missing-gwtd"))
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run hook repair block without jq");
+
+    assert!(
+        !output.status.success(),
+        "hook repair must fail closed without jq\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("browser-check preflight failed: jq is required"),
+        "missing actionable jq preflight message: {stderr}"
+    );
+    assert!(
+        stderr.contains("install jq"),
+        "preflight must tell the operator how to recover: {stderr}"
+    );
+    assert!(
+        !stderr.contains("command not found") && !stderr.contains("did not return evidence"),
+        "preflight must run before hook.doctor is attempted: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_repair_blocks_url_handoff_when_doctor_reports_issues() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SPEC #1935 T-285: a convergence mismatch must stop the skill before any
+    // URL handoff instead of launching a GUI with skewed hook surfaces.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"degraded\\\",\\\"issues\\\":[\\\"managed hook fallback is worktree-local: /repo/target/debug/gwtd\\\"]}}\"}'\n",
+    )
+    .expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", &fake_gwtd)
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run hook repair block against a degraded doctor");
+
+    assert!(
+        !output.status.success(),
+        "a degraded hook.doctor must block the URL handoff\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not converge managed surfaces"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("managed hook fallback is worktree-local"),
+        "the blocking issue must be surfaced to the operator: {stderr}"
+    );
+}
+
 #[test]
 fn user_verification_handoff_is_identifiable_and_actionable() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -365,10 +512,21 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
+        // Issue #4001 AC-A1: `n/a (autonomous)` is the recorded value for an
+        // Issue Monitor launch, distinct from the agent judging a skip.
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
-            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a",
+            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous)",
             "{} evidence-bundle enum must include every supported result",
+            skill_path.display()
+        );
+
+        // Issue #4001 AC-2: the agent's own headed browser-check is its own
+        // evidence line and is never read as the user's result.
+        assert_eq!(
+            line_starting_with(&skill, "Agent Visual Check:"),
+            "Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)",
+            "{} evidence bundle must record the agent's own visual check separately",
             skill_path.display()
         );
 
