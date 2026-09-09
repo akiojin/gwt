@@ -665,125 +665,174 @@ pub(super) fn run<E: CliEnv>(
 }
 
 fn sync_edited_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus) {
-    let matches_current =
-        gwt_core::workspace_projection::load_workspace_projection(env.repo_path())
-            .ok()
-            .flatten()
-            .and_then(|projection| projection.git_details)
-            .is_some_and(|details| details.pr_number == Some(pr.number));
-    if matches_current {
-        sync_workspace_pr_metadata(env, pr, None);
-    }
+    sync_workspace_pr_metadata_for_target(env, pr, None, true);
 }
 
 fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
-    let pr_event = gwt_core::workspace_projection::mutate_existing_workspace_projection(
-        env.repo_path(),
-        |projection| {
-            let stored_branch = projection
-                .git_details
-                .as_ref()
-                .and_then(|details| details.branch.as_deref());
-            if !should_sync_workspace_pr_metadata(env.repo_path(), stored_branch, requested_head) {
-                return Ok(None);
+    sync_workspace_pr_metadata_for_target(env, pr, requested_head, false);
+}
+
+fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
+    env: &E,
+    pr: &PrStatus,
+    requested_head: Option<&str>,
+    require_existing_pr: bool,
+) {
+    use gwt_core::workspace_projection::{
+        transact_workspace_state_for_work_event_root, WorkEvent, WorkEventKind,
+        WorkspaceExecutionContainerRef,
+    };
+
+    let Some(branch) = current_branch_name(env.repo_path()) else {
+        return;
+    };
+    let worktree_root = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let Ok(worktree) = std::fs::canonicalize(&worktree_root) else {
+        return;
+    };
+    if requested_head.is_some_and(|head| {
+        !requested_head_matches_workspace_branch(env.repo_path(), head, Some(&branch))
+    }) {
+        return;
+    }
+    let matches_identity = |candidate_branch: Option<&str>,
+                            candidate_path: Option<&std::path::Path>| {
+        candidate_branch == Some(branch.as_str())
+            && candidate_path
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .is_some_and(|path| path == worktree)
+    };
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let work_item_id = transact_workspace_state_for_work_event_root(
+        &worktree_root,
+        &worktree_root,
+        |projection, work_items, _| {
+            let current_matches = projection.git_details.as_ref().is_some_and(|details| {
+                matches_identity(details.branch.as_deref(), details.worktree_path.as_deref())
+            });
+            let mut candidates = work_items.work_items.iter().flat_map(|item| {
+                item.execution_containers
+                    .iter()
+                    .filter(|container| {
+                        matches_identity(
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                        )
+                    })
+                    .map(move |container| (item, container))
+            });
+            let target = candidates.next();
+            // A shared current projection is not authority to choose among Works.
+            if candidates.next().is_some() {
+                return Ok((None, vec![]));
             }
-            let Some(details) = projection.git_details.as_mut() else {
-                return Ok(None);
+            let (id, status, mut container) = if let Some((item, container)) = target {
+                (
+                    item.id.clone(),
+                    Some(item.status_category),
+                    container.clone(),
+                )
+            } else if current_matches {
+                let item = work_items
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == projection.id);
+                if item.is_some_and(|item| !item.execution_containers.is_empty()) {
+                    return Ok((None, vec![]));
+                }
+                let details = projection
+                    .git_details
+                    .as_ref()
+                    .expect("matching current details");
+                (
+                    projection.id.clone(),
+                    item.map(|item| item.status_category),
+                    WorkspaceExecutionContainerRef {
+                        branch: details.branch.clone(),
+                        worktree_path: details.worktree_path.clone(),
+                        pr_number: details.pr_number,
+                        pr_url: details.pr_url.clone(),
+                        pr_state: details.pr_state.clone(),
+                    },
+                )
+            } else {
+                return Ok((None, vec![]));
             };
-            details.pr_number = Some(pr.number);
-            details.pr_state = Some(pr.state.to_string());
-            details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
-            details.pr_created_at = pr.created_at;
-            projection.updated_at = chrono::Utc::now();
-            let mut event = gwt_core::workspace_projection::WorkEvent::new(
-                gwt_core::workspace_projection::WorkEventKind::Pr,
-                projection.id.clone(),
-                projection.updated_at,
-            );
-            event.execution_container = Some(
-                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-                    branch: details.branch.clone(),
-                    worktree_path: details.worktree_path.clone(),
-                    pr_number: details.pr_number,
-                    pr_url: details.pr_url.clone(),
-                    pr_state: details.pr_state.clone(),
-                },
-            );
-            Ok(Some(event))
+            // Cross-current writes retain the transaction's existing Session
+            // authority contract; matching a container alone cannot grant it.
+            if projection.id != id
+                && !session_id.as_deref().is_some_and(|session| {
+                    projection
+                        .latest_agent_for_session(session)
+                        .is_some_and(|agent| {
+                            agent.is_assigned()
+                                && agent.workspace_id.as_deref() == Some(id.as_str())
+                        })
+                })
+            {
+                return Ok((None, vec![]));
+            }
+            let update_current = current_matches && projection.id == id;
+            if require_existing_pr
+                && container.pr_number != Some(pr.number)
+                && !(update_current
+                    && projection
+                        .git_details
+                        .as_ref()
+                        .is_some_and(|details| details.pr_number == Some(pr.number)))
+            {
+                return Ok((None, vec![]));
+            }
+            container.pr_number = Some(pr.number);
+            container.pr_state = Some(pr.state.to_string());
+            container.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
+            let now = chrono::Utc::now();
+            if update_current {
+                let details = projection
+                    .git_details
+                    .as_mut()
+                    .expect("matching current details");
+                details.pr_number = container.pr_number;
+                details.pr_state = container.pr_state.clone();
+                details.pr_url = container.pr_url.clone();
+                details.pr_created_at = pr.created_at;
+                projection.updated_at = now;
+            }
+            let already_recorded = target.is_some_and(|(_, existing)| existing == &container);
+            let events = if already_recorded {
+                vec![]
+            } else {
+                let mut event = WorkEvent::new(WorkEventKind::Pr, id.clone(), now);
+                event.status_category = status;
+                event.agent_session_id = session_id.clone();
+                event.execution_container = Some(container);
+                vec![event]
+            };
+            Ok((Some(id), events))
         },
     )
     .ok()
-    .flatten()
     .flatten();
 
-    let Some(mut pr_event) = pr_event else {
-        return;
-    };
-    let work_item_id = pr_event.work_item_id.clone();
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(env.repo_path())
-        .ok()
-        .flatten();
-    let item = work_items.as_ref().and_then(|projection| {
-        projection
-            .work_items
-            .iter()
-            .find(|item| item.id == work_item_id)
-    });
-    let already_recorded = item.is_some_and(|item| {
-        pr_event
-            .execution_container
-            .as_ref()
-            .is_some_and(|incoming| {
-                item.execution_containers
-                    .iter()
-                    .any(|existing| existing == incoming)
-            })
-    });
-    if let Some(item) = item {
-        pr_event.status_category = Some(item.status_category);
+    // SPEC-2359 US-37 / FR-117: merged polling remains idempotent for the
+    // selected Work, including when another Work owns the shared current.
+    if let Some(work_item_id) = work_item_id {
+        if pr.state.to_string().eq_ignore_ascii_case("merged") {
+            let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+                env.repo_path(),
+                &work_item_id,
+                chrono::Utc::now(),
+            );
+        }
     }
-    if !already_recorded {
-        let _ =
-            gwt_core::workspace_projection::record_workspace_work_event(env.repo_path(), pr_event);
-    }
-
-    // SPEC-2359 US-37 / FR-117: auto-emit Done for the linked Workspace WorkItem
-    // when the PR transitions to merged. The helper is idempotent per work_item_id,
-    // so repeated polling does not duplicate Done events.
-    if pr.state.to_string().eq_ignore_ascii_case("merged") {
-        let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
-            env.repo_path(),
-            &work_item_id,
-            chrono::Utc::now(),
-        );
-    }
-}
-
-fn should_sync_workspace_pr_metadata(
-    repo_path: &std::path::Path,
-    stored_branch: Option<&str>,
-    requested_head: Option<&str>,
-) -> bool {
-    let current_branch = current_branch_name(repo_path);
-    if let Some(requested_head) = requested_head {
-        return requested_head_matches_workspace_branch(
-            repo_path,
-            requested_head,
-            stored_branch,
-            current_branch.as_deref(),
-        );
-    }
-    if let (Some(current_branch), Some(stored_branch)) = (current_branch.as_deref(), stored_branch)
-    {
-        return current_branch == stored_branch;
-    }
-    true
 }
 
 fn requested_head_matches_workspace_branch(
     repo_path: &std::path::Path,
     requested_head: &str,
-    stored_branch: Option<&str>,
     current_branch: Option<&str>,
 ) -> bool {
     let (requested_owner, requested_branch) = split_head_owner_and_branch(requested_head);
@@ -795,7 +844,7 @@ fn requested_head_matches_workspace_branch(
             return false;
         }
     }
-    stored_branch == Some(requested_branch) || current_branch == Some(requested_branch)
+    current_branch == Some(requested_branch)
 }
 
 fn split_head_owner_and_branch(head: &str) -> (Option<&str>, &str) {
@@ -2597,6 +2646,12 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo");
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-b", "work/20260507-0808"])
+            .current_dir(&repo)
+            .status()
+            .expect("init git")
+            .success());
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
@@ -2616,7 +2671,7 @@ mod tests {
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/20260507-0808".to_string()),
-            worktree_path: Some(repo.join("work/20260507-0808")),
+            worktree_path: Some(repo.clone()),
             base_branch: Some("origin/develop".to_string()),
             pr_number: None,
             pr_state: None,
@@ -2652,14 +2707,43 @@ mod tests {
     }
 
     fn assert_pr_command_writes_work_event_pr_metadata(command: PrCommand) {
+        assert_pr_metadata_target(command, false);
+    }
+
+    #[test]
+    fn pr_metadata_current_targets_work_from_subdirectory() {
+        assert_pr_metadata_target_from_directory(PrCommand::Current, true, true);
+    }
+
+    fn assert_pr_metadata_target(command: PrCommand, foreign_current: bool) {
+        assert_pr_metadata_target_from_directory(command, foreign_current, false);
+    }
+
+    fn assert_pr_metadata_target_from_directory(
+        command: PrCommand,
+        foreign_current: bool,
+        subdirectory: bool,
+    ) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo");
+        {
+            let status = gwt_core::process::hidden_command("git")
+                .args(["init", "-b", "work/issue-3640"])
+                .current_dir(&repo)
+                .status()
+                .expect("initialize current branch fixture");
+            assert!(status.success());
+        }
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "pr-metadata-session",
+        );
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
         let pr = gwt_git::PrStatus {
@@ -2681,7 +2765,7 @@ mod tests {
         projection.id = "work-work-issue-3640".to_string();
         projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/issue-3640".to_string()),
-            worktree_path: Some(repo.join("work/issue-3640")),
+            worktree_path: Some(repo.clone()),
             base_branch: Some("origin/develop".to_string()),
             pr_number: matches!(command, PrCommand::EditBody { .. }).then_some(3672),
             pr_state: None,
@@ -2690,6 +2774,33 @@ mod tests {
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "pr-metadata-session".to_string(),
+                window_id: None,
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked,
+                current_focus: None,
+                title_summary: None,
+                worktree_path: Some(repo.clone()),
+                branch: Some("work/issue-3640".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: Some("work-work-issue-3640".to_string()),
+                updated_at: chrono::Utc::now(),
+            });
+        if foreign_current {
+            projection.id = "foreign-work".to_string();
+            let details = projection.git_details.as_mut().expect("details");
+            details.branch = Some("work/foreign".to_string());
+            details.worktree_path = Some(home.path().join("foreign"));
+            details.pr_number = Some(999);
+        }
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
         let mut start = gwt_core::workspace_projection::WorkEvent::new(
@@ -2697,13 +2808,14 @@ mod tests {
             "work-work-issue-3640",
             "2026-08-19T01:00:00Z".parse().expect("start time"),
         );
+        start.agent_session_id = Some("pr-metadata-session".to_string());
         start.title = Some("Issue 3640".to_string());
         start.status_category =
             Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked);
         start.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some("work/issue-3640".to_string()),
-                worktree_path: Some(repo.join("work/issue-3640")),
+                worktree_path: Some(repo.clone()),
                 pr_number: None,
                 pr_url: None,
                 pr_state: None,
@@ -2712,6 +2824,10 @@ mod tests {
         gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
             .expect("seed start event");
 
+        if subdirectory {
+            env.repo_path = repo.join("nested");
+            std::fs::create_dir_all(&env.repo_path).expect("create nested cwd");
+        }
         let mut out = String::new();
         let code = run(&mut env, command, &mut out).expect("run pr command");
         assert_eq!(code, 0, "{out}");
@@ -2755,6 +2871,25 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        if foreign_current {
+            let current = gwt_core::workspace_projection::load_workspace_projection(&repo)
+                .expect("load current")
+                .expect("current");
+            assert_eq!(current.id, "foreign-work");
+            assert_eq!(
+                current.git_details.expect("foreign details").pr_number,
+                Some(999)
+            );
+            assert!(!work_items.work_items.iter().any(|item| {
+                item.id == "foreign-work"
+                    && item.events.iter().any(|event| {
+                        event
+                            .execution_container
+                            .as_ref()
+                            .is_some_and(|c| c.pr_number == Some(3672))
+                    })
+            }));
+        }
         let event_count = item.events.len();
         run(&mut env, PrCommand::Current, &mut out).expect("repeat PR sync");
         let repeated = gwt_core::workspace_projection::load_workspace_work_items(&repo)
@@ -2800,6 +2935,21 @@ mod tests {
     }
 
     #[test]
+    fn pr_metadata_create_targets_current_work_with_foreign_shared_projection() {
+        assert_pr_metadata_target(
+            PrCommand::CreateBody {
+                base: "develop".to_string(),
+                head: Some("work/issue-3640".to_string()),
+                title: "Current work PR".to_string(),
+                body: "Regression".to_string(),
+                labels: vec![],
+                draft: true,
+            },
+            true,
+        );
+    }
+
+    #[test]
     fn pr_family_create_skips_workspace_pr_metadata_for_non_current_head() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -2827,7 +2977,7 @@ mod tests {
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/20260507-0808".to_string()),
-            worktree_path: Some(repo.join("work/20260507-0808")),
+            worktree_path: Some(repo.clone()),
             base_branch: Some("origin/develop".to_string()),
             pr_number: None,
             pr_state: None,
@@ -3150,6 +3300,12 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo");
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-b", "work/20260513-0500"])
+            .current_dir(&repo)
+            .status()
+            .expect("init git")
+            .success());
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
@@ -3171,7 +3327,7 @@ mod tests {
         projection.id = "wi-pr-merge-auto-done".to_string();
         projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/20260513-0500".to_string()),
-            worktree_path: Some(repo.join("work/20260513-0500")),
+            worktree_path: Some(repo.clone()),
             base_branch: Some("origin/develop".to_string()),
             pr_number: None,
             pr_state: None,
@@ -3223,6 +3379,115 @@ mod tests {
             item.status_category,
             gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
             "PR merge must auto-emit Done for the linked Workspace WorkItem",
+        );
+    }
+
+    #[test]
+    fn pr_metadata_current_rejects_same_branch_in_different_worktree() {
+        assert_pr_metadata_current_rejects_unproven_work(false, false);
+    }
+
+    #[test]
+    fn pr_metadata_current_rejects_two_works_with_matching_container() {
+        assert_pr_metadata_current_rejects_unproven_work(true, true);
+    }
+
+    #[test]
+    fn pr_metadata_current_rejects_cross_current_without_session_authority() {
+        assert_pr_metadata_current_rejects_unproven_work(false, true);
+    }
+
+    fn assert_pr_metadata_current_rejects_unproven_work(ambiguous: bool, matching_path: bool) {
+        use gwt_core::workspace_projection::{
+            load_workspace_projection, load_workspace_work_items, record_workspace_work_event,
+            save_workspace_projection, GitDetails, WorkEvent, WorkEventKind,
+            WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceStatusCategory,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        let other_worktree = home.path().join("other-worktree");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let repo = std::fs::canonicalize(repo).expect("canonical repo fixture");
+        std::fs::create_dir_all(&other_worktree).expect("create different canonical path");
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-b", "work/issue-3697"])
+            .current_dir(&repo)
+            .status()
+            .expect("initialize branch")
+            .success());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
+        env.repo_path = repo.clone();
+        env.seed_current_pr(Some(gwt_git::PrStatus {
+            number: 4186,
+            title: "Current branch PR".to_string(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://github.com/akiojin/gwt/pull/4186".to_string(),
+            created_at: None,
+            ci_status: "PENDING".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: "UNKNOWN".to_string(),
+            review_status: "REVIEW_REQUIRED".to_string(),
+        }));
+
+        let mut current = WorkspaceProjection::default_for_project(&repo);
+        current.id = "foreign-current".to_string();
+        current.git_details = Some(GitDetails {
+            branch: Some("work/foreign-current".to_string()),
+            worktree_path: Some(other_worktree.clone()),
+            base_branch: None,
+            pr_number: Some(3200),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/3200".to_string()),
+            pr_state: Some("OPEN".to_string()),
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        save_workspace_projection(&repo, &current).expect("save foreign current");
+        let work_ids: &[&str] = if ambiguous {
+            &["matching-work-one", "matching-work-two"]
+        } else {
+            &["same-branch-foreign-worktree"]
+        };
+        for id in work_ids {
+            let mut start = WorkEvent::new(WorkEventKind::Start, *id, chrono::Utc::now());
+            start.status_category = Some(WorkspaceStatusCategory::Active);
+            start.execution_container = Some(WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3697".to_string()),
+                worktree_path: Some(if matching_path {
+                    repo.clone()
+                } else {
+                    other_worktree.clone()
+                }),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            });
+            record_workspace_work_event(&repo, start).expect("seed candidate Work");
+        }
+        let before_current = load_workspace_projection(&repo).expect("snapshot current");
+        let before_works = load_workspace_work_items(&repo).expect("snapshot Works");
+
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Current, &mut out).expect("read current PR"),
+            0,
+            "{out}"
+        );
+        assert_eq!(
+            load_workspace_projection(&repo).expect("reload current"),
+            before_current,
+            "foreign shared current must remain unchanged"
+        );
+        assert_eq!(
+            load_workspace_work_items(&repo).expect("reload Works"),
+            before_works,
+            "unproven Work targets must receive neither PR metadata nor a PR event"
         );
     }
 }
