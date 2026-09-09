@@ -71,10 +71,15 @@ pub(crate) enum HookAgentSessionId {
 /// boundary so malformed provider payloads can still be parsed and logged.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RawHookEvent {
+    #[serde(alias = "toolName")]
     tool_name: Option<String>,
+    #[serde(alias = "toolInput")]
     tool_input: Option<serde_json::Value>,
+    #[serde(alias = "sessionId")]
     session_id: Option<String>,
+    #[serde(alias = "transcriptPath")]
     transcript_path: Option<String>,
+    prompt: Option<String>,
     cwd: Option<String>,
 }
 
@@ -92,6 +97,10 @@ impl RawHookEvent {
 
     pub(crate) fn tool_name(&self) -> Option<&str> {
         self.tool_name.as_deref()
+    }
+
+    pub(crate) fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
     }
 
     pub(crate) fn cwd(&self) -> Option<&str> {
@@ -195,6 +204,7 @@ mod tests {
             tool_input: None,
             session_id: Some(session_id.to_string()),
             transcript_path: None,
+            prompt: None,
             cwd: None,
         }
     }
@@ -256,5 +266,40 @@ mod tests {
             HookAgentSessionId::Provided(id)
                 if id.as_str() == "019e4646-9d79-79f0-b74a-df9f74f9f0fd"
         ));
+    }
+
+    #[test]
+    fn grok_hook_identity_accepts_camel_case_wire_fields() {
+        let raw = RawHookEvent::read_from_str(
+            r#"{
+                "sessionId":"grok-session",
+                "toolName":"ask_user_question",
+                "toolInput":{"question":"Continue?"},
+                "transcriptPath":"/tmp/grok-transcript.jsonl",
+                "cwd":"/tmp/worktree"
+            }"#,
+        )
+        .expect("valid Grok hook payload")
+        .expect("non-empty Grok hook payload");
+
+        assert_eq!(
+            raw.session_id().map(|id| id.into_string()).as_deref(),
+            Some("grok-session")
+        );
+        assert_eq!(raw.tool_name(), Some("ask_user_question"));
+        assert_eq!(raw.cwd(), Some("/tmp/worktree"));
+        let canonical = HookEvent::from(raw);
+        assert_eq!(
+            canonical.transcript_path.as_deref(),
+            Some("/tmp/grok-transcript.jsonl")
+        );
+        assert_eq!(
+            canonical
+                .tool_input
+                .as_ref()
+                .and_then(|input| input.get("question"))
+                .and_then(serde_json::Value::as_str),
+            Some("Continue?")
+        );
     }
 }

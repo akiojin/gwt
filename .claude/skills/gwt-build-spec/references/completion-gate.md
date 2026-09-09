@@ -55,7 +55,9 @@ The gate **fails** when any of:
 - `User Verification Result` is `pending` (handoff never completed) or
   `rejected(<reason>)` (user declined). The user's reason is preserved
   in the evidence bundle; route the failure for repair per the
-  failure-handling section below.
+  failure-handling section below. `n/a (autonomous)` is not `pending`: an
+  unattended gwt Issue Monitor launch waives the handoff by design and passes
+  the gate, provided `Agent Visual Check: pass` covers any UI surface.
 
 ## Standalone mode checks
 

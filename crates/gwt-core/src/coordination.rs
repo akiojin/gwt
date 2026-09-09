@@ -1015,42 +1015,93 @@ fn resolved_escalation_cutoff() -> DateTime<Utc> {
     Utc::now() - chrono::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
 }
 
-fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+fn rebuild_escalation_store_in_memory(worktree_root: &Path) -> Result<BoardEscalationStore> {
     let coordination_root = coordination_dir(worktree_root);
     let mut entries = load_board_entries_from_segments_root(&coordination_root)?;
     entries.sort_by_key(|entry| entry.created_at);
     let mut store = BoardEscalationStore::from_entries(entries.iter());
     store.prune_resolved_before(resolved_escalation_cutoff());
+    Ok(store)
+}
+
+fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let store = rebuild_escalation_store_in_memory(worktree_root)?;
     write_atomic_json(&coordination_escalations_path(worktree_root), &store)?;
     Ok(store)
+}
+
+fn load_escalation_store_for_update(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let path = coordination_escalations_path(worktree_root);
+    if !path.exists() {
+        return rebuild_escalation_store_in_memory(worktree_root);
+    }
+    match load_json_or_default::<BoardEscalationStore>(&path) {
+        Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+            Ok(store)
+        }
+        Ok(store) => {
+            tracing::warn!(
+                version = store.version,
+                "board escalation index has an unknown version; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "board escalation index is unreadable; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+    }
+}
+
+/// Re-insert blocked posts that `params.resolves` names but the on-disk index
+/// no longer carries — typically because the index was rebuilt from the hot
+/// Board window (Issue #3690).
+fn restore_lost_resolve_targets(
+    store: &mut BoardEscalationStore,
+    worktree_root: &Path,
+    target_ids: &[String],
+) -> Result<bool> {
+    let mut changed = false;
+    let coordination_root = coordination_dir(worktree_root);
+    for target_id in target_ids {
+        let target_id = target_id.trim();
+        if target_id.is_empty()
+            || store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == target_id)
+        {
+            continue;
+        }
+        let Some(historical) = find_board_entry_in_segments(&coordination_root, target_id)? else {
+            continue;
+        };
+        if store.restore_lost_blocked(&historical) {
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 /// Fold one freshly appended entry into the index, already holding the
 /// coordination lock.
 ///
-/// A never-written index is rebuilt from the whole log instead of started from
-/// this single entry, so upgrading an existing repository does not silently
-/// discard the escalations that were already open.
+/// A never-written or unreadable index is rebuilt from the whole log instead
+/// of started from this single entry, so upgrading an existing repository does
+/// not silently discard the escalations that were already open. The incoming
+/// entry is always folded afterwards — a rebuild that dropped the resolve
+/// would leave the PM unable to close overflowed blockers (Issue #3690).
 fn update_escalation_store_locked(worktree_root: &Path, entry: &BoardEntry) -> Result<()> {
     let path = coordination_escalations_path(worktree_root);
-    if !path.exists() {
-        rebuild_escalation_store_locked(worktree_root)?;
-        return Ok(());
-    }
-    let mut store: BoardEscalationStore = match load_json_or_default(&path) {
-        Ok(store) => store,
-        Err(_) => {
-            rebuild_escalation_store_locked(worktree_root)?;
-            return Ok(());
-        }
-    };
-    if store.version != crate::board_escalation::ESCALATION_STORE_VERSION {
-        rebuild_escalation_store_locked(worktree_root)?;
-        return Ok(());
-    }
+    let mut store = load_escalation_store_for_update(worktree_root)?;
+    let restored =
+        restore_lost_resolve_targets(&mut store, worktree_root, &entry.resolves_entry_ids)?;
     let applied = store.apply_entry(entry);
     let pruned = store.prune_resolved_before(resolved_escalation_cutoff());
-    if applied || pruned {
+    if restored || applied || pruned || !path.exists() {
         write_atomic_json(&path, &store)?;
     }
     Ok(())
@@ -2218,24 +2269,40 @@ pub fn has_recent_post_by(
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
     ensure_repo_local_files(worktree_root)?;
+    Ok(find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)?.is_some())
+}
+
+/// Load one immutable Board entry by its durable id, including entries that
+/// have aged out of the hot projection.
+pub fn load_board_entry(worktree_root: &Path, entry_id: &str) -> Result<Option<BoardEntry>> {
+    ensure_repo_local_files(worktree_root)?;
+    find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)
+}
+
+fn find_board_entry_in_segments(
+    coordination_root: &Path,
+    entry_id: &str,
+) -> Result<Option<BoardEntry>> {
     let entry_id = entry_id.trim();
     if entry_id.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let coordination_root = coordination_dir(worktree_root);
-    let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    let manifest = load_event_manifest_from_dir(coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
     for segment in manifest.segments.into_iter().rev() {
         let path = segments_dir.join(segment.file);
+        if !path.exists() {
+            continue;
+        }
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.id == entry_id {
-                return Ok(true);
+                return Ok(Some(entry));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub fn load_entries_before(
@@ -3397,7 +3464,15 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "entry-0"));
         assert!(board_entry_exists(dir.path(), "entry-0").unwrap());
+        let historical = load_board_entry(dir.path(), "entry-0")
+            .unwrap()
+            .expect("load entry outside hot projection");
+        assert_eq!(historical.id, "entry-0");
+        assert_eq!(historical.body, "entry-0");
         assert!(!board_entry_exists(dir.path(), "missing-entry").unwrap());
+        assert!(load_board_entry(dir.path(), "missing-entry")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -4922,6 +4997,105 @@ mod tests {
             1,
             "the index must answer independently of the hot projection window"
         );
+    }
+
+    #[test]
+    fn an_explicit_resolution_closes_an_escalation_that_has_left_the_hot_projection() {
+        // Issue #3690: the PM's only handle is params.resolves with the
+        // durable index id. Once the blocked post has scrolled out of the
+        // 500-entry Board window, that handle must still close the row.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.id == blocked_id),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("the durable index must still carry the overflowed row");
+        assert!(
+            closed.resolved_at.is_some(),
+            "params.resolves must stamp resolved_at even after the Board window has moved on"
+        );
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resolution_recovers_an_escalation_dropped_by_a_hot_window_rebuild() {
+        // Issue #3690 production shape: BoardEscalationStore::from_entries on
+        // the hot projection drops overflowed blocked posts from the in-memory
+        // index. apply_entry then no-ops, the persisted file is left unchanged,
+        // and the wake prompt keeps quoting the open row. Recreate that index
+        // state and require the next params.resolves to fold the historical
+        // blocked post back in and close it.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        write_atomic_json(
+            &coordination_escalations_path(dir.path()),
+            &BoardEscalationStore::default(),
+        )
+        .unwrap();
+        assert!(
+            load_open_escalations(dir.path()).unwrap().is_empty(),
+            "the fixture is the index after a hot-window rebuild, which no longer has the row"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("resolving must recover the historical blocked post into the index");
+        assert!(closed.resolved_at.is_some());
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
     }
 
     #[test]

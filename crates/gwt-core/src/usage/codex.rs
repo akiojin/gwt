@@ -3,8 +3,11 @@
 //! Source of truth is the per-session rollout JSONL under
 //! `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`. Each
 //! `token_count` event embeds:
-//! - `rate_limits` — account-level 5h (`primary`) / weekly (`secondary`) +
-//!   optional `code_review`, with `plan_type` and `rate_limit_reached_type`.
+//! - `rate_limits` — account-level pools `primary` / `secondary` (+ optional
+//!   `code_review`), each carrying `window_minutes`, with `plan_type` and
+//!   `rate_limit_reached_type`. Which pool is 5h vs weekly is decided from
+//!   `window_minutes`, not the key (Issue #3860: upstream dropped the 5h
+//!   window and `primary` became weekly with `secondary: null`).
 //! - `info.total_token_usage` — cumulative per-session tokens.
 //! - `info.model_context_window` — the model's context size (so no static
 //!   table lookup is needed for Codex).
@@ -47,9 +50,36 @@ fn parse_reset(window: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     None
 }
 
-fn window_from(kind: WindowKind, obj: &Value, now: DateTime<Utc>) -> Option<UsageWindow> {
+/// Pool keys read from `rate_limits`, in display order.
+const POOL_KEYS: [&str; 3] = ["primary", "secondary", "code_review"];
+
+/// Decide a pool's window kind. `code_review` names a distinct sub-limit pool
+/// and keeps its kind; the general pools are classified from `window_minutes`
+/// alone. A missing or unrecognized length yields `Unknown` — never a guess
+/// from the key position.
+fn classify_pool(key: &str, window_minutes: Option<u32>) -> WindowKind {
+    if key == "code_review" {
+        return WindowKind::CodeReviewWeekly;
+    }
+    window_minutes
+        .and_then(WindowKind::from_minutes)
+        .unwrap_or(WindowKind::Unknown)
+}
+
+fn window_from(key: &str, obj: &Value, now: DateTime<Utc>) -> Option<UsageWindow> {
     let used = obj.get("used_percent").and_then(Value::as_f64)? as f32;
-    Some(UsageWindow::new(kind, used, parse_reset(obj, now)))
+    let window_minutes = obj
+        .get("window_minutes")
+        .and_then(Value::as_u64)
+        .and_then(|m| u32::try_from(m).ok());
+    Some(
+        UsageWindow::new(
+            classify_pool(key, window_minutes),
+            used,
+            parse_reset(obj, now),
+        )
+        .with_window_minutes(window_minutes),
+    )
 }
 
 /// Parse a `rate_limits` JSON object into account windows. Returns `None` when
@@ -58,22 +88,10 @@ pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<Code
     if rate_limits.is_null() {
         return None;
     }
-    let mut windows = Vec::new();
-    if let Some(primary) = rate_limits.get("primary") {
-        if let Some(w) = window_from(WindowKind::FiveHour, primary, now) {
-            windows.push(w);
-        }
-    }
-    if let Some(secondary) = rate_limits.get("secondary") {
-        if let Some(w) = window_from(WindowKind::Weekly, secondary, now) {
-            windows.push(w);
-        }
-    }
-    if let Some(review) = rate_limits.get("code_review") {
-        if let Some(w) = window_from(WindowKind::CodeReviewWeekly, review, now) {
-            windows.push(w);
-        }
-    }
+    let windows: Vec<UsageWindow> = POOL_KEYS
+        .iter()
+        .filter_map(|key| window_from(key, rate_limits.get(key)?, now))
+        .collect();
     if windows.is_empty() {
         return None;
     }
@@ -385,6 +403,88 @@ mod tests {
             acc.windows[0].resets_at,
             DateTime::from_timestamp(1780376627, 0)
         );
+    }
+
+    #[test]
+    fn classifies_by_window_minutes_not_key_position() {
+        // Issue #3860 AC-1: the 2026-09 upstream schema dropped the 5h window
+        // and made `primary` the weekly pool with `secondary: null`.
+        let rl = serde_json::json!({
+            "limit_id": "codex",
+            "primary": {"used_percent": 5.0, "window_minutes": 10080, "resets_at": 1788861607},
+            "secondary": null,
+            "credits": {"has_credits": false, "unlimited": false, "balance": "0"},
+            "plan_type": "pro",
+            "rate_limit_reached_type": null
+        });
+        let acc = parse_rate_limits(&rl, now()).unwrap();
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].kind, WindowKind::Weekly);
+        assert_eq!(acc.windows[0].used_percent, 5.0);
+        assert_eq!(acc.windows[0].window_minutes, Some(10080));
+        assert_eq!(acc.plan.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn legacy_schema_keeps_five_hour_and_weekly() {
+        // Issue #3860 AC-2: the pre-2026-09 layout (primary=5h, secondary=7d)
+        // still classifies as before and carries its window length.
+        let rl = serde_json::json!({
+            "primary": {"used_percent": 0.0, "window_minutes": 300, "resets_at": 1780376627},
+            "secondary": {"used_percent": 23.0, "window_minutes": 10080, "resets_at": 1780899120}
+        });
+        let acc = parse_rate_limits(&rl, now()).unwrap();
+        assert_eq!(acc.windows[0].kind, WindowKind::FiveHour);
+        assert_eq!(acc.windows[0].window_minutes, Some(300));
+        assert_eq!(acc.windows[1].kind, WindowKind::Weekly);
+        assert_eq!(acc.windows[1].window_minutes, Some(10080));
+    }
+
+    #[test]
+    fn missing_window_minutes_is_unknown_not_guessed() {
+        // Issue #3860 AC-3: without `window_minutes` the key position is not
+        // trusted; the window is kept but its kind stays Unknown.
+        let rl = serde_json::json!({
+            "primary": {"used_percent": 12.0, "resets_at": 1780376627}
+        });
+        let acc = parse_rate_limits(&rl, now()).unwrap();
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].kind, WindowKind::Unknown);
+        assert_eq!(acc.windows[0].window_minutes, None);
+        assert_eq!(acc.windows[0].used_percent, 12.0);
+        assert_eq!(
+            acc.windows[0].resets_at,
+            DateTime::from_timestamp(1780376627, 0)
+        );
+    }
+
+    #[test]
+    fn unrecognized_window_minutes_is_kept_as_unknown() {
+        // Issue #3860 AC-5: a length that matches no known window is not
+        // dropped and not forced into a known kind.
+        let rl = serde_json::json!({
+            "primary": {"used_percent": 40.0, "window_minutes": 1440, "resets_at": 1780376627},
+            "secondary": {"used_percent": 7.0, "window_minutes": 10080}
+        });
+        let acc = parse_rate_limits(&rl, now()).unwrap();
+        assert_eq!(acc.windows.len(), 2);
+        assert_eq!(acc.windows[0].kind, WindowKind::Unknown);
+        assert_eq!(acc.windows[0].window_minutes, Some(1440));
+        assert_eq!(acc.windows[0].used_percent, 40.0);
+        assert_eq!(acc.windows[1].kind, WindowKind::Weekly);
+    }
+
+    #[test]
+    fn code_review_pool_kind_is_key_scoped() {
+        // `code_review` names a distinct sub-limit pool, so it keeps its pool
+        // kind while still recording its window length.
+        let rl = serde_json::json!({
+            "primary": {"used_percent": 1.0, "window_minutes": 10080},
+            "code_review": {"used_percent": 6.0, "window_minutes": 10080}
+        });
+        let acc = parse_rate_limits(&rl, now()).unwrap();
+        assert_eq!(acc.windows[1].kind, WindowKind::CodeReviewWeekly);
+        assert_eq!(acc.windows[1].window_minutes, Some(10080));
     }
 
     #[test]

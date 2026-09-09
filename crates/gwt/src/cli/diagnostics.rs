@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 
 use super::{CliEnv, CliParseError};
 
+#[path = "errors.rs"]
+pub(crate) mod errors;
+
 const CPU_DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
 const RECENT_LOG_FILE_LIMIT: usize = 16;
 const RECENT_LOG_LINES_PER_FILE: usize = 2_000;
@@ -23,6 +26,8 @@ const RECENT_LOG_LINES_PER_FILE: usize = 2_000;
 pub enum DiagnosticsCommand {
     /// `gwtd diagnostics cpu --json`.
     Cpu { json: bool },
+    /// Issue #3778: `errors.list`.
+    ErrorsList { since: Option<String> },
 }
 
 pub fn parse(args: &[String]) -> Result<DiagnosticsCommand, CliParseError> {
@@ -48,6 +53,9 @@ pub fn run<E: CliEnv>(
             Ok(0)
         }
         DiagnosticsCommand::Cpu { json: false } => Err(unexpected_error("json output is required")),
+        DiagnosticsCommand::ErrorsList { since } => {
+            errors::run(env, errors::ErrorsCommand::List { since }, out)
+        }
     }
 }
 

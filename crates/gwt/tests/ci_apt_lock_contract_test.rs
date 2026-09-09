@@ -13,6 +13,8 @@
 //! These tests pin the shared wrapper and the workflow wiring that keep a
 //! held dpkg lock from hanging a job or failing a PR for an unrelated change.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
