@@ -239,6 +239,7 @@ fn resolve_launch_worktree_request_locked(
         if has_remote_branch {
             recovery_refs.push(remote_branch_ref.as_str());
         }
+        let mut unique_commit_ref = None;
         for recovery_ref in recovery_refs {
             let divergence = gwt_git::git_divergence(
                 main_repo_path,
@@ -251,15 +252,35 @@ fn resolve_launch_worktree_request_locked(
                 )
             })?;
             if divergence.ahead > 0 {
-                let residual_path = usable_worktree
-                    .as_deref()
-                    .or(observed_worktree_path.as_deref())
-                    .unwrap_or(&preferred_worktree_path);
+                unique_commit_ref = Some((recovery_ref.to_string(), divergence.ahead));
+                break;
+            }
+        }
+        // Issue #4074 AC-2: unique commits are a reason to *inherit* the
+        // existing launch ref, not to park the owner Issue. Refusing here fired
+        // before the Execution Control Record successor route in
+        // `app_runtime/launch.rs` could ever run, so every Monitor relaunch of
+        // an Issue with pushed work fell out as `needs_human` and a human filed
+        // a successor Issue instead. The one loss inheritance cannot prevent is
+        // two agents sharing a worktree, so that — and only that — still
+        // refuses.
+        if let Some((recovery_ref, ahead)) = unique_commit_ref {
+            let residual_path = usable_worktree
+                .as_deref()
+                .or(observed_worktree_path.as_deref())
+                .unwrap_or(&preferred_worktree_path);
+            if let Some(holder) =
+                live_session_holding_worktree(&gwt_core::paths::gwt_sessions_dir(), residual_path)
+            {
                 return Err(format!(
-                    "needs_human: unique commits present on existing launch ref `{recovery_ref}` for branch `{branch_name}` ({} commit(s) ahead of `{remote_base_ref}`); refusing automatic fresh-launch recovery to preserve work. Residual worktree location: `{}`. Recommended action: continue the existing work, or archive/delete the branch and worktree, then retry fresh launch.",
-                    divergence.ahead,
+                    "needs_human: unique commits present on existing launch ref `{recovery_ref}` for branch `{branch_name}` ({ahead} commit(s) ahead of `{remote_base_ref}`), and its worktree is still held by live Session `{holder}`; refusing automatic fresh-launch recovery to preserve work. Residual worktree location: `{}`. Recommended action: let the live Session finish or stop it, then retry the launch.",
                     residual_path.display()
                 ));
+            }
+            // A stale local ref would otherwise materialize the worktree behind
+            // the pushed work, which is how #3551 spent ten days off `develop`.
+            if has_local_branch && has_remote_branch {
+                fast_forward_stale_launch_ref(main_repo_path, branch_name, &remote_branch_ref)?;
             }
         }
     }
@@ -364,6 +385,103 @@ pub fn resolve_ephemeral_launch_worktree(
 
     set_worktree_launch_path(working_dir, env_vars, &worktree_path);
     Ok(())
+}
+
+/// Fast-forward a local launch ref that is strictly behind its remote
+/// counterpart (Issue #4074 AC-2).
+///
+/// Only a fast-forward is performed: a genuinely diverged local ref keeps its
+/// own commits and is materialized as-is, because rewriting it would be the
+/// commit loss the guard exists to prevent.
+fn fast_forward_stale_launch_ref(
+    main_repo_path: &Path,
+    branch_name: &str,
+    remote_branch_ref: &str,
+) -> Result<(), String> {
+    let divergence = gwt_git::git_divergence(main_repo_path, branch_name, remote_branch_ref)
+        .map_err(|error| {
+            format!(
+                "failed to compare local launch ref {branch_name} with {remote_branch_ref}: {error}"
+            )
+        })?;
+    if divergence.ahead > 0 || divergence.behind == 0 {
+        return Ok(());
+    }
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "update-ref",
+            &format!("refs/heads/{branch_name}"),
+            remote_branch_ref,
+        ],
+        Some(main_repo_path),
+    )
+    .map_err(|error| {
+        format!("failed to fast-forward {branch_name} to {remote_branch_ref}: {error}")
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to fast-forward {branch_name} to {remote_branch_ref}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// The id of a live Session whose worktree is `worktree`, when one exists
+/// (Issue #4074 AC-2).
+///
+/// "Live" means a runtime sidecar under a Host PID that still answers. A
+/// Session record left behind by a crashed or replaced Host holds nothing, so
+/// it must not keep an owner Issue parked forever.
+fn live_session_holding_worktree(sessions_dir: &Path, worktree: &Path) -> Option<String> {
+    let target = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
+            continue;
+        };
+        let session_worktree = dunce::canonicalize(&session.worktree_path)
+            .unwrap_or_else(|_| session.worktree_path.clone());
+        if session_worktree != target {
+            continue;
+        }
+        if session_runtime_host_is_alive(sessions_dir, &session.id) {
+            return Some(session.id);
+        }
+    }
+    None
+}
+
+fn session_runtime_host_is_alive(sessions_dir: &Path, session_id: &str) -> bool {
+    let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
+        return false;
+    };
+    for namespace in namespaces.flatten() {
+        let Some(host_pid) = namespace
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let sidecar = namespace.path().join(format!("{session_id}.json"));
+        let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&sidecar) else {
+            continue;
+        };
+        if matches!(
+            runtime.status,
+            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+        ) {
+            continue;
+        }
+        if gwt::process::is_host_process_alive(host_pid) {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_start_work_branch_name(branch_name: &str) -> bool {
@@ -1387,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_launch_preserves_issue_branch_with_unique_commits() {
+    fn fresh_launch_inherits_issue_branch_with_unique_commits() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = init_launch_test_repo(temp.path());
@@ -1438,39 +1556,40 @@ mod tests {
         let mut base_branch = Some("origin/develop".to_string());
         let mut working_dir = None;
         let mut env_vars = HashMap::new();
-        let error = resolve_launch_worktree_request(
+        resolve_launch_worktree_request(
             &repo,
             Some(branch),
             &mut base_branch,
             &mut working_dir,
             &mut env_vars,
         )
-        .expect_err("unique commits must block automatic fresh-launch recovery");
+        .expect("unique commits must be inherited, not refused (Issue #4074 AC-2)");
 
-        assert!(error.contains("needs_human"), "{error}");
-        assert!(error.contains("unique commits present"), "{error}");
-        assert!(error.contains(branch), "{error}");
-        assert!(error.contains("origin/work/issue-unique"), "{error}");
-        assert!(error.contains("origin/develop"), "{error}");
-        assert!(
-            error.contains(&residual_path.display().to_string()),
-            "{error}"
+        let working_dir = working_dir.expect("inherited worktree");
+        assert_eq!(
+            env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(working_dir.display().to_string().as_str())
         );
-        assert!(error.contains("archive/delete"), "{error}");
-        assert!(working_dir.is_none());
         assert_eq!(
             fs::read_to_string(residual_path.join("sentinel.txt")).expect("preserved sentinel"),
             "keep\n"
         );
-        let preserved_head = gwt_core::process::hidden_command("git")
-            .args(["rev-parse", branch])
-            .current_dir(&repo)
+        // The launch lands on the ref that carries the unique commits, so the
+        // relaunched agent sees its own pushed work instead of redoing it.
+        let inherited_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&working_dir)
             .output()
-            .expect("preserved branch head");
-        assert!(preserved_head.status.success());
+            .expect("inherited head");
+        assert!(inherited_head.status.success());
         assert_eq!(
-            String::from_utf8_lossy(&preserved_head.stdout).trim(),
-            local_head
+            String::from_utf8_lossy(&inherited_head.stdout).trim(),
+            remote_head,
+            "inherited launch must fast-forward the stale local ref (was {local_head})"
+        );
+        assert_eq!(
+            fs::read_to_string(working_dir.join("unique.txt")).expect("inherited unique file"),
+            "preserve me\n"
         );
         let preserved_remote_head = gwt_core::process::hidden_command("git")
             .args(["rev-parse", "origin/work/issue-unique"])
@@ -1482,35 +1601,10 @@ mod tests {
             String::from_utf8_lossy(&preserved_remote_head.stdout).trim(),
             remote_head
         );
-
-        run_git(&repo, &["branch", "-D", branch]);
-        let mut continuation_base_branch = None;
-        let mut continuation_working_dir = None;
-        let mut continuation_env_vars = HashMap::new();
-        resolve_launch_worktree_request(
-            &repo,
-            Some(branch),
-            &mut continuation_base_branch,
-            &mut continuation_working_dir,
-            &mut continuation_env_vars,
-        )
-        .expect("manual continuation must materialize the preserved remote branch");
-        let continuation_working_dir =
-            continuation_working_dir.expect("manual continuation worktree");
-        let continued_head = gwt_core::process::hidden_command("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&continuation_working_dir)
-            .output()
-            .expect("continued branch head");
-        assert!(continued_head.status.success());
-        assert_eq!(
-            String::from_utf8_lossy(&continued_head.stdout).trim(),
-            remote_head
-        );
     }
 
     #[test]
-    fn fresh_launch_preserves_usable_issue_worktree_with_unique_commits() {
+    fn fresh_launch_inherits_usable_issue_worktree_with_unique_commits() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = init_launch_test_repo(temp.path());
@@ -1534,6 +1628,63 @@ mod tests {
         let mut base_branch = Some("origin/develop".to_string());
         let mut working_dir = None;
         let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("an unheld worktree with unique commits is inherited (Issue #4074 AC-2)");
+
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|path| crate::same_worktree_path(path, &worktree)));
+        assert_eq!(
+            fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
+            "preserve me\n"
+        );
+    }
+
+    /// Issue #4074 AC-2: inheritance stops at a worktree an agent is still
+    /// working in. Two agents in one worktree is the only loss the guard has
+    /// left to prevent, so a live holder keeps the `needs_human` refusal.
+    #[test]
+    fn fresh_launch_refuses_issue_worktree_held_by_live_session() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-held";
+        let worktree = temp.path().join("held-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(worktree.join("unique.txt"), "in progress\n").expect("write unique file");
+        run_git(&worktree, &["add", "unique.txt"]);
+        run_git(&worktree, &["commit", "-m", "unique work"]);
+
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session = gwt_agent::Session::new(&worktree, branch, gwt_agent::AgentId::ClaudeCode);
+        session.save(&sessions_dir).expect("persist session");
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions_dir, std::process::id(), &session.id);
+        fs::create_dir_all(runtime_path.parent().expect("runtime dir")).expect("runtime dir");
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&runtime_path)
+            .expect("persist runtime sidecar");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
         let error = resolve_launch_worktree_request(
             &repo,
             Some(branch),
@@ -1541,15 +1692,72 @@ mod tests {
             &mut working_dir,
             &mut env_vars,
         )
-        .expect_err("fresh launch must not bypass unique-commit protection");
+        .expect_err("a live Session holding the worktree must still refuse");
 
         assert!(error.contains("needs_human"), "{error}");
         assert!(error.contains("unique commits present"), "{error}");
+        assert!(error.contains(&session.id), "{error}");
         assert!(error.contains(&worktree.display().to_string()), "{error}");
         assert!(working_dir.is_none());
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
-            "preserve me\n"
+            "in progress\n"
+        );
+    }
+
+    /// A Session record whose Host process is gone holds nothing: the launch
+    /// inherits the worktree instead of parking the owner Issue for a human.
+    #[test]
+    fn fresh_launch_inherits_issue_worktree_left_by_dead_session() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-dead-holder";
+        let worktree = temp.path().join("dead-holder-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(worktree.join("unique.txt"), "orphaned\n").expect("write unique file");
+        run_git(&worktree, &["add", "unique.txt"]);
+        run_git(&worktree, &["commit", "-m", "unique work"]);
+
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session = gwt_agent::Session::new(&worktree, branch, gwt_agent::AgentId::ClaudeCode);
+        session.save(&sessions_dir).expect("persist session");
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions_dir, u32::MAX - 7, &session.id);
+        fs::create_dir_all(runtime_path.parent().expect("runtime dir")).expect("runtime dir");
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&runtime_path)
+            .expect("persist runtime sidecar");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("a dead holder must not park the owner Issue");
+
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|path| crate::same_worktree_path(path, &worktree)));
+        assert_eq!(
+            fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
+            "orphaned\n"
         );
     }
 

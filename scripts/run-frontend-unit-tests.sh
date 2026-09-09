@@ -32,6 +32,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/issue-row-work-info.test.mjs \
   crates/gwt/web/__tests__/issue-row-state-model.test.mjs \
   crates/gwt/web/__tests__/issue-window-composite.test.mjs \
+  crates/gwt/web/__tests__/issue-window-split.test.mjs \
   crates/gwt/web/__tests__/surface-naming.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
@@ -56,6 +57,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/launch-wizard-hermes-options.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-controls.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-model-fallback.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-pool-impact.test.mjs \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/workspace-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \

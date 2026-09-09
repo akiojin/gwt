@@ -115,17 +115,17 @@ pub fn generate_codex_hooks_for_mode(
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
     for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
-        generate_hook_config_at_path(&hooks_path)?;
+        generate_hook_config_at_path(&hooks_path, ManagedHookTarget::Codex)?;
     }
     Ok(())
 }
 
 fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Result<()> {
     let settings_path = target.config_path(worktree);
-    generate_hook_config_at_path(&settings_path)
+    generate_hook_config_at_path(&settings_path, target)
 }
 
-fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
+fn generate_hook_config_at_path(settings_path: &Path, target: ManagedHookTarget) -> io::Result<()> {
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -139,7 +139,7 @@ fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
         "hooks".to_string(),
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
-            managed_hook_shell(),
+            managed_hook_shell(target),
             &managed_hook_bin_for_config_path(settings_path),
         )),
     );
@@ -729,11 +729,29 @@ fn powershell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-fn managed_hook_shell() -> HookShell {
-    if cfg!(windows) {
-        HookShell::PowerShell
-    } else {
-        HookShell::Posix
+/// The shell that will interpret a generated hook `command` string.
+///
+/// This is decided by the *agent CLI that runs the hook*, not by the host
+/// platform (Issue #3966). Claude Code runs every managed hook command through
+/// a POSIX shell — Git Bash on Windows — so a Windows-only PowerShell wrapper
+/// had its `$gwtBin` / `$env:GWT_BIN_PATH` / `$LASTEXITCODE` expanded away by
+/// the outer shell before PowerShell ever parsed the script. The resulting
+/// `CommandNotFoundException` happens inside the script block, so the process
+/// still exits 0: Claude Code recorded `hook_success`, `gwtd` never ran, and
+/// every managed hook was silently dead on Windows.
+///
+/// Codex keeps the host-native selection: its own hook runner is not a POSIX
+/// shell on Windows, which is the mirror-image failure tracked by Issue #3810.
+fn managed_hook_shell(target: ManagedHookTarget) -> HookShell {
+    match target {
+        ManagedHookTarget::Claude => HookShell::Posix,
+        ManagedHookTarget::Codex => {
+            if cfg!(windows) {
+                HookShell::PowerShell
+            } else {
+                HookShell::Posix
+            }
+        }
     }
 }
 
@@ -2384,12 +2402,72 @@ mod tests {
             .any(|command| command.contains(" hook event PreToolUse")));
     }
 
+    /// Issue #3966: Claude Code runs every managed hook command through a POSIX
+    /// shell on every platform, Windows included. Emitting the PowerShell
+    /// wrapper there let the outer shell eat `$gwtBin` / `$env:GWT_BIN_PATH` /
+    /// `$LASTEXITCODE`, so PowerShell failed inside the script block, the
+    /// process still exited 0, and `gwtd` never ran.
+    #[test]
+    fn generate_settings_local_emits_posix_hook_commands_on_every_platform() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_settings_local(dir.path()).unwrap();
+
+        let path = dir.path().join(".claude/settings.local.json");
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let bin = managed_hook_bin_for_config_path(&path);
+        for event in MANAGED_EVENT_ORDER {
+            let command = value["hooks"][*event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} managed command"));
+            assert_eq!(
+                command,
+                event_hook_command_with_bin(&bin, event, HookShell::Posix),
+                "{event} must use the POSIX form Claude Code actually executes"
+            );
+            assert!(
+                !command.contains("powershell"),
+                "{event} must not wrap the dispatch in PowerShell: {command}"
+            );
+        }
+    }
+
+    /// The mirror-image constraint (Issue #3810): Codex's own hook runner is
+    /// not a POSIX shell on Windows, so its generated commands stay
+    /// host-native.
+    #[test]
+    fn generate_codex_hooks_keeps_the_host_native_shell() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let path = dir.path().join(".codex/hooks.json");
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let expected_shell = if cfg!(windows) {
+            HookShell::PowerShell
+        } else {
+            HookShell::Posix
+        };
+        let bin = managed_hook_bin_for_config_path(&path);
+        for event in MANAGED_EVENT_ORDER {
+            let command = value["hooks"][*event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} managed command"));
+            assert_eq!(
+                command,
+                event_hook_command_with_bin(&bin, event, expected_shell)
+            );
+        }
+    }
+
     #[test]
     fn generate_codex_hooks_migrates_tracked_runtime_hooks_when_shell_shape_mismatches_host() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let foreign_managed_command = match managed_hook_shell() {
+        let foreign_managed_command = match managed_hook_shell(ManagedHookTarget::Codex) {
             HookShell::Posix => powershell_runtime_hook_command("SessionStart"),
             HookShell::PowerShell => posix_runtime_hook_command("SessionStart"),
         };
@@ -2438,8 +2516,11 @@ mod tests {
             .expect("session start command");
         // #3567: the file is git-tracked here, so the migrated command keeps the
         // canonical portable fallback instead of this machine's absolute path.
-        let expected =
-            event_hook_command_with_bin(CANONICAL_HOOK_BIN, "SessionStart", managed_hook_shell());
+        let expected = event_hook_command_with_bin(
+            CANONICAL_HOOK_BIN,
+            "SessionStart",
+            managed_hook_shell(ManagedHookTarget::Codex),
+        );
         assert_eq!(session_start_command, expected);
     }
 
@@ -2457,7 +2538,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("SessionStart", managed_hook_shell()),
+                                    "command": runtime_hook_command("SessionStart", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2468,7 +2549,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell()),
+                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2479,7 +2560,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2488,7 +2569,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": workflow_policy_hook_command(managed_hook_shell()),
+                                    "command": workflow_policy_hook_command(managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2499,7 +2580,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2510,7 +2591,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("Stop", managed_hook_shell()),
+                                    "command": runtime_hook_command("Stop", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
@@ -2583,11 +2664,11 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("SessionStart", managed_hook_shell()),
+                                    "command": runtime_hook_command("SessionStart", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
-                                    "command": coordination_hook_command("SessionStart", managed_hook_shell()),
+                                    "command": coordination_hook_command("SessionStart", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2598,7 +2679,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell()),
+                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2609,7 +2690,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2618,7 +2699,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": workflow_policy_hook_command(managed_hook_shell()),
+                                    "command": workflow_policy_hook_command(managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
@@ -2633,7 +2714,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell()),
+                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]
@@ -2644,11 +2725,11 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": runtime_hook_command("Stop", managed_hook_shell()),
+                                    "command": runtime_hook_command("Stop", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 },
                                 {
-                                    "command": coordination_hook_command("Stop", managed_hook_shell()),
+                                    "command": coordination_hook_command("Stop", managed_hook_shell(ManagedHookTarget::Codex)),
                                     "type": "command"
                                 }
                             ]

@@ -381,8 +381,13 @@ impl AppRuntime {
         if let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) {
             if session.worktree_path.exists() {
                 let before = self.pm_window_ids(tab_id);
-                let events =
-                    self.spawn_restored_agent_session(tab_id, session, None, PM_WINDOW_GEOMETRY);
+                let events = self.spawn_restored_agent_session(
+                    tab_id,
+                    session,
+                    None,
+                    PM_WINDOW_GEOMETRY,
+                    crate::app_runtime::startup::RestoreOrigin::Automatic,
+                );
                 self.mark_new_pm_windows(tab_id, &before, &project_root);
                 return events;
             }
