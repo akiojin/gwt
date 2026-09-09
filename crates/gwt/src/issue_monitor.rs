@@ -8872,11 +8872,15 @@ impl IssueMonitorState {
             && self.pending_launches.is_empty();
         // Every launch path here is gated on `gui_connected`, so a detached
         // GUI means nothing can start by design — the ordinary overnight
-        // state. Reporting that as an outage would fire nightly and teach
-        // readers to skip the field, which is precisely how the real one on
-        // 2026-08-17 would go unnoticed again.
+        // state. A raised update drain (#4037) or provider quota hold is the
+        // same thing said deliberately: admission is closed, so zero agents is
+        // the instructed state rather than an outage. Reporting either would
+        // fire on every routine drain and teach readers to skip the field,
+        // which is precisely how the real one on 2026-08-17 would go unnoticed
+        // again.
         if !self.config.enabled
             || !self.gui_connected
+            || self.launch_admission_is_held_at(now)
             || !fleet_idle
             || self.runnable_backlog_len(now) == 0
         {
