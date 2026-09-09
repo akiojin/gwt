@@ -8875,6 +8875,10 @@ fi
         package_dir
     }
 
+    // Both callers are `#[cfg(not(windows))]` tests, so on Windows this helper
+    // is dead code and `-D warnings` fails the workspace clippy for every
+    // worktree on the platform. Same shape as #3872 (`pty.rs` `Instant`).
+    #[cfg(not(windows))]
     fn sample_exact_npx_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(worktree)
