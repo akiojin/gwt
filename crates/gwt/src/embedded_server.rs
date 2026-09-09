@@ -4267,6 +4267,13 @@ fn handle_frontend_message(
         }
     };
 
+    // Issue #4145 AC-1: the prompt-send route is the submit reaching the PTY,
+    // covering both the WebSocket fast path and the event-loop fallback below.
+    // Only a submit is timed — Issue #3611 is the reminder that per-keystroke
+    // work on this path is exactly what must not be added.
+    let _perf_route = (data.contains('\n') || data.contains('\r'))
+        .then(|| gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PromptSend));
+
     let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     tracing::debug!(
         target: "gwt_input_trace",

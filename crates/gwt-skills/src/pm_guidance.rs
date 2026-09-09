@@ -141,8 +141,12 @@ body cannot hold `plan` / `tasks` sections.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the inbox rows (state, `blocked_by_owner`,
+  `blocked_by_claim_id`, `claim_expires_at`, `exclusion_reason`,
   `launched_window_id`, `error_message`), and `last_error`. That
-  snapshot is your source of truth.
+  snapshot is your source of truth. A row held out of the queue by
+  another Monitor's claim says so in `exclusion_reason` and names the
+  deadline in `claim_expires_at` — read those before concluding that a
+  queued-looking Issue is simply waiting its turn.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
@@ -180,6 +184,13 @@ body cannot hold `plan` / `tasks` sections.
   usage threshold apply), so a held provider never stalls the queue while
   another candidate exists. Prefer adding a candidate over stopping the
   Monitor when one provider hits its limit.
+  An element that names only `agent_id` keeps the settings already saved for
+  that provider (model / reasoning / version / permissions / Docker / shell),
+  so a plain reorder changes nothing else; a provider that is new to the pool
+  inherits the saved head's `skip_permissions`, `docker_lifecycle_intent`,
+  `windows_shell` and `runtime_target`. Write a field explicitly (`"model":
+  null`, `"prefer_for": []`) to clear it. The reply's `changes` list names
+  every omitted field that was inherited or reset (Issue #4079).
 
 ## Observing the running agents
 
@@ -664,6 +675,22 @@ quota:
   refusal in a row (1 → 2 → 4 → 8 minutes, capped at 15) and no gwt
   process issues GraphQL calls inside it; wait for `backoff_until`
   instead of retrying.
+- `issue.monitor.status` also carries `disk_space`: the volumes the
+  worktrees and the verification coordinator live on, and a `warning`
+  once one falls below 20 GiB or 5% free. A full host stops every
+  `verify.run` on it at once (`No space left on device`), so treat the
+  warning as a fleet blocker, not a per-Issue one. Reclaim with JSON
+  operation `worktree.gc_build_artifacts`: the default call is a dry run
+  listing the `target/` caches of merged, idle worktrees with their
+  sizes and every kept worktree with its reason; rerun with
+  `dry_run:false` to delete. Never pass `include_unmerged:true` on your
+  own — an unmerged worktree is someone's uncommitted build state; ask
+  the owner first. `include_protected_workspaces:true` reclaims the
+  shared `develop` / `main` workspaces, which are the single largest
+  caches on the host; it is the right call only once the host is tight
+  enough that the rebuild the next opener pays is worth it. Running
+  worktrees are excluded by the operation itself, so it is safe to run
+  while agents are active.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -828,6 +855,14 @@ Board naming the holder. Your part:
 - A Board post from a waiting agent names the lease holder. Read
   `verify.lease.status` and arbitrate the order — tell the holder to
   release or the waiter to keep waiting — instead of relaunching either.
+- `verify.lease.status` names `holder_kind`. When it is `index` (a
+  background `chroma_index_runner` job, Issue #4086), verification
+  already outranks it: a refused agent leaves a reservation the runner
+  yields to at its next batch boundary, and `estimated_remaining_ms` /
+  `remaining_batches` say how long that is. To force the order yourself,
+  run `verify.lease.release` with the index lease's `lease_id`: it answers
+  `yield requested` and leaves the same reservation instead of failing
+  with "no control channel".
 - An agent whose `current_focus` says it is waiting for the lease, or
   whose row carries a `waiting` declaration, is waiting, not stuck. Do
   not stop it on `last_activity_at` alone.
@@ -1735,6 +1770,23 @@ mod tests {
             "`backoff_until`",
             "`sources_last_minute`",
             "capped at 15",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #4009 AC-4: the disk-space warning and the reclaim operation are
+    /// named where the PM reads the queue, so a filling host is acted on
+    /// before every `verify.run` on it fails.
+    #[test]
+    fn contract_points_the_pm_at_disk_space_and_the_reclaim_operation() {
+        let body = body();
+        for phrase in [
+            "`disk_space`",
+            "`worktree.gc_build_artifacts`",
+            "`dry_run:false`",
+            "`include_unmerged:true`",
+            "`include_protected_workspaces:true`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

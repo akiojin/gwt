@@ -328,6 +328,21 @@ settings で別 provider を保存すると同じプールに追加されます�
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
 
+ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
+`disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
+空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が
+`No space left on device` で落ちる前にディスク枯渇が見えます。空き容量の回収は
+`worktree.gc_build_artifacts` operation が行います。HEAD が `origin/<base>`
+（`base` の既定は `develop`）にマージ済みで、稼働中プロセスも live な gwt launch も
+無い worktree の `target/` ビルドキャッシュを削除します。引数無しの呼び出しは dry run
+で、候補とそのサイズ、および除外した worktree とその理由（`active process …` /
+`tracked launch …` / `not merged …`）を報告します。削除するには `dry_run: false`
+を、未マージの idle worktree も対象にするには `include_unmerged: true` を渡します。
+共有の base ブランチ workspace（`develop` / `main`）は、リビルド代償を次に触る人が
+負うことになるため既定で除外され、`include_protected_workspaces: true` を明示した
+場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
+実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
+
 ### Autonomous モード（opt-in）
 
 Autonomous モードはループ全体を無人で実行します: 適格 Issue → 自動起動 → 実装 →

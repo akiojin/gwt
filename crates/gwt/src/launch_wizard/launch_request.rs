@@ -264,6 +264,21 @@ impl LaunchWizardState {
         })
     }
 
+    /// Issue #4079 AC-2: the launch profile this wizard would save right now.
+    ///
+    /// The Issue Monitor Agent Settings form previews its own effect on the
+    /// candidate pool, and it must preview the exact profile the save writes —
+    /// so it reads it through the same builder the save uses. `None` when the
+    /// current selection is not a launchable agent target.
+    pub fn preview_launch_profile(&self) -> Option<crate::IssueMonitorLaunchProfile> {
+        match self.build_launch_request().ok()? {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                Some(crate::IssueMonitorLaunchProfile::from(config.as_ref()))
+            }
+            LaunchWizardLaunchRequest::Shell(_) => None,
+        }
+    }
+
     pub(super) fn build_launch_request(&self) -> Result<LaunchWizardLaunchRequest, String> {
         match self.launch_target {
             LaunchTargetKind::Agent => Ok(LaunchWizardLaunchRequest::Agent(Box::new(

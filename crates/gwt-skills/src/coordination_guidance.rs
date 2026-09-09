@@ -274,9 +274,12 @@ release it afterwards:
     {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
     JSON
 
-A refused acquire names the current holder; declare the wait with
-`issue.monitor.wait` (see "Waiting is not a stall") and retry on the
-cadence the gwt-verify skill defines instead of running without it.
+A refused acquire names the current holder (`holder_kind`,
+`estimated_remaining_ms`) and reserves your turn, so background index
+jobs defer to this worktree until your retry is granted; declare the
+wait with `issue.monitor.wait` (see "Waiting is not a stall") and retry
+on the cadence the gwt-verify skill defines instead of running without
+it.
 `verify.run` admits itself: it honors a lease this worktree holds,
 otherwise claims one and waits for other worktrees' heavy processes to
 drain, and answers `deferred` when its bounded wait runs out — rerun it.
@@ -570,9 +573,12 @@ focused test でも、開始前に host 全体の lease を取り、終わった
     {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
     JSON
 
-拒否された acquire は現在の保持者を返します。lease 無しで実行せず、
-`issue.monitor.wait` で待機を申告して（「待機は停滞ではない」参照）、
-gwt-verify skill が定める間隔で再試行してください。`verify.run` は
+拒否された acquire は現在の保持者（`holder_kind`、
+`estimated_remaining_ms`）を返し、この worktree の順番を予約します。
+background index job は再試行が granted されるまでこの予約に道を譲ります。
+lease 無しで実行せず、`issue.monitor.wait` で待機を申告して
+（「待機は停滞ではない」参照）、gwt-verify skill が定める間隔で
+再試行してください。`verify.run` は
 自分で admission を取ります: この worktree が保持する lease はそのまま使い、
 無ければ取得して他 worktree の heavy プロセスが捌けるまで待ち、bounded な
 待機を使い切ると `deferred` を返します。その場合は再実行してください。

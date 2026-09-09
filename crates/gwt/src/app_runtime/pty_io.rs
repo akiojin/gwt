@@ -532,6 +532,10 @@ impl AppRuntime {
         window_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
+        // Issue #4145 AC-1: `pane.send` writes a whole prompt and submits it,
+        // so this is the prompt-send route for capability callers, alongside
+        // the WebSocket submit path in `embedded_server`.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PromptSend);
         let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
             Some(runtime) => write_pane_input_then_submit(&runtime.pane, text),

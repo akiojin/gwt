@@ -362,6 +362,10 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
+        // Issue #4143 (AC-3): read the automatic-restore guard before anything
+        // below can publish an Error status for this window. The launch is over
+        // either way, so the marker is consumed here.
+        let restored_launch = self.restore_launch_windows.remove(&window_id);
         let user_detail = Self::user_facing_launch_error_detail(&detail);
         let issue_monitor_issue_number = launch_feedback_context
             .as_ref()
@@ -438,6 +442,36 @@ impl AppRuntime {
                             self.close_window_after_issue_monitor_finalize_events(&window_id),
                         );
                     }
+                }
+                return events;
+            }
+            // Issue #4143 (AC-3): an automatic restore that failed before its
+            // PTY started must not survive as a persistent Error window.
+            // Keeping it made the failures self-propagating: the window
+            // persisted, the next start restored it, and the next failure added
+            // another one — the mechanism that grew 135 `Launch failed before
+            // PTY started.` panes across restarts. The concrete reason is
+            // already in gwt.log and in the host error ledger that backs
+            // `errors.list` (`log_window_launch_error` above), so the
+            // diagnostic outlives the pane.
+            if let Some(source_session_id) = restored_launch {
+                if self.window_lookup.contains_key(&window_id) {
+                    tracing::warn!(
+                        target: "gwt::agent_launch",
+                        window_id = %window_id,
+                        session_id = source_session_id.as_deref().unwrap_or("-"),
+                        "closing the automatically restored window that failed before PTY start"
+                    );
+                    events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                }
+                // The window is gone, so nothing keeps the Session out of the
+                // next start's restore set except the Session itself.
+                if let Some(session_id) = source_session_id.as_deref() {
+                    super::startup::mark_auto_resume_source_completed(
+                        &self.sessions_dir,
+                        session_id,
+                    );
                 }
             }
             return events;
