@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.94.1] - 2026-09-09
+
+### Bug Fixes
+
+- **release:** Release PR 本文を参照専用にして誤クローズを reopen する
+- **execution:** 正常完了時に同じ build lifecycle も終了する
+- **pm:** 復元された PM Session に $gwt-pm bootstrap prompt を再付与する
+- **issue-monitor:** 起動時の試行期限と再試行総期限を分離する
+- **launch:** Codex hook trust が materialize の pin した binary を照合するようにする
+
+### Miscellaneous Tasks
+
+- **work:** #3665 の既存作業履歴を保存する
+- **work:** Issue #3652 の既存 Work 記録を保全する
+- **work:** Record issue 3545 work events (done)
+- **work:** Issue #3545 の受け入れ監査と実行記録を保存
+- **work:** #3665 の自動再開履歴を保存する
+- **work:** Issue #3967 の受け入れ監査と検証履歴を保存する
+
+### Testing
+
+- **release:** Prepare-release の契約テストを Release PR 本文生成 step に追随させる
+
 ## [9.94.0] - 2026-09-09
 
 ### Bug Fixes
