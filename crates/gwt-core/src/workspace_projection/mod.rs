@@ -48,6 +48,7 @@ pub use persistence::{
     emit_workspace_done_event_if_absent_paths,
     emit_workspace_terminal_event_for_exact_resolved_work_target,
     emit_workspace_terminal_event_for_resolved_work_target, find_work_item_for_container,
+    heal_same_container_duplicate_claim_attachments_for_work_event_root,
     load_or_default_workspace_projection, load_or_default_workspace_projection_from_path,
     load_or_synthesize_workspace_work_items, load_or_synthesize_workspace_work_items_from_paths,
     load_recent_workspace_journal_entries, load_recent_workspace_journal_entries_from_path,

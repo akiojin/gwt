@@ -5,7 +5,7 @@
 //! - write permission on the project root
 
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -80,23 +80,46 @@ pub fn check_disk_space(project_root: &Path) -> Result<(), ValidationError> {
 /// Compute the total bytes consumed by `path`, walking subdirectories.
 /// Symlinks are not followed.
 fn directory_size(path: &Path) -> Result<u64, ValidationError> {
+    let mut discovered = Vec::new();
+    // The root is the caller's input: if it is missing, that is a real error.
+    let root = measure_entry(path, &mut discovered)?;
+    Ok(root.saturating_add(drain_discovered(&mut discovered)?))
+}
+
+/// Measure every path `read_dir` handed us, skipping the ones that are already
+/// gone. The project root is a live repository, so a transient child (a Git
+/// lock file, a temporary object) can disappear between being listed and being
+/// stat-ed. A vanished entry occupies no space, so skipping it is the correct
+/// answer rather than a reason to abort the migration.
+fn drain_discovered(discovered: &mut Vec<PathBuf>) -> Result<u64, ValidationError> {
     let mut total: u64 = 0;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let metadata = fs::symlink_metadata(&current)?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            for entry in fs::read_dir(&current)? {
-                let entry = entry?;
-                stack.push(entry.path());
-            }
-        } else if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
+    while let Some(current) = discovered.pop() {
+        match measure_entry(&current, discovered) {
+            Ok(bytes) => total = total.saturating_add(bytes),
+            Err(ValidationError::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
     }
     Ok(total)
+}
+
+/// Measure a single entry, pushing a directory's children onto `discovered`.
+/// Symlinks contribute nothing and are not followed.
+fn measure_entry(path: &Path, discovered: &mut Vec<PathBuf>) -> Result<u64, ValidationError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            discovered.push(entry?.path());
+        }
+        return Ok(0);
+    }
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    Ok(0)
 }
 
 /// Detect any worktrees marked as locked under the given project. Locked
@@ -180,4 +203,46 @@ pub fn validate(project_root: &Path) -> Result<(), ValidationError> {
     check_disk_space(project_root)?;
     check_locked_worktrees(project_root)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{directory_size, drain_discovered, ValidationError};
+    use std::fs;
+
+    #[test]
+    fn drain_discovered_skips_entries_removed_after_they_were_listed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let vanished = root.path().join("index.lock");
+        let stable = root.path().join("HEAD");
+        fs::write(&vanished, "transient").expect("write transient entry");
+        fs::write(&stable, "ref: refs/heads/master").expect("write stable entry");
+
+        // `read_dir` already handed both paths to the walk; only one of them
+        // survives until it is stat-ed.
+        let mut discovered = vec![stable.clone(), vanished.clone()];
+        fs::remove_file(&vanished).expect("remove entry after it was listed");
+
+        let total = drain_discovered(&mut discovered)
+            .expect("a listed entry may disappear before it is measured");
+
+        assert_eq!(
+            total,
+            fs::metadata(&stable).expect("stat stable entry").len(),
+            "only the surviving entry contributes to the measured size"
+        );
+    }
+
+    #[test]
+    fn directory_size_propagates_not_found_for_a_missing_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let error = directory_size(&root.path().join("missing"))
+            .expect_err("a missing root must remain an error");
+
+        assert!(
+            matches!(&error, ValidationError::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
+            "expected an Io(NotFound) error, got {error:?}"
+        );
+    }
 }

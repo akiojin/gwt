@@ -18,8 +18,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 
 import chroma_index_runner as runner
@@ -186,6 +188,155 @@ class CooperativeYieldTests(unittest.TestCase):
             f"equal-priority claimants must not preempt the running build: {payload}",
         )
         self.assertEqual(payload.get("indexed"), TOTAL_DOCS, payload)
+
+
+
+def _write_reservation(coordinator_root: Path, priority: str, reserved_until_ms: int) -> Path:
+    """Issue #4086: a durable pending claim with no live lock holder."""
+    pending_dir = coordinator_root / "heavy.pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    path = pending_dir / "reservation-repo--verification--wt.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "owner": {"pid": 999999, "start_id": "test-reservation"},
+                "priority": priority,
+                "registered_at_ms": 0,
+                "reserved_until_ms": reserved_until_ms,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+class HeavyReservationTests(unittest.TestCase):
+    """Issue #4086 AC-1 / AC-2: reservations are honored only while unexpired."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.coordinator_root = Path(self._tmp.name) / "coordinator"
+        self.coordinator_root.mkdir()
+        self._env = mock.patch.dict(
+            os.environ, {"GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator_root)}
+        )
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_live_reservation_preempts_background(self):
+        _write_reservation(
+            self.coordinator_root, "manual-rebuild", int(time.time() * 1000) + 600_000
+        )
+        self.assertTrue(runner._pending_higher_priority("background"))
+
+    def test_expired_reservation_is_ignored(self):
+        _write_reservation(self.coordinator_root, "manual-rebuild", int(time.time() * 1000) - 1)
+        self.assertFalse(runner._pending_higher_priority("background"))
+
+
+ISSUE_REPO_HASH = "4086408640864086"
+ISSUE_TOTAL = 40
+
+
+class IssueIndexCooperativeYieldTests(unittest.TestCase):
+    """Issue #4086 AC-2 / AC-4: the issues build checkpoints like the files
+    build — it yields at the batch boundary to a pending verification
+    claimant, resumes from staging, and publishes its batch progress next to
+    the heavy ticket so a refused claimant can estimate the wait."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self.home = base / "home"
+        self.home.mkdir()
+        self.coordinator_root = base / "coordinator"
+        self.coordinator_root.mkdir()
+        self.db_root = self.home / ".gwt" / "index"
+        cache_root = self.home / ".gwt" / "cache" / "issues" / ISSUE_REPO_HASH
+        for number in range(1, ISSUE_TOTAL + 1):
+            issue = cache_root / str(number)
+            issue.mkdir(parents=True, exist_ok=True)
+            (issue / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "number": number,
+                        "title": f"Issue {number}",
+                        "labels": ["bug"],
+                        "state": "open",
+                        "updated_at": "2026-09-07T00:00:00Z",
+                        "comment_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (issue / "body.md").write_text(f"body of issue {number}\n", encoding="utf-8")
+        self._env = mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(self.home),
+                "USERPROFILE": str(self.home),
+                "GWT_INDEX_FAKE_EMBEDDING": "1",
+                "GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator_root),
+            },
+        )
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def _run(self) -> dict:
+        return runner.action_index_issues_v2(
+            repo_hash=ISSUE_REPO_HASH,
+            project_root=str(self.home),
+            db_root=self.db_root,
+            respect_ttl=False,
+            qos="background",
+        )
+
+    def _progress(self) -> dict:
+        return json.loads(
+            (self.coordinator_root / "heavy.progress.json").read_text(encoding="utf-8")
+        )
+
+    def test_issue_build_yields_to_a_verification_reservation_and_resumes(self):
+        pending = _write_reservation(
+            self.coordinator_root, "manual-rebuild", int(time.time() * 1000) + 600_000
+        )
+        yielded = self._run()
+        self.assertTrue(yielded.get("ok"), yielded)
+        self.assertTrue(yielded.get("yielded"), yielded)
+        self.assertTrue(yielded.get("resumable"), yielded)
+        self.assertEqual(yielded.get("newly_embedded"), CHECKPOINT_BATCH, yielded)
+
+        progress = self._progress()
+        self.assertEqual(progress["target"], f"{ISSUE_REPO_HASH}--issues")
+        self.assertEqual(progress["done"], CHECKPOINT_BATCH)
+        self.assertEqual(progress["total"], ISSUE_TOTAL)
+        self.assertEqual(progress["batch_size"], CHECKPOINT_BATCH)
+        self.assertGreaterEqual(progress["batch_ms"], 0)
+
+        pending.unlink()
+        resumed = self._run()
+        self.assertTrue(resumed.get("ok"), resumed)
+        self.assertFalse(resumed.get("yielded"), resumed)
+        self.assertEqual(resumed.get("indexed"), ISSUE_TOTAL, resumed)
+        self.assertEqual(
+            resumed.get("newly_embedded"),
+            ISSUE_TOTAL - CHECKPOINT_BATCH,
+            f"resume must not re-embed already-staged issues: {resumed}",
+        )
+        self.assertEqual(self._progress()["done"], ISSUE_TOTAL)
+
+    def test_issue_build_completes_without_pending_claimants(self):
+        payload = self._run()
+        self.assertTrue(payload.get("ok"), payload)
+        self.assertFalse(payload.get("yielded"), payload)
+        self.assertEqual(payload.get("indexed"), ISSUE_TOTAL, payload)
 
 
 if __name__ == "__main__":
