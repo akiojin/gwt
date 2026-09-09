@@ -417,11 +417,118 @@ where
 
 /// Body for the recovered Release PR: the CHANGELOG section when it can be
 /// read, otherwise a self-describing placeholder so the PR is never empty.
+///
+/// The body is reference-only (Issue #3545): `main` is the default branch,
+/// so a closing keyword that survives here would close its Issue on merge
+/// regardless of open acceptance criteria.
 fn release_pr_body(changelog: Option<&str>, version: &str) -> String {
     let notes = changelog
         .and_then(|text| changelog_section(text, version))
         .unwrap_or_else(|| format!("## {version}"));
-    format!("{notes}\n\nRecovered by the gwt interrupted-release check (Issue #3516).\n")
+    neutralize_closing_keywords(&format!(
+        "{notes}\n\nRecovered by the gwt interrupted-release check (Issue #3516).\n"
+    ))
+}
+
+/// GitHub closing keywords. One of these followed by an optional colon,
+/// whitespace, and an Issue reference links the PR as closing that Issue.
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+/// Wrap every Issue reference that follows a closing keyword in a code span
+/// so GitHub cannot read the pair as a closing link (Issue #3545). Plain
+/// references stay untouched and the rewrite is idempotent.
+fn neutralize_closing_keywords(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    while let Some((ref_start, ref_end)) = next_closing_reference(rest) {
+        out.push_str(&rest[..ref_start]);
+        out.push('`');
+        out.push_str(&rest[ref_start..ref_end]);
+        out.push('`');
+        rest = &rest[ref_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte range of the first Issue reference that follows a closing keyword.
+fn next_closing_reference(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    for (index, _) in text.char_indices() {
+        let word_start = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+        if !word_start {
+            continue;
+        }
+        let Some(keyword_end) = closing_keyword_end(text, index) else {
+            continue;
+        };
+        let mut cursor = keyword_end;
+        if bytes.get(cursor) == Some(&b':') {
+            cursor += 1;
+        }
+        let after_sep = text[cursor..].trim_start();
+        let sep_len = text.len() - cursor - after_sep.len();
+        if sep_len == 0 {
+            continue;
+        }
+        let ref_start = cursor + sep_len;
+        let ref_end = ref_start + issue_reference_len(after_sep);
+        if ref_end > ref_start {
+            return Some((ref_start, ref_end));
+        }
+    }
+    None
+}
+
+/// End of the closing keyword that starts at `start`, when one does.
+fn closing_keyword_end(text: &str, start: usize) -> Option<usize> {
+    let rest = &text[start..];
+    CLOSING_KEYWORDS
+        .iter()
+        .filter(|keyword| {
+            // Compare bytes: slicing `rest` at a byte offset would panic when a
+            // multi-byte character follows the keyword (`fix対応`).
+            rest.len() >= keyword.len()
+                && rest.as_bytes()[..keyword.len()].eq_ignore_ascii_case(keyword.as_bytes())
+        })
+        .map(|keyword| start + keyword.len())
+        .find(|&end| {
+            !text
+                .as_bytes()
+                .get(end)
+                .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+
+/// Length of the `#N`, `owner/repo#N`, or Issue-URL reference at the start of
+/// `text`, or 0 when there is none.
+fn issue_reference_len(text: &str) -> usize {
+    let token_len = text
+        .find(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '#' | '/' | '.' | '-' | '_' | ':'))
+        })
+        .unwrap_or(text.len());
+    let token = &text[..token_len];
+    let is_reference = match token.split_once('#') {
+        Some((prefix, digits))
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            prefix.is_empty() || prefix.matches('/').count() == 1
+        }
+        _ => {
+            token.starts_with("https://github.com/")
+                && token.rsplit_once("/issues/").is_some_and(|(_, digits)| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+        }
+    };
+    if is_reference {
+        token_len
+    } else {
+        0
+    }
 }
 
 /// Pull the PR number out of the URL `gh pr create` prints.
@@ -758,5 +865,41 @@ mod tests {
         let body = release_pr_body(None, "v9.91.0");
         assert!(body.contains("## v9.91.0"));
         assert!(body.contains("Issue #3516"));
+    }
+
+    #[test]
+    fn recovered_body_neutralizes_closing_keywords_from_the_changelog() {
+        // Issue #3545: a Release PR body must never carry a closing keyword
+        // followed by an Issue reference, whatever a commit subject said.
+        let changelog = "## [9.92.0] - 2026-09-07\n\n### Bug Fixes\n\n\
+            - **launch:** Skip legacy resume, fixes #3527\n\
+            - Closes: #3528 and RESOLVES akiojin/gwt#3529\n\
+            - closed https://github.com/akiojin/gwt/issues/3530\n\
+            - Plain reference #3531 and hotfix #3532 stay\n\
+            - 修正 fixed #3533 対応、fix対応 #3534\n";
+        let body = release_pr_body(Some(changelog), "v9.92.0");
+        assert!(body.contains("fixes `#3527`"), "body was: {body}");
+        assert!(body.contains("Closes: `#3528`"), "body was: {body}");
+        assert!(
+            body.contains("RESOLVES `akiojin/gwt#3529`"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains("closed `https://github.com/akiojin/gwt/issues/3530`"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains("reference #3531 and hotfix #3532 stay"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains("修正 fixed `#3533` 対応、fix対応 #3534"),
+            "body was: {body}"
+        );
+        assert_eq!(
+            neutralize_closing_keywords(&body),
+            body,
+            "rewrite is idempotent"
+        );
     }
 }
