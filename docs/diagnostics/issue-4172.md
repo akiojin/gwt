@@ -258,3 +258,51 @@ PM自動起動は隔離先 `project-state/pm.json` の `settings.auto_start=fals
 startup後にBoard latestを変更するとwatcherが投影を起動するが、handlerにはmilestone transactionがあり、
 現在checkoutのrepo-local Work eventへ書く可能性が残る。
 したがって、実行前にその書込先も隔離できることを確認する必要がある。この後注入案は未実行である。
+
+### health 単体の実 ledger 量比較（23:36–23:38 JST）
+
+GUI を起動せず、通常ビルドの公開関数 `read_managed_hook_health` を同一の空 fixture に対して
+反復した。実 ledger のコピーを使うと、評価回数と ledger 量の両方に応じて時間が増えた。
+全投影の再現ではないが、Work ごとの ledger 全走査が秒単位の負荷になることを実測した。
+
+| ledger 条件 | 非空行数 / bytes | 1評価 | 32評価 | 254評価 |
+| --- | --- | ---: | ---: | ---: |
+| 空 | 0 / 0 | 0.8ms | 22.2ms | 175.4ms |
+| 各ファイルの先頭から一行おきに抽出 | 576 / 325,439 | 13.1ms | 418.3ms | 3,158.6ms |
+| 実 ledger コピー | 1,145 / 657,882 | 23.6ms | 758.4ms | 5,861.1ms |
+
+各値はウォームアップ1回後の3回の中央値。通常の dev（最適化なし）rlib にリンクした
+[診断プログラム](../../scripts/diagnostics/measure-work-health-4172.rs) を使用した。
+[証拠JSON](issue-4172-health-evidence.json) に全27標本、入力ファイルのhash・サイズ、
+ソースcommit、compiler versionを保全した。ledger本文やhealthのメッセージは出力しない。
+全コピーは10ファイルで、物理行数1,146と非空行数1,145を区別する。
+
+比較する関数呼出しの数は1/32/254だが、**254個の異なるWorkを投影した測定ではない**。
+空fixtureを繰り返すので、実worktreeの設定・discussions・session読取、grouping、
+Board読み取り、Git起動、描画は含まない。実ledger内のproject pathはfixtureと一致しないが、
+path照合の前に全行がパースされる。結果のissue数は全条件ゼロだった。
+実運用releaseの約28秒にこのdebug測定値をそのまま足し引きしてはならない。
+
+量依存の経路は `workspace_views.rs:403` のWork反復から、同`:380`、`health.rs:139/:282`、
+`error_ledger.rs:198` の全ファイル読取・`:223`以降の全行パースへ続く。
+日時とprojectによるfilterはパース後なので、表示対象外のエラーも評価ごとに読み直す。
+空ledgerとの差は254評価で約5.69秒、半量との差は約2.70秒だった。
+
+再実行には、先に正規verification leaseを取得し、このcheckoutの通常Cargo buildで作った
+gwt rlibへ診断プログラムを `rustc --edition=2021` でリンクする。
+`--extern gwt=<rlib>` と `-L dependency=target/debug/deps` を渡す。
+Windowsでは `windows_x86_64_msvc-0.53.1/lib` のnative library search pathも必要だった。
+その指定前のlinkは `LNK1181: windows.0.53.0.lib` で失敗し、指定後は成功した。
+test-support有効のrlibは使用しない。その構成では専用home overrideなしのledger読取が空になる。
+
+子processごとにfresh HOME/USERPROFILEを同じディレクトリへ設定し、
+`.issue-4172-measurement-fixture` markerと配下の空fixtureを用意する。
+ambientなGWT/Git環境変数を子環境から除去し、引数にfixture、`1,32,254`、`3`を渡す。
+空条件はledgerなし、全量条件は原本から読み取りコピーした `.gwt/logs/errors`、
+半量条件はコピーの各ファイルから一行おきに抽出したデータを使う。
+この採取で原本の変更、実worktreeへの書込、GUI起動は行っていない。
+
+次の修正候補は、一度の投影でledgerを一度読み、各Workへ同じsnapshotを渡す方法である。
+永続cacheの失効管理を追加せず、現状のWork別filterを保てる。ただしこれは未実装・未検証であり、
+既存SPECのタスク追加と修正範囲の裁定を要する。全投影時間・子Git数・Board量の比較は依然残る。
+AC-4/6とOverallを完了にせず、既存PR #4189はDraftのままとする。
