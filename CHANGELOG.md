@@ -1,6 +1,107 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.94.1] - 2026-09-09
+
+### Bug Fixes
+
+- **release:** Release PR 本文を参照専用にして誤クローズを reopen する
+- **execution:** 正常完了時に同じ build lifecycle も終了する
+- **pm:** 復元された PM Session に $gwt-pm bootstrap prompt を再付与する
+- **issue-monitor:** 起動時の試行期限と再試行総期限を分離する
+- **launch:** Codex hook trust が materialize の pin した binary を照合するようにする
+
+### Miscellaneous Tasks
+
+- **work:** #3665 の既存作業履歴を保存する
+- **work:** Issue #3652 の既存 Work 記録を保全する
+- **work:** Record issue 3545 work events (done)
+- **work:** Issue #3545 の受け入れ監査と実行記録を保存
+- **work:** #3665 の自動再開履歴を保存する
+- **work:** Issue #3967 の受け入れ監査と検証履歴を保存する
+
+### Testing
+
+- **release:** Prepare-release の契約テストを Release PR 本文生成 step に追随させる
+
+## [9.94.0] - 2026-09-09
+
+### Bug Fixes
+
+- **skills:** Self-heal existing managed asset targets
+- **hooks:** Windows の Claude managed hook を POSIX shell 形式にして resume ハンドルを永続化する
+- **issue-monitor:** Stop / requeue で GitHub claim を解放し、claim block の期限と理由を status に出す
+- **issue-monitor:** Develop 併合で増えた inbox/status field をテストの初期化子に反映
+- **issue-monitor:** Develop 併合で増えた issue_cache field をテストの初期化子に反映
+- **monitor:** Develop 取り込みで漏れた disk_space 初期化を補いテストビルドを復旧する
+- **perf:** Pane 生成の計測を start_window の同期経路へ移す
+- **runtime:** Session restore を復元価値のある窓に限定し復元失敗窓の蓄積を止める
+- **runtime:** Session restore の復元対象判定を是正し復元失敗ウィンドウの蓄積を止める
+- **terminal:** PTY fd 予算を是正し descriptor 枯渇を診断可能にする
+- **terminal:** Rlim_t の同型キャストに理由付き allow を追加して clippy を通す
+- **terminal:** FD_PROBE_CEILING を公開して Windows の dead_code と rustdoc の private link を解消する
+- **issue-monitor:** 重複 launch の generation 拒否で生存中の launch を落とさない
+- **perf:** Gwtd は既存 perf ログへの append のみ行う
+- **execution:** 前 Session 所有の terminal ECR を execution.adopt で回復可能にする
+- **verify:** Verification を background index job より優先し issue.* の即時 rebuild を集約する (#4086)
+- **agent:** Package runner を launch PATH へ再束縛して実ホスト npx の spawn を止める
+- **spec:** Tasks の完了判定でチェックボックス無しのタスク行を未完了として数える
+- **skills:** Refresh existing managed surfaces for agents without their own target
+- **test:** Runtime_daemon_events の project_store_identity テストを thread-local な gwt home に固定する
+
+### Documentation
+
+- **pm:** Status inbox の claim block 用 field を PM guidance に載せる
+- **issue-monitor:** Apply_failure_release の doc comment を元の関数へ戻す
+
+### Features
+
+- **launch:** Codex Default mode で request_user_input 選択UIを canonical 起動引数として有効化
+- **worktree:** マージ済み・非稼働 worktree の target/ を回収する GC 操作と空き容量警告を追加
+- **worktree:** 共有 base ブランチ workspace を既定除外し明示 opt-in で回収可能にする
+- **perf:** Perf 計装を production 経路へ配線し perf 集計 operation を追加
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3233 reconcile coordination log
+- **work:** Issue #1921 の検証backfillを記録
+- **work:** SPEC-1921 Phase 76 検証セッションの resume イベントを記録
+- **hooks:** .codex/hooks.json を develop の canonical 内容へ合わせる
+- **work:** SPEC-1921 Phase 76 配信セッションの Work event を記録
+- **work:** Runtime が書き出した Work event shard を取り込む
+- **work:** Runtime が書き出した Work event shard を取り込む
+- **work:** Runtime が書き出した Work event shard を取り込む
+- **work:** Issue #4009 の Work event shard を記録する
+- **work:** Issue #4077 の terminal Work event を記録
+- **work:** Issue #4143 の Work event shard を記録する
+- **work:** Issue #4143 の Work を done で終端する
+- **work:** Issue #4143 の Work event shard を記録する
+- **work:** Issue #4143 の Work を done で終端する
+- **work:** #4142 の terminal Work receipt を記録する
+- **work:** #4142 の検証専用セッションの Work receipt を記録する
+- **work:** #4150 の Work event shard を追加
+- **work:** Issue #4086 の終端 Work イベント shard を記録する
+- **work:** Issue #4086 の終端 Work event shard を記録する
+- **work:** Record issue 3233 verification coordination log
+- **work:** #4094 の work event shard を記録する
+- **work:** #4094 の verify 実行 work event shard を記録する
+- **agent:** Gate the npx exact-plan test helper to non-Windows
+- **work:** Record issue 3233 terminal work event receipt
+
+### Refactor
+
+- **cli:** Pr.* のデータ型を cli/pr/types.rs へ移し cli.rs の行数予算を回復する
+
+### Styling
+
+- Cargo fmt
+- **runtime:** Cargo fmt を適用する
+
+### Testing
+
+- **hooks:** Windows agent launch E2E の Claude hook runner を POSIX shell でモデル化する
+- **issue-monitor:** Status projection の等値比較から disk_space を除外する
+
 ## [9.93.1] - 2026-09-08
 
 ### Bug Fixes
