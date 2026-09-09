@@ -337,7 +337,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     const issueSurface = page.locator(".workspace-window.surface-knowledge");
     await expect(
-      issueSurface.locator('[data-issue-number="3098"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3098"] .knowledge-row-badge'),
     ).toHaveText("Agent failed");
 
     const blackout = issueSurface.locator(".knowledge-monitor-blackout");
