@@ -4258,6 +4258,22 @@ fn handle_frontend_message(
 ) {
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
+        FrontendEvent::StartupFirstFrame { navigation_ms } => {
+            gwt::perf::startup::first_frame(navigation_ms);
+            // Keep the shell/event-loop readiness acknowledgement separate
+            // from the paint observation when restore is still draining.
+            state.proxy.send(UserEvent::Frontend {
+                client_id: client_id.to_string(),
+                event: FrontendEvent::StartupFirstFrame { navigation_ms },
+            });
+            return;
+        }
+        FrontendEvent::StartupTerminalReady { id } => {
+            // Input uses this WebSocket fast path too: an unrelated event-loop
+            // backlog must not inflate the time at which keys can reach the PTY.
+            gwt::perf::startup::terminal_ready(&id);
+            return;
+        }
         other => {
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),

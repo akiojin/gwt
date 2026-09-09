@@ -147,6 +147,7 @@ fn format_perf_help() -> String {
         "",
         "Operations:",
         "  perf.summary                            p50 / p95 / worst per stream and target",
+        "  perf.startup                            Latest startup phases and first-frame budget",
         "  perf.violations                         Sustained budget violations of the period",
         "",
         "Key params:",

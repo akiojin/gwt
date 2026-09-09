@@ -860,6 +860,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
         "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.startup" => {
+            reject_unknown_params(params, &[], "perf.startup")?;
+            CliCommand::Perf(PerfCommand::Startup)
+        }
         "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));

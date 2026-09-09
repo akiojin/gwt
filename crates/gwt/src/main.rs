@@ -8472,6 +8472,7 @@ fn main() -> std::io::Result<()> {
     // can be measured. Fail-open — a disabled kill switch or an unwritable log
     // directory leaves every later `record_*` call a no-op.
     gwt::perf::install_from_settings();
+    gwt::perf::startup::begin(*PROCESS_STARTED_AT.get().expect("process start instant"));
 
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
@@ -8562,7 +8563,11 @@ fn main() -> std::io::Result<()> {
         ),
     };
 
-    let runtime = Runtime::new().expect("tokio runtime");
+    let runtime = {
+        let _phase =
+            gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RuntimeInit);
+        Runtime::new().expect("tokio runtime")
+    };
 
     // SPEC-3287 FR-028..FR-030: commit the embedded-server port before any
     // server task or browser URL can be published. Explicit `--port` values
@@ -8805,6 +8810,9 @@ fn main() -> std::io::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    let mut startup_index_project = app
+        .active_project_root()
+        .map(|root| root.display().to_string());
     spawn_project_index_status_check(
         &runtime,
         proxy.clone(),
@@ -9372,6 +9380,15 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 status,
             }) => {
+                if startup_index_project.as_deref() == Some(project_root.as_str()) {
+                    if status.state == gwt::ProjectIndexStatusState::Ready {
+                        gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::IndexRuntimeReady);
+                        startup_index_project = None;
+                    } else if matches!(status.state, gwt::ProjectIndexStatusState::Error | gwt::ProjectIndexStatusState::Skipped) {
+                        // A later manual repair/open is not startup readiness.
+                        startup_index_project = None;
+                    }
+                }
                 clients.dispatch(vec![OutboundEvent::broadcast(
                     BackendEvent::ProjectIndexStatus {
                         project_root,

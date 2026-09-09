@@ -22,6 +22,8 @@ pub const PERF_STREAMS: &[&str] = &["ui", "op", "resource"];
 /// `perf.*` command model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PerfCommand {
+    /// `perf.startup` — the latest process startup, without mixing runs.
+    Startup,
     /// `perf.summary` — p50 / p95 / worst per stream and target.
     Summary {
         /// RFC3339 lower bound of the aggregated period.
@@ -104,6 +106,21 @@ pub fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let _ = env;
     match command {
+        PerfCommand::Startup => {
+            let records = read_records(&PerfFilter {
+                target: Some("startup:".to_string()),
+                ..PerfFilter::default()
+            })
+            .map_err(|error| SpecOpsError::from(ApiError::Network(error.to_string())))?;
+            render(
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "startup": crate::perf::startup::latest_startup(&records),
+                }),
+                out,
+            )?;
+            Ok(0)
+        }
         PerfCommand::Summary {
             since,
             stream,

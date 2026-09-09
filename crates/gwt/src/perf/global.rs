@@ -218,6 +218,14 @@ pub fn record_operation(operation: &str, elapsed: Duration, read_only: bool) {
     with_runtime(|runtime| runtime.record_operation(operation, elapsed, read_only));
 }
 
+/// Startup milestones occur once, rather than at a sampling frequency. Keep
+/// each milestone while retaining the same disabled sink and retention policy.
+pub(crate) fn record_startup_sample(record: &PerfRecord) {
+    with_runtime(|runtime| {
+        let _ = runtime.sink.append(record);
+    });
+}
+
 /// Scope guard recording a route measurement when it drops.
 ///
 /// Instrumented routes are full of early returns and `?` propagation; a guard
