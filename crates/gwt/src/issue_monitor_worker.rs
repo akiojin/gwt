@@ -497,86 +497,14 @@ fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
     let (Some(_plan), Some(tasks)) = (section("plan"), section("tasks")) else {
         return IssueMonitorReadiness::NotReady;
     };
-    let mut open_fence = None;
-    let checkbox_states = tasks.lines().filter_map(|line| {
-        let content = line.trim_start_matches([' ', '\t']);
-        let indentation = &line[..line.len() - content.len()];
-        if indentation.len() > 3 || indentation.contains('\t') {
-            return markdown_list_item(content)
-                .filter(|item| item.starts_with('['))
-                .map(|_| None);
-        }
-        let fence = markdown_fence(content);
-        if let Some((open_marker, open_length)) = open_fence {
-            if fence.is_some_and(|(marker, length, suffix)| {
-                marker == open_marker && length >= open_length && suffix.trim().is_empty()
-            }) {
-                open_fence = None;
-            }
-            return None;
-        }
-        if let Some((marker, length, _)) = fence {
-            open_fence = Some((marker, length));
-            return None;
-        }
-        let item = markdown_list_item(content)?;
-        if item.starts_with("[ ]") {
-            Some(Some(false))
-        } else if item.starts_with("[x]") || item.starts_with("[X]") {
-            Some(Some(true))
-        } else if item.starts_with('[') {
-            // A checkbox-like task with an unknown marker must never turn a
-            // partially parsed task list into Issue-wide completion.
-            Some(None)
-        } else {
-            None
-        }
-    });
-    let mut saw_checkbox = false;
-    let mut saw_open = false;
-    for checked in checkbox_states {
-        if let Some(checked) = checked {
-            saw_checkbox = true;
-            saw_open |= !checked;
-        } else {
-            saw_open = true;
-        }
-    }
-    if saw_open {
+    let progress = crate::spec_tasks::parse_tasks_progress(tasks);
+    if progress.open > 0 {
         IssueMonitorReadiness::ReadyWithOpenTasks
-    } else if saw_checkbox {
+    } else if progress.completed > 0 {
         IssueMonitorReadiness::ReadyWithCompletedTasks
     } else {
         IssueMonitorReadiness::Ready
     }
-}
-
-fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
-    let marker = *line.as_bytes().first()?;
-    if !matches!(marker, b'`' | b'~') {
-        return None;
-    }
-    let length = line
-        .bytes()
-        .take_while(|candidate| *candidate == marker)
-        .count();
-    (length >= 3).then_some((marker, length, &line[length..]))
-}
-
-fn markdown_list_item(line: &str) -> Option<&str> {
-    if let Some(item) = line
-        .strip_prefix("- ")
-        .or_else(|| line.strip_prefix("* "))
-        .or_else(|| line.strip_prefix("+ "))
-    {
-        return Some(item.trim_start());
-    }
-    let (marker, item) = line.split_once(char::is_whitespace)?;
-    let ordered = marker
-        .strip_suffix('.')
-        .or_else(|| marker.strip_suffix(')'))?;
-    (!ordered.is_empty() && ordered.bytes().all(|byte| byte.is_ascii_digit()))
-        .then_some(item.trim_start())
 }
 
 fn issue_monitor_candidates_with_readiness<F>(
@@ -2336,6 +2264,9 @@ mod tests {
             (46, "```markdown\n~~~\n- [x] example only\n~~~\n```"),
             (47, "    - [x] indented code only"),
             (48, "- [x] T-001\n    - [ ] T-002"),
+            // Issue #4146 AC-2: every checkbox is `[x]`, but the plain rows
+            // below them are untracked work, so the Issue is not complete.
+            (49, "- [x] T-001\n- T-002 never tracked"),
         ] {
             cache
                 .write_snapshot(&structured_spec(number, "t1", "Plan", tasks))
@@ -2351,6 +2282,7 @@ mod tests {
                 live_issue(46, &["gwt-spec"], Some("t1")),
                 live_issue(47, &["gwt-spec"], Some("t1")),
                 live_issue(48, &["gwt-spec"], Some("t1")),
+                live_issue(49, &["gwt-spec"], Some("t1")),
             ],
             dir.path(),
             |_| panic!("matching cache must not refresh"),
@@ -2369,6 +2301,7 @@ mod tests {
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::Ready,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
             ]
@@ -2654,6 +2587,8 @@ mod tests {
             claim_id: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
             launched_window_id: Some("window-1".to_string()),
             launch_plan: None,
             error_message: None,

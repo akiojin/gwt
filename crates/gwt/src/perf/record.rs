@@ -58,6 +58,21 @@ impl PerfViolationDetails {
             duration_seconds,
         }
     }
+
+    /// Budget that was exceeded.
+    pub fn budget(&self) -> f64 {
+        self.budget
+    }
+
+    /// Number of consecutive over-budget samples in the run.
+    pub fn consecutive_count(&self) -> u32 {
+        self.consecutive_count
+    }
+
+    /// Wall-clock length of the over-budget run.
+    pub fn duration_seconds(&self) -> f64 {
+        self.duration_seconds
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

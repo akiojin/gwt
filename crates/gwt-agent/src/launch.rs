@@ -131,22 +131,30 @@ fn command_basename(command: &str) -> &str {
 }
 
 fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
-    match command_basename(command) {
-        "codex" => Some(0),
-        "bunx" | "npx" => {
-            let mut index = 0usize;
-            if args.get(index).is_some_and(|arg| arg == "--yes") {
-                index += 1;
-            }
-            args.get(index)
-                .is_some_and(|arg| arg.contains("@openai/codex"))
-                .then_some(index + 1)
-        }
-        _ => None,
+    let command = command_basename(command);
+    if ["codex", "codex.exe", "codex.cmd"]
+        .iter()
+        .any(|candidate| command.eq_ignore_ascii_case(candidate))
+    {
+        return Some(0);
     }
+    if !["bunx", "bunx.exe", "bunx.cmd", "npx", "npx.exe", "npx.cmd"]
+        .iter()
+        .any(|candidate| command.eq_ignore_ascii_case(candidate))
+    {
+        return None;
+    }
+
+    let mut index = 0usize;
+    if args.get(index).is_some_and(|arg| arg == "--yes") {
+        index += 1;
+    }
+    args.get(index)
+        .is_some_and(|arg| arg.contains("@openai/codex"))
+        .then_some(index + 1)
 }
 
-/// Canonical source of truth for agent-neutral default launch arguments.
+/// Canonical source of truth for entrypoint-independent default launch arguments.
 ///
 /// Every agent launch entry point — wizard (`AgentLaunchBuilder::build`),
 /// preset spawn (`crates/gwt/src/preset.rs`), and persisted session migration
@@ -154,15 +162,26 @@ fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
 /// a default like `--no-alt-screen` cannot silently miss an entry point.
 /// See SPEC-1921 FR-064 / Issue #2091 for background.
 ///
-/// This returns only the *agent-neutral* positional defaults. Agent-specific
-/// env vars and conditional flags (model, session-mode, fast-mode, reasoning,
-/// etc.) remain the responsibility of the agent-specific builder methods.
+/// This returns only unconditional defaults shared by every entry point for an
+/// agent. Conditional flags (model, session-mode, fast-mode, reasoning, etc.)
+/// remain the responsibility of the agent-specific builder methods.
 pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
     match agent {
+        AgentId::Codex => vec![
+            // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
+            // scrollback instead of redraw-only fullscreen frames. Matches the
+            // CLI's documented inline mode for preserving terminal history.
+            "--no-alt-screen".to_string(),
+            // SPEC-1921 FR-181..185: expose Codex's native request_user_input
+            // overlay in Default mode across managed, preset, and restored
+            // launches. Use the tolerant config form so pre-0.106 Codex keeps
+            // starting instead of rejecting an unknown `--enable` feature.
+            "--config=features.default_mode_request_user_input=true".to_string(),
+        ],
         // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
         // CLI's documented inline mode for preserving terminal history.
-        AgentId::Codex | AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
+        AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
         | AgentId::Gemini
@@ -178,15 +197,17 @@ pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<S
     if !matches!(agent_id, AgentId::Codex) {
         return;
     }
-    let Some(insert_index) = codex_runner_prefix_len(command, args) else {
+    let canonical = canonical_launch_args(agent_id);
+    let mut normalized = args
+        .iter()
+        .filter(|arg| !canonical.contains(arg))
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(insert_index) = codex_runner_prefix_len(command, &normalized) else {
         return;
     };
-    for canonical in canonical_launch_args(agent_id).iter().rev() {
-        if args.iter().any(|existing| existing == canonical) {
-            continue;
-        }
-        args.insert(insert_index, canonical.clone());
-    }
+    normalized.splice(insert_index..insert_index, canonical);
+    *args = normalized;
 }
 
 /// Resolve the runner command based on version selection.
@@ -493,6 +514,52 @@ pub(crate) fn resolve_direct_runner_with_effective_env(
     which::which_in(command, Some(path), &cwd)
         .ok()
         .map(|candidate| candidate.display().to_string())
+}
+
+/// Re-resolve a package-runner command against a launch `PATH` that overrides
+/// the process one, or `None` when there is nothing to re-bind.
+///
+/// [`AgentLaunchBuilder::build`] picks `bunx`/`npx` before the launch profile
+/// is merged into the config, so it resolves them from the gwt process `PATH`
+/// and stores the executable that `PATH` selects. Every later step — the health
+/// probe and the spawn itself — then reuses that stored command, so neither a
+/// profile `PATH` nor a test's pinned fixture runners can redirect it
+/// (Issue #3972).
+///
+/// Only a launch `PATH` that differs from the process `PATH` re-binds:
+/// re-resolving an inherited `PATH` would repeat the builder's own lookup and
+/// rewrite every bare `bunx` into an absolute host path for no gain.
+/// Resolution keeps the runner family too — only the same file name is looked
+/// up, so a `bunx` launch never silently becomes `npx`.
+pub(crate) fn rebind_package_runner_to_effective_env(
+    command: &str,
+    env: &HashMap<String, String>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    rebind_package_runner_with_host_path(command, env, cwd, host_process_path)
+}
+
+fn rebind_package_runner_with_host_path(
+    command: &str,
+    env: &HashMap<String, String>,
+    cwd: Option<&Path>,
+    host_path: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let name = Path::new(command).file_name()?.to_str()?.to_owned();
+    let (_, launch_path) = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))?;
+    if host_path().is_some_and(|host_path| &host_path == launch_path) {
+        return None;
+    }
+    let cwd = absolute_launch_cwd(cwd);
+    let search_path = absolute_search_path(launch_path, &cwd)?;
+    let resolved = which::which_in(&name, Some(search_path), &cwd).ok()?;
+    let resolved = resolved.to_string_lossy().into_owned();
+    if resolved.contains("node_modules") || resolved == command {
+        return None;
+    }
+    Some(resolved)
 }
 
 /// Platform priority list of `npx` fallback executables consulted when the host
@@ -1764,7 +1831,6 @@ impl AgentLaunchBuilder {
             env_vars.insert(cfg.effective_env_key(), profile.api_key.clone());
         }
 
-        args.extend(canonical_launch_args(&AgentId::Codex));
         // SPEC-2014 2026-05-18 amendment FR-B:
         // - Continue        → `codex resume --last`  (resume the most recent session)
         // - Resume + id     → `codex resume <id>`    (Quick Start: replay specific session)
@@ -2070,7 +2136,7 @@ mod tests {
     use super::*;
 
     // SPEC-1921 Phase 53 / Issue #2091: canonical_launch_args is the single
-    // source of truth for agent-neutral default args across all launch entry
+    // source of truth for entrypoint-independent default args across all launch entry
     // points (wizard, preset, session-load migration). Regression guard for
     // the preset-path gap that caused Codex Plan-mode scroll to die.
 
@@ -2098,11 +2164,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_launch_args_for_codex_contains_no_alt_screen() {
+    fn canonical_launch_args_for_codex_contains_common_defaults() {
         let args = canonical_launch_args(&AgentId::Codex);
-        assert!(
-            args.iter().any(|arg| arg == "--no-alt-screen"),
-            "Codex canonical args must include --no-alt-screen (FR-064, Issue #2091)"
+        assert_eq!(
+            args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
+            ],
+            "Codex canonical args must cover inline scrollback and Default-mode questions"
         );
     }
 
@@ -2781,6 +2851,35 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_all_session_modes_enable_default_mode_questions_once() {
+        let configs = [
+            AgentLaunchBuilder::new(AgentId::Codex).build(),
+            AgentLaunchBuilder::new(AgentId::Codex)
+                .session_mode(SessionMode::Resume)
+                .resume_session_id("sess-123")
+                .build(),
+            AgentLaunchBuilder::new(AgentId::Codex)
+                .session_mode(SessionMode::Continue)
+                .build(),
+        ];
+
+        for config in configs {
+            assert_eq!(
+                config
+                    .args
+                    .iter()
+                    .filter(|arg| {
+                        arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                    })
+                    .count(),
+                1,
+                "Default-mode question override must appear exactly once: {:?}",
+                config.args
+            );
+        }
+    }
+
+    #[test]
     fn build_non_codex_agents_do_not_enable_goal_feature() {
         for agent in [
             AgentId::ClaudeCode,
@@ -2798,6 +2897,10 @@ mod tests {
                 .args
                 .windows(2)
                 .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+            assert!(!config
+                .args
+                .iter()
+                .any(|arg| { arg == "--config=features.default_mode_request_user_input=true" }));
         }
     }
 
@@ -2805,7 +2908,13 @@ mod tests {
     fn canonical_codex_args_do_not_include_goal_feature_flag() {
         let args = canonical_launch_args(&AgentId::Codex);
 
-        assert_eq!(args, vec!["--no-alt-screen".to_string()]);
+        assert_eq!(
+            args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
+            ]
+        );
         assert!(!args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
@@ -2839,9 +2948,56 @@ mod tests {
                 "--yes".to_string(),
                 "@openai/codex@latest".to_string(),
                 "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
                 "resume".to_string(),
                 "sess-123".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn normalize_launch_args_deduplicates_and_orders_defaults_beside_other_config() {
+        let mut args = vec![
+            "--yes".to_string(),
+            "@openai/codex@latest".to_string(),
+            "--config=features.default_mode_request_user_input=true".to_string(),
+            "--config=model_reasoning_effort=high".to_string(),
+            "--no-alt-screen".to_string(),
+            "--config=features.default_mode_request_user_input=true".to_string(),
+            "resume".to_string(),
+            "sess-123".to_string(),
+        ];
+
+        normalize_launch_args(&AgentId::Codex, "C:/Users/example/bin/npx.cmd", &mut args);
+        let first_pass = args.clone();
+        normalize_launch_args(&AgentId::Codex, "C:/Users/example/bin/npx.cmd", &mut args);
+
+        assert_eq!(
+            args, first_pass,
+            "canonical normalization must be idempotent"
+        );
+        assert_eq!(
+            &args[..4],
+            [
+                "--yes",
+                "@openai/codex@latest",
+                "--no-alt-screen",
+                "--config=features.default_mode_request_user_input=true",
+            ],
+            "canonical defaults must follow the package runner in stable order"
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--config=model_reasoning_effort=high"),
+            "unrelated config overrides must survive normalization"
         );
     }
 
@@ -4354,6 +4510,45 @@ mod tests {
         assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
     }
 
+    /// Issue #3972: a launch `PATH` that pins its own runners re-binds the
+    /// stored package runner, while a launch that merely inherits the process
+    /// `PATH` keeps the command the builder already resolved.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn package_runner_rebinds_only_for_a_launch_path_that_overrides_the_process_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let inherited_bin = temp.path().join("inherited");
+        let pinned_bin = temp.path().join("pinned");
+        std::fs::create_dir_all(&inherited_bin).expect("create inherited bin");
+        std::fs::create_dir_all(&pinned_bin).expect("create pinned bin");
+        write_test_runner(&inherited_bin.join("npx"));
+        write_test_runner(&pinned_bin.join("npx"));
+        let host_path = || Some(inherited_bin.display().to_string());
+
+        let inherited = rebind_package_runner_with_host_path(
+            "npx",
+            &HashMap::from([("PATH".to_string(), inherited_bin.display().to_string())]),
+            Some(temp.path()),
+            host_path,
+        );
+        let pinned = rebind_package_runner_with_host_path(
+            "npx",
+            &HashMap::from([("PATH".to_string(), pinned_bin.display().to_string())]),
+            Some(temp.path()),
+            host_path,
+        );
+
+        assert_eq!(
+            inherited, None,
+            "an inherited PATH must not rewrite the resolved command"
+        );
+        assert_eq!(
+            pinned.map(PathBuf::from),
+            Some(pinned_bin.join("npx")),
+            "a pinned launch PATH must select the runner that will be probed"
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn resolve_host_npx_fallback_executable_defaults_to_bare_npx_when_absent() {
@@ -4815,6 +5010,17 @@ mod tests {
             std::fs::read_to_string(Path::new(codex_home).join("config.toml")).expect("read");
         assert!(body.contains("model_provider = \"gwt-llmlb\""));
         assert!(body.contains("base_url = \"http://127.0.0.1:8080\""));
+        assert_eq!(
+            config
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "CLI override must survive worktree-local CODEX_HOME replacement"
+        );
     }
 
     #[test]

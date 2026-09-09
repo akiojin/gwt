@@ -1218,6 +1218,12 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// Issue #4145 AC-1: the navigation request id and start instant of the
+    /// project open in flight. Opening spans a synchronous reserve, a
+    /// blocking-pool prepare and an event-loop commit, and
+    /// `ProjectNavigationRequest` is cloned into the worker and compared for
+    /// identity, so the instant is parked here instead.
+    pub(crate) project_open_started: Option<(u64, std::time::Instant)>,
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
     /// entry is consumed by `handle_launch_complete`, which writes the PM
@@ -1261,6 +1267,16 @@ pub struct AppRuntime {
     /// notification center once the frontend canvas is ready.
     pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Issue #4143 (AC-3): windows spawned by an *automatic* restore (startup
+    /// auto-resume / Open Project) whose launch has not reached PTY start yet,
+    /// mapped to the restored Session id. Nobody is watching such a window, so
+    /// a pre-PTY failure would leave an empty `Launch failed before PTY
+    /// started.` pane that the next generation restores again, and the
+    /// failures pile up across generations. A restart the operator asked for
+    /// is deliberately absent: that pane is the diagnostic they are waiting
+    /// for. Consumed by [`AppRuntime::launch_error_events`] and dropped once
+    /// the PTY is live or the window closes.
+    pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
     /// Legacy official-provider provenance is staged during preparation and
     /// committed only after the exact launched Session emits authenticated
     /// SessionStart. Any earlier route failure leaves the source Session bytes
@@ -1957,7 +1973,12 @@ fn commit_local_issue_monitor_effect_result(
                             .inbox_item(*issue_number)
                             .map(|item| item.issue.clone())
                         {
-                            latest.record_blocked_by_claim(issue, winner.owner, winner.expires_at);
+                            latest.record_blocked_by_claim(
+                                issue,
+                                winner.owner.clone(),
+                                winner.expires_at.clone(),
+                                Some(winner.claim_id.as_str()),
+                            );
                         }
                     }
                     1
@@ -2844,6 +2865,7 @@ impl AppRuntime {
             pending_launch_wizard_materializations: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            project_open_started: None,
             pending_pm_launches: HashMap::new(),
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
@@ -2866,6 +2888,7 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            restore_launch_windows: HashMap::new(),
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
