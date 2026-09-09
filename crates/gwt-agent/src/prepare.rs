@@ -9042,6 +9042,11 @@ fi
         package_dir
     }
 
+    // Both callers are `#[cfg(not(windows))]`, so on Windows this helper is
+    // dead code and `cargo clippy --all-targets -- -D warnings` fails on it.
+    // CI only runs Clippy on Linux, so the break is local-only and permanent
+    // until the helper carries the same gate as its callers.
+    #[cfg(not(windows))]
     fn sample_exact_npx_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(worktree)

@@ -53174,6 +53174,7 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap()
     .expect("enabled host Codex launch should register trust");
@@ -53186,6 +53187,73 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         "Codex config should contain trusted hashes, got: {config}"
     );
     assert_eq!(report.config_path, codex_config_path);
+}
+
+/// Issue #3967 (recurrence in v9.93.1): materialization resolves the fallback
+/// binary a managed hook command embeds, pins it for the duration of the
+/// generation call, and releases the pin on the way out. Trust pre-registration
+/// then re-derived an answer of its own, and for a gwt started from a checkout
+/// build that answer was `target/debug/gwtd` — reduced to the bare `gwtd` for a
+/// config outside that checkout — where the generated command carried the
+/// installed absolute path. All five managed hooks failed the exact-command
+/// match, and Codex stopped every launch on `Hooks need review`. The launch has
+/// to vouch for the value materialization actually wrote.
+#[test]
+fn codex_hook_trust_launch_vouches_for_the_binary_materialization_pinned() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let worktree = tempdir().expect("worktree tempdir");
+
+    // An installed binary the ambient resolver cannot reach: it is neither this
+    // process, nor its sibling, nor anything on PATH. Materialization pins it,
+    // generates with it, and drops the pin — the shape of the `GWT_HOOK_BIN`
+    // guard in `regenerate_managed_hook_configs_for_targets`.
+    let generated_hook_bin = home
+        .path()
+        .join("Programs")
+        .join("GWT")
+        .join("gwtd")
+        .to_string_lossy()
+        .into_owned();
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(&generated_hook_bin);
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    }
+
+    // Re-deriving the binary once the pin is gone is what the launch used to
+    // do, and it cannot reach the pinned value — every managed hook stays
+    // untrusted and Codex stops the launch.
+    let guessed = gwt_skills::register_codex_managed_hook_trust_for_mode(
+        worktree.path(),
+        &home.path().join("guessed-codex-config.toml"),
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .unwrap();
+    assert!(
+        !guessed.untrusted_gwt_hooks.is_empty(),
+        "a re-derived binary must not be able to vouch for a pin it cannot reach; if it can, \
+         the launch no longer needs to be told which binary was written: {guessed:?}"
+    );
+
+    let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &profile_config_path,
+        worktree.path(),
+        &gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        None,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        Some(generated_hook_bin.as_str()),
+    )
+    .unwrap()
+    .expect("enabled host Codex launch should register trust");
+
+    assert!(
+        report.untrusted_gwt_hooks.is_empty(),
+        "every hook materialization generated must be trusted, got: {report:?}"
+    );
+    assert_eq!(report.trusted_entries.len(), 5);
 }
 
 #[test]
@@ -53205,6 +53273,7 @@ fn codex_hook_trust_launch_uses_effective_codex_home_config() {
         None,
         Some(codex_home.path()),
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap()
     .expect("Codex launch should register trust into the effective CODEX_HOME");
@@ -53238,6 +53307,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -53260,6 +53330,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert!(disabled.is_none());
@@ -53279,6 +53350,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -53297,6 +53369,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert!(claude.is_none());
@@ -53433,6 +53506,7 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .expect("launch trust registration must succeed")
     .expect("Codex host launch registers trust");
@@ -53477,6 +53551,7 @@ fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     );
 
     let error = result.expect_err("untrusted gwt hook must abort the launch");
@@ -53509,6 +53584,7 @@ fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     );
 
     let error = result.expect_err("unwritable Codex trust state must abort the launch");
@@ -59716,6 +59792,102 @@ fn persisted_pm_resume_config_reinjects_project_state_scratch_dir() {
         config.env_vars.get("GWT_PM_SCRATCH_DIR").map(PathBuf::from),
         Some(gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo)),
         "resuming a canonical PM session must restore its project-state scratch path"
+    );
+}
+
+/// Issue #3965 AC-1 / AC-2 / AC-3: the restore counterpart of
+/// `pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_project`.
+/// A restored PM must start under the same PM contract as a fresh spawn, and a
+/// persisted `launch_args` that already records the prompt must not double it.
+#[test]
+fn persisted_pm_resume_config_reinjects_the_pm_bootstrap_prompt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+
+    // The reported shape: a Session persisted by an earlier restore, whose
+    // `launch_args` lost the bootstrap prompt entirely.
+    let mut stripped = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+    stripped.agent_session_id = Some("pm-conversation-1".to_string());
+    stripped.skip_permissions = true;
+    stripped.launch_args = vec!["--dangerously-skip-permissions".to_string()];
+
+    let restored = super::launch_config_from_persisted_session(&stripped);
+
+    assert_eq!(
+        restored.args.iter().filter(|arg| *arg == "$gwt-pm").count(),
+        1,
+        "a restored PM session must carry the same bootstrap prompt as a fresh spawn: {:?}",
+        restored.args
+    );
+
+    // A Session persisted by a fresh spawn already records the prompt; the
+    // restore must honor it without duplicating it.
+    let mut recorded = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+    recorded.agent_session_id = Some("pm-conversation-2".to_string());
+    recorded.skip_permissions = true;
+    recorded.launch_args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "$gwt-pm".to_string(),
+    ];
+
+    let rebuilt = super::launch_config_from_persisted_session(&recorded);
+
+    assert_eq!(
+        rebuilt.args.iter().filter(|arg| *arg == "$gwt-pm").count(),
+        1,
+        "restoring a PM session that already recorded the prompt must not duplicate it: {:?}",
+        rebuilt.args
+    );
+}
+
+/// Issue #3965 AC-4: the bootstrap prompt is a PM-role property. Restoring any
+/// other Session must keep producing exactly the args it produced before.
+#[test]
+fn persisted_non_pm_resume_config_gains_no_bootstrap_prompt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("work/issue-1");
+    fs::create_dir_all(&worktree).expect("create work worktree");
+    assert!(
+        !gwt::pm_registry::is_pm_worktree(&worktree),
+        "fixture must not be a PM worktree"
+    );
+
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-1", gwt_agent::AgentId::ClaudeCode);
+    session.agent_session_id = Some("work-conversation-1".to_string());
+    session.skip_permissions = true;
+    session.launch_args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "$gwt-execute #1".to_string(),
+    ];
+
+    let config = super::launch_config_from_persisted_session(&session);
+
+    assert!(
+        !config.args.iter().any(|arg| arg == "$gwt-pm"),
+        "a non-PM session must not gain the PM bootstrap prompt: {:?}",
+        config.args
+    );
+    assert!(
+        !config.args.iter().any(|arg| arg == "$gwt-execute #1"),
+        "restoring a non-PM session must keep its established args: {:?}",
+        config.args
     );
 }
 

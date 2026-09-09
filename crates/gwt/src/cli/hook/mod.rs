@@ -524,10 +524,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                 },
                 None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // #3967: compare against the binary managed hook generation embeds,
+            // resolved the same way materialization resolves it. Guessing here
+            // is what left every hook untrusted for a gwt started from a
+            // development build.
+            let expected_hook_bin = match crate::managed_assets::managed_hook_bin() {
+                Ok(hook_bin) => hook_bin,
+                Err(err) => return Ok(emit_hook_error(env, name, err)),
+            };
+            match gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
                 &project_root,
                 &codex_config_path,
                 discovery_mode,
+                Some(expected_hook_bin.as_str()),
             ) {
                 Ok(report) => {
                     let _ = writeln!(
@@ -535,7 +544,18 @@ pub fn run_daemon_hook<E: CliEnv>(
                         "trusted {} gwt-managed Codex hooks",
                         report.trusted_entries.len()
                     );
-                    Ok(0)
+                    // #3967 AC-4: a silent success here is how an operator was
+                    // told the pre-registration had worked while Codex was
+                    // still going to stop the launch. Report the hooks gwt
+                    // could not vouch for, and fail — this is the front door an
+                    // operator runs to check a real machine.
+                    match report.hooks_need_review_reason() {
+                        Some(reason) => {
+                            let _ = writeln!(env.stdout(), "{reason}");
+                            Ok(1)
+                        }
+                        None => Ok(0),
+                    }
                 }
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
