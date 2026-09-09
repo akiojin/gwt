@@ -62,6 +62,7 @@ const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 /// pathological in-flight count cannot let one scan run unbounded.
 const ISSUE_MONITOR_SCAN_BUDGET_CEILING: Duration = Duration::from_secs(300);
 const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
+const ISSUE_MONITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -493,6 +494,12 @@ fn spawn_issue_monitor_worker_with_config(
 struct IssueMonitorWorkerTestHooks {
     #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
+    #[cfg(all(test, unix))]
+    startup_timeout: Option<Duration>,
+    #[cfg(all(test, unix))]
+    startup_retry_submitted: Option<Arc<tokio::sync::Notify>>,
+    #[cfg(all(test, unix))]
+    startup_retry_started: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(all(test, unix))]
@@ -546,6 +553,7 @@ fn spawn_issue_monitor_worker_with_config_and_scan_probe(
         ISSUE_MONITOR_SCAN_TIMEOUT,
         IssueMonitorWorkerTestHooks {
             scan_concurrency_probe: Some(scan_concurrency_probe),
+            ..Default::default()
         },
     )
 }
@@ -582,10 +590,27 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
     let project_store =
         crate::runtime_daemon_events::ProjectStoreIdentity::from_runtime_scope(&scope);
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-    let loaded = load_issue_monitor_state_for_daemon(&prefs_path, config.clone());
+    let startup_timeout = ISSUE_MONITOR_STARTUP_TIMEOUT;
+    #[cfg(all(test, unix))]
+    let startup_timeout = test_hooks.startup_timeout.unwrap_or(startup_timeout);
+    let startup_deadline = Instant::now() + startup_timeout;
+    let loaded = {
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(startup_deadline);
+        load_issue_monitor_state_for_daemon(&prefs_path, config.clone())
+    };
     tokio::spawn(async move {
         let mut loaded = loaded;
         while loaded.authority_retry_pending {
+            if Instant::now() >= startup_deadline {
+                loaded.authority_retry_pending = false;
+                loaded.recovery_blocked = true;
+                loaded.monitor.record_scan_error(
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "Issue Monitor authority recovery is blocked: startup retry budget exhausted; automation disabled and durable state preserved".to_string(),
+                );
+                break;
+            }
             tokio::select! {
                 _ = shutdown.notified() => {
                     hub.close_issue_monitor_controls();
@@ -593,14 +618,70 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                 }
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {}
             }
+            // Scheduling delay must not start a fresh authority attempt after
+            // the total startup budget, even if the lock has become free.
+            if Instant::now() >= startup_deadline {
+                continue;
+            }
             let retry_prefs_path = prefs_path.clone();
             let retry_config = config.clone();
-            loaded = match tokio::task::spawn_blocking(move || {
-                load_issue_monitor_state_for_daemon(&retry_prefs_path, retry_config)
-            })
-            .await
-            {
-                Ok(loaded) => loaded,
+            // The first claimant either starts the synchronous attempt or
+            // cancels it before it can touch authority. A queued abort alone
+            // is not joinable until a blocking-pool thread becomes available.
+            let retry_claimed = Arc::new(AtomicBool::new(false));
+            let run_claim = Arc::clone(&retry_claimed);
+            #[cfg(all(test, unix))]
+            let retry_started = test_hooks.startup_retry_started.clone();
+            let mut retry = tokio::task::spawn_blocking(move || {
+                if run_claim.swap(true, Ordering::AcqRel) {
+                    return None;
+                }
+                #[cfg(all(test, unix))]
+                if let Some(started) = retry_started {
+                    started.notify_one();
+                }
+                let _deadline =
+                    gwt_core::operation_deadline::ScopedOperationDeadline::enter(startup_deadline);
+                Some(load_issue_monitor_state_for_daemon(
+                    &retry_prefs_path,
+                    retry_config,
+                ))
+            });
+            #[cfg(all(test, unix))]
+            if let Some(submitted) = &test_hooks.startup_retry_submitted {
+                submitted.notify_one();
+            }
+            let result = tokio::select! {
+                biased;
+                _ = shutdown.notified() => {
+                    let running = retry_claimed.swap(true, Ordering::AcqRel);
+                    retry.abort();
+                    if running {
+                        // Started blocking tasks cannot be aborted. Drain the
+                        // bounded attempt before reporting worker termination.
+                        let _ = retry.await;
+                    }
+                    hub.close_issue_monitor_controls();
+                    return;
+                }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(startup_deadline)) => {
+                    let running = retry_claimed.swap(true, Ordering::AcqRel);
+                    retry.abort();
+                    if running {
+                        // It inherits this same absolute deadline. No running
+                        // attempt may outlive the terminal startup transition.
+                        let _ = retry.await;
+                    }
+                    continue;
+                }
+                result = &mut retry => result,
+            };
+            loaded = match result {
+                Ok(Some(loaded)) => loaded,
+                Ok(None) => {
+                    hub.close_issue_monitor_controls();
+                    return;
+                }
                 Err(error) => {
                     tracing::error!(%error, "Issue Monitor authority retry worker failed");
                     hub.close_issue_monitor_controls();
@@ -1322,12 +1403,15 @@ fn load_issue_monitor_state_for_daemon(
             authority_lease: Some(authority_lease),
         },
         Err(error)
-            if gwt_core::operation_deadline::is_lock_contended(&error)
+            if (gwt_core::operation_deadline::is_lock_contended(&error)
+                || error.kind() == io::ErrorKind::TimedOut)
                 && matches!(
                     crate::load_issue_monitor_authority_fence(prefs_path),
                     Ok(crate::IssueMonitorAuthorityFenceState::Missing)
                 ) =>
         {
+            // An exhausted attempt budget says nothing about durable ambiguity.
+            // Retry a missing fence under the separate startup-wide budget.
             // A GUI-only fallback owns the same lifetime lock only for one
             // bounded remote-effect pass and deliberately writes no fence.
             // Keep the public control lane in Starting and retry after that
@@ -12541,6 +12625,70 @@ exit 1
     }
 
     #[test]
+    fn startup_retries_expired_attempt_with_free_lock_and_missing_fence() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let before = fs::read(&prefs_path).expect("seeded bytes");
+        let loaded = {
+            let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                Instant::now() - Duration::from_secs(1),
+            );
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
+        assert!(!loaded.recovery_blocked, "one expired attempt is retryable");
+        assert!(loaded.authority_retry_pending);
+        assert!(loaded.authority_fence.is_none());
+        assert!(loaded.authority_lease.is_none());
+        assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+        assert!(matches!(
+            crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+            crate::IssueMonitorAuthorityFenceState::Missing
+        ));
+    }
+
+    #[test]
+    fn startup_retries_contended_prefs_past_attempt_budget_with_missing_fence() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let before = fs::read(&prefs_path).expect("seeded bytes");
+        let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
+        let loaded = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(Duration::from_millis(250));
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
+        assert!(!loaded.recovery_blocked, "prefs contention is retryable");
+        assert!(loaded.authority_retry_pending);
+        assert!(loaded.authority_fence.is_none());
+        assert!(loaded.authority_lease.is_none());
+        assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+        FileExt::unlock(&lock).expect("unlock");
+
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let retried = super::load_issue_monitor_state_for_daemon(
+            &prefs_path,
+            crate::IssueMonitorConfig::default(),
+        );
+        assert!(!retried.recovery_blocked);
+        assert!(!retried.authority_retry_pending);
+        assert!(retried.authority_fence.is_some());
+        assert!(retried.authority_lease.is_some());
+        assert!(matches!(
+            crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+            crate::IssueMonitorAuthorityFenceState::Active(_)
+        ));
+    }
+
+    #[test]
     fn startup_treats_a_fence_less_local_fallback_lease_as_retryable() {
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -12565,6 +12713,195 @@ exit 1
         assert!(loaded.authority_fence.is_none());
         assert!(loaded.authority_lease.is_none());
         drop(local_lease);
+    }
+
+    #[tokio::test]
+    async fn startup_retry_total_budget_exhaustion_never_publishes_ready() {
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        // Keep this fixture local: a shared remote would share the prefs lock
+        // with other daemon tests through the repository-scoped store.
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let before = fs::read(&prefs_path).expect("seeded bytes");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig::default(),
+            super::ISSUE_MONITOR_SCAN_TIMEOUT,
+            super::IssueMonitorWorkerTestHooks {
+                startup_timeout: Some(Duration::ZERO),
+                ..Default::default()
+            },
+        );
+        // Releasing the lock must not allow a new authority attempt once the
+        // startup-wide budget has already expired.
+        drop(local_lease);
+        let status =
+            tokio::time::timeout(Duration::from_secs(5), hub.wait_for_issue_monitor_status()).await;
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("worker shutdown is bounded")
+            .expect("worker exits cleanly");
+        assert!(status.expect("startup reaches a terminal state").is_none());
+        assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+        assert!(matches!(
+            crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+            crate::IssueMonitorAuthorityFenceState::Missing
+        ));
+    }
+
+    #[test]
+    fn startup_retry_blocking_queue_wait_respects_total_budget() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
+            let repo = temp.path().join("repo");
+            fs::create_dir_all(&repo).expect("repo");
+            init_git_repo(&repo);
+            commit_initial_branch(&repo);
+            // Keep this fixture local: a shared remote would share the prefs lock
+            // with other daemon tests through the repository-scoped store.
+            let scope = RuntimeScope::new(
+                "abcdef0123456789",
+                "feedfacecafebeef",
+                repo,
+                RuntimeTarget::Host,
+            )
+            .expect("scope");
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+            crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+                .expect("seed prefs");
+            let before = fs::read(&prefs_path).expect("seeded bytes");
+            let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+                .expect("hold GUI fallback authority");
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered_tx.send(()).expect("signal occupied slot");
+                release_rx.recv().expect("release slot");
+            });
+            entered_rx.await.expect("blocking pool is occupied");
+            let hub = BroadcastHub::new();
+            let shutdown = Arc::new(DaemonShutdown::new());
+            let submitted = Arc::new(tokio::sync::Notify::new());
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+                scope,
+                hub.clone(),
+                Arc::clone(&shutdown),
+                crate::IssueMonitorConfig::default(),
+                super::ISSUE_MONITOR_SCAN_TIMEOUT,
+                super::IssueMonitorWorkerTestHooks {
+                    startup_timeout: Some(Duration::from_secs(1)),
+                    startup_retry_submitted: Some(Arc::clone(&submitted)),
+                    ..Default::default()
+                },
+            );
+            let queued = tokio::time::timeout(Duration::from_secs(5), submitted.notified()).await;
+            let status =
+                tokio::time::timeout(Duration::from_secs(3), hub.wait_for_issue_monitor_status())
+                    .await;
+            // Always release our blocking thread before assertions, including
+            // RED, so Runtime::drop cannot hang waiting for the test fixture.
+            release_tx.send(()).expect("release occupied slot");
+            blocker.await.expect("blocker exits");
+            drop(local_lease);
+            shutdown.request();
+            tokio::time::timeout(Duration::from_secs(5), worker)
+                .await
+                .expect("worker shutdown")
+                .expect("worker exits");
+            queued.expect("retry was actually queued in the occupied pool");
+            assert!(status.expect("queue wait obeys startup budget").is_none());
+            assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+            assert!(matches!(
+                crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+                crate::IssueMonitorAuthorityFenceState::Missing
+            ));
+        });
+    }
+
+    #[test]
+    fn startup_shutdown_joins_a_running_authority_retry() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
+            let repo = temp.path().join("repo");
+            fs::create_dir_all(&repo).expect("repo");
+            init_git_repo(&repo);
+            let scope = RuntimeScope::new(
+                "abcdef0123456789",
+                "feedfacecafebeef",
+                repo,
+                RuntimeTarget::Host,
+            )
+            .expect("scope");
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+            crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+                .expect("seed prefs");
+            let before = fs::read(&prefs_path).expect("seeded bytes");
+            let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
+            let started = Arc::new(tokio::sync::Notify::new());
+            let shutdown = Arc::new(DaemonShutdown::new());
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+                scope,
+                BroadcastHub::new(),
+                Arc::clone(&shutdown),
+                crate::IssueMonitorConfig::default(),
+                super::ISSUE_MONITOR_SCAN_TIMEOUT,
+                super::IssueMonitorWorkerTestHooks {
+                    startup_retry_started: Some(Arc::clone(&started)),
+                    ..Default::default()
+                },
+            );
+            let running = tokio::time::timeout(Duration::from_secs(5), started.notified()).await;
+            shutdown.request();
+            let stopped = tokio::time::timeout(Duration::from_secs(5), worker).await;
+            FileExt::unlock(&lock).expect("unlock after worker exit");
+            // With one blocking slot, this barrier drains any attempt the
+            // worker incorrectly detached before reporting shutdown complete.
+            tokio::task::spawn_blocking(|| {})
+                .await
+                .expect("drain pool");
+            running.expect("retry actually started");
+            stopped.expect("bounded shutdown").expect("worker exits");
+            assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+            assert!(
+                matches!(
+                    crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+                    crate::IssueMonitorAuthorityFenceState::Missing
+                ),
+                "a stopped worker must not leave a retry that establishes authority later"
+            );
+        });
     }
 
     #[tokio::test]
