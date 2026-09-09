@@ -804,10 +804,12 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
 /// at whatever the previous build materialized, so a bundle asset added since
 /// then appeared on one side only and broke `.claude` / `.codex` parity.
 fn refresh_targets_for_agent(worktree: &Path, agent_id: &AgentId) -> Vec<ManagedAssetTarget> {
-    let Some(primary) = managed_targets_for_agent(agent_id) else {
-        return Vec::new();
-    };
-    let mut targets = vec![primary];
+    // An agent with no managed surface of its own (Gemini, Copilot, …) still
+    // launches inside a worktree whose existing `.claude` / `.codex` surfaces
+    // must not be left frozen, so start from the optional primary instead of
+    // returning early.
+    let mut targets: Vec<ManagedAssetTarget> =
+        managed_targets_for_agent(agent_id).into_iter().collect();
     for existing in detect_existing_managed_asset_targets(worktree) {
         push_existing_target(&mut targets, true, existing);
     }
