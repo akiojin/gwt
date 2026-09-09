@@ -238,10 +238,21 @@ pub(super) fn run<E: CliEnv>(
             draft.mentions = mentions;
             draft.audience = audience;
             if let Some(session) = current_session.as_ref() {
+                // SPEC-1974 FR-063: record which *form* of worktree the post
+                // came from, so a branchless ephemeral session stays
+                // identifiable on the Board once its worktree is pruned. This
+                // is provenance only — the retired Intake / Execution action
+                // lanes are not coming back through it.
                 draft.origin = BoardOrigin::new(
                     session.branch.clone(),
                     session.id.clone(),
                     session.display_name.clone(),
+                )
+                .with_worktree_form(
+                    crate::worktree_form::board_origin_worktree_form(
+                        env.repo_path(),
+                        Some(session.branch.as_str()),
+                    ),
                 );
             }
             let entry = draft

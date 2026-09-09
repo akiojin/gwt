@@ -305,6 +305,26 @@ pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bo
             .any(|mention| match_keys.iter().any(|key| key == &mention.typed_key()))
 }
 
+/// The worktree form a Board post came from (SPEC-1974 FR-063).
+///
+/// This is *provenance*, not a behavioural lane: it records the shape of the
+/// worktree the posting session was launched into, so a post made from a
+/// branchless ephemeral worktree stays identifiable after that worktree is
+/// gone. The vocabulary is Issue #3384's canonical worktree-form wording, and
+/// the type is closed on purpose — the retired Intake / Execution action lanes
+/// (SPEC #3245 Stage C) cannot be reintroduced through this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardOriginWorktreeForm {
+    /// A throwaway worktree with no backing branch.
+    Ephemeral,
+    /// A worktree checked out on a branch.
+    BranchBacked,
+    /// The form could not be resolved (for example the worktree is already
+    /// gone), which is a fact worth recording rather than a guess worth making.
+    Unknown,
+}
+
 /// One immutable post on the shared coordination Board. Appended by agents
 /// and the user via `board.post`, persisted to the repo-local event log
 /// (`.gwt/coordination/`), and projected into [`BoardProjection`] for the UI.
@@ -348,6 +368,16 @@ pub struct BoardEntry {
     pub origin_session_id: Option<String>,
     #[serde(default)]
     pub origin_agent_id: Option<String>,
+    /// Worktree form of the originating session (SPEC-1974 FR-063). Additive
+    /// and omitted when absent, so entries written before this contract load
+    /// and rewrite byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_worktree_form: Option<BoardOriginWorktreeForm>,
+    /// The durable recovery intent this post materializes (SPEC-1974 FR-063).
+    /// The intent store itself belongs to SPEC #1921; the Board only carries
+    /// the identity so a materialized post can be matched back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_recovery_id: Option<String>,
     #[serde(default)]
     pub target_owners: Vec<String>,
     #[serde(default)]
@@ -379,6 +409,20 @@ impl BoardEntry {
 
     pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
         self.origin_agent_id = Some(value.into());
+        self
+    }
+
+    /// Record the worktree form the posting session ran in (FR-063).
+    pub fn with_origin_worktree_form(mut self, value: BoardOriginWorktreeForm) -> Self {
+        self.origin_worktree_form = Some(value);
+        self
+    }
+
+    /// Link this post to the recovery intent that produced it (FR-063).
+    /// Blank input is dropped, matching the other origin setters' tolerance
+    /// for pass-through session fields.
+    pub fn with_origin_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_recovery_id = blank_to_none(&value.into());
         self
     }
 
@@ -463,6 +507,8 @@ impl BoardEntry {
             origin_branch: None,
             origin_session_id: None,
             origin_agent_id: None,
+            origin_worktree_form: None,
+            origin_recovery_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
             audience: Vec::new(),
@@ -494,6 +540,12 @@ pub struct BoardOrigin {
     pub branch: String,
     pub session_id: String,
     pub agent_id: String,
+    /// Worktree form of the posting session (SPEC-1974 FR-063). `None` when the
+    /// surface has not resolved one; it is not guessed at finalize time.
+    pub worktree_form: Option<BoardOriginWorktreeForm>,
+    /// Recovery intent identity (SPEC-1974 FR-063), blank when the post is not
+    /// replaying one.
+    pub recovery_id: String,
 }
 
 impl BoardOrigin {
@@ -506,7 +558,19 @@ impl BoardOrigin {
             branch: branch.into(),
             session_id: session_id.into(),
             agent_id: agent_id.into(),
+            worktree_form: None,
+            recovery_id: String::new(),
         }
+    }
+
+    pub fn with_worktree_form(mut self, value: BoardOriginWorktreeForm) -> Self {
+        self.worktree_form = Some(value);
+        self
+    }
+
+    pub fn with_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.recovery_id = value.into();
+        self
     }
 }
 
@@ -606,6 +670,8 @@ impl BoardEntryDraft {
         entry.origin_branch = blank_to_none(&self.origin.branch);
         entry.origin_session_id = blank_to_none(&self.origin.session_id);
         entry.origin_agent_id = blank_to_none(&self.origin.agent_id);
+        entry.origin_worktree_form = self.origin.worktree_form;
+        entry.origin_recovery_id = blank_to_none(&self.origin.recovery_id);
         Ok(entry)
     }
 }
@@ -758,7 +824,31 @@ mod board_entry_draft_tests {
         assert_eq!(entry.origin_branch, None);
         assert_eq!(entry.origin_session_id, None);
         assert_eq!(entry.origin_agent_id, None);
+        assert_eq!(entry.origin_worktree_form, None);
+        assert_eq!(entry.origin_recovery_id, None);
         assert_eq!(entry.state, None);
+    }
+
+    #[test]
+    fn finalize_keeps_the_worktree_form_and_drops_a_blank_recovery_id() {
+        // SPEC-1974 FR-063: the worktree form and the recovery identity travel
+        // with the rest of the origin, and a blank recovery id is dropped the
+        // same way a blank branch is.
+        let mut d = draft("body");
+        d.origin = BoardOrigin::new("  ", "session-1", "agent-a")
+            .with_worktree_form(BoardOriginWorktreeForm::Ephemeral)
+            .with_recovery_id("   ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(
+            entry.origin_worktree_form,
+            Some(BoardOriginWorktreeForm::Ephemeral)
+        );
+        assert_eq!(entry.origin_recovery_id, None);
+
+        let mut d = draft("body");
+        d.origin = BoardOrigin::default().with_recovery_id("  recovery-7 ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-7"));
     }
 }
 
@@ -1115,6 +1205,123 @@ pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<Boa
     let mut entry = entry;
     entry.normalize_audience();
     append_event_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
+}
+
+/// What a deterministic (caller-identified) Board append settled to
+/// (SPEC-1974 FR-064).
+///
+/// All three are answers, not failures: they map onto the durable intent states
+/// a recovery store tracks (FR-067). An `Err` from
+/// [`post_entry_deterministic`] means the storage attempt itself failed and the
+/// intent stays pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardDeterministicOutcome {
+    /// The identity was new; this call materialized it.
+    Appended(BoardPostOutcome),
+    /// The identity was already on the Board carrying this exact payload, so
+    /// nothing was written. A retry after a lost response lands here.
+    AlreadyMaterialized { entry_id: String },
+    /// The identity is already on the Board carrying a *different* payload.
+    /// Refused with zero mutation: reusing an identity for other content would
+    /// make the id meaningless as a retry key.
+    Conflicted { entry_id: String },
+}
+
+/// Append a Board post under a caller-supplied deterministic identity
+/// (SPEC-1974 FR-064).
+///
+/// The identity, the existence check, and the append all happen under the same
+/// exclusive coordination lock, so a post materializes exactly zero or one
+/// times no matter how many times a crashed or disconnected caller replays it.
+///
+/// The lookup reads the segment log rather than the hot projection, so an
+/// identity that has aged out of the projection is still recognized as
+/// materialized.
+pub fn post_entry_deterministic(
+    worktree_root: &Path,
+    entry: BoardEntry,
+) -> Result<BoardDeterministicOutcome> {
+    let mut entry = entry;
+    entry.id = entry.id.trim().to_string();
+    if entry.id.is_empty() {
+        return Err(GwtError::Other(
+            "a deterministic Board append requires a caller-supplied entry id".to_string(),
+        ));
+    }
+    entry.normalize_audience();
+
+    with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files(worktree_root)?;
+        let coordination_root = coordination_dir(worktree_root);
+        if let Some(existing) = find_board_entry_in_segments(&coordination_root, &entry.id)? {
+            let entry_id = existing.id.clone();
+            return Ok(if same_board_payload(&existing, &entry) {
+                BoardDeterministicOutcome::AlreadyMaterialized { entry_id }
+            } else {
+                BoardDeterministicOutcome::Conflicted { entry_id }
+            });
+        }
+        append_event_locked_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
+            .map(BoardDeterministicOutcome::Appended)
+    })
+}
+
+/// Whether two posts sharing a deterministic id carry the same authored intent.
+///
+/// `created_at` / `updated_at` are excluded deliberately: a caller that crashed
+/// before it learned the append's fate rebuilds the entry on restart and can
+/// never reproduce the original clock reading, so comparing them would turn
+/// every legitimate replay into a conflict. `body_html` is render-only and
+/// never persisted. Everything the caller actually authored is compared.
+fn same_board_payload(left: &BoardEntry, right: &BoardEntry) -> bool {
+    // Destructured rather than field-by-field so that adding a field to
+    // `BoardEntry` fails to compile here instead of silently dropping out of
+    // the identity comparison.
+    let BoardEntry {
+        id: _,
+        created_at: _,
+        updated_at: _,
+        body_html: _,
+        author_kind,
+        author,
+        kind,
+        body,
+        title,
+        title_summary,
+        state,
+        parent_id,
+        resolves_entry_ids,
+        related_topics,
+        related_owners,
+        origin_branch,
+        origin_session_id,
+        origin_agent_id,
+        origin_worktree_form,
+        origin_recovery_id,
+        target_owners,
+        mentions,
+        audience,
+    } = left;
+
+    author_kind == &right.author_kind
+        && author == &right.author
+        && kind == &right.kind
+        && body == &right.body
+        && title == &right.title
+        && title_summary == &right.title_summary
+        && state == &right.state
+        && parent_id == &right.parent_id
+        && resolves_entry_ids == &right.resolves_entry_ids
+        && related_topics == &right.related_topics
+        && related_owners == &right.related_owners
+        && origin_branch == &right.origin_branch
+        && origin_session_id == &right.origin_session_id
+        && origin_agent_id == &right.origin_agent_id
+        && origin_worktree_form == &right.origin_worktree_form
+        && origin_recovery_id == &right.origin_recovery_id
+        && target_owners == &right.target_owners
+        && mentions == &right.mentions
+        && audience == &right.audience
 }
 
 pub fn append_event(
@@ -2378,6 +2585,36 @@ pub trait BoardProvider {
         self.post_entry(worktree_root, entry)
             .map(BoardPostOutcome::Refreshed)
     }
+    /// Whether this provider can store a caller-supplied deterministic entry id
+    /// and report back an exact acknowledgement for it (SPEC-1974 FR-069).
+    ///
+    /// Defaults to `false`. A provider proves the capability by implementing
+    /// [`post_entry_deterministic`](Self::post_entry_deterministic) and saying
+    /// so here; anything that has not is treated as unable, which is the safe
+    /// direction. Callers holding a durable intent read this *before* they
+    /// attempt delivery, so an unsupported Board leaves the intent pending
+    /// rather than producing an acknowledgement nobody can honour.
+    fn supports_deterministic_identity(&self) -> bool {
+        false
+    }
+    /// Append under a caller-supplied deterministic identity (SPEC-1974 FR-064).
+    ///
+    /// The default refuses (FR-069). Appending here anyway would either
+    /// duplicate the post the next time the caller retried, or acknowledge an
+    /// identity the provider cannot recognize again — and falling back to the
+    /// local log would report a delivery that never reached the remote Board.
+    fn post_entry_deterministic(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardDeterministicOutcome> {
+        let _ = (worktree_root, entry);
+        Err(GwtError::Other(
+            "this Board provider cannot preserve a caller-supplied deterministic entry id; \
+             refusing the append rather than risking a duplicate post or a false acknowledgement"
+                .to_string(),
+        ))
+    }
     /// Load the hot projection snapshot.
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
     /// Load the snapshot filtered to an audience scope.
@@ -2444,6 +2681,20 @@ impl BoardProvider for LocalProvider {
         entry: BoardEntry,
     ) -> Result<BoardPostOutcome> {
         post_entry_outcome(worktree_root, entry)
+    }
+
+    /// The event log stores whatever id the caller supplies and can look it up
+    /// again, so the local Board honours deterministic identity (FR-069).
+    fn supports_deterministic_identity(&self) -> bool {
+        true
+    }
+
+    fn post_entry_deterministic(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardDeterministicOutcome> {
+        post_entry_deterministic(worktree_root, entry)
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -5216,5 +5467,285 @@ mod tests {
         }))
         .unwrap();
         assert!(entry.resolves_entry_ids.is_empty());
+    }
+
+    // --- SPEC-1974 Phase 14R: worktree origin + deterministic identity ------
+
+    /// A post that carries a caller-supplied durable identity, the way a
+    /// recovery intent replays one.
+    fn identified_entry(id: &str, body: &str) -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        entry.id = id.to_string();
+        entry
+    }
+
+    #[test]
+    fn a_board_entry_carries_its_worktree_origin_and_recovery_identity() {
+        // FR-063: origin metadata is additive and survives the event log.
+        let entry = identified_entry("intent-1", "body")
+            .with_origin_worktree_form(BoardOriginWorktreeForm::Ephemeral)
+            .with_origin_recovery_id("recovery-7");
+
+        let roundtripped: BoardEntry =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+
+        assert_eq!(
+            roundtripped.origin_worktree_form,
+            Some(BoardOriginWorktreeForm::Ephemeral)
+        );
+        assert_eq!(
+            roundtripped.origin_recovery_id.as_deref(),
+            Some("recovery-7")
+        );
+    }
+
+    #[test]
+    fn worktree_origin_speaks_the_worktree_form_vocabulary_not_a_lane() {
+        // FR-063 with Issue #3384's vocabulary: the wire values name a worktree
+        // form. `intake` was a behavioural lane and is not a form, so it must
+        // not resolve back into the domain.
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::Ephemeral).unwrap(),
+            serde_json::json!("ephemeral")
+        );
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::BranchBacked).unwrap(),
+            serde_json::json!("branch-backed")
+        );
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::Unknown).unwrap(),
+            serde_json::json!("unknown")
+        );
+        assert!(
+            serde_json::from_value::<BoardOriginWorktreeForm>(serde_json::json!("intake")).is_err(),
+            "a behavioural lane must not deserialize as a worktree form"
+        );
+    }
+
+    #[test]
+    fn a_legacy_entry_without_origin_metadata_does_not_gain_the_new_keys() {
+        // FR-063 additive compatibility: entries written before this contract
+        // load unchanged, and rewriting them does not invent the new fields.
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy body",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z",
+            "origin_branch": "work/issue-1",
+        });
+
+        let entry: BoardEntry = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(entry.origin_worktree_form, None);
+        assert_eq!(entry.origin_recovery_id, None);
+
+        let rewritten = serde_json::to_value(&entry).unwrap();
+        assert!(rewritten.get("origin_worktree_form").is_none());
+        assert!(rewritten.get("origin_recovery_id").is_none());
+        assert_eq!(rewritten["origin_branch"], legacy["origin_branch"]);
+    }
+
+    #[test]
+    fn a_deterministic_identity_materializes_exactly_once_across_retries() {
+        // FR-064: the response to the first append can be lost, so the retry
+        // has to be a no-op rather than a second post.
+        let dir = tempfile::tempdir().unwrap();
+
+        let first =
+            post_entry_deterministic(dir.path(), identified_entry("intent-1", "the post")).unwrap();
+        assert!(matches!(first, BoardDeterministicOutcome::Appended(_)));
+
+        let retry =
+            post_entry_deterministic(dir.path(), identified_entry("intent-1", "the post")).unwrap();
+        assert!(matches!(
+            retry,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 1, "a retry must not append a second time");
+    }
+
+    #[test]
+    fn a_replayed_intent_matches_even_though_its_timestamps_are_regenerated() {
+        // FR-065 replay: a crash-restarted retry rebuilds the entry, so it can
+        // never reproduce the original `created_at`. Identity is the caller's
+        // id plus the authored payload, not the moment of construction.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry_deterministic(dir.path(), identified_entry("intent-2", "same intent")).unwrap();
+
+        let mut replay = identified_entry("intent-2", "same intent");
+        replay.created_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        replay.updated_at = replay.created_at;
+
+        let outcome = post_entry_deterministic(dir.path(), replay).unwrap();
+        assert!(matches!(
+            outcome,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn reusing_a_deterministic_identity_for_a_different_payload_conflicts() {
+        // FR-064: the same id with different content is a different post. It is
+        // refused as a conflict and the Board is left exactly as it was.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry_deterministic(dir.path(), identified_entry("intent-3", "original")).unwrap();
+
+        let outcome =
+            post_entry_deterministic(dir.path(), identified_entry("intent-3", "rewritten"))
+                .unwrap();
+        assert!(matches!(
+            outcome,
+            BoardDeterministicOutcome::Conflicted { .. }
+        ));
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].body, "original",
+            "a conflicting retry must not overwrite the materialized post"
+        );
+    }
+
+    #[test]
+    fn a_deterministic_append_without_a_caller_identity_is_refused() {
+        // FR-064: without a caller-supplied id there is nothing to be
+        // idempotent about, so the append fails closed instead of inventing one.
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = post_entry_deterministic(dir.path(), identified_entry("   ", "body"));
+
+        assert!(outcome.is_err());
+        assert!(load_snapshot(dir.path()).unwrap().board.entries.is_empty());
+    }
+
+    #[test]
+    fn the_local_provider_declares_and_honors_deterministic_identity() {
+        // FR-069: the filesystem provider can preserve a caller-supplied id, so
+        // it declares the capability and the retry is idempotent through it.
+        let provider = LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(provider.supports_deterministic_identity());
+
+        provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-4", "body"))
+            .unwrap();
+        let retry = provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-4", "body"))
+            .unwrap();
+
+        assert!(matches!(
+            retry,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_provider_that_cannot_preserve_identity_fails_closed() {
+        // FR-069: the trait default refuses. Appending anyway would either
+        // duplicate the post on the next retry or report an acknowledgement the
+        // provider never made, and falling back to the local log would fake a
+        // delivery that never reached the remote Board.
+        struct IdentityBlindProvider;
+
+        impl BoardProvider for IdentityBlindProvider {
+            fn post_entry(
+                &self,
+                worktree_root: &Path,
+                entry: BoardEntry,
+            ) -> Result<CoordinationSnapshot> {
+                LocalProvider.post_entry(worktree_root, entry)
+            }
+            fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
+                LocalProvider.load_snapshot(worktree_root)
+            }
+            fn load_snapshot_for_scope(
+                &self,
+                worktree_root: &Path,
+                scope: &BoardAudienceScope,
+            ) -> Result<CoordinationSnapshot> {
+                LocalProvider.load_snapshot_for_scope(worktree_root, scope)
+            }
+            fn load_entries_since(
+                &self,
+                worktree_root: &Path,
+                since: DateTime<Utc>,
+            ) -> Result<Vec<BoardEntry>> {
+                LocalProvider.load_entries_since(worktree_root, since)
+            }
+            fn load_entries_since_for_scope(
+                &self,
+                worktree_root: &Path,
+                since: DateTime<Utc>,
+                scope: &BoardAudienceScope,
+            ) -> Result<Vec<BoardEntry>> {
+                LocalProvider.load_entries_since_for_scope(worktree_root, since, scope)
+            }
+            fn has_recent_post_by(
+                &self,
+                worktree_root: &Path,
+                author: &str,
+                kind: &BoardEntryKind,
+                within: chrono::Duration,
+            ) -> Result<bool> {
+                LocalProvider.has_recent_post_by(worktree_root, author, kind, within)
+            }
+            fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
+                LocalProvider.board_entry_exists(worktree_root, entry_id)
+            }
+            fn load_entries_before(
+                &self,
+                worktree_root: &Path,
+                before_entry_id: Option<&str>,
+                limit: usize,
+            ) -> Result<BoardHistoryPage> {
+                LocalProvider.load_entries_before(worktree_root, before_entry_id, limit)
+            }
+            fn load_entries_before_for_scope(
+                &self,
+                worktree_root: &Path,
+                before_entry_id: Option<&str>,
+                limit: usize,
+                scope: &BoardAudienceScope,
+            ) -> Result<BoardHistoryPage> {
+                LocalProvider.load_entries_before_for_scope(
+                    worktree_root,
+                    before_entry_id,
+                    limit,
+                    scope,
+                )
+            }
+        }
+
+        let provider = IdentityBlindProvider;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!provider.supports_deterministic_identity());
+
+        let refusal =
+            provider.post_entry_deterministic(dir.path(), identified_entry("intent-5", "body"));
+
+        assert!(refusal.is_err());
+        assert!(
+            provider
+                .load_snapshot(dir.path())
+                .unwrap()
+                .board
+                .entries
+                .is_empty(),
+            "a refused deterministic append must not leave a local fallback post"
+        );
     }
 }
