@@ -347,6 +347,66 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
     );
 }
 
+/// Issue #3967 AC-4: this is the front door an operator runs to check a real
+/// machine, and it used to answer `trusted 0 gwt-managed Codex hooks` with exit
+/// 0 while Codex was still going to stop every launch on `Hooks need review`.
+/// Hooks gwt cannot vouch for have to be reported, and the operation has to
+/// fail.
+#[test]
+fn gwtd_hook_register_codex_managed_hook_trust_fails_on_hooks_it_cannot_vouch_for() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    // Generate against one installed binary, then ask a gwt that resolves a
+    // different one to vouch for the result.
+    let generated_with = project.path().join("Programs").join("GWT").join("gwtd");
+    // #4057: pin the generator per thread. `GWT_HOOK_BIN` is process-global, so
+    // setting it here would leak this pin into any materialization another test
+    // runs at the same time.
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(&generated_with);
+        gwt_skills::generate_codex_hooks(project.path()).expect("generate hooks");
+    }
+
+    let mut child = isolated_gwtd_command()
+        .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd hook register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_hook_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child.wait_with_output().expect("wait gwtd hook register");
+
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("hook registration stdout must be JSON");
+    assert_eq!(
+        response["ok"].as_bool(),
+        Some(false),
+        "registration must not report success while hooks stay untrusted, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        response["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Hooks need review")),
+        "the refusal must name the launch Codex would stop, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 #[test]
 fn gwtd_managed_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();

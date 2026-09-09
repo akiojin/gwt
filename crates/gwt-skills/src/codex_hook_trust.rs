@@ -68,6 +68,11 @@ pub struct CodexHookTrustReport {
     pub untrusted_gwt_hooks: Vec<String>,
     /// Issue #4071 AC-2: one entry per hooks file the scan read.
     pub expectations: Vec<CodexHookTrustExpectation>,
+    /// Issue #3967: the command string behind each entry of
+    /// [`Self::untrusted_gwt_hooks`], in the same order. The expected fallback
+    /// binary alone did not say what the file actually held, so diagnosing a
+    /// recurrence meant reading the machine's `.codex/hooks.json` by hand.
+    pub untrusted_gwt_hook_commands: Vec<String>,
     /// Issue #4071 AC-2: whether `config_path` was written. False when no gwt
     /// hook could be vouched for — gwt 9.91.0 then left the config untouched
     /// and the failure read as if registration had never run.
@@ -116,6 +121,12 @@ impl CodexHookTrustReport {
         reason.push_str(&format!(
             "Expected fallback binary per hooks file: {expectations}."
         ));
+        // Issue #3967: quote what the file actually holds. Without it a
+        // recurrence only says which hooks Codex would stop on, and telling a
+        // stale command apart from a mismatched binary needs the machine.
+        if let Some(command) = self.untrusted_gwt_hook_commands.first() {
+            reason.push_str(&format!(" First untrusted command: `{command}`."));
+        }
         Some(reason)
     }
 }
@@ -162,6 +173,7 @@ fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
 struct CodexHookTrustScan {
     trusted: Vec<CodexHookTrustEntry>,
     untrusted_gwt_hooks: Vec<String>,
+    untrusted_gwt_hook_commands: Vec<String>,
     expectations: Vec<CodexHookTrustExpectation>,
 }
 
@@ -176,6 +188,8 @@ fn scan_codex_hook_trust_for_mode(
         scan.trusted.extend(path_scan.trusted);
         scan.untrusted_gwt_hooks
             .extend(path_scan.untrusted_gwt_hooks);
+        scan.untrusted_gwt_hook_commands
+            .extend(path_scan.untrusted_gwt_hook_commands);
         scan.expectations.extend(path_scan.expectations);
     }
     Ok(scan)
@@ -273,6 +287,7 @@ fn scan_codex_hook_trust_from_path(
                     });
                 } else if is_gwt_hook_transport_command(command) {
                     scan.untrusted_gwt_hooks.push(key);
+                    scan.untrusted_gwt_hook_commands.push(command.to_string());
                 }
             }
         }
@@ -297,16 +312,40 @@ pub fn register_codex_managed_hook_trust_for_mode(
     config_path: &Path,
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<CodexHookTrustReport> {
+    register_codex_managed_hook_trust_for_mode_with_expected_bin(worktree, config_path, mode, None)
+}
+
+/// Register trust for the hooks materialization just generated, told exactly
+/// which fallback binary it wrote.
+///
+/// Issue #3967 (recurrence in v9.93.1): the binary a generated hook command
+/// falls back to is resolved once, by materialization, and pinned only for the
+/// duration of that materialization. Re-deriving it here instead answers with
+/// this library's own `current_exe` fallback, and for a gwt started from a
+/// checkout build (`target/debug/gwt`) that is the build output — where
+/// materialization had written the installed absolute path. Every managed hook
+/// then fails the exact-command match, lands in `untrusted_gwt_hooks`, and
+/// Codex stops the launch on `Hooks need review`. Callers that generated the
+/// hooks must pass the value they generated them with; `None` keeps the
+/// library fallback for callers that did not.
+pub fn register_codex_managed_hook_trust_for_mode_with_expected_bin(
+    worktree: &Path,
+    config_path: &Path,
+    mode: CodexHookDiscoveryMode,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<CodexHookTrustReport> {
     let CodexHookTrustScan {
         trusted: trusted_entries,
         untrusted_gwt_hooks,
+        untrusted_gwt_hook_commands,
         expectations,
-    } = scan_codex_hook_trust_for_mode(worktree, mode, None)?;
+    } = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
     if trusted_entries.is_empty() {
         return Ok(CodexHookTrustReport {
             config_path: config_path.to_path_buf(),
             trusted_entries,
             untrusted_gwt_hooks,
+            untrusted_gwt_hook_commands,
             expectations,
             wrote_trust_state: false,
         });
@@ -345,6 +384,7 @@ pub fn register_codex_managed_hook_trust_for_mode(
         config_path: config_path.to_path_buf(),
         trusted_entries,
         untrusted_gwt_hooks,
+        untrusted_gwt_hook_commands,
         expectations,
         wrote_trust_state: true,
     })
@@ -1759,7 +1799,10 @@ enabled = false
         assert!(
             reason.contains("wrote 4 trusted entries")
                 && reason.contains("trusted_hash mismatch")
-                && reason.contains(":stop:0:0"),
+                && reason.contains(":stop:0:0")
+                // Issue #3967: quoting the command is what lets a recurrence be
+                // diagnosed from the failure record instead of the machine.
+                && reason.contains("First untrusted command: `'/tmp/attacker/gwtd' hook event Stop`"),
             "reason must separate a hash mismatch from a skipped registration: {reason}"
         );
 
