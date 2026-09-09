@@ -12969,6 +12969,77 @@ exit 1
             .expect("worker exits cleanly");
     }
 
+    /// Issue #4199: `Rejected` and `RecoveryBlocked` answer different
+    /// questions, and three unrelated PRs read the first as a regression of
+    /// the second. They cannot be reached by the same worker: a
+    /// recovery-blocked worker never claims the control receiver, so its lane
+    /// can only refuse with `RecoveryBlocked`, while only a worker that owns
+    /// the lifetime authority lease ever reaches the decoder that answers
+    /// `Rejected`. Pin that discriminator against the exact malformed frame
+    /// `recovery_blocked_worker_never_publishes_or_drains_launch_delivery`
+    /// sends, so the two control states stay separable.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global GWT home must stay isolated for the worker lifetime
+    async fn authority_owning_worker_rejects_a_malformed_control() {
+        // This worker keeps daemon authority for its whole body, so it needs a
+        // private GWT home: sibling tests resolve their project directory from
+        // the same remote and would lose their own authority to this one.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create isolated gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        // Nothing overlaps this worker, so it establishes the fence, claims the
+        // sole control receiver, and publishes Ready.
+        let worker = super::spawn_issue_monitor_worker_with_config(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig::default(),
+        );
+
+        assert_eq!(
+            hub.publish_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: serde_json::json!({"enabled": false}),
+            })
+            .await,
+            Err(super::IssueMonitorControlQueueError::Rejected),
+            "an authority-owning worker decodes the frame and rejects it as malformed",
+        );
+        assert!(
+            matches!(
+                crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+                crate::IssueMonitorAuthorityFenceState::Active(_)
+            ),
+            "`Rejected` is only reachable once this worker durably owns authority",
+        );
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker shutdown is bounded")
+            .expect("worker exits cleanly");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn authority_retry_state_load_does_not_block_the_tokio_worker() {
         let temp = TempDir::new().expect("tempdir");
@@ -13075,6 +13146,16 @@ exit 1
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #4199: the subject is the control-lane state under overlapping
+        // authority, not how much of the 250 ms prefs budget this runner's
+        // filesystem left over. Under the default budget a saturated CI host
+        // expired the fixture's *own* authority load; that returns
+        // `recovery_blocked: false` with no lease, so the worker took authority
+        // for itself, reached the decoder, and answered `Rejected` for a frame
+        // that only a recovery-blocked lane may refuse. Pin the hang-guard
+        // budget so the runner may delay these transactions but never decide
+        // them (Issue #3641 / #4033 / #4096).
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
@@ -13115,6 +13196,14 @@ exit 1
             crate::IssueMonitorConfig::default(),
         );
         assert!(!authority_owner.recovery_blocked);
+        // A load that gave up its budget also reports `recovery_blocked: false`
+        // — with `authority_retry_pending` and no lease. Assert the premise
+        // itself, so a fixture that never took authority fails here instead of
+        // downstream as a control-lane contract change (Issue #4199).
+        assert!(
+            authority_owner.authority_lease.is_some(),
+            "the overlap premise requires this fixture to hold the lifetime authority lease",
+        );
 
         let hub = BroadcastHub::new();
         let mut events = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
@@ -13258,6 +13347,13 @@ exit 1
 
     #[test]
     fn dead_lifetime_authority_fence_revokes_then_is_replaced_before_ready() {
+        // Issue #4199: the subject is the fence verdict for a dead owner, and
+        // reaching it costs two fsync-backed atomic writes. Under the default
+        // 250 ms budget a saturated CI host expired the transaction, and an
+        // expired attempt against a *retained* fence is reported as terminal
+        // recovery-blocked — so the runner, not the fence, decided this
+        // assertion (Issue #3641 / #4033 / #4096).
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(
