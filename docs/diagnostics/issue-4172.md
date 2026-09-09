@@ -228,3 +228,33 @@ PM Board `3231fce0-0970-427c-afd6-928c49228684` により、AC-4の次の調査�
 shell枚数については「今回のfresh HOME条件では相関を認めない」と記録し、あらゆる実運用条件で無関係と断定しない。
 実運用状態のコピーを冷起動すると既存worktreeのhook self-heal等が走るため、HOME隔離だけで無変更は保証できない。
 追加比較は、セッション復元を避ける安全な採取方法の確定から引き継ぐ。
+
+### 実運用データ量の読み取り集計（23:06 JST）
+
+実USERPROFILEの `.gwt/projects/99a8660247f5bc49` には以下のデータが存在した。
+本文・秘密情報は採取資料に含めず、原本の変更・コピー・GUI再起動を行っていない。
+
+| 保存先 | 件数 | bytes |
+| --- | --- | ---: |
+| `project-state/works.json` | 保存Work 254件 | 3,383,335 |
+| `project-state/current.json` | — | 15,219 |
+| `project-state/journal.jsonl` | 257行 | 132,045 |
+| `coordination/board.latest.json` | hot 500件 / total 1,680件 | 698,473 |
+| `coordination/events.manifest.json` | 1ファイル | 528 |
+| `coordination/events/*` | 1ファイル | 1,992,612 |
+| `.gwt/logs/errors/errors.*.jsonl`（HOME共通） | 10ファイル / 1,122行 | 644,912 |
+
+`ffa30e30ecb522d5` にはlogs/runtimeのみがあり、project-state/coordinationはない。
+実運用ログのhashとWork保存先のhashを混同しない。保存Work総数254は、grouping後の
+hook health対象行数 `work_count` と同じとは限らない。
+
+コード上、`error_ledger.rs:198` は保持日数外を含む全ledgerファイルを読み、JSON parse後に日時で絞る。
+`health.rs:282` はWork別healthごとにこの読取を呼ぶため、同じledgerの読取・parseが繰り返される。
+ただし、このデータ量だけから27秒の原因だとは結論しない。各呼出しの所要時間は未採取である。
+
+再現用のコピー候補は上記project-state/Board/ledgerのみで、sessions、workspace、PM registration、
+execution/trusted情報、runtime状態、lock/transaction、旧work-eventsは移送しない。
+PM自動起動は隔離先 `project-state/pm.json` の `settings.auto_start=false` で抑止できる。
+startup後にBoard latestを変更するとwatcherが投影を起動するが、handlerにはmilestone transactionがあり、
+現在checkoutのrepo-local Work eventへ書く可能性が残る。
+したがって、実行前にその書込先も隔離できることを確認する必要がある。この後注入案は未実行である。
