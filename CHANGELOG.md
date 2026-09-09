@@ -1,6 +1,81 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.93.1] - 2026-09-08
+
+### Bug Fixes
+
+- **issue-cache:** Full refresh の停止を Monitor scan が解消し失敗を errors.list に記録する
+- **index:** Issues index の source cache drift を corrupt ではなく stale に分類する
+- **issue-monitor:** Agent Settings の agent 切替を候補プール index 0 に反映し、profiles.set の省略フィールド継承を追加
+- **agent:** Codex 起動から削除済み feature flag goals を除去
+- **index:** インデックスジョブが host 検証 lease を占有し続けないよう協調 yield を追加
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4087 の Work event shard を記録
+- **work:** Issue #4079 の Work event shard を追加
+- **work:** Issue #4079 の Work を done で終端する
+- **work:** Work イベント shard を追跡
+- **work:** Work イベント shard を追跡
+- **work:** Work 終端更新の receipt を記録
+- **work:** Issue #4140 の Work event shard を記録
+- **work:** Issue #4140 の Work event shard を追加記録
+- **work:** Issue #4140 の Work event shard を追加記録
+
+### Testing
+
+- **frontend:** Pool impact contract test を frontend unit テスト一覧に追加
+- **playwright:** Agent Settings の候補プール影響ノートの headed E2E を追加
+- **issue-cache:** Full refresh 失敗 ledger の期待 stage 名を REST 版に合わせる
+- **index:** Lease 解放と yield 理由の書き込み順に依存しないよう待機する
+
+## [9.93.0] - 2026-09-08
+
+### Bug Fixes
+
+- **gui:** Windowize した agent を他 Issue の canvas face にしない
+- **issue-monitor:** Launch_now が backoff window を返し verify.run が GWT_ALLOW_REAL_GH を子に渡さない
+- **github:** HttpIssueClient の budget 接続を本番コンストラクタの opt-in にしテスト fixture を hermetic に保つ
+- **execution:** Receipt generation gate に担当が回復できる経路を追加する
+- **agent:** Bunx cache fast path がネイティブ bin を bun に渡す問題を修正 (#3857)
+- **issue-monitor:** レビュー dispatch に admission を入れ同一 PR の重複起動と max_active 超過を防ぐ
+- **issue-monitor:** Wait 宣言の publish をベストエフォート化し宣言を durable に記録する
+- **verify:** Windows で verify.lease.hold が親 stdio を継承しないようにする
+
+### Features
+
+- **gui:** Issue ウィンドウにリスト⇄分割表示と Issue 窓 chrome を実装する
+- **issue-monitor:** Merged PR reconciliation を REST 差分同期に置き換え GraphQL 全件取得を廃止する
+- **issue-monitor:** Issue list と open PR inventory を REST のページ読みへ移し GraphQL 予算 0 でも scan を完走させる
+- **github-budget:** Refresh:true の予算尊重・[github_budget] settings・GraphQL ポイント会計を追加する
+- **issue-monitor:** Completion probe の linked PR 読みを scan ごとの bulk GraphQL query に置き換える
+- **github-budget:** Reqwest 経路と agent の gh を単一台帳に収束し変化ゼロの PM 周回を park する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4082 の Work event shard を記録する
+- **merge:** Develop 取り込み後の PrCommand::List literal に force_reason を補う
+- **merge:** PrCommand::List literal の force_reason 重複を除去する
+- Clippy cmp_owned を native entrypoint テストで解消 (#3857)
+- **work:** Record issue 3857 work events
+- **ci:** Rerun after flaky lease admission test (#3937)
+- **work:** Issue #4091 の Work event shard を追跡に追加
+- **work:** Issue #4091 の終端 Work update で生成された event shard を追跡に追加
+- **work:** #4117 の Work event shard を追跡する
+- **work:** #4011 の Work event receipt を記録する
+- Rustfmt を適用する
+- Runtime が生成した Work event shard を取り込む
+- 終端の Work update event shard を取り込む
+- **work:** 終端 Work event shard を取り込み直すため一旦外す
+- **work:** 終端 Work update の event shard を取り込む
+- **work:** Issue #4105 の Work 完了イベントを記録
+
+### Testing
+
+- **issue-monitor:** GraphQL window 中も merge reconciliation が REST で完走する期待値に更新する
+- **app-runtime:** Fake gh の merge 応答モードを REST closed-pulls 同期に対応させる
+
 ## [9.92.0] - 2026-09-07
 
 ### Bug Fixes

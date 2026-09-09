@@ -151,6 +151,8 @@ pub struct Settings {
     pub usage: UsageConfig,
     /// Embedded browser server configuration (SPEC-3287).
     pub server: ServerConfig,
+    /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
+    pub github_budget: crate::GitHubBudgetConfig,
 }
 
 impl Default for Settings {
@@ -173,6 +175,7 @@ impl Default for Settings {
             board: BoardConfig::default(),
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
+            github_budget: crate::GitHubBudgetConfig::default(),
         }
     }
 }

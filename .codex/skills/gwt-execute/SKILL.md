@@ -71,10 +71,17 @@ non-empty `params.reason`. Reopen requires the exact immutable derived-plan
 snapshot, fresh passing evidence that started after the block, the same
 session/owner/worktree fingerprint, and valid integrity hashes. It appends a
 recovery audit entry and returns the execution to Active; it does not claim
-completion. Completed executions remain immutable. Another session must use
-audited `execution.adopt` only while the record is Active. Blocked and
-Completed records are terminal and cannot be adopted; another session must
-use a fresh linked-owner launch.
+completion. Completed executions remain immutable.
+
+When a worktree inherits a terminal Blocked record from a Session that is gone
+— the startup reaper settles a defunct generation, and the relaunch lands in
+the same worktree — the relaunched Session takes the record over with audited
+`execution.adopt` first. Adoption transfers ownership without changing the
+lifecycle, so the record stays Blocked and the same-session route above
+(`verify.plan` `params.derive:true`, `verify.run`, `execution.reopen`) then
+applies. Adoption is refused while the previous holder Session is still
+running. Completed records are never adopted; another session must use a fresh
+linked-owner launch.
 
 Completion and Ready PR handoffs consume tool-generated verification
 evidence (SPEC-3248 P8b): run the verification matrix through JSON operation
