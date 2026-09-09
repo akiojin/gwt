@@ -141,8 +141,12 @@ body cannot hold `plan` / `tasks` sections.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the inbox rows (state, `blocked_by_owner`,
+  `blocked_by_claim_id`, `claim_expires_at`, `exclusion_reason`,
   `launched_window_id`, `error_message`), and `last_error`. That
-  snapshot is your source of truth.
+  snapshot is your source of truth. A row held out of the queue by
+  another Monitor's claim says so in `exclusion_reason` and names the
+  deadline in `claim_expires_at` — read those before concluding that a
+  queued-looking Issue is simply waiting its turn.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
@@ -180,6 +184,13 @@ body cannot hold `plan` / `tasks` sections.
   usage threshold apply), so a held provider never stalls the queue while
   another candidate exists. Prefer adding a candidate over stopping the
   Monitor when one provider hits its limit.
+  An element that names only `agent_id` keeps the settings already saved for
+  that provider (model / reasoning / version / permissions / Docker / shell),
+  so a plain reorder changes nothing else; a provider that is new to the pool
+  inherits the saved head's `skip_permissions`, `docker_lifecycle_intent`,
+  `windows_shell` and `runtime_target`. Write a field explicitly (`"model":
+  null`, `"prefer_for": []`) to clear it. The reply's `changes` list names
+  every omitted field that was inherited or reset (Issue #4079).
 
 ## Observing the running agents
 
@@ -664,6 +675,22 @@ quota:
   refusal in a row (1 → 2 → 4 → 8 minutes, capped at 15) and no gwt
   process issues GraphQL calls inside it; wait for `backoff_until`
   instead of retrying.
+- `issue.monitor.status` also carries `disk_space`: the volumes the
+  worktrees and the verification coordinator live on, and a `warning`
+  once one falls below 20 GiB or 5% free. A full host stops every
+  `verify.run` on it at once (`No space left on device`), so treat the
+  warning as a fleet blocker, not a per-Issue one. Reclaim with JSON
+  operation `worktree.gc_build_artifacts`: the default call is a dry run
+  listing the `target/` caches of merged, idle worktrees with their
+  sizes and every kept worktree with its reason; rerun with
+  `dry_run:false` to delete. Never pass `include_unmerged:true` on your
+  own — an unmerged worktree is someone's uncommitted build state; ask
+  the owner first. `include_protected_workspaces:true` reclaims the
+  shared `develop` / `main` workspaces, which are the single largest
+  caches on the host; it is the right call only once the host is tight
+  enough that the rebuild the next opener pays is worth it. Running
+  worktrees are excluded by the operation itself, so it is safe to run
+  while agents are active.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -690,10 +717,11 @@ quota:
 - `owner_issue` names the Issue a relaunch or triage would target (the
   first closing Issue, else the Issue on the head's launch ref).
 - When `default_action_executable` is false the Issue Monitor cannot
-  perform the default action and `blocker` says why:
-  `owner_relaunch_refused_unique_commits` (the PR's commits sit on the
-  owner's launch ref, so a fresh launch would be refused to preserve
-  them), `owner_unknown` (no closing Issue), or `owner_issue_closed`.
+  perform the default action and `blocker` says why: `owner_unknown`
+  (no closing Issue and no launch ref naming one) or
+  `owner_issue_closed`. A head sitting on the owner's own launch ref is
+  no longer a blocker — since #4074 a relaunch inherits that branch and
+  its commits instead of being refused, so relaunch the owner.
   Do not retry the default action. The row's `fallback` fixes the
   order you take instead: triage the CI failure or conflict yourself
   (the triage procedure is #3790's, not yours to redefine), arrange a
@@ -724,6 +752,53 @@ quota:
   notes, and judge recovery only by a real operation succeeding on a
   later cycle — never by `gh api rate_limit`, which reports remaining
   budget while a secondary limit still refuses every call.
+
+## Unlanded branch stocktake
+
+`pr.list` also answers `unlanded_branches`: every remote `work/issue-*`
+branch with commits `origin/develop` does not have and no open PR
+carrying them. Each row names the `branch`, its `owner_issue`, how many
+commits it is `ahead`, and its `last_commit_at`. It is read from local
+refs, so it costs no GitHub budget and stays truthful even when the PR
+rows came from cache. `unlanded_branch_count` is the row count.
+
+- Read it every cycle. A row is committed work with nothing carrying it
+  to `develop` — #3551 sat unlanded for ten days because no open PR
+  mentioned it and nothing else looked.
+- Resolve each row one of two ways: relaunch the owner Issue so the work
+  reaches a PR, or rule the branch archived and say so in the digest. A
+  row that survives a cycle unaddressed is an escalation, never part of
+  a silent no-change cycle.
+- Order the triage by `last_commit_at`: the inventory already puts the
+  longest residue first.
+
+## Terminal executions never justify a successor Issue
+
+An execution generation goes terminal through four routes: the agent's
+own `execution.complete` (Completed), its `execution.blocked` (Blocked),
+the startup / scan reaper terminalizing a dead holder's Active
+generation (Blocked), and a `build.complete` that settles the Work while
+its own execution settlement fails. All four are normal end states.
+
+None of them is a reason to register a `【#N 後継】` Issue. A terminal
+record releases to a successor generation on the *same* Issue and the
+*same* `work/issue-N` branch:
+
+- Completed and Blocked predecessors both release on the next linked-
+  owner launch — `issue.monitor.requeue` the row and let the Monitor
+  launch it.
+- Since #4074 a launch ref carrying unique commits is inherited rather
+  than refused, so pushed work no longer forces `needs_human` and no
+  longer needs a new Issue number to escape it. The only refusal left is
+  a worktree still held by a live Session; steer or stop that Session
+  instead.
+- A Blocked execution that is waiting on another Issue stays held until
+  that dependency merges. Do not create the successor early — requeue
+  the same Issue once the dependency lands.
+
+Register a new Issue only when the *work* is new: a different scope, a
+follow-up the owner Issue explicitly deferred, or a defect the owner
+never covered. "The record went terminal" is not new work.
 
 ## Interrupted release check
 
@@ -780,6 +855,14 @@ Board naming the holder. Your part:
 - A Board post from a waiting agent names the lease holder. Read
   `verify.lease.status` and arbitrate the order — tell the holder to
   release or the waiter to keep waiting — instead of relaunching either.
+- `verify.lease.status` names `holder_kind`. When it is `index` (a
+  background `chroma_index_runner` job, Issue #4086), verification
+  already outranks it: a refused agent leaves a reservation the runner
+  yields to at its next batch boundary, and `estimated_remaining_ms` /
+  `remaining_batches` say how long that is. To force the order yourself,
+  run `verify.lease.release` with the index lease's `lease_id`: it answers
+  `yield requested` and leaves the same reservation instead of failing
+  with "no control channel".
 - An agent whose `current_focus` says it is waiting for the lease, or
   whose row carries a `waiting` declaration, is waiting, not stuck. Do
   not stop it on `last_activity_at` alone.
@@ -1428,6 +1511,36 @@ mod tests {
         );
     }
 
+    /// Issue #4074 AC-4 / AC-5: the PM reads the unlanded-branch stocktake
+    /// every cycle, and a terminal execution record never becomes a reason to
+    /// register a successor Issue.
+    #[test]
+    fn contract_covers_the_unlanded_stocktake_and_forbids_successor_issues() {
+        let body = body();
+        for phrase in [
+            "`unlanded_branches`",
+            "`unlanded_branch_count`",
+            "`last_commit_at`",
+            "costs no GitHub budget",
+            "relaunch the owner Issue so the work reaches a PR, or rule the branch archived",
+            "A row that survives a cycle unaddressed is an escalation",
+            "## Terminal executions never justify a successor Issue",
+            "`execution.complete` (Completed)",
+            "`execution.blocked` (Blocked)",
+            "reaper terminalizing a dead holder's Active",
+            "`build.complete` that settles the Work while",
+            "`【#N 後継】`",
+            "the *same* Issue and the",
+            "`issue.monitor.requeue` the row and let the Monitor",
+            "a launch ref carrying unique commits is inherited rather",
+            "a worktree still held by a live Session",
+            "Do not create the successor early",
+            "\"The record went terminal\" is not new work.",
+        ] {
+            assert!(body.contains(phrase), "PM contract is missing: {phrase}");
+        }
+    }
+
     /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
     /// the resident PM's conversational turn. The detailed contract belongs in
     /// one section so the compact wake/Stop reminder cannot become an
@@ -1568,7 +1681,7 @@ mod tests {
         for phrase in [
             "`default_action_executable` is false",
             "`blocker`",
-            "`owner_relaunch_refused_unique_commits`",
+            "`owner_unknown`",
             "triage the CI failure or conflict yourself",
             "arrange a rerun when it is a flake",
             "arrange a fresh launch when it is a regression",
@@ -1657,6 +1770,23 @@ mod tests {
             "`backoff_until`",
             "`sources_last_minute`",
             "capped at 15",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #4009 AC-4: the disk-space warning and the reclaim operation are
+    /// named where the PM reads the queue, so a filling host is acted on
+    /// before every `verify.run` on it fails.
+    #[test]
+    fn contract_points_the_pm_at_disk_space_and_the_reclaim_operation() {
+        let body = body();
+        for phrase in [
+            "`disk_space`",
+            "`worktree.gc_build_artifacts`",
+            "`dry_run:false`",
+            "`include_unmerged:true`",
+            "`include_protected_workspaces:true`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

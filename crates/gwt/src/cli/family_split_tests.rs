@@ -49,6 +49,7 @@ fn cli_command_family_split_round_trip_parses() {
             escalate_after_cycles: None,
             refresh: false,
             include: None,
+            force_reason: None,
         })
     );
 

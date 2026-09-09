@@ -21,8 +21,8 @@ use gwt_core::index::broker::{
     RefreshScope, RefreshTarget, RefreshTargetState, REFRESH_INTENT_PROTOCOL_VERSION,
 };
 use gwt_core::index_coordinator::{
-    IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind, OwnerIdentity,
-    TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
+    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind,
+    OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
 };
 
 const POLL: Duration = Duration::from_millis(25);
@@ -206,6 +206,41 @@ fn run_helper_role(role: &str) {
             poll_until(Duration::from_secs(20), || signal.exists());
             drop(waiter);
             write_result("departed");
+        }
+        "issues-index-hold-heavy" => {
+            // Issue #4140: the issues index job holds the host-wide heavy
+            // lease for the whole runner child. It must hand the lease back
+            // as soon as a verification claimant queues behind it, or once
+            // its hold cap lapses — whichever comes first — while its own
+            // job keeps running.
+            let key = target_from_env();
+            let ttl = Duration::from_millis(required_env_u64("GWT_COORD_TTL_MS"));
+            let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
+            let stop = PathBuf::from(required_env("GWT_COORD_SIGNAL"));
+            let admission = coordinator
+                .request_job(&key, JobPriority::Background, Duration::from_secs(20))
+                .expect("helper: request issues index job");
+            let guard = expect_owner(admission);
+            let heavy = guard
+                .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
+                .expect("helper: acquire issues index heavy lease");
+            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            let yielded = heavy.hold_while(Duration::from_millis(25), || !stop.exists());
+            // Best-effort: a parent that already failed takes its arena with
+            // it, and a helper that panics on the missing file would bury the
+            // parent's diagnosis under its own.
+            let _ = fs::write(
+                PathBuf::from(required_env("GWT_COORD_RESULT")),
+                match yielded {
+                    Some(reason) => reason.as_str(),
+                    None => "job-finished",
+                },
+            );
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !stop.exists() && Instant::now() < deadline {
+                std::thread::sleep(POLL);
+            }
+            let _ = guard.complete(JobOutcome::Completed);
         }
         "hold-heavy-and-park" => {
             let key = target_from_env();
@@ -829,6 +864,129 @@ fn killed_verification_owner_releases_lease_before_ttl_expiry() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #4140: a background index job must not starve heavy verification
+// ---------------------------------------------------------------------------
+
+/// How long a verification claimant may wait behind a running index job
+/// before the wait is treated as starvation. The reported failure had a
+/// 30-minute hold with no yield at all; anything inside this budget is a
+/// handover, not a stall.
+const VERIFICATION_HANDOVER_BUDGET: Duration = Duration::from_secs(20);
+
+/// AC-2 / AC-5: while the issues index job runs, a `verify.run`-shaped
+/// claimant must get the host-wide lease within a bounded time — the index
+/// job hands it back instead of finishing first.
+#[test]
+fn issues_index_job_yields_the_heavy_lease_to_a_waiting_verification_run() {
+    let arena = TestArena::new();
+    let ready = arena.path("issues-index-ready");
+    let stop = arena.path("issues-index-stop");
+    let result = arena.path("issues-index-result");
+
+    let holder = spawn_helper(
+        "issues-index",
+        &[
+            ("GWT_COORD_ROLE", "issues-index-hold-heavy".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_TARGET", "repo-a|issues|".to_string()),
+            // Far beyond this test: only preemption can hand the lease over,
+            // so a pass cannot be the hold cap firing by accident.
+            ("GWT_COORD_TTL_MS", "600000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+            ("GWT_COORD_SIGNAL", stop.to_string_lossy().into_owned()),
+            ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::verification("repo-a", "wt-1");
+    let guard = match coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
+        .expect("request verification job")
+    {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("the index job must not own the verification target"),
+    };
+    let started = Instant::now();
+    let lease = guard
+        .acquire_heavy_with_ttl(VERIFICATION_HANDOVER_BUDGET, Duration::from_secs(60))
+        .unwrap_or_else(|err| {
+            let _ = fs::write(&stop, b"stop");
+            panic!(
+                "a running index job must hand the heavy lease to verification within {:?}: {err}",
+                VERIFICATION_HANDOVER_BUDGET
+            )
+        });
+    let waited = started.elapsed();
+
+    // The index job is still running: it released the lease rather than
+    // finishing, which is the whole point of the yield.
+    assert!(!stop.exists(), "the index job must still be running");
+    // The lease is released before the reason is written, so the winner can
+    // be here first; the reason is what the assertion is about, not the
+    // ordering of two independent writes.
+    wait_for_file(&result, Duration::from_secs(10));
+    assert_eq!(
+        fs::read_to_string(&result).unwrap_or_default(),
+        HeavyYieldReason::Preempted.as_str(),
+        "the index job must record that it was preempted after waiting {waited:?}"
+    );
+
+    lease.release().expect("release verification lease");
+    guard
+        .complete(JobOutcome::Completed)
+        .expect("complete verification job");
+    fs::write(&stop, b"stop").expect("signal the index job to finish");
+    wait_success(holder, Duration::from_secs(30));
+}
+
+/// AC-1: with nobody queued behind it, the index job still may not hold the
+/// host lease indefinitely — the hold cap bounds it and it hands the lease
+/// back while its own job keeps running.
+#[test]
+fn issues_index_job_releases_the_heavy_lease_when_its_hold_cap_lapses() {
+    let arena = TestArena::new();
+    let ready = arena.path("issues-index-ready");
+    let stop = arena.path("issues-index-stop");
+    let result = arena.path("issues-index-result");
+
+    let holder = spawn_helper(
+        "issues-index-capped",
+        &[
+            ("GWT_COORD_ROLE", "issues-index-hold-heavy".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_TARGET", "repo-a|issues|".to_string()),
+            ("GWT_COORD_TTL_MS", "1000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+            ("GWT_COORD_SIGNAL", stop.to_string_lossy().into_owned()),
+            ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    poll_until(Duration::from_secs(30), || {
+        !coordinator
+            .heavy_lease_status()
+            .expect("read heavy lease status")
+            .held
+    });
+    assert!(
+        !stop.exists(),
+        "the cap must fire while the index job is still running"
+    );
+    wait_for_file(&result, Duration::from_secs(10));
+    assert_eq!(
+        fs::read_to_string(&result).unwrap_or_default(),
+        HeavyYieldReason::CapReached.as_str(),
+    );
+
+    fs::write(&stop, b"stop").expect("signal the index job to finish");
+    wait_success(holder, Duration::from_secs(30));
+}
+
+// ---------------------------------------------------------------------------
 // T-IDX-383: fault injection (owner kill / stale ticket / crash before spawn
 // / PID reuse)
 // ---------------------------------------------------------------------------
@@ -1439,4 +1597,102 @@ fn refresh_broker_promotes_priority_while_inspect_remains_read_only() {
             .is_none(),
         "inspect and promotion must not bypass another target's quiet period"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4086 AC-5: the #4071 chronology — index-issues, then files-docs, then
+// index-issues again claim the heavy lease back to back — must admit a
+// verification claimant that was refused once before the second index job.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refused_verification_is_admitted_before_the_next_background_index_job() {
+    use gwt_core::index_coordinator::{CoordinatorError, VERIFICATION_RESERVATION_TTL};
+
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let non_blocking = Duration::from_millis(250);
+    let index_wait = Duration::from_millis(400);
+
+    let own = |key: &TargetKey, priority: JobPriority| match coordinator
+        .request_job(key, priority, Duration::from_secs(5))
+        .expect("request job")
+    {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("{} must be free", key.file_stem()),
+    };
+
+    // 02:26Z — index-issues (background, full) takes the heavy lease.
+    let issues_key = TargetKey::repo_shared("99a8660247f5bc49", "issues");
+    let index_issues = own(&issues_key, JobPriority::Background);
+    let issues_lease = index_issues
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("first index job owns an idle host");
+
+    // The agent's `verify.lease.acquire` is refused (non-blocking) and leaves
+    // its intent behind as a reservation instead of vanishing.
+    let verify_key = TargetKey::verification("99a8660247f5bc49", "0bdb8556929a0889");
+    let verify = own(&verify_key, JobPriority::ManualRebuild);
+    match verify.acquire_heavy_with_ttl(non_blocking, Duration::from_secs(600)) {
+        Err(CoordinatorError::Timeout { .. }) => {}
+        Ok(_) => panic!("verification must be refused while the index runs"),
+        Err(err) => panic!("unexpected coordinator error: {err}"),
+    }
+    coordinator
+        .reserve_heavy(
+            &verify_key,
+            JobPriority::ManualRebuild,
+            VERIFICATION_RESERVATION_TTL,
+            Some("Issue 4071 verify"),
+        )
+        .expect("reserve");
+
+    // 02:50Z — index-issues completes and the host immediately queues
+    // files-docs. Before this fix it won the lease here.
+    drop(issues_lease);
+    index_issues.complete(JobOutcome::Completed).unwrap();
+    let docs_key = TargetKey::worktree("99a8660247f5bc49", "files-docs", "0bdb8556929a0889");
+    let files_docs = own(&docs_key, JobPriority::Background);
+    match files_docs.acquire_heavy(index_wait) {
+        Err(CoordinatorError::Timeout { .. }) => {}
+        Ok(_) => panic!("files-docs must defer to the reserved verification"),
+        Err(err) => panic!("unexpected coordinator error: {err}"),
+    }
+
+    // The agent's next retry (3 minutes later in production) is admitted.
+    let verify_lease = verify
+        .acquire_heavy_with_ttl(non_blocking, Duration::from_secs(600))
+        .expect("verification wins the freed lease");
+    let status = coordinator.heavy_lease_status().unwrap();
+    assert_eq!(
+        status.pending, 0,
+        "the granted verification consumes its own reservation"
+    );
+    assert_eq!(
+        status.target.as_deref(),
+        Some(verify_key.file_stem().as_str())
+    );
+
+    // Only once verification is done do the queued index jobs run, in order.
+    match files_docs.acquire_heavy(index_wait) {
+        Err(CoordinatorError::Timeout { .. }) => {}
+        Ok(_) => panic!("index jobs stay excluded while verification holds"),
+        Err(err) => panic!("unexpected coordinator error: {err}"),
+    }
+    drop(verify_lease);
+    verify.complete(JobOutcome::Completed).unwrap();
+
+    let docs_lease = files_docs
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("files-docs resumes after verification");
+    drop(docs_lease);
+    files_docs.complete(JobOutcome::Completed).unwrap();
+
+    // 03:03Z — the second index-issues (full) is now unobstructed.
+    let index_issues = own(&issues_key, JobPriority::Background);
+    let issues_lease = index_issues
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("second index job runs once nothing is reserved");
+    drop(issues_lease);
+    index_issues.complete(JobOutcome::Completed).unwrap();
 }

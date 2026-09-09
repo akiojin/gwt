@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod daemon_pipe_name;
 pub mod error;
 pub mod error_ledger;
+pub mod fd_limit;
 pub mod github_budget;
 pub mod github_quota;
 pub mod index;
