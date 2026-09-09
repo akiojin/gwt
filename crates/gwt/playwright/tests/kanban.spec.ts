@@ -343,9 +343,11 @@ test.describe("Issue Bridge load recovery", () => {
     const blackout = issueSurface.locator(".knowledge-monitor-blackout");
     await expect(blackout).toBeVisible();
     await expect(blackout).toContainText("the fleet has been down since");
-    // The per-issue failure keeps its own line; the outage must not be masked.
-    await expect(issueSurface.locator(".knowledge-monitor-error")).toContainText(
-      "#3098",
+    // FR-017: the per-issue failure is read in the notification center, not
+    // here. The outage renders anyway — it must not be masked by whichever
+    // launch happened to occupy `last_error` first.
+    await expect(issueSurface.locator(".knowledge-monitor-error")).toHaveCount(
+      0,
     );
 
     // A queued row has no failure hold to release, so it must not offer the
