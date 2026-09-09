@@ -3419,6 +3419,9 @@ mod tests {
             .status()
             .expect("initialize branch")
             .success());
+        // Match the transaction's Git-resolved root representation on Windows;
+        // canonicalize alone uses a verbatim path that Git does not return.
+        let repo = gwt_core::paths::resolve_current_worktree_root(&repo);
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));

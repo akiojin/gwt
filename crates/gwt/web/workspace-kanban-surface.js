@@ -1850,11 +1850,13 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Linked Work", (body) => {
+        const prMeta = createWorkspacePrMeta?.(workspace);
         appendDefinitionList(body, [
           ["Owner", workspace.owner],
-          ["PR", workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
-          ["PR state", workspace.pr_state],
+          ["PR", !prMeta && workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
+          ["PR state", prMeta ? "" : workspace.pr_state],
         ]);
+        if (prMeta) body.appendChild(prMeta);
         const hadBoardRefs = appendBoardDiagnostics(body, boardDiagnosticRefs(workspace));
         if (!workspace.owner && !workspace.pr_number && !workspace.pr_state && !hadBoardRefs) {
           body.appendChild(createNode("div", "workspace-overview-empty", "No linked work"));

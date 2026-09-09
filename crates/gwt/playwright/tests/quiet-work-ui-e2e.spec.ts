@@ -39,6 +39,27 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     );
   });
 
+  test("Linked Work displays the Work PR link and state", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(liveUrl || APP_URL);
+
+    const linkedWork = page.locator(".workspace-detail-section").filter({
+      has: page.locator(".workspace-detail-section-title", { hasText: "Linked Work" }),
+    });
+    const prLink = linkedWork.getByRole("link", { name: "PR #2856", exact: true });
+    await expect(prLink).toBeVisible();
+    await expect(prLink).toHaveAttribute("href", "https://github.com/akiojin/gwt/pull/2856");
+    await expect(linkedWork).toContainText("open");
+    expect(errors).toEqual([]);
+  });
+
   test("Workspace detail renders Work → Session with the active conversation highlighted", async ({
     page,
   }) => {
@@ -451,6 +472,7 @@ async function installBackend(
             branch: "work/20260521-0234",
             worktree_path: "/repo/work/20260521-0234",
             pr_number: 2856,
+            pr_url: "https://github.com/akiojin/gwt/pull/2856",
             pr_state: "open",
             board_refs: ["board-claim-1", "board-status-2", "board-decision-3"],
             agents: [activeAgent],
