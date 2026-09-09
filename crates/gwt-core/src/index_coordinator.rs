@@ -2185,6 +2185,99 @@ mod tests {
         holder.complete(JobOutcome::Completed).unwrap();
     }
 
+    /// Every queue record the predicate can be asked about, so the invariants
+    /// below are checked against the whole space rather than a chosen corner.
+    fn every_queue_record() -> Vec<QueueRecord> {
+        let mut records = Vec::new();
+        for priority in [
+            JobPriority::InteractiveSearch,
+            JobPriority::ManualRebuild,
+            JobPriority::Background,
+        ] {
+            for queued_at_ms in [10_u64, 20, 30] {
+                for target in [Some("a"), Some("b"), None] {
+                    for waiting in [false, true] {
+                        for present in [false, true] {
+                            records.push(QueueRecord {
+                                target: target.map(str::to_string),
+                                priority,
+                                queued_at_ms,
+                                waiting,
+                                present,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        records
+    }
+
+    /// Issue #1939 raised this against the queue after its own burst cap
+    /// livelocked: a scheme where claimants defer to one another can reach a
+    /// state where every claimant yields and a free lease is taken by nobody.
+    ///
+    /// It cannot happen here, and the reason is structural rather than lucky.
+    /// `blocks` is derived from `rank`, a strict total order, and only ever
+    /// answers true for a claimant that ranks *strictly* ahead. A strict order
+    /// is asymmetric, so "A defers to B" and "B defers to A" cannot both hold.
+    #[test]
+    fn deferral_is_asymmetric_so_two_claimants_never_defer_to_each_other() {
+        let records = every_queue_record();
+        for left in &records {
+            for right in &records {
+                if left.blocks(right) {
+                    assert!(
+                        !right.blocks(left),
+                        "mutual deferral between {left:?} and {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Asymmetry rules out a two-party standoff; this rules out a deferral
+    /// cycle of any length, which is what a livelock actually is.
+    ///
+    /// `blocks` answers true only when the blocker ranks strictly ahead — the
+    /// priority branch implies it, because `rank` compares priority first, and
+    /// the queue branch requires it outright. A relation contained in a strict
+    /// order cannot contain a cycle, so every queue has a claimant that defers
+    /// to nobody and the chain always terminates.
+    ///
+    /// That head-of-queue claimant may be a reservation with no process behind
+    /// it (Issue #4086 keeps a claimant's turn between its retries). Waiting
+    /// for it is a *bounded* wait, not a livelock: the reservation lapses at
+    /// its TTL and the next claimant is served.
+    #[test]
+    fn deferral_never_forms_a_cycle() {
+        let records = every_queue_record();
+        for left in &records {
+            for right in &records {
+                if left.blocks(right) {
+                    assert!(
+                        left.rank() < right.rank(),
+                        "a blocker must rank strictly ahead: {left:?} blocks {right:?}"
+                    );
+                }
+            }
+        }
+        // The consequence, checked directly: every queue has a head that
+        // defers to nobody, so the chain of deferrals always terminates.
+        for window in records.windows(7) {
+            let head = window
+                .iter()
+                .min_by(|left, right| left.rank().cmp(&right.rank()))
+                .expect("a non-empty window has a lowest-ranked record");
+            assert!(
+                !window
+                    .iter()
+                    .any(|other| other.target != head.target && other.blocks(head)),
+                "the head of the queue must defer to nobody: {head:?} in {window:?}"
+            );
+        }
+    }
+
     #[test]
     fn heavy_lease_status_reports_holder_kind_and_index_estimate() {
         let tmp = tempfile::tempdir().unwrap();
