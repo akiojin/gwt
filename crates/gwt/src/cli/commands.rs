@@ -40,6 +40,12 @@ pub enum IssueCommand {
         phase: Option<String>,
         state: Option<String>,
     },
+    /// Issue #4146: scan gwt-spec Issues and report the ones whose `tasks`
+    /// section carries task rows with no checkbox, the shape that read as
+    /// "all complete" before the completion accounting was fixed.
+    SpecAudit {
+        state: Option<String>,
+    },
     SpecCreate {
         title: String,
         file: String,
@@ -157,7 +163,9 @@ pub enum IssueCommand {
     /// and optionally the usage threshold.
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
-        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
+        /// saved candidate's value instead of resetting to `Default`.
+        profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
