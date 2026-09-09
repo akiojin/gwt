@@ -21,8 +21,9 @@ use gwt_core::index::broker::{
     RefreshScope, RefreshTarget, RefreshTargetState, REFRESH_INTENT_PROTOCOL_VERSION,
 };
 use gwt_core::index_coordinator::{
-    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind,
-    OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
+    CoordinatorError, HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority,
+    LeaseEventKind, OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
+    INTERACTIVE_SEARCH_ADMISSION_DEADLINE, MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS,
 };
 
 const POLL: Duration = Duration::from_millis(25);
@@ -257,6 +258,45 @@ fn run_helper_role(role: &str) {
             // kill: the kernel must auto-release both locks).
             std::thread::sleep(Duration::from_secs(60));
         }
+        "search-heavy" => {
+            // SPEC #1939 Phase 71 T-IDX-437 / FR-417: `search-multi` encodes a
+            // query with the same model, so it claims the same host-wide heavy
+            // lease as a build. Search owns no build target, so it takes the
+            // heavy lease directly rather than through a target job.
+            let key = search_target_from_env();
+            let hold = Duration::from_millis(required_env_u64("GWT_COORD_HOLD_MS"));
+            let ledger = PathBuf::from(required_env("GWT_COORD_LEDGER"));
+            let lease = coordinator
+                .acquire_interactive_search_heavy(&key, Duration::from_secs(20))
+                .expect("helper: acquire interactive search heavy lease");
+            locked_counter_add(&ledger, 1);
+            std::thread::sleep(hold);
+            locked_counter_add(&ledger, -1);
+            lease.release().expect("helper: release search heavy lease");
+            write_result("done");
+        }
+        "background-heavy-claim" => {
+            // A background continuation queued behind the heavy lease. It
+            // marks the instant it is granted so the parent can prove the
+            // interactive burst cap actually let it through (FR-418).
+            let key = target_from_env();
+            let hold = Duration::from_millis(required_env_u64("GWT_COORD_HOLD_MS"));
+            let granted = PathBuf::from(required_env("GWT_COORD_MARKER"));
+            let admission = coordinator
+                .request_job(&key, JobPriority::Background, Duration::from_secs(30))
+                .expect("helper: request background job");
+            let guard = expect_owner(admission);
+            let lease = guard
+                .acquire_heavy(Duration::from_secs(30))
+                .expect("helper: acquire background heavy lease");
+            fs::write(&granted, b"granted").expect("helper: write granted marker");
+            std::thread::sleep(hold);
+            lease.release().expect("helper: release background lease");
+            guard
+                .complete(JobOutcome::Completed)
+                .expect("helper: complete background job");
+            write_result("done");
+        }
         other => panic!("unknown helper role: {other}"),
     }
 }
@@ -279,6 +319,16 @@ fn target_from_env() -> TargetKey {
     } else {
         TargetKey::worktree(repo, scope, worktree)
     }
+}
+
+/// `GWT_COORD_SEARCH_TARGET` is `repo_hash|worktree_hash`; the scope is fixed
+/// by [`TargetKey::search`]. An empty worktree means a repo-shared search.
+fn search_target_from_env() -> TargetKey {
+    let raw = required_env("GWT_COORD_SEARCH_TARGET");
+    let mut parts = raw.split('|');
+    let repo = parts.next().expect("search repo");
+    let worktree = parts.next().unwrap_or("");
+    TargetKey::search(repo, (!worktree.is_empty()).then_some(worktree))
 }
 
 /// `GWT_COORD_VERIFY_TARGET` is `repo_hash|worktree_hash`; the scope is fixed
@@ -984,6 +1034,256 @@ fn issues_index_job_releases_the_heavy_lease_when_its_hold_cap_lapses() {
 
     fs::write(&stop, b"stop").expect("signal the index job to finish");
     wait_success(holder, Duration::from_secs(30));
+}
+
+// ---------------------------------------------------------------------------
+// SPEC #1939 Phase 71 T-IDX-436 / AS-30 / SC-065: search heavy admission
+// ---------------------------------------------------------------------------
+
+/// AS-30 / SC-065: "build と `search-multi` が同時に要求されても model load /
+/// document encode / query encode を行う logical runner tree は host 全体で
+/// 最大 1 本である". Query encoding loads the same model as a build, so a
+/// search claimant must serialize on the same host-wide ledger.
+#[test]
+fn concurrent_build_and_search_never_load_models_at_the_same_time() {
+    let arena = TestArena::new();
+    let ledger = arena.path("ledger.json");
+    let mut children = Vec::new();
+
+    for (label, target) in [
+        ("build-a", "repo-a|files|wt-1"),
+        ("build-b", "repo-a|issues|"),
+    ] {
+        children.push(spawn_helper(
+            label,
+            &[
+                ("GWT_COORD_ROLE", "heavy-job".to_string()),
+                arena.coord_env(),
+                ("GWT_COORD_TARGET", target.to_string()),
+                ("GWT_COORD_HOLD_MS", "250".to_string()),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+                (
+                    "GWT_COORD_RESULT",
+                    arena
+                        .path(&format!("result-{label}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        ));
+    }
+    for (label, target) in [("search-a", "repo-a|wt-1"), ("search-b", "repo-a|wt-2")] {
+        children.push(spawn_helper(
+            label,
+            &[
+                ("GWT_COORD_ROLE", "search-heavy".to_string()),
+                arena.coord_env(),
+                ("GWT_COORD_SEARCH_TARGET", target.to_string()),
+                ("GWT_COORD_HOLD_MS", "250".to_string()),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+                (
+                    "GWT_COORD_RESULT",
+                    arena
+                        .path(&format!("result-{label}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        ));
+    }
+
+    for child in children {
+        wait_success(child, Duration::from_secs(60));
+    }
+    for label in ["build-a", "build-b", "search-a", "search-b"] {
+        assert_eq!(
+            fs::read_to_string(arena.path(&format!("result-{label}"))).expect("read result"),
+            "done",
+            "claimant {label} must finish through the queued heavy lease"
+        );
+    }
+    let (current, max) = read_counter(&ledger);
+    assert_eq!(current, 0, "all heavy leases must be released");
+    assert_eq!(
+        max, 1,
+        "a query encode and a document build must never hold the heavy lease at once"
+    );
+}
+
+/// AS-30 / SC-065: "interactive search は最大 16 document 境界で background を
+/// yield させ" — a running background build must hand the lease to an
+/// interactive search inside the published admission deadline.
+#[test]
+fn background_index_job_yields_the_heavy_lease_to_an_interactive_search() {
+    let arena = TestArena::new();
+    let ready = arena.path("index-ready");
+    let stop = arena.path("index-stop");
+    let result = arena.path("index-result");
+
+    let holder = spawn_helper(
+        "background-index",
+        &[
+            ("GWT_COORD_ROLE", "issues-index-hold-heavy".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_TARGET", "repo-a|files|wt-1".to_string()),
+            // Far beyond this test: only preemption can hand the lease over,
+            // so a pass cannot be the hold cap firing by accident.
+            ("GWT_COORD_TTL_MS", "600000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+            ("GWT_COORD_SIGNAL", stop.to_string_lossy().into_owned()),
+            ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::search("repo-a", Some("wt-1"));
+    let started = Instant::now();
+    let lease = coordinator
+        .acquire_interactive_search_heavy(&key, INTERACTIVE_SEARCH_ADMISSION_DEADLINE)
+        .unwrap_or_else(|err| {
+            let _ = fs::write(&stop, b"stop");
+            panic!(
+                "a running background build must hand the heavy lease to an \
+                 interactive search within {INTERACTIVE_SEARCH_ADMISSION_DEADLINE:?}: {err}"
+            )
+        });
+    let waited = started.elapsed();
+
+    assert!(!stop.exists(), "the background build must still be running");
+    wait_for_file(&result, Duration::from_secs(10));
+    assert_eq!(
+        fs::read_to_string(&result).unwrap_or_default(),
+        HeavyYieldReason::Preempted.as_str(),
+        "the background build must record that an interactive search preempted \
+         it after waiting {waited:?}"
+    );
+
+    lease.release().expect("release search lease");
+    fs::write(&stop, b"stop").expect("signal the background build to finish");
+    wait_success(holder, Duration::from_secs(30));
+}
+
+/// AS-30 edge case: "interactive search が連続しても burst 上限後に background
+/// continuation へ slot を与え" — the interactive exemption is bounded, and a
+/// non-interactive grant resets it.
+#[test]
+fn interactive_heavy_burst_is_bounded_and_reset_by_a_background_grant() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::search("repo-a", Some("wt-1"));
+
+    assert!(
+        !coordinator
+            .interactive_burst_exhausted()
+            .expect("read burst state"),
+        "a fresh coordinator must not make the first search stand aside"
+    );
+
+    for grant in 1..=MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS {
+        coordinator
+            .acquire_interactive_search_heavy(&key, Duration::from_secs(5))
+            .unwrap_or_else(|err| panic!("interactive grant {grant} must be admitted: {err}"))
+            .release()
+            .expect("release search lease");
+    }
+    assert!(
+        coordinator
+            .interactive_burst_exhausted()
+            .expect("read burst state"),
+        "the interactive exemption must be spent after \
+         {MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS} consecutive grants"
+    );
+
+    let build_key = TargetKey::worktree("repo-a", "files", "wt-1");
+    let guard = expect_owner(
+        coordinator
+            .request_job(&build_key, JobPriority::Background, Duration::from_secs(5))
+            .expect("request background job"),
+    );
+    guard
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("background grant")
+        .release()
+        .expect("release background lease");
+    guard
+        .complete(JobOutcome::Completed)
+        .expect("complete background job");
+
+    assert!(
+        !coordinator
+            .interactive_burst_exhausted()
+            .expect("read burst state"),
+        "a background grant must restart the interactive burst budget"
+    );
+}
+
+/// AS-30 edge case, cross-process half: once the burst is spent, a queued
+/// background continuation gets the slot ahead of the next interactive search.
+#[test]
+fn spent_interactive_burst_lets_a_queued_background_job_in_first() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let search_key = TargetKey::search("repo-a", Some("wt-1"));
+
+    // Spend the burst while the lease is free.
+    for _ in 0..MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS {
+        coordinator
+            .acquire_interactive_search_heavy(&search_key, Duration::from_secs(5))
+            .expect("interactive grant inside the burst")
+            .release()
+            .expect("release search lease");
+    }
+
+    // Hold the lease so the background claimant queues instead of racing.
+    let held = coordinator
+        .acquire_interactive_search_heavy(&search_key, Duration::from_secs(5))
+        .expect("hold the lease while the background claimant queues");
+
+    let granted = arena.path("background-granted");
+    let background = spawn_helper(
+        "queued-background",
+        &[
+            ("GWT_COORD_ROLE", "background-heavy-claim".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_TARGET", "repo-a|files|wt-1".to_string()),
+            ("GWT_COORD_HOLD_MS", "1500".to_string()),
+            ("GWT_COORD_MARKER", granted.to_string_lossy().into_owned()),
+            (
+                "GWT_COORD_RESULT",
+                arena
+                    .path("result-background")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ],
+    );
+    poll_until(Duration::from_secs(30), || {
+        coordinator
+            .heavy_lease_status()
+            .expect("read heavy lease status")
+            .pending
+            >= 1
+    });
+
+    held.release().expect("release the held search lease");
+
+    // The burst is spent and a background continuation is queued, so the next
+    // interactive search must stand aside rather than jump the queue again.
+    let err = coordinator
+        .acquire_interactive_search_heavy(&search_key, Duration::from_millis(400))
+        .err()
+        .expect("interactive search must stand aside once its burst is spent");
+    assert!(
+        matches!(err, CoordinatorError::Timeout { .. }),
+        "standing aside must surface as an admission timeout, got {err:?}"
+    );
+    assert!(
+        granted.exists(),
+        "the queued background continuation must have taken the slot"
+    );
+
+    wait_success(background, Duration::from_secs(30));
 }
 
 // ---------------------------------------------------------------------------

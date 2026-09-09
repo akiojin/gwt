@@ -339,5 +339,153 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
         self.assertEqual(payload.get("indexed"), ISSUE_TOTAL, payload)
 
 
+V2_REPO_HASH = "19391939abcd1939"
+V2_WORKTREE_HASH = "aaaabbbbccccdddd"
+
+
+class FileIndexV2CooperativeYieldTests(unittest.TestCase):
+    """SPEC #1939 Phase 71 T-IDX-436 / AS-30 / FR-418.
+
+    The v2 canonical-base + worktree-overlay build is the path production
+    search actually uses (`--file-index-protocol v2`), so it is the path that
+    must checkpoint every 16 documents and hand the heavy lease back when an
+    interactive search queues behind it. The repo-scoped Embedding CAS is the
+    checkpoint: a yielded run leaves every vector it computed durably cached,
+    so the follow-up run resumes without re-embedding them and publishes no
+    partial view in between.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self.home = base / "home"
+        self.home.mkdir()
+        self.coordinator_root = base / "coordinator"
+        self.coordinator_root.mkdir()
+        self.db_root = self.home / ".gwt" / "index"
+        self.project_root = base / "project"
+        src = self.project_root / "src"
+        src.mkdir(parents=True)
+        for index in range(TOTAL_DOCS):
+            (src / f"module_{index:02}.rs").write_text(
+                f"//! module {index}\nfn feature_{index}() {{}}\n",
+                encoding="utf-8",
+            )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_v2(self) -> dict:
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env["USERPROFILE"] = str(self.home)
+        env["GWT_INDEX_FAKE_EMBEDDING"] = "1"
+        env["GWT_INDEX_COORDINATOR_ROOT"] = str(self.coordinator_root)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER_PATH),
+                "--action",
+                "index-files",
+                "--repo-hash",
+                V2_REPO_HASH,
+                "--worktree-hash",
+                V2_WORKTREE_HASH,
+                "--project-root",
+                str(self.project_root),
+                "--mode",
+                "full",
+                "--scope",
+                "files",
+                "--qos",
+                "background",
+                "--db-root",
+                str(self.db_root),
+                "--file-index-protocol",
+                "v2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"runner failed: stdout={proc.stdout!r} stderr={proc.stderr!r}",
+        )
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        self.assertTrue(lines, f"runner produced no stdout payload: {proc.stderr!r}")
+        return json.loads(lines[-1])
+
+    def _worktree_head(self) -> Path:
+        return (
+            runner.resolve_file_index_v2_root(V2_REPO_HASH, db_root=self.db_root)
+            / "worktrees"
+            / V2_WORKTREE_HASH
+            / "head.json"
+        )
+
+    def test_v2_build_yields_at_the_checkpoint_and_resumes_from_the_cas(self):
+        pending = _write_pending_claimant(self.coordinator_root, "interactive-search")
+
+        first = self._run_v2()
+        self.assertTrue(first.get("ok"), first)
+        self.assertTrue(
+            first.get("yielded"),
+            f"the v2 build must yield to a pending interactive search: {first}",
+        )
+        self.assertTrue(first.get("resumable"), first)
+        self.assertEqual(
+            first.get("computed_embeddings"),
+            CHECKPOINT_BATCH,
+            f"the yield must land on the 16-document checkpoint boundary: {first}",
+        )
+        self.assertFalse(
+            self._worktree_head().exists(),
+            "a yielded v2 build must not publish a partial worktree view",
+        )
+
+        # A second yielded run makes real forward progress: the first batch is
+        # served entirely from the CAS checkpoint, and only the next batch
+        # costs model work.
+        second = self._run_v2()
+        self.assertTrue(second.get("ok"), second)
+        self.assertTrue(second.get("yielded"), second)
+        self.assertEqual(
+            second.get("computed_embeddings"),
+            CHECKPOINT_BATCH,
+            f"a resumed yield must not re-embed the cached checkpoint: {second}",
+        )
+        self.assertEqual(
+            second.get("embedding_cache_hits"),
+            CHECKPOINT_BATCH,
+            f"the first batch must be served from the CAS checkpoint: {second}",
+        )
+
+        # 3. With the claimant gone the build finishes, embedding only the
+        #    documents no earlier run had reached.
+        pending.unlink()
+        final = self._run_v2()
+        self.assertTrue(final.get("ok"), final)
+        self.assertFalse(final.get("yielded"), final)
+        self.assertEqual(
+            final.get("computed_embeddings"),
+            TOTAL_DOCS - 2 * CHECKPOINT_BATCH,
+            f"the final run must only embed what no checkpoint had reached: {final}",
+        )
+        self.assertTrue(
+            self._worktree_head().exists(),
+            "a completed v2 build must publish the worktree view",
+        )
+
+    def test_v2_build_completes_without_pending_claimants(self):
+        payload = self._run_v2()
+        self.assertTrue(payload.get("ok"), payload)
+        self.assertFalse(payload.get("yielded"), payload)
+        self.assertEqual(payload.get("computed_embeddings"), TOTAL_DOCS, payload)
+        self.assertTrue(self._worktree_head().exists(), payload)
+
+
 if __name__ == "__main__":
     unittest.main()

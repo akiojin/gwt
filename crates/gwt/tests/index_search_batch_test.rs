@@ -158,6 +158,19 @@ case \"$*\" in\n\
 esac\n\
 printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
 
+/// Fake runner that snapshots the host-wide heavy ticket while it runs
+/// (SPEC #1939 Phase 71 FR-417). The runner *is* the model-loading process,
+/// so reading the ticket from inside it is the only way to prove the query
+/// encode was admitted rather than run unadmitted.
+const FAKE_RUNNER_RECORDS_HEAVY_TICKET: &str = "#!/bin/sh\n\
+echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
+case \"$*\" in\n\
+  *\"--action search-multi\"*)\n\
+    cat \"$HOME/.gwt/runtime/index-coordinator/heavy.ticket.json\" \
+> \"$GWT_FAKE_RUNNER_TICKET\" 2>/dev/null || : ;;\n\
+esac\n\
+printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
+
 fn setup_search_fixture(payload: &str) -> SearchFixture {
     setup_search_fixture_with_script(payload, FAKE_RUNNER_PASSTHROUGH)
 }
@@ -301,6 +314,48 @@ fn default_eight_scope_search_uses_one_batch_runner_process() {
     assert!(
         call.contains("--worktree-hash"),
         "file scopes require the worktree hash in the batch request: {call}"
+    );
+}
+
+/// SPEC #1939 Phase 71 T-IDX-436 / AS-30 / FR-417: the query encode is model
+/// work, so `search-multi` must run while this process holds the host-wide
+/// heavy lease at interactive priority. `search-multi` must not be the one
+/// exception to the "at most one model-loaded runner tree" rule.
+#[test]
+fn search_multi_runs_under_an_interactive_heavy_lease() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture =
+        setup_search_fixture_with_script(r#"{"ok": true}"#, FAKE_RUNNER_RECORDS_HEAVY_TICKET);
+    let ticket_path = fixture.repo.parent().expect("tmp root").join("ticket.json");
+    let _ticket_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_TICKET", &ticket_path);
+
+    gwt::search_project_index(
+        &fixture.repo,
+        "coordinator design",
+        &[],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect("batch search succeeds");
+
+    let raw = fs::read_to_string(&ticket_path).unwrap_or_else(|err| {
+        panic!("search-multi must run under a published heavy ticket: {err}")
+    });
+    let ticket: serde_json::Value =
+        serde_json::from_str(&raw).expect("heavy ticket must be valid json");
+    assert_eq!(
+        ticket["priority"].as_str(),
+        Some("interactive-search"),
+        "the query encode must be admitted at interactive priority: {ticket}"
+    );
+    let target = ticket["target"].as_str().unwrap_or_default();
+    assert!(
+        target.contains("--search"),
+        "the heavy ticket must name the search scope so the holder is \
+         recognizable in diagnostics: {ticket}"
     );
 }
 

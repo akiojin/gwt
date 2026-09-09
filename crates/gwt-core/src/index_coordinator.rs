@@ -38,7 +38,25 @@ pub const VERIFICATION_RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
 /// decides exclusion; the TTL makes a runaway runner visible as `expired` in
 /// status output instead of `expires_at_ms=unknown`.
 pub const INDEX_HEAVY_LEASE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+/// Scope reserved for interactive query encoding (SPEC #1939 Phase 71 FR-417).
+/// `search-multi` loads the same model as a build, so it is an ordinary
+/// claimant of the same host-wide heavy lease.
+pub const SEARCH_SCOPE: &str = "search";
+/// SC-065: how long an interactive search waits for the heavy lease before
+/// its admission is treated as a stall. A running background build yields at
+/// its 16-document checkpoint, so a handover fits well inside this budget;
+/// the search hard limit is 30 s, which leaves room for the query itself.
+pub const INTERACTIVE_SEARCH_ADMISSION_DEADLINE: Duration = Duration::from_secs(10);
+/// TTL horizon on an interactive search's heavy lease (FR-417). A query
+/// encode is short; the TTL only bounds how long crash residue can matter.
+pub const INTERACTIVE_SEARCH_HEAVY_TTL: Duration = Duration::from_secs(60);
+/// FR-418: consecutive interactive grants before a queued background
+/// continuation is let through. Without a cap, a busy search session would
+/// starve background index work indefinitely, because interactive claimants
+/// never defer.
+pub const MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS: u32 = 8;
 const HEAVY_PROGRESS_FILE: &str = "heavy.progress.json";
+const INTERACTIVE_BURST_FILE: &str = "heavy.burst.json";
 const RESERVATION_PREFIX: &str = "reservation-";
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
@@ -99,6 +117,20 @@ impl TargetKey {
 
     pub fn is_verification(&self) -> bool {
         self.scope == VERIFICATION_SCOPE
+    }
+
+    /// Target key for an interactive query encode (FR-417). The scope is
+    /// fixed so every search claimant is recognizable in the heavy ticket
+    /// regardless of which caller issued it.
+    pub fn search(repo_hash: impl Into<String>, worktree_hash: Option<&str>) -> Self {
+        match worktree_hash {
+            Some(worktree) => Self::worktree(repo_hash, SEARCH_SCOPE, worktree),
+            None => Self::repo_shared(repo_hash, SEARCH_SCOPE),
+        }
+    }
+
+    pub fn is_search(&self) -> bool {
+        self.scope == SEARCH_SCOPE
     }
 
     pub fn repo_hash(&self) -> &str {
@@ -649,6 +681,38 @@ impl IndexCoordinator {
         })
     }
 
+    /// Acquire the host-wide heavy lease for an interactive query encode
+    /// (FR-417). `search-multi` loads the same model as a build, so it must
+    /// not be an exception to the "at most one model-loaded runner tree"
+    /// rule (AS-30).
+    ///
+    /// Unlike a build, a search owns no target job: there is nothing to
+    /// coalesce two concurrent searches into, and each needs its own result.
+    /// It therefore takes only the heavy lease, which cannot violate the
+    /// target -> heavy lock order because it never takes a target lock.
+    ///
+    /// Registering as a pending interactive claimant is also what makes a
+    /// running background build hand the lease back at its next checkpoint.
+    pub fn acquire_interactive_search_heavy(
+        &self,
+        key: &TargetKey,
+        timeout: Duration,
+    ) -> Result<HeavyLease, CoordinatorError> {
+        acquire_heavy_at(
+            &self.root,
+            key,
+            JobPriority::InteractiveSearch,
+            timeout,
+            Some(INTERACTIVE_SEARCH_HEAVY_TTL),
+        )
+    }
+
+    /// True when the interactive exemption is spent, so the next interactive
+    /// claimant stands aside for whoever is already queued (FR-418).
+    pub fn interactive_burst_exhausted(&self) -> Result<bool, CoordinatorError> {
+        Ok(read_interactive_burst(&self.root) >= MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS)
+    }
+
     /// Reservation file for `key` under `heavy.pending/` (Issue #4086). One
     /// per claimant target, so a retry refreshes rather than duplicates it.
     pub fn heavy_reservation_path(&self, key: &TargetKey) -> PathBuf {
@@ -768,97 +832,7 @@ impl TargetJobGuard {
         timeout: Duration,
         ttl: Option<Duration>,
     ) -> Result<HeavyLease, CoordinatorError> {
-        let pending_dir = self.root.join("heavy.pending");
-        fs::create_dir_all(&pending_dir)?;
-        let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-        let pending_file = open_lock_file(&pending_path)?;
-        let registration = Registration {
-            schema_version: COORDINATOR_SCHEMA_VERSION,
-            owner: OwnerIdentity::current(),
-            priority: self.priority,
-            registered_at_ms: now_ms(),
-            reserved_until_ms: None,
-            reason: None,
-        };
-        // Payload first, liveness lock second — see the waiter registration
-        // above for why a Windows shared lock cannot come first.
-        {
-            let mut handle = &pending_file;
-            handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
-            handle.flush()?;
-        }
-        pending_file.lock_shared()?;
-        let cleanup_pending = |file: File, path: &Path| {
-            drop(file);
-            let _ = fs::remove_file(path);
-        };
-
-        let started = Instant::now();
-        let heavy_lock_path = self.root.join("heavy.lock");
-        let heavy_file = match open_lock_file(&heavy_lock_path) {
-            Ok(file) => file,
-            Err(err) => {
-                cleanup_pending(pending_file, &pending_path);
-                return Err(CoordinatorError::Io(err));
-            }
-        };
-        loop {
-            let must_defer = self.priority != JobPriority::InteractiveSearch
-                && scan_live_pending_excluding(&pending_dir, &pending_path)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .any(|priority| priority < self.priority);
-            if !must_defer {
-                match fs2::FileExt::try_lock_exclusive(&heavy_file) {
-                    Ok(()) => {
-                        let acquired_at_ms = now_ms();
-                        let ticket = Ticket {
-                            schema_version: COORDINATOR_SCHEMA_VERSION,
-                            target: self.key.file_stem(),
-                            priority: self.priority,
-                            owner: OwnerIdentity::current(),
-                            acquired_at_ms,
-                            lease_id: Some(uuid::Uuid::new_v4().to_string()),
-                            expires_at_ms: ttl
-                                .map(|ttl| acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
-                        };
-                        let _ = write_json_atomic(&self.root.join("heavy.ticket.json"), &ticket);
-                        cleanup_pending(pending_file, &pending_path);
-                        // The grant consumes the claimant's own reservation
-                        // (Issue #4086): its turn has come.
-                        let _ = fs::remove_file(
-                            pending_dir
-                                .join(format!("{RESERVATION_PREFIX}{}.json", self.key.file_stem())),
-                        );
-                        let lease = HeavyLease {
-                            _lock_file: heavy_file,
-                            root: self.root.clone(),
-                            ticket_path: self.root.join("heavy.ticket.json"),
-                            // Only verification leases keep a ledger: index
-                            // jobs run on the hot search path and gain
-                            // nothing from an extra append per acquisition.
-                            records_events: self.key.is_verification(),
-                            ticket,
-                            released: false,
-                        };
-                        lease.record_event(LeaseEventKind::Acquired, None);
-                        return Ok(lease);
-                    }
-                    Err(err) if is_contended(&err) => {}
-                    Err(err) => {
-                        cleanup_pending(pending_file, &pending_path);
-                        return Err(CoordinatorError::Io(err));
-                    }
-                }
-            }
-            if started.elapsed() >= timeout {
-                cleanup_pending(pending_file, &pending_path);
-                return Err(CoordinatorError::Timeout {
-                    waited_ms: started.elapsed().as_millis() as u64,
-                });
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        }
+        acquire_heavy_at(&self.root, &self.key, self.priority, timeout, ttl)
     }
 
     /// Number of live waiters currently joined to this target job. Stale
@@ -900,6 +874,172 @@ impl TargetJobGuard {
         )?;
         Ok(())
     }
+}
+
+/// Take the host-wide heavy lease for `key` at `priority`.
+///
+/// Shared by the two kinds of claimant: a build, which reaches it through an
+/// owned [`TargetJobGuard`] so the target -> heavy lock order holds, and an
+/// interactive search, which owns no build target and takes only this lease
+/// (FR-417).
+///
+/// An interactive claimant is exempt from deferral so a queued background
+/// build cannot delay a query encode — but the exemption is bounded
+/// ([`MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS`]): once it is spent, the next
+/// interactive claimant stands aside for a queued lower-priority claimant, so
+/// a busy search session cannot starve a background continuation forever.
+fn acquire_heavy_at(
+    root: &Path,
+    key: &TargetKey,
+    priority: JobPriority,
+    timeout: Duration,
+    ttl: Option<Duration>,
+) -> Result<HeavyLease, CoordinatorError> {
+    let pending_dir = root.join("heavy.pending");
+    fs::create_dir_all(&pending_dir)?;
+    let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    let pending_file = open_lock_file(&pending_path)?;
+    let registration = Registration {
+        schema_version: COORDINATOR_SCHEMA_VERSION,
+        owner: OwnerIdentity::current(),
+        priority,
+        registered_at_ms: now_ms(),
+        reserved_until_ms: None,
+        reason: None,
+    };
+    // Payload first, liveness lock second — see the waiter registration
+    // above for why a Windows shared lock cannot come first.
+    {
+        let mut handle = &pending_file;
+        handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
+        handle.flush()?;
+    }
+    pending_file.lock_shared()?;
+    let cleanup_pending = |file: File, path: &Path| {
+        drop(file);
+        let _ = fs::remove_file(path);
+    };
+
+    let started = Instant::now();
+    let heavy_lock_path = root.join("heavy.lock");
+    let heavy_file = match open_lock_file(&heavy_lock_path) {
+        Ok(file) => file,
+        Err(err) => {
+            cleanup_pending(pending_file, &pending_path);
+            return Err(CoordinatorError::Io(err));
+        }
+    };
+    loop {
+        // `scan_live_pending_excluding` still reports the excluded caller's
+        // own registration, so both arms must be phrased against a *strict*
+        // priority comparison — a claimant is never strictly higher or lower
+        // priority than itself.
+        let live = scan_live_pending_excluding(&pending_dir, &pending_path).unwrap_or_default();
+        // Both arms read the same budget, and they must: a spent burst has to
+        // stand the search aside AND stop the queued background claimant from
+        // deferring right back to it. Deferring on only one side livelocks —
+        // the search waits for the build, the build waits for the search, and
+        // the lease sits free until both time out.
+        let burst_spent = read_interactive_burst(root) >= MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
+        let must_defer = if priority == JobPriority::InteractiveSearch {
+            // The cap exists to stop a stream of searches from starving
+            // lower-priority work, so only lower-priority claimants collect
+            // on it. Another queued search would gain nothing from this one
+            // standing aside.
+            burst_spent
+                && live
+                    .iter()
+                    .any(|pending| *pending > JobPriority::InteractiveSearch)
+        } else {
+            live.iter().any(|pending| {
+                *pending < priority && !(burst_spent && *pending == JobPriority::InteractiveSearch)
+            })
+        };
+        if !must_defer {
+            match fs2::FileExt::try_lock_exclusive(&heavy_file) {
+                Ok(()) => {
+                    let acquired_at_ms = now_ms();
+                    let ticket = Ticket {
+                        schema_version: COORDINATOR_SCHEMA_VERSION,
+                        target: key.file_stem(),
+                        priority,
+                        owner: OwnerIdentity::current(),
+                        acquired_at_ms,
+                        lease_id: Some(uuid::Uuid::new_v4().to_string()),
+                        expires_at_ms: ttl
+                            .map(|ttl| acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
+                    };
+                    let _ = write_json_atomic(&root.join("heavy.ticket.json"), &ticket);
+                    cleanup_pending(pending_file, &pending_path);
+                    // The grant consumes the claimant's own reservation
+                    // (Issue #4086): its turn has come.
+                    let _ = fs::remove_file(
+                        pending_dir.join(format!("{RESERVATION_PREFIX}{}.json", key.file_stem())),
+                    );
+                    record_interactive_burst_grant(root, priority);
+                    let lease = HeavyLease {
+                        _lock_file: heavy_file,
+                        root: root.to_path_buf(),
+                        ticket_path: root.join("heavy.ticket.json"),
+                        // Only verification leases keep a ledger: index
+                        // jobs run on the hot search path and gain
+                        // nothing from an extra append per acquisition.
+                        records_events: key.is_verification(),
+                        ticket,
+                        released: false,
+                    };
+                    lease.record_event(LeaseEventKind::Acquired, None);
+                    return Ok(lease);
+                }
+                Err(err) if is_contended(&err) => {}
+                Err(err) => {
+                    cleanup_pending(pending_file, &pending_path);
+                    return Err(CoordinatorError::Io(err));
+                }
+            }
+        }
+        if started.elapsed() >= timeout {
+            cleanup_pending(pending_file, &pending_path);
+            return Err(CoordinatorError::Timeout {
+                waited_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Consecutive interactive heavy grants since the last non-interactive one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct InteractiveBurst {
+    schema_version: u32,
+    consecutive_grants: u32,
+    updated_at_ms: u64,
+}
+
+fn read_interactive_burst(root: &Path) -> u32 {
+    fs::read(root.join(INTERACTIVE_BURST_FILE))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<InteractiveBurst>(&raw).ok())
+        .map(|burst| burst.consecutive_grants)
+        .unwrap_or(0)
+}
+
+/// Best effort: the burst budget is a fairness heuristic, so a write failure
+/// must never fail an acquisition that already holds the kernel lock.
+fn record_interactive_burst_grant(root: &Path, priority: JobPriority) {
+    let consecutive_grants = if priority == JobPriority::InteractiveSearch {
+        read_interactive_burst(root).saturating_add(1)
+    } else {
+        0
+    };
+    let _ = write_json_atomic(
+        &root.join(INTERACTIVE_BURST_FILE),
+        &InteractiveBurst {
+            schema_version: COORDINATOR_SCHEMA_VERSION,
+            consecutive_grants,
+            updated_at_ms: now_ms(),
+        },
+    );
 }
 
 impl Drop for TargetJobGuard {

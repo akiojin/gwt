@@ -7,6 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gwt_core::index_coordinator::{
+    IndexCoordinator, TargetKey, INTERACTIVE_SEARCH_ADMISSION_DEADLINE,
+};
 use serde_json::Value;
 
 use crate::{
@@ -920,6 +923,41 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
     })
 }
 
+/// Claim the host-wide heavy lease for one query encode (FR-417).
+///
+/// Fails open on purpose: the lease governs how much model work runs at
+/// once, and a coordinator that is unreachable — or a holder that overruns
+/// [`INTERACTIVE_SEARCH_ADMISSION_DEADLINE`] — must degrade the guarantee,
+/// never the user's search. A well-behaved background build yields at its
+/// next checkpoint, so the normal path is a fast handover rather than a wait.
+fn acquire_search_heavy_lease(
+    repo_hash: &str,
+    worktree_hash: Option<&str>,
+) -> Option<gwt_core::index_coordinator::HeavyLease> {
+    let coordinator = IndexCoordinator::open_default()
+        .inspect_err(|error| {
+            tracing::debug!(
+                target: "gwt::index",
+                %error,
+                "search proceeding without the heavy lease: coordinator unavailable"
+            );
+        })
+        .ok()?;
+    let key = TargetKey::search(repo_hash, worktree_hash);
+    match coordinator.acquire_interactive_search_heavy(&key, INTERACTIVE_SEARCH_ADMISSION_DEADLINE)
+    {
+        Ok(lease) => Some(lease),
+        Err(error) => {
+            tracing::debug!(
+                target: "gwt::index",
+                %error,
+                "search proceeding without the heavy lease: admission deadline lapsed"
+            );
+            None
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_batch_scope_search(
     project_root: &Path,
@@ -939,6 +977,12 @@ fn run_batch_scope_search(
         limit,
         match_mode,
     );
+    // FR-417 (T-IDX-437 / AS-30): `search-multi` encodes the query with the
+    // same model a build loads, so it is an ordinary claimant of the
+    // host-wide heavy lease — not an exception to it. Registering as a
+    // pending interactive claimant is also what makes a running background
+    // build hand the lease back at its next 16-document checkpoint.
+    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash);
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
     // forwarding, one hard deadline, and full process-tree termination and
