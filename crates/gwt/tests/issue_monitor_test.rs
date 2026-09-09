@@ -3442,7 +3442,6 @@ fn a_claim_block_is_revalidated_once_the_issue_changed_under_it() {
     assert_eq!(item.claim_expires_at, None);
 }
 
-
 /// Build the 2026-08-17 blackout shape: an enabled monitor holding failed work
 /// and running nothing at all.
 fn blacked_out_monitor() -> IssueMonitorState {
