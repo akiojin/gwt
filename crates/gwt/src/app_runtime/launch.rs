@@ -2706,6 +2706,15 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
     })
 }
 
+/// `generated_hook_bin` is the fallback binary the materialization that just
+/// ran pinned into the hook commands it wrote (#3967). Trust has to compare
+/// against that exact value: the pin is released when materialization returns,
+/// and re-deriving it here answered `target/debug/gwtd` — reduced to the bare
+/// `gwtd` for a config outside that checkout — for every gwt started from a
+/// development build, while the generated command carried the installed
+/// absolute path. All five managed hooks then failed the exact-command match
+/// and Codex stopped the launch on `Hooks need review`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
     profile_config_path: &Path,
     worktree_path: &Path,
@@ -2714,6 +2723,7 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
     docker_service: Option<&str>,
     codex_home: Option<&Path>,
     codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
+    generated_hook_bin: Option<&str>,
 ) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
     if agent_id != &gwt_agent::AgentId::Codex {
         return Ok(None);
@@ -2766,10 +2776,11 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
             // orphaned — present, gwt-generated, and untrusted. Trust state is
             // keyed by absolute hooks path, so entries for a file Codex does
             // not read are inert.
-            let report = gwt_skills::register_codex_managed_hook_trust_for_mode(
+            let report = gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
                 worktree_path,
                 &codex_config_path,
                 gwt::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+                generated_hook_bin,
             )
             .map_err(|error| {
                 format!(
@@ -4656,21 +4667,22 @@ impl AppRuntime {
             }
             let codex_hook_discovery_mode =
                 codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
-            refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
-                &worktree_path,
-                &config.agent_id,
-                codex_hook_discovery_mode,
-                config.is_ephemeral,
-            )
-            .map_err(|error| {
-                // Attribute managed-asset failures to the worktree so the
-                // operator sees which worktree's setup failed, not a bare
-                // skill-writer error.
-                format!(
-                    "managed asset setup failed for worktree {}: {error}",
-                    worktree_path.display()
+            let managed_assets =
+                refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+                    &worktree_path,
+                    &config.agent_id,
+                    codex_hook_discovery_mode,
+                    config.is_ephemeral,
                 )
-            })?;
+                .map_err(|error| {
+                    // Attribute managed-asset failures to the worktree so the
+                    // operator sees which worktree's setup failed, not a bare
+                    // skill-writer error.
+                    format!(
+                        "managed asset setup failed for worktree {}: {error}",
+                        worktree_path.display()
+                    )
+                })?;
             let codex_home = config.env_vars.get("CODEX_HOME").map(PathBuf::from);
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
@@ -4680,6 +4692,7 @@ impl AppRuntime {
                 config.docker_service.as_deref(),
                 codex_home.as_deref(),
                 codex_hook_discovery_mode,
+                managed_assets.hook_bin.as_deref(),
             )? {
                 if !report.trusted_entries.is_empty() {
                     proxy.send(UserEvent::LaunchProgress {
