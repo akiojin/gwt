@@ -21,8 +21,8 @@ use gwt_core::index::broker::{
     RefreshScope, RefreshTarget, RefreshTargetState, REFRESH_INTENT_PROTOCOL_VERSION,
 };
 use gwt_core::index_coordinator::{
-    CoordinatorError, HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority,
-    LeaseEventKind, OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
+    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind,
+    OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
     INTERACTIVE_SEARCH_ADMISSION_DEADLINE, MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS,
 };
 
@@ -295,6 +295,33 @@ fn run_helper_role(role: &str) {
             guard
                 .complete(JobOutcome::Completed)
                 .expect("helper: complete background job");
+            write_result("done");
+        }
+        "background-heavy-loop" => {
+            // A background index worker that keeps asking for the lease for as
+            // long as the parent drives interactive traffic, tallying every
+            // turn it is granted. The tally is what shows the interactive
+            // burst cap leaves room for background work (FR-418).
+            let key = target_from_env();
+            let ledger = PathBuf::from(required_env("GWT_COORD_LEDGER"));
+            let stop = PathBuf::from(required_env("GWT_COORD_SIGNAL"));
+            let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
+            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            while !stop.exists() {
+                let admission = coordinator
+                    .request_job(&key, JobPriority::Background, Duration::from_secs(20))
+                    .expect("helper: request background job");
+                let guard = expect_owner(admission);
+                if let Ok(lease) = guard.acquire_heavy(Duration::from_millis(500)) {
+                    locked_counter_add(&ledger, 1);
+                    std::thread::sleep(Duration::from_millis(20));
+                    lease.release().expect("helper: release background lease");
+                }
+                guard
+                    .complete(JobOutcome::Completed)
+                    .expect("helper: complete background job");
+                std::thread::sleep(Duration::from_millis(5));
+            }
             write_result("done");
         }
         other => panic!("unknown helper role: {other}"),
@@ -1218,10 +1245,24 @@ fn interactive_heavy_burst_is_bounded_and_reset_by_a_background_grant() {
     );
 }
 
-/// AS-30 edge case, cross-process half: once the burst is spent, a queued
-/// background continuation gets the slot ahead of the next interactive search.
+/// AS-30 edge case, cross-process half. Both halves of "starves neither side"
+/// in one run: once the burst is spent a queued background continuation is
+/// served *ahead of* a contending interactive search, and that same search is
+/// then served straight after — the cap costs it one turn, not its session.
+///
+/// **This is the regression pin for the stand-aside livelock.** The burst cap
+/// makes the search yield its exemption; if only that side yields, the queued
+/// background job still defers *back* to the search (interactive outranks it),
+/// so neither takes the free lease. Both arms must read the same burst budget.
+///
+/// The search contends from its own thread with a long deadline, so the
+/// assertion is about a claimant that never gets served rather than one that
+/// is merely slow: under the one-sided rule `background-granted` never appears
+/// no matter how long the window is. Verified RED — with the one-sided version
+/// this failed at "the queued background continuation must have taken the
+/// slot" while every other test in this file passed.
 #[test]
-fn spent_interactive_burst_lets_a_queued_background_job_in_first() {
+fn spent_interactive_burst_serves_the_queued_background_job_then_the_search() {
     let arena = TestArena::new();
     let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
     let search_key = TargetKey::search("repo-a", Some("wt-1"));
@@ -1247,7 +1288,7 @@ fn spent_interactive_burst_lets_a_queued_background_job_in_first() {
             ("GWT_COORD_ROLE", "background-heavy-claim".to_string()),
             arena.coord_env(),
             ("GWT_COORD_TARGET", "repo-a|files|wt-1".to_string()),
-            ("GWT_COORD_HOLD_MS", "1500".to_string()),
+            ("GWT_COORD_HOLD_MS", "750".to_string()),
             ("GWT_COORD_MARKER", granted.to_string_lossy().into_owned()),
             (
                 "GWT_COORD_RESULT",
@@ -1266,24 +1307,94 @@ fn spent_interactive_burst_lets_a_queued_background_job_in_first() {
             >= 1
     });
 
+    // A search contends for the whole window, so the background claimant has
+    // to get in past a live interactive registration rather than into an idle
+    // host. This is the half a one-sided stand-aside deadlocks.
+    let coord_root = arena.coord_root.clone();
+    let contending_key = search_key.clone();
+    let searcher = std::thread::spawn(move || {
+        let coordinator = IndexCoordinator::open(&coord_root).expect("open coordinator: searcher");
+        coordinator.acquire_interactive_search_heavy(&contending_key, Duration::from_secs(20))
+    });
+
     held.release().expect("release the held search lease");
 
-    // The burst is spent and a background continuation is queued, so the next
-    // interactive search must stand aside rather than jump the queue again.
-    let err = coordinator
-        .acquire_interactive_search_heavy(&search_key, Duration::from_millis(400))
-        .err()
-        .expect("interactive search must stand aside once its burst is spent");
-    assert!(
-        matches!(err, CoordinatorError::Timeout { .. }),
-        "standing aside must surface as an admission timeout, got {err:?}"
-    );
-    assert!(
-        granted.exists(),
-        "the queued background continuation must have taken the slot"
-    );
+    wait_for_file(&granted, Duration::from_secs(20));
+
+    // ...and the search that stood aside is served right after, so the cap
+    // never turns into starvation in the other direction.
+    let lease = searcher
+        .join()
+        .expect("searcher thread panicked")
+        .expect("the search that stood aside must still be served");
+    lease.release().expect("release the search lease");
 
     wait_success(background, Duration::from_secs(30));
+}
+
+/// AS-30 / FR-418 end to end: sustained interactive search traffic and a
+/// background index worker must **both** make progress on the same host.
+///
+/// The searches run back to back with no pause, which is the shape that
+/// starves background work without a cap: an interactive claimant never
+/// defers, so it re-takes the lease long before a 25 ms poll notices it was
+/// free. The cap is what converts that into a turn for the background worker
+/// every `MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS` grants — and the searches
+/// must all still be served, so the cap is a fairness rule and not a stall.
+#[test]
+fn sustained_interactive_traffic_and_background_index_work_both_progress() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let search_key = TargetKey::search("repo-a", Some("wt-1"));
+    let ledger = arena.path("background-grants.json");
+    let ready = arena.path("background-ready");
+    let stop = arena.path("background-stop");
+
+    let background = spawn_helper(
+        "background-worker",
+        &[
+            ("GWT_COORD_ROLE", "background-heavy-loop".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_TARGET", "repo-a|files|wt-1".to_string()),
+            ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+            ("GWT_COORD_SIGNAL", stop.to_string_lossy().into_owned()),
+            (
+                "GWT_COORD_RESULT",
+                arena
+                    .path("result-background-loop")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+    let (baseline, _) = read_counter(&ledger);
+
+    // Three full bursts of searches, issued back to back.
+    let rounds = 3 * MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
+    for round in 1..=rounds {
+        coordinator
+            .acquire_interactive_search_heavy(&search_key, Duration::from_secs(20))
+            .unwrap_or_else(|err| {
+                let _ = fs::write(&stop, b"stop");
+                panic!("interactive search {round}/{rounds} must still be served: {err}")
+            })
+            .release()
+            .expect("release search lease");
+    }
+
+    let (after, _) = read_counter(&ledger);
+    fs::write(&stop, b"stop").expect("signal the background worker to finish");
+    wait_success(background, Duration::from_secs(60));
+
+    let background_turns = after - baseline;
+    assert!(
+        background_turns >= 2,
+        "background index work must keep getting turns under sustained search \
+         traffic: {rounds} searches yielded only {background_turns} background \
+         grants (cap is {MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS})"
+    );
 }
 
 // ---------------------------------------------------------------------------
