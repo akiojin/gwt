@@ -9,8 +9,8 @@ use gwt::issue_monitor::{
     scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
     IssueClosureEvidence, IssueClosureRecord, IssueClosureState, IssueMonitorCandidateSource,
     IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorState, MonitorInboxState,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorState, IssueMonitorUpdateDrainReason,
+    MonitorInboxState, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 use gwt::issue_monitor_worker::{
     scan_loaded_issue_monitor_candidates, LoadedIssueMonitorCandidates,
@@ -3465,6 +3465,44 @@ fn blacked_out_monitor() -> IssueMonitorState {
     // meaningful when one is there to launch through.
     monitor.set_gui_connected(true);
     monitor
+}
+
+/// A raised update drain (#4037) holds admission on purpose: the fleet is meant
+/// to be at zero agents until the staged update applies. The same is true of a
+/// provider quota hold. Both landed on develop after the blackout check was
+/// written, and both look identical to the outage from the inside — enabled,
+/// GUI attached, backlog runnable, nothing running — so without this the field
+/// fires on every routine drain and readers learn to skip it.
+#[test]
+fn a_deliberate_launch_hold_is_not_a_blackout() {
+    let mut monitor = blacked_out_monitor();
+    monitor.set_update_drain(
+        IssueMonitorUpdateDrainReason::Manual,
+        "9.91.0",
+        "2026-08-17T00:00:00Z",
+    );
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+        "a drained fleet is idle by instruction, not by outage"
+    );
+
+    // Clearing the drain re-arms the check: the onset starts at the first scan
+    // that sees a fleet which could be launching and is not.
+    monitor.clear_update_drain();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T01:00:00Z");
+
+    assert!(
+        monitor
+            .agent_status_at("2026-08-17T02:00:00Z")
+            .agent_blackout
+            .is_some(),
+        "once admission reopens, a fleet that still runs nothing is an outage"
+    );
 }
 
 /// A detached GUI cannot launch anything by design — the ordinary state

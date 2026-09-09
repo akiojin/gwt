@@ -353,11 +353,13 @@ test.describe("Issue Bridge load recovery", () => {
     // A queued row has no failure hold to release, so it must not offer the
     // recovery — a button that cannot change anything is worse than none.
     await expect(
-      issueSurface.locator('[data-issue-number="3273"] [data-action="requeue"]'),
+      issueSurface.locator(
+        '[data-issue-number="3273"] [data-action="requeue-issue"]',
+      ),
     ).toHaveCount(0);
 
     await issueSurface
-      .locator('[data-issue-number="3098"] [data-action="requeue"]')
+      .locator('[data-issue-number="3098"] [data-action="requeue-issue"]')
       .click();
 
     const messages = await page.evaluate(() => window.__knowledgeLoadMessages);
