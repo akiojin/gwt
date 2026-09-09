@@ -1771,6 +1771,45 @@ pub(super) fn dispatch_agent_launch_success<F>(
     spawn_project_index_bootstrap(proxy, project_index_root);
 }
 
+/// Why a restored Session cannot be handed to the agent CLI as `--resume`
+/// (SPEC-3966 AC-4).
+///
+/// `None` means the Session does carry a usable handle. Every other answer is
+/// the reason the restore falls back to a brand-new conversation, so the
+/// fallback is never silent.
+pub(super) fn resume_handle_unavailable_reason(
+    session: &gwt_agent::Session,
+) -> Option<&'static str> {
+    if session.exact_resume_session_id().is_some() {
+        return None;
+    }
+    match session.agent_session_id.as_deref().map(str::trim) {
+        None => Some(
+            "no agent_session_id was ever persisted for this Session \
+             (the SessionStart managed hook never reached persist_agent_session_id)",
+        ),
+        Some("") => Some("the persisted agent_session_id is empty"),
+        Some(_) => Some(
+            "the persisted agent_session_id is the Codex placeholder, not a conversation handle",
+        ),
+    }
+}
+
+/// Carry a restored launch's conversation identity onto the successor Session
+/// record (SPEC-3966 AC-5).
+///
+/// Without this the successor is written with no `agent_session_id`, so the
+/// *next* restore has nothing to resume from either and every restart leaves
+/// one more handle-less Session behind.
+pub(super) fn apply_resume_identity_to_session(
+    session: &mut gwt_agent::Session,
+    config: &gwt_agent::LaunchConfig,
+) {
+    if config.session_mode == gwt_agent::SessionMode::Resume {
+        session.agent_session_id = config.resume_session_id.clone();
+    }
+}
+
 pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
@@ -1817,6 +1856,18 @@ pub(super) fn launch_config_from_persisted_session(
             .resume_session_id(resume_id.to_string())
             .predecessor_session_id(session.id.clone());
     } else {
+        // SPEC-3966 AC-4: restoring without a resume handle silently started a
+        // brand-new conversation, which is how the resident PM lost its whole
+        // decision history on every gwt restart without anyone noticing. Say so
+        // instead, with the reason, so the next reader does not have to
+        // reverse-engineer it from an empty Session TOML.
+        tracing::warn!(
+            session_id = %session.id,
+            worktree = %session.worktree_path.display(),
+            agent = ?session.agent_id,
+            reason = resume_handle_unavailable_reason(session).unwrap_or("unknown"),
+            "restored Session has no resume handle; launching a new conversation instead of --resume"
+        );
         builder = builder.session_mode(gwt_agent::SessionMode::Normal);
     }
 
@@ -2870,6 +2921,17 @@ impl AppRuntime {
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
         let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
+        // request, so the pane-create route is the span from that stamp to this
+        // completion — worktree resolution, Docker probing and the PTY spawn
+        // included. Recorded before the entry is dropped below.
+        if let Some((_, (_, started_at))) = self
+            .inflight_launches
+            .iter()
+            .find(|(_, (pending_window_id, _))| pending_window_id == &window_id)
+        {
+            gwt::perf::record_route(gwt::perf::PerfRoute::PaneCreate, started_at.elapsed());
+        }
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -3713,6 +3775,12 @@ impl AppRuntime {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return Self::status_events(window_id, WindowProcessStatus::Running, None);
         }
+        // Issue #4145 AC-1: a process pane is created synchronously here —
+        // shell resolution, env, resource policy and the PTY spawn all happen
+        // before this returns — so one guard is the whole pane-create route for
+        // the non-agent half of the surface. Agent panes are asynchronous and
+        // are recorded from `handle_launch_complete` instead.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneCreate);
 
         let project_root = self
             .tab(tab_id)
@@ -3988,6 +4056,9 @@ impl AppRuntime {
         // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
         self.register_pty_writer(id, &pane);
         self.runtimes.insert(id.to_string(), runtime);
+        // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
+        // the pre-PTY failure guard.
+        self.restore_launch_windows.remove(id);
     }
 
     /// Issue #3475: start the authenticated SessionStart readiness deadline for
@@ -4676,9 +4747,7 @@ impl AppRuntime {
             session.launch_args = config.args.clone();
             session.windows_shell = config.windows_shell;
             session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
-            if session.session_mode == gwt_agent::SessionMode::Resume {
-                session.agent_session_id = config.resume_session_id.clone();
-            }
+            apply_resume_identity_to_session(&mut session, &config);
             session.update_status(gwt_agent::AgentStatus::Running);
             // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
             // recovers producing authority through the continuation
