@@ -5,12 +5,15 @@
 //! - `gh.rs`: every `gh` CLI / graphql wrapper, plus the small response-shape
 //!   parsers (`parse_pr_checks_*`, `parse_available_fields`, ...) that exist
 //!   solely to interpret gh output.
+//! - `types.rs`: the plain `pr.*` response / call shapes, re-exported from
+//!   `crate::cli` so existing call sites keep their paths.
 //!
 //! All `gh.rs` items are re-exported via `pub(super) use gh::*;` so external
 //! callers (`cli::env`, `cli::run`, `cli::tests`) keep accessing them via
 //! `super::pr::name` / `crate::cli::pr::name` exactly as before.
 
 mod gh;
+pub(crate) mod types;
 
 #[allow(unused_imports)]
 pub(super) use gh::{

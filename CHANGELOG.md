@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.93.1] - 2026-09-08
+
+### Bug Fixes
+
+- **issue-cache:** Full refresh の停止を Monitor scan が解消し失敗を errors.list に記録する
+- **index:** Issues index の source cache drift を corrupt ではなく stale に分類する
+- **issue-monitor:** Agent Settings の agent 切替を候補プール index 0 に反映し、profiles.set の省略フィールド継承を追加
+- **agent:** Codex 起動から削除済み feature flag goals を除去
+- **index:** インデックスジョブが host 検証 lease を占有し続けないよう協調 yield を追加
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4087 の Work event shard を記録
+- **work:** Issue #4079 の Work event shard を追加
+- **work:** Issue #4079 の Work を done で終端する
+- **work:** Work イベント shard を追跡
+- **work:** Work イベント shard を追跡
+- **work:** Work 終端更新の receipt を記録
+- **work:** Issue #4140 の Work event shard を記録
+- **work:** Issue #4140 の Work event shard を追加記録
+- **work:** Issue #4140 の Work event shard を追加記録
+
+### Testing
+
+- **frontend:** Pool impact contract test を frontend unit テスト一覧に追加
+- **playwright:** Agent Settings の候補プール影響ノートの headed E2E を追加
+- **issue-cache:** Full refresh 失敗 ledger の期待 stage 名を REST 版に合わせる
+- **index:** Lease 解放と yield 理由の書き込み順に依存しないよう待機する
+
 ## [9.93.0] - 2026-09-08
 
 ### Bug Fixes
