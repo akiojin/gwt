@@ -2991,15 +2991,21 @@ impl AppRuntime {
         let runtime_proof = match runtime_disposition {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof)
             | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(proof) => {
-                Some(proof)
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live => {
                 local_runtime_incarnation.map(|runtime_incarnation| {
-                    gwt_agent::ManualLaunchRuntimeProof {
-                        host_pid: std::process::id(),
-                        runtime_incarnation,
-                    }
+                    gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                        gwt_agent::ManualLaunchRuntimeProof {
+                            host_pid: std::process::id(),
+                            runtime_incarnation,
+                        },
+                    )
                 })
+            }
+            // Issue #3457: absence is exact evidence, not a missing proof.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
@@ -3033,6 +3039,14 @@ impl AppRuntime {
                 ))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(_) => Ok(
+                super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
+            ),
+            // Issue #3457: the holder published no sidecar in any namespace,
+            // so no Host is running it and no proof can ever appear. Unlike a
+            // Terminal holder there is no exit record to cross-check against
+            // the durable status, so a `.toml` a crashed Host left behind as
+            // Running must still be recoverable here.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
                 super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
             ),
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {
@@ -4404,6 +4418,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_checked_out_develop_in_container_workspace() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -4416,6 +4431,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_checked_out_main_without_develop() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &[], Some("main"));
 
@@ -4428,6 +4444,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_existing_normal_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");
 
@@ -4440,6 +4457,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_existing_bare_head_without_default_worktree() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
 
@@ -4452,6 +4470,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_empty_bare_repository() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_empty_bare_workspace(&workspace);
 
@@ -4464,6 +4483,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_unborn_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repository");
         run_git(&repo, &["init", "-q", "-b", "future"]);
@@ -4477,6 +4497,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_develop_worktree_from_detached_head() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         run_git(&repo, &["branch", "develop"]);
@@ -4494,6 +4515,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_falls_back_from_unusable_root_git_metadata() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -4507,6 +4529,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_develop_when_project_root_is_bare() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -4519,6 +4542,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_local_ref_that_is_not_a_commit() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &["main"], Some("main"));
         let blob = git_stdout(&workspace.join("seed"), &["rev-parse", "master:README.md"]);
@@ -4537,6 +4561,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_git_error_when_fallback_is_unavailable() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -4552,6 +4577,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_malformed_local_ref_error() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         fs::write(repo.join(".git/refs/heads/main"), "not-an-object-id\n")

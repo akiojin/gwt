@@ -162,6 +162,17 @@ pub enum IssueCommand {
         delivery_id: Option<String>,
         window_id: Option<String>,
     },
+    /// Issue #3645 / #3628: release the failure holding one issue out of the
+    /// queue, for rows that have no live launch left to identify.
+    ///
+    /// Carries no identity components, and that is the point: `agent_failed`
+    /// rows lost their launch, so every operation that resolves one refuses
+    /// them. The state layer still fails closed on anything a launch owns.
+    MonitorRequeue {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        reason: String,
+    },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.
     MonitorQuestions {

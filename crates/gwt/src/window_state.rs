@@ -254,6 +254,25 @@ pub fn compose_window_state_with_approval_wait(
     }
 }
 
+/// Issue #3616: present a quota-blocked agent pane as waiting.
+///
+/// Every other projection of this situation lies. `Stopped` renders as `DONE`,
+/// claiming the work completed; `Error` claims the agent broke; and `Idle` —
+/// what a Claude pane reports, because its process never exits — claims a
+/// healthy agent between turns. None happened: the account ran out and the
+/// conversation is intact. `Waiting` is the existing state for "this pane needs
+/// something from outside before it can continue".
+///
+/// Applied to whatever the pane composed to, because both observed shapes need
+/// it: Codex exits (terminal states) and Claude does not (live states).
+pub fn apply_provider_quota_block(composed: WindowState, quota_blocked: bool) -> WindowState {
+    if quota_blocked {
+        WindowState::Waiting
+    } else {
+        composed
+    }
+}
+
 pub fn is_live_agent_hook_state(state: WindowState) -> bool {
     matches!(
         state,

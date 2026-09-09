@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -109,6 +110,30 @@ class GenerationBranchTests(unittest.TestCase):
                     db_path, "files", None, runner.V2_FILES_CODE_COLLECTION, {"a.rs": "h1"}
                 )
             self.assertEqual(copied, 0)
+
+
+class WorkEventShardDiscoveryBranchTests(unittest.TestCase):
+    def test_store_parent_inspection_error_reports_the_managed_path(self):
+        store = Path("/repo/.gwt/work/events")
+        with mock.patch.object(Path, "lstat", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(ValueError, re.escape(str(store.parent.parent))):
+                runner._work_event_shard_store_exists(store)
+
+    def test_bucket_enumeration_error_reports_the_bucket_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / ".gwt" / "work" / "events"
+            bucket = store / "aa"
+            bucket.mkdir(parents=True)
+            original_iterdir = Path.iterdir
+
+            def fail_bucket_iterdir(path: Path):
+                if path == bucket:
+                    raise PermissionError("denied")
+                return original_iterdir(path)
+
+            with mock.patch.object(Path, "iterdir", fail_bucket_iterdir):
+                with self.assertRaisesRegex(ValueError, re.escape(str(bucket))):
+                    runner._enumerate_work_event_shards(store)
 
 
 class InProcessYieldTests(unittest.TestCase):

@@ -9,12 +9,11 @@
 //! removes that drift surface and makes the platform-conditional
 //! behaviour explicit in a single place.
 //!
-//! Note: `prepare_daemon_front_door_for_path`
-//! (`crates/gwt/src/cli/hook/mod.rs`) deliberately uses a *narrower*
-//! predicate (`|pid| pid == std::process::id()`) and is kept inline
-//! there. That difference is the subject of Issue #2338 — fixing it
-//! requires SPEC-2077 owner alignment on endpoint-slot semantics, so
-//! this module intentionally does not absorb that callsite.
+//! Every daemon-bootstrap caller now shares this one predicate. The GUI front
+//! door used to run a narrower `|pid| pid == std::process::id()` variant that
+//! classified a live daemon as dead; Issue #2338 resolved that by removing the
+//! front door's endpoint-slot handling entirely rather than by giving it a
+//! second liveness definition.
 
 /// Return `true` when `pid` refers to a live process visible to the
 /// current user on a Unix host.

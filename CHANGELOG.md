@@ -1,6 +1,104 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.82.0] - 2026-08-18
+
+### Bug Fixes
+
+- **test:** Claim driver defer テストの fixture を thread-local gwt home に固定する
+- **pm:** PM の一意性を project store ではなくリポジトリ単位で判定する
+- **pm:** 常駐ループ gate の呼び出し元 Session を dispatcher から注入する
+- **github:** GraphQL レート制限を識別可能にし枯渇時の無駄な発行を止める
+- **test:** App_runtime の共有 runtime fixture から process-global HOME 解決を除去し機械検出を追加する
+- **test:** Intake session テストの Start Work 予約ディレクトリを自テストの home へ固定する
+- **issue-monitor:** Canvas から消えた agent window のスロットを回収する
+- **workspace:** Detached HEAD の worktree で workspace.update の失敗理由と次アクションを伝える
+- **pm:** Pm.message.send が送達成功を失敗と誤報告する問題を修正
+- **cli:** Avoid terminal snapshots in pane list
+- **gwtd:** 失敗した JSON operation を ok:false envelope で返す
+- **cli:** Pane.list を旧backendへフォールバックさせる
+- **cli:** Pane 応答待ちの budget を GUI stall に合わせる
+- **daemon:** 長い runtime path で Unix socket が bind できない問題を修正
+- **execution:** Terminal Work でも settlement receipt 要求で完了できなくする閉ループを解消
+- **work:** Workイベントをimmutable shardへ分割する
+- **work:** Shard移行後の回帰契約を修正する
+- **work:** Work event shard intakeをbucket化する
+- **pm:** 変化の無い周回で PM が digest を報告しないようにする
+- **test:** AppRuntime を組み立てる bin gwt テスト 184 件に gwt home の所有を強制する
+- **test:** Tempdir を作る bin gwt テスト 231 件に gwt home の所有を強制する
+- **test:** Lock 無しの ScopedEnvVar を排除し crate 全体で env 直列化を機械検証する
+- **test:** Env lock の poison 復帰を crate 全体へ広げ cascade で真因が隠れるのを止める
+- **daemon:** GUI front door が daemon endpoint スロットへ sentinel を書き込むのをやめる
+- **test:** Develop 取り込みで増えた tempdir テスト 24 件に gwt home の所有を強制する
+- **workspace:** 同一ブランチの別 worktree が execution container 統合で失われるのを防ぐ
+- **workspace:** 分裂 project store の移行を復活させ writer 排他と eventless Work 欠落を修正する
+- **workspace:** Store_consolidate の apply authority と dry-run 審査ゲートを塞ぐ
+- **pane:** 無応答 backend を timeout ではなく識別可能な条件として返す
+- **windows:** Tray 起動失敗の診断をプロジェクトログへ確実に残す
+- **workspace:** 登録済み PM の detached worktree から Work を更新できるようにする
+- **workspace:** #3491 の typed branch identity と PM の branchless authority を統合する
+- **hooks:** 本ブランチが持ち込んだ .codex/hooks.json の machine-local パスを戻す
+- **daemon:** GUI を runtime daemon の起動・監視主体にする
+- **issue-monitor:** 手動復旧後の failure hold を operator が解除できるようにする
+
+### Features
+
+- **pm:** Pm.stop で孤児 PM を CLI から停止・登録解除できるようにする
+
+### Miscellaneous Tasks
+
+- **work:** #3607 の Work event ログを記録する
+- **work:** Issue #3611 の Work event を settle する
+- **work:** #3604 の Work イベントを記録する
+- **work:** #3604 の終端 Work イベントを記録する
+- **work:** Work イベントログを更新
+- **work:** Issue #3491 の Work lifecycle event を記録する
+- **work:** Issue #3608 の Work event を記録する
+- **work:** Issue #3608 の resume event を記録する
+- **work:** Record issue 3510 completion
+- **work:** Record issue 3510 work events
+- **work:** Record issue 3510 verification and completion events
+- **work:** Record issue 3510 verification events
+- **work:** Issue #3476 の Work event を記録する
+- **work:** Work event を同期する
+- **work:** Terminal Work event を記録する
+- CI の Rust テストを再実行する
+- **work:** Issue #3476 の完了状態を記録する
+- **work:** #3560 引き継ぎ時点の Work event を記録する
+- **work:** #3560 再開時点の Work event を記録する
+- **work:** #3560 Ready 化時点の Work event を記録する
+- **work:** Issue #3632 の Work event を記録する
+- **work:** Issue #2338 の Work event を記録する
+- **work:** Issue #2338 の Work を done で終端する
+- **work:** #3607 の Work 完了イベントを記録する
+- **work:** #3606 の作業 Work event を記録
+- **work:** #3606 の完了 Work event を記録
+- **work:** #1764 の Work event ledger を更新する
+- **work:** #1764 の Work を done として記帳する
+- **work:** Issue #3477 の作業イベントと managed hook 更新を記録
+- **work:** Issue #3477 の作業イベントを記録
+- **work:** Issue #3477 の完了 Work event を記録
+- **work:** Issue #3633 の Work イベントを記録する
+- **work:** Issue #3633 の Work 完了状態を記録する
+- **work:** Issue #3645 の Work event を記録する
+
+### Performance
+
+- **gui:** Work/branch scan の同期 git 実行を projection から除去する
+
+### Testing
+
+- **gui:** #3611 の projection テスト 2 件を 1 件へ統合する
+- **work:** App runtimeのshard回帰契約を更新する
+- **work:** Workspace CLIのshard回帰契約を更新する
+- **work:** Bucket shardのapp runtime回帰契約を修正する
+- **work:** Symlink 拒否契約の digest bucket ケースを実行可能にする
+- **work:** Bucket shardの配布契約とCLI回帰契約を追随させる
+- **work:** Develop の受領テストを shard delivery に追随させる
+- **workspace:** 再起動を跨いだ store 解決の安定性と PM worktree の identity を固定する
+- **gwt:** Env lock guard を poison 耐性にし 1 件の flake が 7 件の失敗に化けるのを止める
+- **daemon:** Daemon の終了理由抽出にテストを足す
+
 ## [9.81.0] - 2026-08-15
 
 ### Bug Fixes

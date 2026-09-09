@@ -709,18 +709,14 @@ mod tests {
     }
 
     /// Unique throwaway repo root per call so the SPEC-2963 root mapping is
-    /// isolated from the real working tree (mirrors the Slack tests).
+    /// isolated from the real working tree (mirrors the Slack tests). The
+    /// random suffix avoids stale-root collisions when Windows reuses a PID.
     fn root() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "gwt-board-roots-teams-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::create_dir_all(&path);
-        path
+        tempfile::Builder::new()
+            .prefix("gwt-board-roots-teams-test-")
+            .tempdir()
+            .expect("Teams board remote test root")
+            .keep()
     }
 
     /// Records every post_json / patch_json (url + body) and returns an

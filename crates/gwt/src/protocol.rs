@@ -718,6 +718,17 @@ pub enum FrontendEvent {
         #[serde(default)]
         linked_issue_kind: Option<crate::LinkedIssueKind>,
     },
+    /// Issue #3628 (AC-3): return an issue whose launch is gone to the queue,
+    /// without launching anything.
+    ///
+    /// Carries no launch identity on purpose. `stop` and `failover` resolve an
+    /// exact live launch, which is right for them and impossible here — a row
+    /// that reached `agent_failed` has already lost the launch those operations
+    /// would name, and hand-editing `issue-monitor.json` was the only remaining
+    /// recovery. The driver still refuses any row a launch does own.
+    IssueMonitorRequeue {
+        issue_number: u64,
+    },
     IssueMonitorConfigureIssue {
         issue_number: u64,
         #[serde(default)]
@@ -1661,7 +1672,11 @@ pub enum BackendEvent {
     },
     /// Origin-connection-only terminal result for one privileged PM message.
     /// `queued` is reserved for a future durable payload queue; this slice
-    /// emits only `delivered` after exact acknowledgement or `failed`.
+    /// emits `delivered` after exact acknowledgement, `unverified` when the
+    /// prompt reached the pane but no acknowledgement arrived inside the
+    /// operation's budget, and `failed` when the input never committed.
+    /// `unverified` is deliberately not folded into `failed` (Issue #3608):
+    /// the two demand opposite responses from the caller.
     PmMessageSendResult {
         operation_id: String,
         status: String,

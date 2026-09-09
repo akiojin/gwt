@@ -71,6 +71,7 @@ pub(super) fn collect_quick_start_entries_from_sessions(
         .into_iter()
         .map(|session| QuickStartEntry {
             session_id: session.id.clone(),
+            linked_issue_number: session.linked_issue_number,
             agent_id: session.agent_id.command().to_string(),
             tool_label: session.display_name.clone(),
             model: session.model.clone(),
@@ -235,6 +236,29 @@ mod tests {
         assert_eq!(entries[0].agent_id, "codex");
         assert_eq!(entries[0].resume_session_id.as_deref(), Some("newer"));
         assert_eq!(entries[0].docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
+    fn quick_start_entry_preserves_durable_session_lineage() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let mut session = sample_session_record(
+            "work/issue-3457",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 8, 5, 10, 0, 0).unwrap(),
+            Some("provider-conversation"),
+        );
+        session.id = "durable-session-3457".to_string();
+        session.linked_issue_number = Some(3457);
+
+        let entries =
+            collect_quick_start_entries_from_sessions(&worktree, "work/issue-3457", vec![session]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id, "durable-session-3457");
+        assert_eq!(entries[0].linked_issue_number, Some(3457));
     }
 
     #[test]

@@ -143,6 +143,34 @@ pub fn success_command() -> TestCommand {
     }
 }
 
+/// A command that terminates with the exact `code`. Issue #3341 needs a
+/// non-zero, non-`1` status so a test can tell a real exit code apart from
+/// the collapsed `Completed(1)` display status.
+pub fn exit_code_command(code: u8) -> TestCommand {
+    #[cfg(windows)]
+    {
+        cmd_command(format!("exit /b {code}"))
+    }
+
+    #[cfg(not(windows))]
+    {
+        TestCommand {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), format!("exit {code}")],
+        }
+    }
+}
+
+/// A command that kills itself with `SIGTERM`, so the child is reaped with a
+/// signal rather than an exit code (Issue #3341 signal-death evidence).
+#[cfg(unix)]
+pub fn self_terminate_command() -> TestCommand {
+    TestCommand {
+        command: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "kill -TERM $$".to_string()],
+    }
+}
+
 pub fn answer_cursor_position_query(handle: &crate::pty::PtyHandle) {
     let _ = handle.write_input(b"\x1b[1;1R");
 }

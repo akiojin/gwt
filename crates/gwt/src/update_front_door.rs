@@ -537,8 +537,14 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
         Ok(()) => true, // unreachable: apply_pending_manifest_and_exit calls exit(0)
         Err(err) => {
             // Apply failed before exit. Clear the manifest so we don't loop.
-            // Tracing isn't initialized this early in main(), so log via stderr
-            // for post-mortem inspection.
+            // Issue #1764: `main()` installs the tracing subscriber before this
+            // runs, so the failure reaches the project log as well — stderr
+            // alone is discarded on the console-less Windows tray route.
+            tracing::error!(
+                target: "gwt::startup",
+                error = %err,
+                "bootstrap pending-update apply failed"
+            );
             eprintln!("gwt bootstrap pending-update apply failed: {err}");
             let _ = gwt_core::update::clear_pending_update_manifest();
             false
@@ -808,6 +814,7 @@ mod poll_state_tests {
         // cleanup helper wipes it. This exercises the same cleanup contract
         // the bootstrap path uses for "pending version <= current".
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tempdir.path());
         let payload = tempdir.path().join("v9.20.0").join("gwt");
         std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
         std::fs::write(&payload, b"#!/bin/sh\nexit 0\n").unwrap();

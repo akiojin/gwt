@@ -643,24 +643,61 @@ pub fn linked_pr_completion_is_fresh_for_issue(
     })
 }
 
-/// Reconcile active launched work branches that have merged, freeing the slot
-/// and delegating Issue-wide completion vs requeue to the domain policy. Skips
-/// the network call when nothing is launched and returns query failures so the
-/// scan owner can surface them after its final state rebase.
+/// Reconcile work branches that have merged, freeing the slot and delegating
+/// Issue-wide completion vs requeue to the domain policy. Returns query
+/// failures so the scan owner can surface them after its final state rebase.
+///
+/// Two entrances, one query. The tracked one matches `active_launched_branches`
+/// and is the ordinary path. The untracked one (Issue #3645 AC-3/AC-4) exists
+/// because emptying `launched_issues` — the repair the 2026-08-17 outage
+/// required — makes every launch that was in flight invisible to the first: the
+/// work merges, nothing records it, and the Issue stays a relaunch candidate
+/// forever. Candidates there are nominated locally from the merged-branch list
+/// and confirmed by [`try_issue_completed_by_merged_pr`], whose
+/// `merged_at >= issue_updated_at` rule is what stops a branch merged for an
+/// earlier generation from parking work that was reopened after it. Bounding
+/// the probe to branch matches keeps it off the whole queue.
 pub fn reconcile_issue_monitor_merges(
     monitor: &mut IssueMonitorState,
     repo_path: &Path,
+    owner: &str,
+    repo: &str,
 ) -> gwt_core::Result<Vec<u64>> {
-    if monitor.active_launched_branches().is_empty() {
+    if monitor.active_launched_branches().is_empty() && !monitor.has_open_launch_plan_candidates() {
         return Ok(Vec::new());
     }
     let merged_branches = gwt_git::pr_status::fetch_merged_pr_branches(repo_path)?;
-    let merged = monitor.reconcile_merged_branches(&merged_branches);
+    let mut merged = monitor.reconcile_merged_branches(&merged_branches);
     if !merged.is_empty() {
         tracing::info!(
             issues = ?merged,
             "issue monitor reconciled merged work deliveries and freed active slots"
         );
+    }
+
+    for issue in monitor.untracked_merged_branch_candidates(&merged_branches) {
+        let issue_number = issue.number;
+        // A probe failure keeps the issue launchable, matching the claim-path
+        // policy: an unreachable GitHub must never mint a terminal completion.
+        match try_issue_completed_by_merged_pr(owner, repo, &issue) {
+            Ok(true) => {
+                if monitor.record_untracked_completion(issue_number) {
+                    tracing::info!(
+                        issue = issue_number,
+                        "issue monitor recovered a completion its launch tracking had lost"
+                    );
+                    merged.push(issue_number);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    issue = issue_number,
+                    error = %error,
+                    "issue monitor untracked completion probe failed; issue stays launchable"
+                );
+            }
+        }
     }
     Ok(merged)
 }

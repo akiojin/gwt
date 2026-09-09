@@ -988,6 +988,7 @@ mod tests {
     #[test]
     fn checked_host_runner_falls_back_from_broken_direct_to_healthy_bunx() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         let original_args = config.args.clone();
         let mut probes = Vec::new();
@@ -1026,6 +1027,7 @@ mod tests {
     #[test]
     fn checked_host_runner_falls_back_from_broken_bunx_to_healthy_npx() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         let original_args = config.args.clone();
         let mut probes = Vec::new();
@@ -1067,6 +1069,7 @@ mod tests {
     #[test]
     fn checked_host_runner_rejects_broken_direct_bunx_and_npx_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         config
             .env_vars
@@ -1158,6 +1161,7 @@ mod tests {
     #[test]
     fn start_work_launch_materialization_prepares_origin_develop_at_launch_time() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let origin = temp.path().join("origin.git");
         let repo = temp.path().join("repo");
         run_git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
@@ -1417,6 +1421,7 @@ mod tests {
     #[test]
     fn command_prompt_agent_wrapper_normalizes_bun_claude_stub_before_shell_expression() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bun_bin_dir = temp.path().join(".bun").join("bin");
         fs::create_dir_all(&bun_bin_dir).expect("bun bin");
         let global_shim = bun_bin_dir.join("claude.exe");
@@ -1503,6 +1508,7 @@ mod tests {
     #[test]
     fn command_prompt_agent_wrapper_preserves_inner_cmd_expression_env() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bin = temp.path().join("Program Files").join("npm bin");
         fs::create_dir_all(&bin).expect("cmd shim directory");
         let shim = bin.join("npx.cmd");
@@ -1544,6 +1550,7 @@ mod tests {
         // an actionable error rather than embed the non-PE stub into the shell
         // expression (which would raise the Windows 16-bit dialog from cmd).
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let package_root = temp
             .path()
             .join("node_modules")
@@ -1584,6 +1591,7 @@ mod tests {
     #[test]
     fn windows_npx_cache_corruption_detection_requires_verified_old_binary_signature() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx_base = temp
             .path()
             .join("Local Cache With Spaces")
@@ -1621,6 +1629,7 @@ mod tests {
     #[test]
     fn windows_npx_cache_corruption_detection_rejects_paths_outside_local_npx_root() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let outside_root = temp.path().join("other-cache").join("_npx").join("abc");
         let bin_dir = outside_root
@@ -1646,6 +1655,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_repairs_corrupt_npx_cache_once_before_switching() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
@@ -1716,6 +1726,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_fails_before_spawn_when_npx_repair_fails() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
@@ -1763,6 +1774,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_does_not_repair_unrelated_npx_failure() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let mut config = sample_exact_windows_npx_launch_config();
@@ -1796,6 +1808,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_rejects_npx_timeout_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let mut config = sample_exact_windows_npx_launch_config();
@@ -1852,6 +1865,7 @@ mod tests {
     #[test]
     fn host_launch_keeps_bunx_when_runner_version_probe_succeeds() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bunx = temp.path().join("bunx");
         write_executable(&bunx);
         let mut config = sample_versioned_launch_config();
@@ -1870,6 +1884,7 @@ mod tests {
     #[test]
     fn host_launch_switches_to_npx_when_bunx_absent_but_npx_present() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         write_executable(&temp.path().join("npx"));
         let mut config = sample_versioned_launch_config();
         config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
@@ -1926,6 +1941,7 @@ mod tests {
     #[test]
     fn install_launch_gwt_bin_env_host_uses_checkout_sibling_before_foreign_path_install() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
         let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
         let current_exe = temp.path().join("checkout").join(executable_name);

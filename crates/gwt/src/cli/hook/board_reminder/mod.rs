@@ -160,9 +160,18 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
     );
     let projection =
         gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
-    Ok(title_summary_missing_in_projection(
-        projection.as_ref(),
-        &session.id,
+    if !title_summary_missing_in_projection(projection.as_ref(), &session.id) {
+        return Ok(false);
+    }
+    // Issue #3491: a detached-HEAD worktree has no branch, so it has no
+    // Workspace identity and every `workspace.update` against it is
+    // permanently rejected. Demanding a title-summary there re-injects an
+    // instruction the agent cannot follow on every single turn. gwt's own
+    // ephemeral intake worktrees are branchless by design, so this is a state
+    // gwt creates itself — stay silent instead of nagging. Probed only once
+    // the title is actually missing, so the common path costs no git call.
+    Ok(!crate::agent_project_state::worktree_head_is_detached(
+        &session.worktree_path,
     ))
 }
 
@@ -816,12 +825,17 @@ mod tests {
     ///
     /// The title demand ("set title-summary as your first action, this is not
     /// optional", re-issued every turn) outranks the PM's own contract in the
-    /// context it reads. It is also unsatisfiable: the PM runs in a detached
-    /// worktree where `workspace.update` fails with
-    /// `branch identity is unavailable` — the PM filed that as #3477 itself.
-    /// The progress-summary demand asks for an implementation/verification
-    /// digest the PM has no basis to write, and writing it would overwrite the
-    /// shared projection that belongs to the implementation agents.
+    /// context it reads. The progress-summary demand asks for an
+    /// implementation/verification digest the PM has no basis to write, and
+    /// writing it would overwrite the shared projection that belongs to the
+    /// implementation agents.
+    ///
+    /// This exemption originally had a second justification — the demand was
+    /// unsatisfiable, because `workspace.update` from the PM's detached
+    /// worktree always failed with `branch identity is unavailable`. Issue
+    /// #3477 removed that failure, so the exemption now rests on the two
+    /// reasons above alone. It is deliberately *not* keyed on branchlessness:
+    /// the PM can record Work state now and simply must not be nagged to.
     #[test]
     fn the_resident_pm_gets_no_work_state_reminders() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -1281,6 +1295,59 @@ mod tests {
         assert!(
             !agent_title_summary_missing(&session).expect("title check"),
             "saved non-empty title_summary must satisfy the guard"
+        );
+    }
+
+    /// Issue #3491: a detached-HEAD worktree can never accept
+    /// `workspace.update` (it has no branch, so it has no Workspace identity),
+    /// which made the title reminder an instruction the agent had no way to
+    /// follow — re-injected every single turn. gwt's own ephemeral intake
+    /// worktrees are branchless by design, so this is a state gwt creates
+    /// itself. The reminder must stay silent there.
+    #[test]
+    fn agent_title_summary_missing_stays_silent_on_a_branchless_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/branchless"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output = gwt_core::process::run_git_logged(&args, Some(&repo)).expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        }
+        let repo = dunce::canonicalize(&repo).expect("canonical repo");
+        let session = make_session(&repo, "work/branchless", "Codex");
+
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut agent = workspace_agent(
+            &session.id,
+            None,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        agent.title_summary = None;
+        agent.worktree_path = Some(repo.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        assert!(
+            agent_title_summary_missing(&session).expect("attached branch title check"),
+            "an attached-branch agent without a title must still be reminded"
+        );
+
+        let output = gwt_core::process::run_git_logged(&["checkout", "--detach"], Some(&repo))
+            .expect("run git");
+        assert!(output.status.success(), "git checkout --detach failed");
+
+        assert!(
+            !agent_title_summary_missing(&session).expect("branchless title check"),
+            "a branchless worktree cannot record Work state, so it must not be asked to"
         );
     }
 
