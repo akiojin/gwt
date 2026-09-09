@@ -1493,15 +1493,20 @@ impl LaunchWizardState {
             self.model = model.to_string();
         } else if self.current_agent_supports_freetext_model() {
             self.model = model.trim().to_string();
-        } else if let Some(fallback) = options.first() {
+        } else if let Some(fallback) = model_display_options(self.effective_agent_id()).first() {
             // Issue #3962 AC-5: the saved model left this agent's catalog
             // (`gpt-5.4` after the 2026-09-05 Codex snapshot). Never fail the
             // launch over it — `sync_selected_agent_options` falls back to the
             // default row, and this hint tells the user the launch is no longer
             // using what they saved.
+            //
+            // SPEC-1921 FR-189: the notice names the fallback row's label. The
+            // Claude Default row stores no model value, so the stored value
+            // itself would render as an empty name.
             self.model_fallback_notice = Some(format!(
-                "{} no longer offers {model}; using {fallback} instead.",
+                "{} no longer offers {model}; using {} instead.",
                 self.current_agent_display_name(),
+                fallback.label,
             ));
         }
     }

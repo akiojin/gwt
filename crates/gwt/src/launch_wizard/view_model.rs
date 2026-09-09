@@ -366,7 +366,7 @@ impl LaunchWizardState {
         model_display_options(self.effective_agent_id())
             .iter()
             .map(|option| LaunchWizardOptionView {
-                value: option.label.to_string(),
+                value: option.stored_value.to_string(),
                 label: option.label.to_string(),
                 description: Some(option.description.to_string()),
                 color: None,
@@ -798,7 +798,7 @@ impl LaunchWizardState {
             LaunchWizardStep::ModelSelect => model_display_options(self.effective_agent_id())
                 .iter()
                 .map(|option| LaunchWizardOptionView {
-                    value: option.label.to_string(),
+                    value: option.stored_value.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                     color: None,
@@ -3097,5 +3097,69 @@ mod tests {
             mode: "continue".to_string(),
         });
         assert_eq!(docker.mode, "continue");
+    }
+
+    // SPEC-1921 Phase 77 (AS-VCM-04; FR-189; SC-066): a stored Claude model
+    // outside the known identifier set - including the legacy version-numbered
+    // default label - restores as Default, and the four aliases roundtrip
+    // unchanged.
+    fn claude_previous_profile(model: &str) -> LaunchWizardPreviousProfile {
+        LaunchWizardPreviousProfile {
+            agent_id: "claude".to_string(),
+            model: Some(model.to_string()),
+            reasoning: None,
+            version: Some("latest".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+            hermes: Default::default(),
+        }
+    }
+
+    fn restored_claude_state(stored: &str) -> LaunchWizardState {
+        LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260523-1406"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            Some(claude_previous_profile(stored)),
+        )
+    }
+
+    #[test]
+    fn legacy_and_unknown_claude_models_restore_as_default() {
+        for stored in ["Default (Opus 4.8)", "claude-opus-4-8", "Opus"] {
+            assert_eq!(restored_claude_state(stored).model, "");
+        }
+    }
+
+    #[test]
+    fn known_claude_aliases_restore_unchanged() {
+        for alias in ["opus", "fable", "sonnet", "haiku"] {
+            assert_eq!(restored_claude_state(alias).model, alias);
+        }
+    }
+
+    #[test]
+    fn restored_default_claude_model_launches_without_model_argument() {
+        let state = restored_claude_state("Default (Opus 4.8)");
+
+        assert!(!is_explicit_model_selection(&state.model));
+        assert!(!state
+            .view()
+            .launch_summary
+            .iter()
+            .any(|entry| entry.label == "Model"));
+        // FR-189: the fallback hint never renders an empty model name.
+        if let Some(notice) = state.model_fallback_notice.as_deref() {
+            assert!(
+                notice.contains("using Default instead."),
+                "fallback notice must name the Default row: {notice}"
+            );
+        }
     }
 }

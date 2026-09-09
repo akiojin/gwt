@@ -5,6 +5,10 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct ModelDisplayOption {
     pub(super) label: &'static str,
+    /// SPEC-1921 FR-187: the identifier persisted in the profile and handed to
+    /// the CLI. Kept separate from `label` so a row's display copy can change
+    /// without rewriting stored selections. Most rows repeat their label here.
+    pub(super) stored_value: &'static str,
     pub(super) description: &'static str,
 }
 
@@ -57,37 +61,49 @@ pub(super) fn default_launch_path(
     }
 }
 
-const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.8)";
+// SPEC-1921 FR-187: Default stores no model value, so the launch omits the
+// model argument and Claude Code picks its own default model.
+pub(super) const CLAUDE_DEFAULT_MODEL_VALUE: &str = "";
 
-// Fable 5 shares the Opus 4.7/4.8 effort surface (low..max), so both models
-// use the same opus-tier reasoning ladder.
+// SPEC-1921 FR-188: gating reads the stored alias, never the display label.
+// Fable shares the Opus effort surface (low..max), and Default resolves to an
+// opus-tier model on Claude Code's side, so all three take the same ladder.
 pub(super) fn is_claude_opus_tier_model(model: &str) -> bool {
-    model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus" || model == "fable"
+    model == CLAUDE_DEFAULT_MODEL_VALUE || model == "opus" || model == "fable"
 }
 
 pub(super) fn is_claude_effort_capable_model(model: &str) -> bool {
     is_claude_opus_tier_model(model) || model == "sonnet"
 }
 
+// SPEC-1921 US-28 / FR-186: model generations belong to Claude Code, so the
+// picker addresses models only through versionless CLI aliases. The 1m context
+// forms, `opusplan`, and `best` stay valid arguments a user can pass
+// explicitly; curating the rendered rows does not remove them.
 const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 5] = [
     ModelDisplayOption {
-        label: CLAUDE_DEFAULT_MODEL_LABEL,
-        description: "Most capable for complex work",
+        label: "Default",
+        stored_value: CLAUDE_DEFAULT_MODEL_VALUE,
+        description: "Let Claude Code choose its default model",
     },
     ModelDisplayOption {
-        label: "fable",
-        description: "Most capable for the hardest, longest-running tasks",
-    },
-    ModelDisplayOption {
-        label: "opus",
+        label: "Opus",
+        stored_value: "opus",
         description: "Deep reasoning for complex problems",
     },
     ModelDisplayOption {
-        label: "sonnet",
+        label: "Fable",
+        stored_value: "fable",
+        description: "Most capable for the hardest, longest-running tasks",
+    },
+    ModelDisplayOption {
+        label: "Sonnet",
+        stored_value: "sonnet",
         description: "Balanced speed and capability",
     },
     ModelDisplayOption {
-        label: "haiku",
+        label: "Haiku",
+        stored_value: "haiku",
         description: "Fastest option for light tasks",
     },
 ];
@@ -109,6 +125,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-6-astra",
+            stored_value: "gpt-6-astra",
             description: "Our most capable model for complex, demanding work",
         },
         default_effort: "medium",
@@ -117,6 +134,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.6-sol",
+            stored_value: "gpt-5.6-sol",
             description: "Reliable agentic workhorse for everyday tasks",
         },
         default_effort: "low",
@@ -125,6 +143,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.6-terra",
+            stored_value: "gpt-5.6-terra",
             description: "Balanced agentic coding model for everyday work",
         },
         default_effort: "medium",
@@ -133,6 +152,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.6-luna",
+            stored_value: "gpt-5.6-luna",
             description: "Fast and affordable agentic coding model",
         },
         default_effort: "medium",
@@ -141,6 +161,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.5",
+            stored_value: "gpt-5.5",
             description: "Proven previous-generation model for coding and general work",
         },
         default_effort: "medium",
@@ -149,6 +170,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.4-mini",
+            stored_value: "gpt-5.4-mini",
             description: "Small, fast, and cost-efficient model for simpler coding tasks",
         },
         default_effort: "medium",
@@ -157,6 +179,7 @@ const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
     CodexModelCapability {
         model: ModelDisplayOption {
             label: "gpt-5.3-codex-spark",
+            stored_value: "gpt-5.3-codex-spark",
             description: "Ultra-fast coding model",
         },
         default_effort: "high",
@@ -177,39 +200,45 @@ const CODEX_MODEL_OPTIONS: [ModelDisplayOption; CODEX_MODEL_CAPABILITIES.len()] 
 const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     ModelDisplayOption {
         label: "Default (Auto)",
+        stored_value: "Default (Auto)",
         description: "Use Gemini default model",
     },
     ModelDisplayOption {
         label: "gemini-3-flash-preview",
+        stored_value: "gemini-3-flash-preview",
         description: "Preview flash model",
     },
     ModelDisplayOption {
         label: "gemini-3.1-flash-lite-preview",
+        stored_value: "gemini-3.1-flash-lite-preview",
         description: "Preview flash-lite model",
     },
     ModelDisplayOption {
         label: "gemini-2.5-flash",
+        stored_value: "gemini-2.5-flash",
         description: "Stable flash model",
     },
     ModelDisplayOption {
         label: "gemini-2.5-flash-lite",
+        stored_value: "gemini-2.5-flash-lite",
         description: "Stable flash-lite model",
     },
     ModelDisplayOption {
         label: "gemma-4-31b-it",
+        stored_value: "gemma-4-31b-it",
         description: "Gemma 4 31B instruction model",
     },
     ModelDisplayOption {
         label: "gemma-4-26b-a4b-it",
+        stored_value: "gemma-4-26b-a4b-it",
         description: "Gemma 4 26B A4B instruction model",
     },
 ];
 
 // Auto is the default: gwt skips the CLAUDE_CODE_EFFORT_LEVEL export so
-// Claude Code applies its own per-model default effort (`high` on
-// Fable 5 / Opus 4.8, `xhigh` on Opus 4.7). Hardcoding a level here goes
-// stale whenever a model generation changes its default, and the `opus`
-// alias resolves to different generations per provider.
+// Claude Code applies its own per-model default effort. Hardcoding a level
+// here goes stale whenever a model generation changes its default, and each
+// alias resolves to a different generation per provider.
 pub(super) const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "Auto",
@@ -232,7 +261,7 @@ pub(super) const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Balances tokens and intelligence (Fable 5 / Opus 4.8 default)",
+        description: "Balances tokens and intelligence (opus-tier default)",
         is_default: false,
     },
     ReasoningDisplayOption {
@@ -383,7 +412,7 @@ const CODEX_FALLBACK_MAX_EFFORT: &str = "xhigh";
 pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDisplayOption> {
     let capability = CODEX_MODEL_CAPABILITIES
         .iter()
-        .find(|capability| capability.model.label == model);
+        .find(|capability| capability.model.stored_value == model);
     let default_effort = capability.map_or(CODEX_FALLBACK_DEFAULT_EFFORT, |row| row.default_effort);
     let max_effort = capability.map_or(CODEX_FALLBACK_MAX_EFFORT, |row| row.max_effort);
     let end = CODEX_REASONING_LADDER
@@ -857,22 +886,14 @@ pub(super) fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizar
     }
 }
 
+/// Stored identifiers for the agent's picker rows, in render order.
+/// SPEC-1921 FR-187: these are the values persisted in the profile and handed
+/// to the CLI, not the labels the picker renders.
 pub(super) fn current_model_options(agent_id: &str) -> Vec<&'static str> {
-    match agent_id {
-        "claude" => CLAUDE_MODEL_OPTIONS
-            .iter()
-            .map(|option| option.label)
-            .collect(),
-        "codex" => CODEX_MODEL_OPTIONS
-            .iter()
-            .map(|option| option.label)
-            .collect(),
-        "gemini" => GEMINI_MODEL_OPTIONS
-            .iter()
-            .map(|option| option.label)
-            .collect(),
-        _ => Vec::new(),
-    }
+    model_display_options(agent_id)
+        .iter()
+        .map(|option| option.stored_value)
+        .collect()
 }
 
 pub(super) fn model_display_options(agent_id: &str) -> &'static [ModelDisplayOption] {
@@ -1820,7 +1841,7 @@ mod tests {
 
         assert_eq!(
             current_model_options("claude"),
-            vec!["Default (Opus 4.8)", "fable", "opus", "sonnet", "haiku"]
+            vec!["", "opus", "fable", "sonnet", "haiku"]
         );
         assert_eq!(
             current_model_options("codex"),
@@ -2169,9 +2190,8 @@ mod tests {
     #[test]
     fn claude_opus_reasoning_default_is_auto() {
         // Defaulting to Auto skips the CLAUDE_CODE_EFFORT_LEVEL export so
-        // Claude Code applies its own per-model default (`high` on
-        // Fable 5 / Opus 4.8, `xhigh` on Opus 4.7) regardless of which
-        // model the alias resolves to on the user's provider.
+        // Claude Code applies its own per-model default effort regardless
+        // of which model the alias resolves to on the user's provider.
         let default = super::CLAUDE_OPUS_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
@@ -2319,5 +2339,79 @@ mod tests {
             .find(|option| option.is_default)
             .expect("Sonnet reasoning options must have a default row");
         assert_eq!(default.stored_value, "auto");
+    }
+
+    // SPEC-1921 Phase 77 (US-28 / AS-VCM-01; FR-186..FR-187; SC-065):
+    // the picker shows five versionless rows in a fixed order and each row
+    // stores the CLI alias rather than its display label. Default stores no
+    // model value at all, so the launch omits the model argument.
+    #[test]
+    fn claude_model_rows_are_versionless_and_ordered() {
+        let labels: Vec<&str> = model_display_options("claude")
+            .iter()
+            .map(|option| option.label)
+            .collect();
+        assert_eq!(labels, ["Default", "Opus", "Fable", "Sonnet", "Haiku"]);
+        assert_eq!(
+            current_model_options("claude"),
+            vec!["", "opus", "fable", "sonnet", "haiku"]
+        );
+        assert!(!is_explicit_model_selection(""));
+    }
+
+    // SPEC-1921 Phase 77 (AS-VCM-02; FR-186; SC-065): model generations belong
+    // to Claude Code, so no rendered Claude string may pin one.
+    #[test]
+    fn claude_display_strings_carry_no_version_numbers() {
+        let mut strings: Vec<&str> = Vec::new();
+        for option in model_display_options("claude") {
+            strings.push(option.label);
+            strings.push(option.description);
+        }
+        for option in super::CLAUDE_OPUS_REASONING_OPTIONS
+            .iter()
+            .chain(super::CLAUDE_SONNET_REASONING_OPTIONS.iter())
+        {
+            strings.push(option.label);
+            strings.push(option.description);
+        }
+        for text in strings {
+            assert!(
+                !text.chars().any(|character| character.is_ascii_digit()),
+                "Claude display string must not pin a model version: {text}"
+            );
+        }
+    }
+
+    // SPEC-1921 Phase 77 (AS-VCM-05; FR-188): effort gating reads the stored
+    // identifier, so a display label can never unlock the opus-tier ladder.
+    #[test]
+    fn claude_effort_gating_keys_off_stored_identifier() {
+        assert!(is_claude_opus_tier_model(""));
+        assert!(is_claude_opus_tier_model("opus"));
+        assert!(is_claude_opus_tier_model("fable"));
+        assert!(!is_claude_opus_tier_model("sonnet"));
+        assert!(!is_claude_opus_tier_model("haiku"));
+        assert!(!is_claude_opus_tier_model("Opus"));
+        assert!(!is_claude_opus_tier_model("Default (Opus 4.8)"));
+
+        assert!(is_claude_effort_capable_model(""));
+        assert!(is_claude_effort_capable_model("sonnet"));
+        assert!(!is_claude_effort_capable_model("haiku"));
+        assert!(!is_claude_effort_capable_model("Sonnet"));
+    }
+
+    // SPEC-1921 Phase 77 (AS-VCM-05): Default follows the opus-tier ladder
+    // because it resolves to Claude Code's own default model, and Haiku still
+    // has no effort step at all.
+    #[test]
+    fn claude_default_row_uses_opus_ladder_and_haiku_skips_effort() {
+        let default_state = claude_state("", true);
+        assert!(default_state.agent_uses_reasoning_step());
+        assert_eq!(
+            claude_reasoning_values(&default_state),
+            ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"]
+        );
+        assert!(!claude_state("haiku", true).agent_uses_reasoning_step());
     }
 }

@@ -2312,11 +2312,41 @@ mod tests {
     #[test]
     fn build_claude_with_model() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .model("claude-opus-4-8")
+            .model("opus")
             .build();
 
         assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"claude-opus-4-8".to_string()));
+        assert!(config.args.contains(&"opus".to_string()));
+    }
+
+    // SPEC-1921 Phase 77 (AS-VCM-03; FR-187, FR-189; SC-066): Default stores no
+    // model value, so the wizard never calls `.model()` and the command carries
+    // no model argument.
+    #[test]
+    fn build_claude_default_row_omits_model_argument() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+
+        assert!(config.model.is_none());
+        assert!(!config.args.contains(&"--model".to_string()));
+    }
+
+    // SPEC-1921 Phase 77 (AS-VCM-03; FR-189): each row passes its own alias
+    // through untouched. gwt runs no alias preflight - an alias the installed
+    // Claude Code does not know surfaces through the CLI's own error output.
+    #[test]
+    fn build_claude_passes_each_alias_without_preflight() {
+        for alias in ["opus", "fable", "sonnet", "haiku", "unreleased-alias"] {
+            let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+                .model(alias)
+                .build();
+
+            let model_argument = config
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "--model")
+                .map(|pair| pair[1].clone());
+            assert_eq!(model_argument.as_deref(), Some(alias));
+        }
     }
 
     #[test]
