@@ -1897,6 +1897,176 @@ pub fn reap_startup_defunct_active_generation(
     })
 }
 
+/// Issue #4200: operation-id prefix for a generation released because the
+/// operator revoked its launch.
+const REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX: &str = "revoked-launch-release-v1:";
+
+fn revoked_launch_release_operation_id(generation_id: &str, binding_id: &str) -> String {
+    let digest = sha256_hex(
+        serde_json::to_vec(&("revoked-launch-release-v1", generation_id, binding_id))
+            .unwrap_or_default(),
+    );
+    format!("{REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX}{digest}")
+}
+
+/// What [`release_revoked_launch_generation`] did to an owner's generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokedLaunchGenerationRelease {
+    /// The Active generation was terminalized by this call, so the next launch
+    /// takes the Blocked successor route.
+    Released {
+        generation_id: String,
+        holder_session_id: String,
+    },
+    /// The generation is already Blocked or Completed. A fresh launch already
+    /// supersedes it, so there is nothing left to release.
+    AlreadyTerminal { generation_id: String },
+    /// The owner holds no generation at all.
+    NotHeld,
+    /// Fail-closed: the generation is Active but is not this operation's to
+    /// settle, and `detail` says why.
+    Held {
+        generation_id: String,
+        detail: &'static str,
+    },
+}
+
+/// Issue #4200: release an owner's Active execution generation because the
+/// operator revoked the launch that holds it.
+///
+/// Every other release route in this module is keyed on *evidence* that the
+/// holder can no longer return — [`unreachable_current_generation_holder`], the
+/// startup/scan reaper, [`holder_status_permits_generation_reclaim`]. That is
+/// the right default, and it is also why a launch that died before its agent
+/// ever ran parks its Issue forever: the durable Session and its runtime
+/// sidecar are both written `Running` at launch, the PTY-exit path that would
+/// correct them never runs, and the Host that wrote the sidecar is the gwt
+/// process itself, which stays alive. Every evidence-based route then answers
+/// "cannot prove it is dead" and refuses, correctly, forever.
+///
+/// Revoking a launch supplies the missing fact directly: it is not evidence
+/// about the holder, it is the operator's decision that the holder must not
+/// return. So this deliberately asks for no liveness proof. It still refuses,
+/// byte-preserving, on every reading that says the generation is not the one
+/// being revoked — a changed current generation, a prepared successor or
+/// takeover mid-flight, or a projection that no longer matches.
+pub fn release_revoked_launch_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    reason: &str,
+) -> io::Result<RevokedLaunchGenerationRelease> {
+    validate_owner(owner)?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "releasing a revoked launch generation requires a non-empty reason",
+        ));
+    }
+    // Same reason as the startup reaper: a refused relaunch materializes the
+    // worktree again and publishes nothing into it, so the strict read below
+    // would fail on a missing pointer for exactly the owners this exists for.
+    let _ = heal_missing_generation_publication(worktree, owner);
+    with_generation_activation_leases(worktree, owner, |context| {
+        let owner_ledger =
+            load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::NotFound,
+                    "owner generation ledger is not initialized",
+                )
+            })?;
+        let Some(owner_current) = owner_ledger.current_generation().cloned() else {
+            return Ok(RevokedLaunchGenerationRelease::NotHeld);
+        };
+        if owner_ledger.effective_status_for(&owner_current) != ExecutionControlStatus::Active {
+            return Ok(RevokedLaunchGenerationRelease::AlreadyTerminal {
+                generation_id: owner_current.identity.generation_id,
+            });
+        }
+        let mut ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("revoked launch release lost strict generation authority")
+        })?;
+        let Some(current) = ledger.current_generation().cloned() else {
+            return Ok(RevokedLaunchGenerationRelease::NotHeld);
+        };
+        if current.identity.generation_id != owner_current.identity.generation_id
+            || current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || ledger.effective_status_for(&current) != ExecutionControlStatus::Active
+        {
+            return Ok(RevokedLaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail: "the current generation changed under the release lease",
+            });
+        }
+        if current_generation_has_prepared_transaction(&ledger, &current.identity.generation_id) {
+            return Ok(RevokedLaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail: "a prepared successor or takeover transaction is still in flight",
+            });
+        }
+        let holder_session_id = current.identity.initial_session_id.clone();
+        let mut record = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(&current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "revoked launch Active projection is malformed: {error}"
+            ))
+        })?;
+        if !integrity_ok(&record)
+            || record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.primary_session_id != holder_session_id
+            || record.status != ExecutionControlStatus::Active
+            || record.settled_at.is_some()
+        {
+            return Ok(RevokedLaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail: "the Active projection no longer matches this generation",
+            });
+        }
+        let operation_id = revoked_launch_release_operation_id(
+            &current.identity.generation_id,
+            &current.identity.session_binding_id,
+        );
+        let recorded_at = Utc::now();
+        record.status = ExecutionControlStatus::Blocked;
+        record.blocked_reason = Some(reason.to_string());
+        record.missing_verification = Some("revoked launch settlement".to_string());
+        record.settled_at = Some(recorded_at);
+        let projection = serialized_execution_projection(&record)?;
+        append_lifecycle_event(
+            &mut ledger,
+            GenerationLifecycleEvent {
+                sequence: 0,
+                generation_id: current.identity.generation_id.clone(),
+                from_status: ExecutionControlStatus::Active,
+                to_status: ExecutionControlStatus::Blocked,
+                session_id: holder_session_id.clone(),
+                reason: reason.to_string(),
+                operation_id: Some(operation_id),
+                recorded_at,
+                execution_control_json: projection.clone(),
+                previous_event_hash: String::new(),
+                content_hash: String::new(),
+            },
+        );
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(context, &ledger, &projection)?;
+        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("revoked launch release lost generation authority")
+        })?;
+        if readback.current_effective_status() != Some(ExecutionControlStatus::Blocked) {
+            return Err(invalid_generation_data(
+                "revoked launch release readback is not Blocked",
+            ));
+        }
+        Ok(RevokedLaunchGenerationRelease::Released {
+            generation_id: current.identity.generation_id,
+            holder_session_id,
+        })
+    })
+}
+
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
     attempt.request.work_id.is_none()
         && matches!(
@@ -15924,6 +16094,195 @@ mod tests {
             assert_eq!(fs::read(session_path).unwrap(), session_before);
             assert_eq!(fs::read(runtime_path).unwrap(), runtime_before);
         }
+    }
+
+    /// Issue #4200 AC-1 / AC-3: revoking a launch releases the generation no
+    /// amount of evidence can.
+    ///
+    /// The fixture is the exact production shape: an Active generation whose
+    /// holder Session still reads `Running` and whose runtime sidecar was
+    /// written by a Host process that is still alive — what a launch that died
+    /// before its agent ever ran leaves behind, because the PTY-exit path that
+    /// would have corrected both records never ran. The reaper refuses it
+    /// forever, and correctly so: nothing here proves the holder is dead.
+    /// Revoking supplies a decision instead of a proof, and that is enough.
+    #[test]
+    fn revoked_launch_release_terminalizes_a_holder_the_reaper_must_refuse() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 920,
+        };
+        let session_id = "revoked-launch-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current process start identity");
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+            "the fixture must reproduce the reading that strands a generation"
+        );
+        assert!(
+            matches!(
+                reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                    .unwrap(),
+                StartupActiveGenerationReapOutcome::Unchanged
+            ),
+            "the evidence-based reaper has nothing to act on, which is the gap"
+        );
+        assert!(
+            unreachable_current_generation_holder(&sessions_dir, worktree.path(), owner)
+                .unwrap()
+                .is_none(),
+            "and the launch path finds no dead holder to supersede either"
+        );
+
+        assert!(
+            release_revoked_launch_generation(worktree.path(), owner, "   ").is_err(),
+            "a release with no stated reason leaves no usable audit entry"
+        );
+
+        let released =
+            release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
+                .unwrap();
+        assert_eq!(
+            released,
+            RevokedLaunchGenerationRelease::Released {
+                generation_id: candidate.generation_id.clone(),
+                holder_session_id: session_id.to_string(),
+            }
+        );
+
+        let hold = owner_generation_hold_from_ledger(
+            &sessions_dir,
+            &load_owner_generation_ledger(worktree.path(), owner)
+                .unwrap()
+                .unwrap(),
+        )
+        .expect("the generation stays on record as audit evidence");
+        assert_eq!(hold.status, ExecutionControlStatus::Blocked);
+        assert_eq!(hold.generation_id, candidate.generation_id);
+        assert!(
+            execution_generation_conflict_refusal(owner, Some(&hold))
+                .contains("blocked generation"),
+            "a refusal on a released generation must say it is terminal, because a \
+             terminal predecessor is what routes the next launch to a successor"
+        );
+
+        // The lifecycle entry names why the generation ended, under its own
+        // operation id, so it can never be confused with a reaper release.
+        let ledger = load_owner_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        let event = ledger
+            .lifecycle_events_for(&candidate.generation_id)
+            .max_by_key(|event| event.sequence)
+            .expect("release lifecycle event");
+        assert_eq!(event.from_status, ExecutionControlStatus::Active);
+        assert_eq!(event.to_status, ExecutionControlStatus::Blocked);
+        assert!(event
+            .operation_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX)));
+
+        // Repeating it reports the terminal state instead of writing again.
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+        assert_eq!(
+            release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
+                .unwrap(),
+            RevokedLaunchGenerationRelease::AlreadyTerminal {
+                generation_id: candidate.generation_id
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "an already-terminal release is byte-preserving"
+        );
+    }
+
+    /// Issue #4200: the release is still fail-closed about *which* generation it
+    /// settles. A successor transaction that is prepared but not yet activated
+    /// owns the outcome of this generation, so the revoke must not race it.
+    #[test]
+    fn revoked_launch_release_refuses_a_generation_with_a_prepared_successor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 921,
+        };
+        let session_id = "revoked-launch-prepared-holder";
+        let (candidate, _identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        prepare_active_continuation_successor(
+            worktree.path(),
+            owner,
+            &SuccessorRequest {
+                operation_id: format!("prepared-{}", uuid::Uuid::new_v4()),
+                principal_id: "test".to_string(),
+                work_id: Some("work/prepared".to_string()),
+                source: "continue-work:resume".to_string(),
+                session_binding_id: uuid::Uuid::new_v4().to_string(),
+                initial_session_id: "revoked-launch-successor".to_string(),
+                entrypoint: "gwt-execute".to_string(),
+                requested_at: Utc::now(),
+            },
+        )
+        .expect("prepare a successor on the Active generation");
+
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+        assert_eq!(
+            release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
+                .unwrap(),
+            RevokedLaunchGenerationRelease::Held {
+                generation_id: candidate.generation_id,
+                detail: "a prepared successor or takeover transaction is still in flight",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "a refused release is byte-preserving"
+        );
     }
 
     /// Issue #3934: a Host that is gone cannot be running anything. When the

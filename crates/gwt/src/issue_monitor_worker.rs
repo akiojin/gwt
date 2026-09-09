@@ -2961,6 +2961,9 @@ mod tests {
         monitor.record_agent_issue_failed(42, conflict);
 
         // Still Active: the scan leaves the hold in place and reports it.
+        // Issue #4200 AC-4: it also parks the row, because a generation nothing
+        // can prove dead never releases itself and the bare `agent_failed` row
+        // is indistinguishable from a transient launch failure.
         scan_loaded_issue_monitor_candidates(
             &mut monitor,
             &loaded,
@@ -2969,7 +2972,13 @@ mod tests {
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::AgentFailed)
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.needs_human_kind),
+            Some(crate::NeedsHumanKind::StrandedExecutionGeneration)
         );
         let reported = monitor
             .agent_status_at("2026-09-05T00:01:30Z")
