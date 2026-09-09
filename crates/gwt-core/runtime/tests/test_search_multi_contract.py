@@ -695,7 +695,15 @@ class SearchMultiContractTests(unittest.TestCase):
                 f"unreadable store must classify as corrupt, not silent-empty: {payload}",
             )
 
-    def test_search_multi_blocks_issue_results_when_source_count_changes(self):
+    def test_search_multi_serves_issue_results_when_source_cache_outgrows_index(self):
+        """Issue #4132: an `issue.create` / `issue.comment` write is drift, not corruption.
+
+        The built collection still agrees with its own manifest and is fully
+        searchable; it merely trails the Issue cache by the documents that
+        landed after the last build. Classifying that as `corrupt` made every
+        `gwt-search` preflight fail with `INDEX_NOT_READY` until the next
+        rebuild, which the very next Issue write broke again.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             db_root = base / "index"
@@ -710,6 +718,51 @@ class SearchMultiContractTests(unittest.TestCase):
                 )
                 self.assertTrue(result.get("ok"), result)
                 self._write_cached_issue(base, 2, "Second issue about alpha search")
+
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=None,
+                    project_root=str(base),
+                    query="alpha search",
+                    n_results=5,
+                    scopes=["issues"],
+                    db_root=db_root,
+                )
+
+            self.assertTrue(payload.get("ok"), payload)
+            self.assertEqual(
+                payload.get("scopes", {}).get("issues", {}).get("state"),
+                "stale",
+                f"source-cache drift must classify as stale, not corrupt: {payload}",
+            )
+            self.assertIn("issues", payload.get("stale_scopes") or [], payload)
+            self.assertTrue(
+                payload.get("issueResults"),
+                f"the last verified index must keep answering: {payload}",
+            )
+
+    def test_search_multi_keeps_issue_scope_corrupt_when_store_contradicts_meta(self):
+        """A collection that disagrees with its own manifest is still corrupt."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            self._write_cached_issue(base, 1, "First issue about alpha search")
+
+            with mock.patch.dict(os.environ, {"HOME": str(base)}, clear=False):
+                result = runner.action_index_issues_v2(
+                    repo_hash=REPO_HASH,
+                    project_root=str(base),
+                    db_root=db_root,
+                    respect_ttl=False,
+                )
+                self.assertTrue(result.get("ok"), result)
+
+                # The manifest claims more documents than the store holds:
+                # the built artifact contradicts itself and cannot be trusted.
+                meta_path = db_root / REPO_HASH / "issues" / "meta.json"
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta["document_count"] = meta["document_count"] + 5
+                meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
                 payload = runner.action_search_multi_v2(
                     repo_hash=REPO_HASH,

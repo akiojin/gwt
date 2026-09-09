@@ -25,6 +25,11 @@ pub enum ErrorKind {
     HookFailure,
     OperationRefusal,
     DaemonFault,
+    /// Issue #4087 AC-2: the Issue cache full refresh (or the index rebuild
+    /// that follows a cache write) failed. Reported here instead of a
+    /// `tracing::warn` line so `errors.list` can tell the PM why Issues
+    /// created on GitHub stopped arriving.
+    CacheRefreshFailure,
 }
 
 /// Optional locators so a ledger row can be triaged back to a launch.

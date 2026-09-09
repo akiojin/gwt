@@ -18,6 +18,7 @@ pub mod daemon_runtime;
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
+pub mod disk_space;
 pub mod error_report;
 pub mod file_content;
 pub mod file_tree;
@@ -49,6 +50,7 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
+pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
@@ -123,16 +125,17 @@ pub use index_worker::{
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
     bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
-    decide_merged_issue_settlement, delegation_recorded, establish_issue_monitor_authority_fence,
-    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
-    issue_monitor_authority_fence_path, issue_monitor_launch_plan,
-    issue_monitor_launch_profile_pool_summary, issue_monitor_launch_profile_summary,
-    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path,
-    load_issue_monitor_authority_fence, load_issue_monitor_prefs,
-    mark_autonomous_handoff_delivered_from_prefs,
-    mark_autonomous_handoff_delivery_ambiguous_from_prefs, mutate_issue_monitor_prefs,
-    mutate_issue_monitor_prefs_recovering, pending_autonomous_handoff_resumption_from_prefs,
-    persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
+    clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
+    delegation_recorded, establish_issue_monitor_authority_fence, is_auto_improve_candidate,
+    is_legacy_git_launch_failure_for_project, issue_monitor_authority_fence_path,
+    issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
+    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
+    issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
+    load_issue_monitor_prefs, mark_autonomous_handoff_delivered_from_prefs,
+    mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
+    mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
+    pending_autonomous_handoff_resumption_from_prefs, persist_issue_monitor_authority_fence,
+    persist_legacy_issue_monitor_shutdown_revoke_fence,
     prepare_autonomous_handoff_delivery_from_prefs,
     preserve_answered_handoff_resume_strategy_from_prefs,
     record_autonomous_handoff_delivery_failure_from_prefs, record_autonomous_question_handoff,
@@ -146,28 +149,29 @@ pub use issue_monitor::{
     AutonomousSteeringRequest, AutonomousWaitDeclaration, AutonomousWaitOutcome,
     EligibilityDecision, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
     IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorExecutionSettlement,
-    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorFailure,
-    IssueMonitorIdleKind, IssueMonitorIdlePaneClose, IssueMonitorIdleReconciliation,
-    IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow, IssueMonitorInboxItem,
-    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchBindingReconciliation,
-    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate,
+    IssueMonitorClaimIdentity, IssueMonitorConfig, IssueMonitorControlReceipt,
+    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorExecutionSettlement, IssueMonitorFailedIssue, IssueMonitorFailoverOutcome,
+    IssueMonitorFailure, IssueMonitorIdleKind, IssueMonitorIdlePaneClose,
+    IssueMonitorIdleReconciliation, IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
+    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchProfileSwitchError,
     IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue,
     IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorPrefsReset,
-    IssueMonitorProviderQuotaHold, IssueMonitorProviderQuotaHoldClearOutcome,
-    IssueMonitorProviderQuotaHoldEvidence, IssueMonitorProviderQuotaHoldRelease,
-    IssueMonitorProviderQuotaPollerWindow, IssueMonitorProviderUsageLimitOutcome,
-    IssueMonitorReadiness, IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
-    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver, IssueMonitorScanDriverKind,
-    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch,
-    IssueMonitorStopOutcome, IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts,
-    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl, IssueMonitorUpdateDrainReason,
-    IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
-    LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement,
-    MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect,
-    AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
+    IssueMonitorProfilesSetChange, IssueMonitorProviderQuotaHold,
+    IssueMonitorProviderQuotaHoldClearOutcome, IssueMonitorProviderQuotaHoldEvidence,
+    IssueMonitorProviderQuotaHoldRelease, IssueMonitorProviderQuotaPollerWindow,
+    IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness, IssueMonitorReleasedFailure,
+    IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver,
+    IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
+    IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
+    IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
+    IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
+    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
+    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
+    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
@@ -183,13 +187,13 @@ pub use launch_wizard::{
     load_agent_options, AgentOption, AgentSetupAffordance, AgentSetupKind, DockerWizardContext,
     LaunchTargetKind, LaunchWizardAction, LaunchWizardAgentSetupView, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
-    LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardLiveSessionView,
-    LaunchWizardMode, LaunchWizardOptionView, LaunchWizardPreviousProfile,
-    LaunchWizardPreviousProfiles, LaunchWizardProgressStepView, LaunchWizardQuickStartView,
-    LaunchWizardStartMethodKind, LaunchWizardStartMethodView, LaunchWizardState, LaunchWizardStep,
-    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
-    QuickStartLaunchMode, ResumableAgentLifecycleStatus, ResumableAgentResumeKind,
-    ResumableAgentView, ShellLaunchConfig,
+    LaunchWizardIssueMonitorPoolImpactView, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
+    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
+    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
+    LaunchWizardQuickStartView, LaunchWizardStartMethodKind, LaunchWizardStartMethodView,
+    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
+    LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
+    ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
