@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    IssueMonitorCandidateSource, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState, MonitorInboxState,
+    IssueMonitorCandidateSource, IssueMonitorExecutionSettlement, IssueMonitorInboxItem,
+    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary,
+    IssueMonitorState, MonitorInboxState,
 };
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
@@ -286,6 +287,62 @@ where
     Ok(value)
 }
 
+/// Issue #4084: read the execution record state of every launched Issue so the
+/// idle classifier can tell a settled implementation window from a live one.
+///
+/// The owner diagnosis is repository-scoped, so any worktree in the repository
+/// answers for every owner. An unreadable or absent record is `Unknown`, which
+/// classifies as `stuck_unknown` and is therefore never released automatically.
+pub fn read_execution_settlements(
+    project_root: &Path,
+    issue_numbers: &[u64],
+) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
+    use crate::cli::execution_state::{
+        diagnose_owner, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    issue_numbers
+        .iter()
+        .map(|issue_number| {
+            let diagnosis = diagnose_owner(
+                project_root,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: *issue_number,
+                },
+            );
+            let settlement = match diagnosis.ecr_status {
+                Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Active,
+                Some(ExecutionControlStatus::Completed) => {
+                    IssueMonitorExecutionSettlement::Completed
+                }
+                Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
+                None => IssueMonitorExecutionSettlement::Unknown,
+            };
+            (*issue_number, settlement)
+        })
+        .collect()
+}
+
+/// Issue #4084 AC-2/AC-3: classify the launched windows against the last
+/// canvas snapshot and release the ones no human has to judge.
+pub fn reconcile_issue_monitor_idle_windows(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> crate::IssueMonitorIdleReconciliation {
+    let settlements = read_execution_settlements(project_root, &monitor.active_issue_numbers());
+    let outcome = monitor.reconcile_idle_windows(&settlements, now);
+    if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
+        tracing::info!(
+            released = ?outcome.released,
+            rebound = ?outcome.rebound,
+            pane_closes = ?outcome.pane_closes,
+            "released idle Issue Monitor windows"
+        );
+    }
+    outcome
+}
+
 pub fn issue_monitor_daemon_payloads(
     monitor: &mut IssueMonitorState,
     gui_connected: bool,
@@ -315,6 +372,19 @@ pub fn issue_monitor_daemon_payloads(
                     }),
                 });
             }
+        }
+        // Issue #4084 AC-2/AC-3: ask the GUI to close the panes whose launch
+        // this scan already released. The lifecycle edge is committed, so the
+        // GUI must close them without publishing a second `window_closed`.
+        for close in monitor.take_pending_idle_pane_closes() {
+            payloads.push(IssueMonitorDaemonPayload {
+                event: "idle_pane_close".to_string(),
+                payload: serde_json::json!({
+                    "window_id": close.window_id,
+                    "issue_number": close.issue_number,
+                    "idle_kind": close.idle_kind.as_str(),
+                }),
+            });
         }
         // SPEC #3200 Option A: surface review-agent spawn requests to the GUI.
         for dispatch in monitor.take_pending_review_dispatches() {
@@ -427,86 +497,14 @@ fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
     let (Some(_plan), Some(tasks)) = (section("plan"), section("tasks")) else {
         return IssueMonitorReadiness::NotReady;
     };
-    let mut open_fence = None;
-    let checkbox_states = tasks.lines().filter_map(|line| {
-        let content = line.trim_start_matches([' ', '\t']);
-        let indentation = &line[..line.len() - content.len()];
-        if indentation.len() > 3 || indentation.contains('\t') {
-            return markdown_list_item(content)
-                .filter(|item| item.starts_with('['))
-                .map(|_| None);
-        }
-        let fence = markdown_fence(content);
-        if let Some((open_marker, open_length)) = open_fence {
-            if fence.is_some_and(|(marker, length, suffix)| {
-                marker == open_marker && length >= open_length && suffix.trim().is_empty()
-            }) {
-                open_fence = None;
-            }
-            return None;
-        }
-        if let Some((marker, length, _)) = fence {
-            open_fence = Some((marker, length));
-            return None;
-        }
-        let item = markdown_list_item(content)?;
-        if item.starts_with("[ ]") {
-            Some(Some(false))
-        } else if item.starts_with("[x]") || item.starts_with("[X]") {
-            Some(Some(true))
-        } else if item.starts_with('[') {
-            // A checkbox-like task with an unknown marker must never turn a
-            // partially parsed task list into Issue-wide completion.
-            Some(None)
-        } else {
-            None
-        }
-    });
-    let mut saw_checkbox = false;
-    let mut saw_open = false;
-    for checked in checkbox_states {
-        if let Some(checked) = checked {
-            saw_checkbox = true;
-            saw_open |= !checked;
-        } else {
-            saw_open = true;
-        }
-    }
-    if saw_open {
+    let progress = crate::spec_tasks::parse_tasks_progress(tasks);
+    if progress.open > 0 {
         IssueMonitorReadiness::ReadyWithOpenTasks
-    } else if saw_checkbox {
+    } else if progress.completed > 0 {
         IssueMonitorReadiness::ReadyWithCompletedTasks
     } else {
         IssueMonitorReadiness::Ready
     }
-}
-
-fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
-    let marker = *line.as_bytes().first()?;
-    if !matches!(marker, b'`' | b'~') {
-        return None;
-    }
-    let length = line
-        .bytes()
-        .take_while(|candidate| *candidate == marker)
-        .count();
-    (length >= 3).then_some((marker, length, &line[length..]))
-}
-
-fn markdown_list_item(line: &str) -> Option<&str> {
-    if let Some(item) = line
-        .strip_prefix("- ")
-        .or_else(|| line.strip_prefix("* "))
-        .or_else(|| line.strip_prefix("+ "))
-    {
-        return Some(item.trim_start());
-    }
-    let (marker, item) = line.split_once(char::is_whitespace)?;
-    let ordered = marker
-        .strip_suffix('.')
-        .or_else(|| marker.strip_suffix(')'))?;
-    (!ordered.is_empty() && ordered.bytes().all(|byte| byte.is_ascii_digit()))
-        .then_some(item.trim_start())
 }
 
 fn issue_monitor_candidates_with_readiness<F>(
@@ -646,6 +644,18 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         Ok(raw_issues) => {
             let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
                 .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
+            // Issue #4087: the cache fallback below and the offline
+            // `issue.monitor.status` projection are only as fresh as the last
+            // full refresh, and nothing else runs one on a schedule. GitHub just
+            // answered the list, so the scan owns the TTL here; a refusal is
+            // already a `cache_refresh_failure` ledger row and the pass goes on.
+            if let Err(error) = refresh_issue_cache_for_scan_if_stale(repo_path, &cache_root) {
+                tracing::warn!(
+                    cache_root = %cache_root.display(),
+                    %error,
+                    "issue cache full refresh failed; scanning with the live list"
+                );
+            }
             let (issues, readiness_errors) =
                 issue_monitor_candidates_with_readiness(raw_issues, &cache_root, |number| {
                     crate::issue_cache::refresh_issue_cache_entry_from_remote(
@@ -680,6 +690,28 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         result
     });
     resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)
+}
+
+/// Issue #4087 AC-4: run the Issue cache full refresh when its TTL has
+/// expired. Returns whether a refresh ran. The scan is the one consumer that
+/// is always present while the Monitor is enabled, so it is the one that keeps
+/// `refresh-meta.json` moving; Issues created on GitHub reach the cache (and
+/// the cache-fallback inbox) within one TTL.
+pub fn refresh_issue_cache_for_scan_if_stale(
+    repo_path: &Path,
+    cache_root: &Path,
+) -> Result<bool, String> {
+    if !crate::issue_cache::issue_cache_refresh_status(
+        cache_root,
+        crate::issue_cache::ISSUE_CACHE_TTL,
+        chrono::Utc::now(),
+    )
+    .stale
+    {
+        return Ok(false);
+    }
+    crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)?;
+    Ok(true)
 }
 
 fn resolve_loaded_issue_monitor_candidates<I>(
@@ -850,6 +882,167 @@ pub fn try_issue_completed_by_merged_pr(
     repo: &str,
     issue: &IssueMonitorIssue,
 ) -> Result<bool, IssueMonitorScanFailure> {
+    try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+        .map_err(IssueMonitorCompletionProbeFailure::into_failure)
+}
+
+/// SPEC #4093 FR-005: the linked PRs of a whole candidate set, read in one
+/// bulk query per scan so the completion probe costs a constant number of
+/// GraphQL calls instead of one per candidate.
+///
+/// A candidate the batch does not hold (the bulk read failed, was refused,
+/// or the issue was not returned) falls back to the single-issue probe, so
+/// a partial batch degrades to today's behaviour instead of a wrong answer.
+#[derive(Debug, Default)]
+pub struct LinkedPrProbeBatch {
+    linked: BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
+    /// Why the bulk read failed, when it did. A refused bulk read is the
+    /// candidates' refusal too: re-probing them one by one would spend the
+    /// same budget again and hide GitHub's own wording behind the local gate.
+    failure: Option<String>,
+}
+
+impl LinkedPrProbeBatch {
+    /// Read the linked PRs of every gwt-spec issue in `issues` in bulk.
+    pub fn prefetch<'a>(
+        owner: &str,
+        repo: &str,
+        issues: impl IntoIterator<Item = &'a IssueMonitorIssue>,
+    ) -> Self {
+        let numbers: Vec<u64> = issues
+            .into_iter()
+            .filter(|issue| is_spec_candidate(issue))
+            .map(|issue| issue.number)
+            .collect();
+        Self::prefetch_with(&numbers, |numbers| {
+            crate::cli::issue::fetch_linked_prs_bulk_via_gh(owner, repo, numbers)
+        })
+    }
+
+    /// Injectable core of [`Self::prefetch`].
+    pub fn prefetch_with<F>(numbers: &[u64], fetch: F) -> Self
+    where
+        F: FnOnce(&[u64]) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>,
+    {
+        if numbers.is_empty()
+            || ensure_scan_deadline(IssueMonitorScanStage::ClaimCompletionReadback).is_err()
+        {
+            return Self::default();
+        }
+        match fetch(numbers) {
+            Ok(linked) => Self {
+                linked,
+                failure: None,
+            },
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "bulk linked-PR read failed; its candidates report that failure"
+                );
+                Self {
+                    linked: BTreeMap::new(),
+                    failure: Some(error.to_string()),
+                }
+            }
+        }
+    }
+
+    /// The bulk read's failure, when the batch holds nothing because of it.
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Whether the batch answers `issue`, and how.
+    pub fn completed(&self, issue: &IssueMonitorIssue) -> Option<bool> {
+        if !is_spec_candidate(issue) {
+            return Some(issue.state == IssueMonitorIssueState::Closed);
+        }
+        self.linked
+            .get(&issue.number)
+            .map(|prs| linked_pr_completion_is_fresh_for_issue(issue, prs))
+    }
+
+    /// How many candidates the batch holds.
+    pub fn len(&self) -> usize {
+        self.linked.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.linked.is_empty()
+    }
+}
+
+fn is_spec_candidate(issue: &IssueMonitorIssue) -> bool {
+    issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+}
+
+/// [`try_issue_completed_by_merged_pr`] answered from `batch` when it holds
+/// the issue, otherwise by the single-issue probe.
+pub fn try_issue_completed_by_merged_pr_with(
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+    batch: Option<&LinkedPrProbeBatch>,
+) -> Result<bool, IssueMonitorScanFailure> {
+    try_issue_completed_by_merged_pr_classified_with(owner, repo, issue, batch)
+        .map_err(IssueMonitorCompletionProbeFailure::into_failure)
+}
+
+/// [`try_issue_completed_by_merged_pr_classified`] answered from `batch`
+/// when it holds the issue, otherwise by the single-issue probe.
+pub fn try_issue_completed_by_merged_pr_classified_with(
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+    batch: Option<&LinkedPrProbeBatch>,
+) -> Result<bool, IssueMonitorCompletionProbeFailure> {
+    if let Some(batch) = batch {
+        if let Some(completed) = batch.completed(issue) {
+            return Ok(completed);
+        }
+        if let Some(failure) = batch.failure().filter(|_| is_spec_candidate(issue)) {
+            return Err(IssueMonitorCompletionProbeFailure::Operation(
+                IssueMonitorScanFailure::new(
+                    IssueMonitorScanStage::ClaimCompletionReadback,
+                    failure.to_string(),
+                ),
+            ));
+        }
+    }
+    try_issue_completed_by_merged_pr_classified(owner, repo, issue)
+}
+
+/// Issue #3528 (SPEC #3200 FR-059): how a completion probe failed. The two
+/// arms carry different contracts — an expired observation deadline is
+/// fail-closed for the whole claim proposal, an ordinary readback error keeps
+/// #3165's fail-open compatibility — so a caller must be able to tell them
+/// apart without parsing the failure text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorCompletionProbeFailure {
+    /// The observation deadline expired before or right after the readback.
+    Deadline(IssueMonitorScanFailure),
+    /// The readback itself failed while the deadline was still valid.
+    Operation(IssueMonitorScanFailure),
+}
+
+impl IssueMonitorCompletionProbeFailure {
+    pub fn into_failure(self) -> IssueMonitorScanFailure {
+        match self {
+            Self::Deadline(failure) | Self::Operation(failure) => failure,
+        }
+    }
+}
+
+/// [`try_issue_completed_by_merged_pr`] with the deadline expiry told apart
+/// from an ordinary readback failure.
+pub fn try_issue_completed_by_merged_pr_classified(
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+) -> Result<bool, IssueMonitorCompletionProbeFailure> {
     let is_spec = issue
         .labels
         .iter()
@@ -857,13 +1050,20 @@ pub fn try_issue_completed_by_merged_pr(
     if !is_spec {
         return Ok(issue.state == IssueMonitorIssueState::Closed);
     }
-    let prs = run_scan_stage(IssueMonitorScanStage::ClaimCompletionReadback, || {
-        crate::cli::issue::fetch_linked_prs_via_gh(
-            owner,
-            repo,
-            gwt_github::IssueNumber(issue.number),
-        )
+    let stage = IssueMonitorScanStage::ClaimCompletionReadback;
+    ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
+    let prs = crate::cli::issue::fetch_linked_prs_via_gh(
+        owner,
+        repo,
+        gwt_github::IssueNumber(issue.number),
+    )
+    .map_err(|error| {
+        IssueMonitorCompletionProbeFailure::Operation(IssueMonitorScanFailure::new(
+            stage,
+            error.to_string(),
+        ))
     })?;
+    ensure_scan_deadline(stage).map_err(IssueMonitorCompletionProbeFailure::Deadline)?;
     Ok(linked_pr_completion_is_fresh_for_issue(issue, &prs))
 }
 
@@ -942,11 +1142,14 @@ pub fn reconcile_issue_monitor_merges(
         );
     }
 
-    for issue in monitor.untracked_merged_branch_candidates(&merged_branches) {
+    let untracked = monitor.untracked_merged_branch_candidates(&merged_branches);
+    // SPEC #4093 FR-005: one bulk read for every nominated candidate.
+    let batch = LinkedPrProbeBatch::prefetch(owner, repo, untracked.iter());
+    for issue in untracked {
         let issue_number = issue.number;
         // A probe failure keeps the issue launchable, matching the claim-path
         // policy: an unreachable GitHub must never mint a terminal completion.
-        match try_issue_completed_by_merged_pr(owner, repo, &issue) {
+        match try_issue_completed_by_merged_pr_with(owner, repo, &issue, Some(&batch)) {
             Ok(true) => {
                 if monitor.record_untracked_completion(issue_number) {
                     tracing::info!(
@@ -1461,6 +1664,20 @@ fn advance_one_autonomous_issue(
             // inventory (the readback degraded) and no row (no open PR) both
             // leave the phase where the last successful readback put it.
             if let Some(pr) = open_prs.and_then(|index| index.get(&branch).copied()) {
+                // Issue #4117 AC-1/AC-2: admission before the readbacks. A PR
+                // whose review window is already live, or a full `max_active`,
+                // keeps the record Implementing so the next scan retries; the
+                // reason lands on the record for `issue.monitor.status`.
+                if let Some(hold) = monitor.review_dispatch_hold(issue_number, pr, now) {
+                    tracing::info!(
+                        issue = issue_number,
+                        pr,
+                        reason = %hold.reason,
+                        "issue monitor: review dispatch held"
+                    );
+                    monitor.hold_review_dispatch(issue_number, hold);
+                    return Ok(());
+                }
                 if let Some(sha) =
                     run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
                         gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
@@ -1485,21 +1702,37 @@ fn advance_one_autonomous_issue(
                             gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
                         })?
                         .unwrap_or_default();
-                    monitor.begin_review(issue_number, pr, &sha);
                     let linked_issue_kind = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
                         .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
                         .unwrap_or_default();
-                    monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
-                        issue_number,
-                        pr_number: pr,
-                        reviewed_sha: sha,
-                        required_criteria: criteria,
-                        diff,
-                        linked_issue_kind,
-                    });
+                    // Issue #4117: `dispatch_review` binds the PR (`begin_review`),
+                    // enters the review window into its own ledger, and queues
+                    // the GUI spawn — or refuses and records why.
+                    if let Err(hold) = monitor.dispatch_review(
+                        crate::AutonomousReviewDispatch {
+                            issue_number,
+                            pr_number: pr,
+                            reviewed_sha: sha,
+                            required_criteria: criteria,
+                            diff,
+                            linked_issue_kind,
+                        },
+                        now,
+                    ) {
+                        tracing::info!(
+                            issue = issue_number,
+                            pr,
+                            reason = %hold.reason,
+                            "issue monitor: review dispatch held"
+                        );
+                    }
                 }
+            } else if open_prs.is_some() {
+                // Issue #4117: the inventory is fresh and shows no open PR for
+                // this branch, so a hold about an earlier PR no longer applies.
+                monitor.clear_review_dispatch_hold(issue_number);
             }
         }
         crate::AutonomousPhase::Reviewing => {
@@ -1824,6 +2057,75 @@ fn has_supported_github_remote_prefix(remote_url: &str) -> bool {
 fn _assert_inbox_item_is_send_sync(_: IssueMonitorInboxItem) {}
 
 #[cfg(test)]
+mod linked_pr_batch_tests {
+    use super::*;
+
+    fn spec_issue(number: u64) -> IssueMonitorIssue {
+        IssueMonitorIssue {
+            number,
+            title: format!("SPEC {number}"),
+            labels: vec!["gwt-spec".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: IssueMonitorReadiness::ReadyWithCompletedTasks,
+            updated_at: Some("2026-09-01T00:00:00Z".to_string()),
+        }
+    }
+
+    /// SPEC #4093 AC-7: the batch is one bulk read for the whole candidate
+    /// set; every candidate it holds is answered without another call, and a
+    /// candidate it does not hold falls back (answered `None` here).
+    #[test]
+    fn batch_reads_all_spec_candidates_once_and_answers_from_memory() {
+        let issues = [spec_issue(1), spec_issue(2), spec_issue(3)];
+        let mut reads = 0;
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], |numbers| {
+            reads += 1;
+            assert_eq!(numbers, [1, 2, 3]);
+            let mut linked = BTreeMap::new();
+            linked.insert(
+                1,
+                vec![crate::cli::LinkedPrSummary {
+                    number: 101,
+                    title: "fix #1".to_string(),
+                    state: "MERGED".to_string(),
+                    url: String::new(),
+                    will_close_target: true,
+                    merged_at: Some("2026-09-02T00:00:00Z".to_string()),
+                }],
+            );
+            linked.insert(2, Vec::new());
+            Ok(linked)
+        });
+        assert_eq!(reads, 1);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.completed(&issues[0]), Some(true));
+        assert_eq!(batch.completed(&issues[1]), Some(false));
+        assert_eq!(
+            batch.completed(&issues[2]),
+            None,
+            "an unreturned candidate falls back to the single probe"
+        );
+
+        let refused = LinkedPrProbeBatch::prefetch_with(&[1], |_| {
+            Err(std::io::Error::other(
+                "gh api graphql failed: API rate limit already exceeded",
+            ))
+        });
+        assert!(refused.is_empty());
+        assert!(refused.failure().is_some_and(|f| f.contains("rate limit")));
+        let error =
+            try_issue_completed_by_merged_pr_classified_with("o", "r", &issues[0], Some(&refused))
+                .expect_err("a refused bulk read is the candidate's refusal");
+        assert!(
+            error.into_failure().detail.contains("rate limit"),
+            "GitHub's own wording is preserved"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{IssueMonitorConfig, MonitorInboxState};
@@ -1962,6 +2264,9 @@ mod tests {
             (46, "```markdown\n~~~\n- [x] example only\n~~~\n```"),
             (47, "    - [x] indented code only"),
             (48, "- [x] T-001\n    - [ ] T-002"),
+            // Issue #4146 AC-2: every checkbox is `[x]`, but the plain rows
+            // below them are untracked work, so the Issue is not complete.
+            (49, "- [x] T-001\n- T-002 never tracked"),
         ] {
             cache
                 .write_snapshot(&structured_spec(number, "t1", "Plan", tasks))
@@ -1977,6 +2282,7 @@ mod tests {
                 live_issue(46, &["gwt-spec"], Some("t1")),
                 live_issue(47, &["gwt-spec"], Some("t1")),
                 live_issue(48, &["gwt-spec"], Some("t1")),
+                live_issue(49, &["gwt-spec"], Some("t1")),
             ],
             dir.path(),
             |_| panic!("matching cache must not refresh"),
@@ -1995,6 +2301,7 @@ mod tests {
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::Ready,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
             ]
@@ -2280,6 +2587,8 @@ mod tests {
             claim_id: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
             launched_window_id: Some("window-1".to_string()),
             launch_plan: None,
             error_message: None,
@@ -3027,6 +3336,106 @@ mod tests {
             candidate.body
         );
         assert_eq!(criteria.ids, want);
+    }
+
+    /// Fake `gh` whose `issue list` answers with the given plain Issues. The
+    /// scan-owned full refresh only lists (no SPEC views), so nothing else is
+    /// needed.
+    fn write_fake_gh_listing(dir: &Path, numbers: &[u64]) -> PathBuf {
+        let rows = numbers
+            .iter()
+            .map(|number| {
+                format!(
+                    r#"{{"number":{number},"title":"Issue {number}","body":"Body {number}","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/{number}","updatedAt":"2026-09-07T03:34:02Z"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        #[cfg(windows)]
+        {
+            let fake_gh = dir.join("gh.cmd");
+            std::fs::write(
+                &fake_gh,
+                format!("@echo off\r\necho [{rows}]\r\nexit /b 0\r\n"),
+            )
+            .expect("write fake gh");
+            fake_gh
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let fake_gh = dir.join("gh");
+            std::fs::write(
+                &fake_gh,
+                format!("#!/bin/sh\nprintf '%s\\n' '[{rows}]'\nexit 0\n"),
+            )
+            .expect("write fake gh");
+            std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+            fake_gh
+        }
+    }
+
+    /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches
+    /// the cache and the inbox through the scan-owned full refresh once the
+    /// cache TTL has expired; a second pass inside the TTL costs no list call.
+    #[test]
+    fn externally_created_issue_reaches_cache_and_inbox_through_the_scan_full_refresh() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 4080]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        // The cache knows only #7 and its last full refresh is 50 minutes past
+        // the 15-minute TTL — the production state on 2026-09-07.
+        Cache::new(cache_root.clone())
+            .write_snapshot(&github_issue(7))
+            .expect("seed cached issue");
+        std::fs::write(
+            cache_root.join("refresh-meta.json"),
+            serde_json::json!({
+                "last_full_refresh":
+                    (chrono::Utc::now() - chrono::Duration::minutes(65)).to_rfc3339(),
+                "ttl_minutes": 15,
+            })
+            .to_string(),
+        )
+        .expect("write stale refresh meta");
+
+        let refreshed = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
+            .expect("stale cache is fully refreshed");
+        assert!(refreshed, "an expired TTL triggers the full refresh");
+
+        let candidates =
+            load_cached_issue_monitor_candidates(&cache_root).expect("cached candidates");
+        assert!(
+            candidates.iter().any(|candidate| candidate.number == 4080),
+            "the externally created Issue is in the cache: {candidates:?}"
+        );
+        let mut monitor = crate::IssueMonitorState::new(IssueMonitorConfig::default());
+        crate::issue_monitor::scan_issue_monitor_candidates(
+            &mut monitor,
+            &candidates,
+            "2026-09-07T04:00:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(4080).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the externally created Issue has an inbox row"
+        );
+
+        let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
+            .expect("fresh cache is left alone");
+        assert!(!within_ttl, "a fresh cache does not spend a list call");
     }
 
     #[test]

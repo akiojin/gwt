@@ -329,7 +329,17 @@ the `gwtd` JSON operations `issue.monitor.status`,
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. `issue.monitor.profiles` reads the launch
+an explicit action in the GUI. Idle agent windows free their slot on
+their own: each scan classifies every launched window as
+`review_verdict_published`, `execution_settled`, `binding_dead`, or
+`stuck_unknown` (visible per row and in `idle_windows` in
+`issue.monitor.status`), releases the first three without requeueing the Issue,
+and closes their panes. Only `stuck_unknown` — a window that is idle while its
+execution record is still active — stays for a human, and it asks for a
+decision once it has been idle for twice the stuck timeout.
+`issue.monitor.release_idle` runs the same release by hand for one Issue or
+every idle row, and `dry_run: true` reports the targets without touching
+anything. `issue.monitor.profiles` reads the launch
 candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
 candidates the Monitor launches each Issue with the first eligible candidate
 (rate-limit holds, the usage threshold, and `prefer_for` routing decide
@@ -340,6 +350,23 @@ in the GUI appends it to the same pool. All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
+
+Host free space is part of the same snapshot: `disk_space` in
+`issue.monitor.status` lists the volumes the worktrees and the verification
+coordinator live on and carries a `warning` once one of them falls below
+20 GiB or 5% free, so a filling host is visible before `verify.run` fails with
+`No space left on device`. The `worktree.gc_build_artifacts` operation
+reclaims the space: it removes the `target/` build cache of every worktree
+whose HEAD is merged into `origin/<base>` (`base` defaults to `develop`) and
+that has neither a running process nor a live gwt launch. An unqualified call
+is a dry run that lists the candidates with their sizes and every kept
+worktree with its reason (`active process …`, `tracked launch …`, `not
+merged …`); pass `dry_run: false` to delete, `include_unmerged: true` to
+also reclaim idle unmerged worktrees, and `include_protected_workspaces: true`
+to also reclaim the shared base-branch workspaces (`develop`, `main`), which
+are kept by default because their rebuild lands on whoever opens them next.
+Running worktrees, the main worktree, the calling worktree, and the worktree
+hosting the running `gwtd` are never touched, whatever the flags say.
 
 ### Autonomous mode (opt-in)
 
@@ -463,6 +490,25 @@ and coordination-event summaries.
 - Outside a launch, gwt owns both Codex hook discovery locations — the
   worktree-local `.codex/hooks.json` and the workspace-home copy at the repo
   root — so hook health reporting and self-heal always target the same files.
+
+### Codex recommended config
+
+On every GUI startup gwt makes sure the host Codex config
+(`$CODEX_HOME/config.toml`, default `~/.codex/config.toml`) carries
+gwt's recommended `features.context_management.experimental_mode = true`, which
+keeps accumulated context as notes and searchable history instead of repeated
+single-summary compaction. gwt writes the key only when it is absent; every
+other table in the file is preserved and a config that already has the key is
+never rewritten. To opt out, set it explicitly in `config.toml`:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt respects any explicit value (`true` or `false`) and does not change it. A
+config that cannot be parsed or written never blocks startup; the path and
+cause are recorded in the error ledger (`errors.list`).
 
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
@@ -689,8 +735,10 @@ gwt shows an actionable hint.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
-  focused window is recentered
+- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
+  windows by activity: running/starting first, waiting/idle next, then the
+  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
+  activated when selected, and the focused Agent is recentered
 
 ## Operator Design Language (SPEC-2356)
 
@@ -804,6 +852,10 @@ JSON
 ```bash
 cargo build -p gwt --bin gwt --bin gwtd
 ```
+
+The `browser-check` skill (isolated GUI verification of this checkout) also
+needs `jq` on `PATH` to read `hook.doctor` evidence. It is not required to run
+gwt itself.
 
 ### Run
 

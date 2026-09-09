@@ -508,6 +508,11 @@ pub struct SessionRuntimeState {
     pub child_started_at: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
+    /// When the most recent managed hook event finished successfully,
+    /// protocol output included (Issue #3541). `hook.health` compares it with
+    /// the newest hook failure to tell "recovered" from "unresolved".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completed_hook_event_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
@@ -516,7 +521,7 @@ impl Session {
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
-    pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
     /// Create a new session with a generated UUID.
     pub fn new(
@@ -954,18 +959,22 @@ impl Session {
     /// Idempotent migration helper for pre-Phase-53 session TOML files.
     /// Walks the `schema_version` forward to
     /// [`Session::CURRENT_SCHEMA_VERSION`], injecting any missing canonical
-    /// launch args (such as Codex's `--no-alt-screen`) along the way.
+    /// launch args (such as Codex's inline and selection-UI defaults) along the way.
     pub fn migrate_legacy_launch_args(&mut self) {
         if self.schema_version < 1 {
             // Schema 0 -> 1: apply canonical default args at the correct
             // runner prefix position so legacy sessions written before
-            // SPEC-1921 FR-064 pick up agent-neutral defaults (Issue #2091).
+            // SPEC-1921 FR-064 pick up canonical defaults (Issue #2091).
             normalize_launch_args(&self.agent_id, &self.launch_command, &mut self.launch_args);
             self.schema_version = 1;
         }
 
         if self.schema_version < 2 {
-            scrub_legacy_codex_hooks_enablement(&self.agent_id, &mut self.launch_args);
+            scrub_legacy_codex_feature_enablement(
+                &self.agent_id,
+                &mut self.launch_args,
+                "codex_hooks",
+            );
             self.schema_version = 2;
         }
 
@@ -974,6 +983,15 @@ impl Session {
                 self.status = AgentStatus::Interrupted;
             }
             self.schema_version = 3;
+        }
+
+        if self.schema_version < 4 {
+            // Schema 3 -> 4: codex-cli removed the `goals` feature flag, and it
+            // rejects unknown `--enable` values before reading the config, so a
+            // persisted session replaying it dies with
+            // `Unknown feature flag: goals` (Issue #4127).
+            scrub_legacy_codex_feature_enablement(&self.agent_id, &mut self.launch_args, "goals");
+            self.schema_version = 4;
         }
     }
 
@@ -1533,7 +1551,16 @@ where
     })
 }
 
-fn scrub_legacy_codex_hooks_enablement(agent_id: &AgentId, args: &mut Vec<String>) {
+/// Drop every enablement of one Codex feature flag from a persisted
+/// `launch_args`, in both the `--enable <feature>` and
+/// `-c features.<feature>=true` spellings. Used when upstream codex-cli retires
+/// a flag: it rejects unknown `--enable` values before reading the config, so a
+/// stale arg makes the session unlaunchable rather than merely inert.
+fn scrub_legacy_codex_feature_enablement(
+    agent_id: &AgentId,
+    args: &mut Vec<String>,
+    feature: &str,
+) {
     if !matches!(agent_id, AgentId::Codex) {
         return;
     }
@@ -1542,7 +1569,7 @@ fn scrub_legacy_codex_hooks_enablement(agent_id: &AgentId, args: &mut Vec<String
     let mut index = 0;
     while index < args.len() {
         if let Some(next) = args.get(index + 1) {
-            if should_strip_codex_hooks_enablement(&args[index], next) {
+            if should_strip_codex_feature_enablement(&args[index], next, feature) {
                 index += 2;
                 continue;
             }
@@ -1554,9 +1581,9 @@ fn scrub_legacy_codex_hooks_enablement(agent_id: &AgentId, args: &mut Vec<String
     *args = cleaned;
 }
 
-fn should_strip_codex_hooks_enablement(flag: &str, value: &str) -> bool {
-    (flag == "--enable" && value == "codex_hooks")
-        || (flag == "-c" && normalize_config_override(value) == "features.codex_hooks=true")
+fn should_strip_codex_feature_enablement(flag: &str, value: &str, feature: &str) -> bool {
+    (flag == "--enable" && value == feature)
+        || (flag == "-c" && normalize_config_override(value) == format!("features.{feature}=true"))
 }
 
 fn normalize_config_override(value: &str) -> String {
@@ -1577,6 +1604,7 @@ impl SessionRuntimeState {
             child_pid: None,
             child_started_at: None,
             source_event: None,
+            last_completed_hook_event_at: None,
             pending_discussion: None,
         }
     }
@@ -4390,10 +4418,10 @@ display_name = "Claude Code"
     }
 
     #[test]
-    fn migrate_legacy_launch_args_injects_no_alt_screen_for_codex() {
+    fn migrate_legacy_launch_args_injects_canonical_defaults_for_codex_exe() {
         let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
         session.schema_version = 0;
-        session.launch_command = "codex".into();
+        session.launch_command = "C:/Users/example/bin/codex.exe".into();
         session.launch_args = vec![
             "--model=gpt-5.4".to_string(),
             "resume".to_string(),
@@ -4407,6 +4435,7 @@ display_name = "Claude Code"
             session.launch_args,
             vec![
                 "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
@@ -4487,6 +4516,115 @@ display_name = "Claude Code"
         );
     }
 
+    /// Sessions persisted before Issue #4127 still carry `--enable goals` in
+    /// `launch_args`, and Resume/Continue replays them verbatim — so removing
+    /// the emit site alone leaves those sessions dying on
+    /// `Unknown feature flag: goals` under codex-cli 0.116.0.
+    #[test]
+    fn migrate_legacy_launch_args_removes_goals_enable_flag() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = 3;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "resume".to_string(),
+            "sess-legacy".to_string(),
+            "--enable".to_string(),
+            "goals".to_string(),
+            "--enable".to_string(),
+            "web_search".to_string(),
+        ];
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            session.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+                "--enable".to_string(),
+                "web_search".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_removes_goals_config_override() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = 3;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "-c".to_string(),
+            "features.goals = true".to_string(),
+            "--sandbox".to_string(),
+            "workspace-write".to_string(),
+        ];
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            session.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_leaves_goals_in_non_codex_sessions() {
+        let original = vec![
+            "--dangerously-skip-permissions".to_string(),
+            "--enable".to_string(),
+            "goals".to_string(),
+        ];
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::ClaudeCode);
+        session.schema_version = 3;
+        session.launch_command = "claude".into();
+        session.launch_args = original.clone();
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(session.launch_args, original);
+    }
+
+    #[test]
+    fn load_and_migrate_schema_three_codex_toml_removes_goals_enable_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-codex-schema-three.toml");
+        write_session_file_with_schema_version(
+            &path,
+            AgentId::Codex,
+            "codex",
+            &[
+                "--no-alt-screen".to_string(),
+                "--enable".to_string(),
+                "goals".to_string(),
+                "--enable".to_string(),
+                "web_search".to_string(),
+            ],
+            3,
+        );
+
+        let loaded = Session::load_and_migrate(&path).unwrap();
+
+        assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--enable".to_string(),
+                "web_search".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn migrate_legacy_launch_args_leaves_non_codex_sessions_unchanged() {
         let original = vec![
@@ -4522,7 +4660,7 @@ display_name = "Claude Code"
     }
 
     #[test]
-    fn load_and_migrate_legacy_codex_toml_injects_no_alt_screen_into_launch_args() {
+    fn load_and_migrate_legacy_codex_toml_injects_canonical_defaults_into_launch_args() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-codex.toml");
         write_legacy_codex_session_file(
@@ -4543,10 +4681,18 @@ display_name = "Claude Code"
                 .any(|arg| arg == "--no-alt-screen"),
             "legacy Codex sessions loaded through load_and_migrate should preserve inline scrollback"
         );
+        assert!(
+            loaded
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--config=features.default_mode_request_user_input=true"),
+            "legacy Codex sessions should enable selection UI in Default mode"
+        );
         assert_eq!(
             loaded.launch_args,
             vec![
                 "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),

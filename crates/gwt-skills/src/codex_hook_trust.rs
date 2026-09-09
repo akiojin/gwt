@@ -1,10 +1,13 @@
 //! Codex hook trust-state registration for gwt-managed project hooks.
 
 use std::{
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
+use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -20,6 +23,12 @@ const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
 /// "this hook is safe" — trust still requires an exact match against a command
 /// gwt emits.
 const GWT_HOOK_TRANSPORT_MARKERS: &[&str] = &[" hook event ", " hook gwt-self-improvement-stop"];
+/// How long a mutation waits for another writer to finish before giving up.
+/// Sized for a burst of concurrent launches against a large shared config, not
+/// for a wedged holder: past it, failing with the lock path beats hanging the
+/// launch forever.
+const CODEX_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MANAGED_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
@@ -34,6 +43,19 @@ pub struct CodexHookTrustEntry {
     pub trusted_hash: String,
 }
 
+/// Issue #4071 AC-2: what the scan compared one hooks file against. A
+/// `Hooks need review` refusal quotes it so the reader can tell a command /
+/// trusted_hash mismatch from a registration that never ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexHookTrustExpectation {
+    /// The hooks file in the same form the trust keys use.
+    pub hooks_path: PathBuf,
+    /// The fallback binary the generator was allowed to write into this file:
+    /// [`crate::CANONICAL_HOOK_BIN`] for a git-tracked config, the absolute
+    /// install path otherwise (#3567).
+    pub expected_gwt_bin: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHookTrustReport {
     pub config_path: PathBuf,
@@ -44,6 +66,58 @@ pub struct CodexHookTrustReport {
     /// loudly instead of launching an unattended agent into it. User hooks are
     /// never listed here — reviewing those is the user's own business.
     pub untrusted_gwt_hooks: Vec<String>,
+    /// Issue #4071 AC-2: one entry per hooks file the scan read.
+    pub expectations: Vec<CodexHookTrustExpectation>,
+    /// Issue #4071 AC-2: whether `config_path` was written. False when no gwt
+    /// hook could be vouched for — gwt 9.91.0 then left the config untouched
+    /// and the failure read as if registration had never run.
+    pub wrote_trust_state: bool,
+}
+
+impl CodexHookTrustReport {
+    /// Issue #4071 AC-2: the launch-blocking reason for the gwt hooks Codex
+    /// would still ask a human about, or `None` when every gwt hook is
+    /// trusted. It states whether any trust state was written and which
+    /// fallback binary each hooks file was compared against, so a skipped
+    /// registration and a command / path-form mismatch read differently in
+    /// the failure record.
+    pub fn hooks_need_review_reason(&self) -> Option<String> {
+        if self.untrusted_gwt_hooks.is_empty() {
+            return None;
+        }
+        let mut reason = format!(
+            "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}. ",
+            self.untrusted_gwt_hooks.join(", ")
+        );
+        if self.wrote_trust_state {
+            reason.push_str(&format!(
+                "gwt wrote {} trusted entries to {}; the listed hooks were skipped because their command does not match what gwt generates (trusted_hash mismatch, not a missing registration). ",
+                self.trusted_entries.len(),
+                self.config_path.display()
+            ));
+        } else {
+            reason.push_str(&format!(
+                "gwt wrote no trust entry to {}: none of the gwt hooks matched what gwt generates, so registration was skipped. ",
+                self.config_path.display()
+            ));
+        }
+        let expectations = self
+            .expectations
+            .iter()
+            .map(|expectation| {
+                format!(
+                    "{} => `{}`",
+                    expectation.hooks_path.display(),
+                    expectation.expected_gwt_bin
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        reason.push_str(&format!(
+            "Expected fallback binary per hooks file: {expectations}."
+        ));
+        Some(reason)
+    }
 }
 
 pub fn collect_codex_managed_hook_trust_entries(
@@ -88,6 +162,7 @@ fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
 struct CodexHookTrustScan {
     trusted: Vec<CodexHookTrustEntry>,
     untrusted_gwt_hooks: Vec<String>,
+    expectations: Vec<CodexHookTrustExpectation>,
 }
 
 fn scan_codex_hook_trust_for_mode(
@@ -101,6 +176,7 @@ fn scan_codex_hook_trust_for_mode(
         scan.trusted.extend(path_scan.trusted);
         scan.untrusted_gwt_hooks
             .extend(path_scan.untrusted_gwt_hooks);
+        scan.expectations.extend(path_scan.expectations);
     }
     Ok(scan)
 }
@@ -129,7 +205,12 @@ fn scan_codex_hook_trust_from_path(
     );
     let expected_gwt_bin = Some(sanitized_expected_gwt_bin.as_str());
 
-    let key_source = fs::canonicalize(hooks_path)?;
+    // Issue #4071: Codex derives this key from the hooks path it discovered,
+    // normalized but never canonicalized — on Windows that is the plain
+    // `E:\...` form. `std::fs::canonicalize` yields the `\\?\` verbatim
+    // form there, and an entry under that key is inert: Codex still stops on
+    // `Hooks need review`. `dunce` strips the prefix and is a no-op elsewhere.
+    let key_source = dunce::canonicalize(hooks_path)?;
     let content = fs::read_to_string(hooks_path)?;
     let root: Value = serde_json::from_str(&content).map_err(|err| {
         io::Error::new(
@@ -142,7 +223,13 @@ fn scan_codex_hook_trust_from_path(
         return Ok(CodexHookTrustScan::default());
     };
 
-    let mut scan = CodexHookTrustScan::default();
+    let mut scan = CodexHookTrustScan {
+        expectations: vec![CodexHookTrustExpectation {
+            hooks_path: key_source.clone(),
+            expected_gwt_bin: sanitized_expected_gwt_bin.clone(),
+        }],
+        ..CodexHookTrustScan::default()
+    };
     for (event_json_name, event_snake_name) in MANAGED_EVENTS {
         let Some(groups) = hooks_by_event
             .get(*event_json_name)
@@ -213,42 +300,53 @@ pub fn register_codex_managed_hook_trust_for_mode(
     let CodexHookTrustScan {
         trusted: trusted_entries,
         untrusted_gwt_hooks,
+        expectations,
     } = scan_codex_hook_trust_for_mode(worktree, mode, None)?;
     if trusted_entries.is_empty() {
         return Ok(CodexHookTrustReport {
             config_path: config_path.to_path_buf(),
             trusted_entries,
             untrusted_gwt_hooks,
+            expectations,
+            wrote_trust_state: false,
         });
     }
 
-    let mut root = read_codex_config(config_path)?;
-    let root_table = root.as_table_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Codex config root must be a TOML table",
-        )
+    // Issue #4071: read, mutate and publish as one critical section. A
+    // concurrent launch that reads between our read and our write would
+    // otherwise write back a copy without our entries.
+    with_codex_config_lock(config_path, || {
+        let mut root = read_codex_config(config_path)?;
+        let root_table = root.as_table_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Codex config root must be a TOML table",
+            )
+        })?;
+        let hooks_table = ensure_child_table(root_table, "hooks")?;
+        let state_table = ensure_child_table(hooks_table, "state")?;
+
+        for entry in &trusted_entries {
+            let hook_state = ensure_child_table(state_table, &entry.key)?;
+            enable_hook_unless_explicitly_disabled(hook_state);
+            hook_state.insert(
+                "trusted_hash".to_string(),
+                toml::Value::String(entry.trusted_hash.clone()),
+            );
+        }
+
+        let rendered = toml::to_string_pretty(&root).map_err(|err| {
+            io::Error::other(format!("Codex config TOML serialize failed: {err}"))
+        })?;
+        write_text_atomically(config_path, &rendered)
     })?;
-    let hooks_table = ensure_child_table(root_table, "hooks")?;
-    let state_table = ensure_child_table(hooks_table, "state")?;
-
-    for entry in &trusted_entries {
-        let hook_state = ensure_child_table(state_table, &entry.key)?;
-        enable_hook_unless_explicitly_disabled(hook_state);
-        hook_state.insert(
-            "trusted_hash".to_string(),
-            toml::Value::String(entry.trusted_hash.clone()),
-        );
-    }
-
-    let rendered = toml::to_string_pretty(&root)
-        .map_err(|err| io::Error::other(format!("Codex config TOML serialize failed: {err}")))?;
-    write_text_atomically(config_path, &rendered)?;
 
     Ok(CodexHookTrustReport {
         config_path: config_path.to_path_buf(),
         trusted_entries,
         untrusted_gwt_hooks,
+        expectations,
+        wrote_trust_state: true,
     })
 }
 
@@ -261,7 +359,70 @@ fn command_hook_trusted_hash_for_test(
     command_hook_trusted_hash(event_name_snake, matcher, command)
 }
 
-fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
+/// Run one read-modify-write of the Codex config under a cross-process lock.
+///
+/// Issue #4071: `$CODEX_HOME/config.toml` is a single file shared by every
+/// Codex agent on the machine — every gwt launch across every project, plus
+/// manual `codex` sessions gwt does not manage. Registration reads the whole
+/// file, mutates it, and writes it back, so two concurrent launches that both
+/// read the pre-write bytes each serialize their own copy and the later writer
+/// silently drops the earlier one's entries. That is how a burst of launches
+/// left freshly registered worktrees untrusted (Codex then stops on `Hooks
+/// need review`) and how 6,444 hand-added `enabled = true` rows disappeared on
+/// the next launch.
+///
+/// The lock lives on a sibling `<config>.gwt-lock` file rather than on the
+/// config itself, because the write publishes through `rename` and would
+/// otherwise replace the very inode the lock is held on. It is advisory, so it
+/// only serializes gwt against gwt; the atomic rename keeps every other reader
+/// from ever seeing a half-written file.
+pub(crate) fn with_codex_config_lock<T>(
+    config_path: &Path,
+    body: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_path = codex_config_lock_path(config_path);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    let deadline = Instant::now() + CODEX_CONFIG_LOCK_TIMEOUT;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out after {}s waiting for the Codex config lock {}: {error}",
+                        CODEX_CONFIG_LOCK_TIMEOUT.as_secs(),
+                        lock_path.display()
+                    ),
+                ));
+            }
+            Err(_) => std::thread::sleep(CODEX_CONFIG_LOCK_POLL_INTERVAL),
+        }
+    }
+
+    let result = body();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+fn codex_config_lock_path(config_path: &Path) -> PathBuf {
+    let mut name = config_path
+        .file_name()
+        .map_or_else(|| OsString::from("config.toml"), OsString::from);
+    name.push(".gwt-lock");
+    config_path.with_file_name(name)
+}
+
+pub(crate) fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
     if !path.exists() {
         return Ok(toml::Value::Table(toml::Table::new()));
     }
@@ -279,7 +440,7 @@ fn read_codex_config(path: &Path) -> io::Result<toml::Value> {
     })
 }
 
-fn ensure_child_table<'a>(
+pub(crate) fn ensure_child_table<'a>(
     table: &'a mut toml::Table,
     key: &str,
 ) -> io::Result<&'a mut toml::Table> {
@@ -486,7 +647,7 @@ mod tests {
     fn generated_codex_hooks_produce_five_trust_entries() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
-        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let hooks_path = dunce::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries(dir.path()).unwrap();
 
@@ -531,7 +692,7 @@ mod tests {
         )
         .unwrap();
         generate_codex_hooks(&worktree).unwrap();
-        let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
+        let root_hooks_path = dunce::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
         let worktree_hooks_prefix = worktree.join(".codex/hooks.json").display().to_string();
 
         let entries = collect_codex_managed_hook_trust_entries(&worktree).unwrap();
@@ -570,7 +731,7 @@ mod tests {
         )
         .unwrap();
         generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal).unwrap();
-        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_path = dunce::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries_for_mode(
             &worktree,
@@ -604,8 +765,8 @@ mod tests {
         )
         .unwrap();
         generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both).unwrap();
-        let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
-        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let root_hooks_path = dunce::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_path = dunce::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries_for_mode(
             &worktree,
@@ -919,7 +1080,7 @@ mod tests {
             serde_json::to_string_pretty(&hooks_json).unwrap(),
         )
         .unwrap();
-        let canonical = fs::canonicalize(&hooks_path).unwrap();
+        let canonical = dunce::canonicalize(&hooks_path).unwrap();
 
         let entries = collect_codex_managed_hook_trust_entries(dir.path()).unwrap();
 
@@ -1190,7 +1351,7 @@ enabled = false
                 .is_none(),
             "unrelated hook state must not receive a trusted hash"
         );
-        let hooks_path = fs::canonicalize(&hooks_path).unwrap();
+        let hooks_path = dunce::canonicalize(&hooks_path).unwrap();
         assert!(
             parsed["hooks"]["state"]
                 .get(format!("{}:pre_tool_use:1:0", hooks_path.display()))
@@ -1199,16 +1360,26 @@ enabled = false
         );
     }
 
+    /// Also Issue #4071 AC-3 (existing worktree): a regenerated, machine-local
+    /// hooks file is registered under the plain absolute path Codex reads.
     #[test]
     fn registration_enables_generated_managed_hooks() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
-        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let hooks_path = dunce::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
         let config_path = dir.path().join("codex-config.toml");
 
         let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
 
         assert_eq!(report.trusted_entries.len(), 5);
+        assert!(
+            report
+                .trusted_entries
+                .iter()
+                .all(|entry| !entry.key.starts_with(r"\\?\")),
+            "Codex keys hooks by the plain absolute path; verbatim keys are inert: {:?}",
+            report.trusted_entries
+        );
         let config = fs::read_to_string(&config_path).unwrap();
         let parsed: toml::Value = toml::from_str(&config).unwrap();
         for event_name in [
@@ -1238,7 +1409,7 @@ enabled = false
     fn registration_preserves_explicit_managed_hook_opt_out() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
-        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let hooks_path = dunce::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
         let pre_tool_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
         let pre_tool_key_toml = pre_tool_key.replace('\\', "\\\\").replace('"', "\\\"");
         let config_path = dir.path().join("codex-config.toml");
@@ -1296,7 +1467,7 @@ enabled = false
             serde_json::to_string_pretty(&hooks_json).unwrap(),
         )
         .unwrap();
-        let hooks_path = fs::canonicalize(&hooks_path).unwrap();
+        let hooks_path = dunce::canonicalize(&hooks_path).unwrap();
         let config_path = dir.path().join("codex-config.toml");
 
         let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
@@ -1376,5 +1547,445 @@ enabled = false
             entries.iter().all(|entry| !entry.key.contains(":stop:")),
             "path-modified Stop hook must not be trusted; got {entries:?}"
         );
+    }
+
+    /// The five managed hooks exactly as a repository that tracks
+    /// `.codex/hooks.json` commits them: the canonical portable fallback in the
+    /// POSIX shape (#3567). A fresh linked worktree starts with these bytes.
+    fn tracked_canonical_managed_hooks_json() -> String {
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": codex_event_hook_commands_with_bin(
+                                    crate::CANONICAL_HOOK_BIN,
+                                    event,
+                                )
+                                .into_iter()
+                                .next()
+                                .unwrap(),
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]),
+            );
+        }
+        serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap()
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
+        assert!(status.success(), "git {args:?} failed with {status}");
+    }
+
+    /// Issue #4071 AC-1 / AC-3: the exact shape of a Monitor launch into a fresh
+    /// linked worktree. The launch refreshes only the workspace-home copy for a
+    /// current Codex, so the worktree-local `.codex/hooks.json` is still the
+    /// tracked canonical bytes git checked out — and every one of its hooks must
+    /// be registered under the key Codex itself derives from the hooks path:
+    /// the plain absolute path, never the `\\?\` verbatim form that
+    /// `std::fs::canonicalize` produces on Windows. gwt 9.91.0 left all five
+    /// untrusted (and, with nothing trusted, wrote nothing at all).
+    #[test]
+    fn fresh_linked_worktree_launch_trusts_tracked_hooks_under_codex_readable_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".codex")).unwrap();
+        fs::write(
+            repo.join(".codex/hooks.json"),
+            tracked_canonical_managed_hooks_json(),
+        )
+        .unwrap();
+        git(&repo, &["init", "-q", "--initial-branch=develop"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "hooks"]);
+        let worktree = dir.path().join("work").join("issue-4071");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work/issue-4071",
+                worktree.to_str().unwrap(),
+                "develop",
+            ],
+        );
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorkspaceHome).unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust_for_mode(
+            &worktree,
+            &config_path,
+            CodexHookDiscoveryMode::Both,
+        )
+        .unwrap();
+
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "a fresh worktree's tracked canonical hooks must be trusted: {report:?}"
+        );
+        let worktree_hooks_path = dunce::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let parsed: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        for event_name in [
+            "session_start",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "stop",
+        ] {
+            let key = format!("{}:{event_name}:0:0", worktree_hooks_path.display());
+            let state = parsed["hooks"]["state"].get(&key).unwrap_or_else(|| {
+                panic!(
+                    "missing Codex-readable trust key {key}; state keys: {:?}",
+                    parsed["hooks"]["state"]
+                        .as_table()
+                        .map(|table| table.keys().collect::<Vec<_>>())
+                )
+            });
+            assert!(
+                state["trusted_hash"].as_str().is_some(),
+                "fresh worktree hook must carry trusted_hash: {key}"
+            );
+        }
+        assert!(
+            report
+                .trusted_entries
+                .iter()
+                .all(|entry| !entry.key.starts_with(r"\\?\")),
+            "Codex keys hooks by the plain absolute path; verbatim keys are inert: {:?}",
+            report.trusted_entries
+        );
+    }
+
+    fn tamper_managed_hook_commands(hooks_path: &std::path::Path, events: &[&str]) {
+        let mut hooks_json: Value =
+            serde_json::from_str(&fs::read_to_string(hooks_path).unwrap()).unwrap();
+        for event in events {
+            hooks_json["hooks"][*event][0]["hooks"][0]["command"] =
+                Value::String(format!("'/tmp/attacker/gwtd' hook event {event}"));
+        }
+        fs::write(
+            hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Issue #4071 AC-2: the launch failure must say whether trust state was
+    /// written at all. gwt 9.91.0 reported "trust is incomplete" for five
+    /// hooks while the config had never been touched, and the report read as
+    /// if registration had not run.
+    #[test]
+    fn hooks_need_review_reason_separates_skipped_registration_from_hash_mismatch() {
+        // Every gwt hook mismatches: nothing can be vouched for, nothing is written.
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        tamper_managed_hook_commands(
+            &hooks_path,
+            &[
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+            ],
+        );
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert!(
+            !report.wrote_trust_state,
+            "nothing trusted, nothing written: {report:?}"
+        );
+        assert!(
+            !config_path.exists(),
+            "config must stay untouched when nothing is trusted"
+        );
+        let reason = report
+            .hooks_need_review_reason()
+            .expect("untrusted gwt hooks must produce a launch-blocking reason");
+        assert!(
+            reason.contains("Hooks need review") && reason.contains("wrote no trust entry"),
+            "reason must say registration was skipped: {reason}"
+        );
+        let key_source = dunce::canonicalize(&hooks_path).unwrap();
+        let expected_bin = crate::settings_local::managed_hook_bin_for_config_path(&hooks_path);
+        assert!(
+            reason.contains(&format!("{} => `{expected_bin}`", key_source.display())),
+            "reason must name the fallback binary each hooks file was compared against: {reason}"
+        );
+
+        // One gwt hook mismatches: four entries are written, the fifth is a hash mismatch.
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        tamper_managed_hook_commands(&hooks_path, &["Stop"]);
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert!(
+            report.wrote_trust_state,
+            "four trusted hooks must be written: {report:?}"
+        );
+        let reason = report
+            .hooks_need_review_reason()
+            .expect("one untrusted gwt hook must still block the launch");
+        assert!(
+            reason.contains("wrote 4 trusted entries")
+                && reason.contains("trusted_hash mismatch")
+                && reason.contains(":stop:0:0"),
+            "reason must separate a hash mismatch from a skipped registration: {reason}"
+        );
+
+        // Everything trusted: no reason, the launch proceeds.
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let report =
+            register_codex_managed_hook_trust(dir.path(), &dir.path().join("codex-config.toml"))
+                .unwrap();
+        assert_eq!(report.hooks_need_review_reason(), None, "{report:?}");
+    }
+
+    /// A worktree whose managed hooks are already generated, ready to register
+    /// against a shared Codex config.
+    fn worktree_with_generated_hooks() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        dir
+    }
+
+    fn trust_state(config_path: &Path) -> toml::Table {
+        let parsed: toml::Value =
+            toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+        parsed["hooks"]["state"].as_table().unwrap().clone()
+    }
+
+    /// Issue #4071: `$CODEX_HOME/config.toml` is one file shared by every Codex
+    /// agent on the machine, and registration is a read-modify-write. Without
+    /// serialization two concurrent launches both read the pre-write file and
+    /// the later writer drops the earlier one's entries — the launch then fails
+    /// on `Hooks need review` for a worktree gwt had just registered.
+    #[test]
+    fn concurrent_registrations_keep_every_worktree_entry() {
+        const WORKTREES: usize = 8;
+
+        let shared = tempfile::tempdir().unwrap();
+        let config_path = shared.path().join("config.toml");
+        // A shared config is never empty in practice: other projects' trust
+        // state is what a lost update destroys.
+        fs::write(
+            &config_path,
+            r#"model = "gpt-6-astra"
+
+[hooks.state."/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:08adeab2"
+"#,
+        )
+        .unwrap();
+
+        let worktrees: Vec<_> = (0..WORKTREES)
+            .map(|_| worktree_with_generated_hooks())
+            .collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKTREES));
+
+        std::thread::scope(|scope| {
+            for worktree in &worktrees {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let config_path = config_path.clone();
+                let worktree = worktree.path().to_path_buf();
+                scope.spawn(move || {
+                    barrier.wait();
+                    register_codex_managed_hook_trust(&worktree, &config_path).unwrap();
+                });
+            }
+        });
+
+        let state = trust_state(&config_path);
+        for worktree in &worktrees {
+            let hooks_path =
+                dunce::canonicalize(worktree.path().join(".codex/hooks.json")).unwrap();
+            for event_name in [
+                "session_start",
+                "user_prompt_submit",
+                "pre_tool_use",
+                "post_tool_use",
+                "stop",
+            ] {
+                let key = format!("{}:{event_name}:0:0", hooks_path.display());
+                let entry = state.get(&key).unwrap_or_else(|| {
+                    panic!(
+                        "concurrent registration lost a trust entry: {key}\nstate keys: {:?}",
+                        state.keys().collect::<Vec<_>>()
+                    )
+                });
+                assert_eq!(
+                    entry.get("enabled").and_then(toml::Value::as_bool),
+                    Some(true),
+                    "concurrent registration must keep the entry enabled: {key}"
+                );
+            }
+        }
+        assert!(
+            state.contains_key("/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0"),
+            "another project's trust entry must survive concurrent registration"
+        );
+    }
+
+    /// Issue #4071: the same lost update, made deterministic. Another writer
+    /// holds the shared config across its own read-modify-write; a registration
+    /// that starts while it is held must publish on top of that writer's
+    /// result, not on the bytes it read before.
+    #[test]
+    fn registration_waits_for_another_writer_and_keeps_its_entry() {
+        const FOREIGN_KEY: &str = "/Workbench/160-Idina/.codex/hooks.json:stop:0:0";
+
+        let worktree = worktree_with_generated_hooks();
+        let config_path = worktree.path().join("codex-config.toml");
+        fs::write(&config_path, "model = \"gpt-6-astra\"\n").unwrap();
+
+        let holder_has_lock = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                with_codex_config_lock(&config_path, || {
+                    holder_has_lock.wait();
+                    // Long enough for an unserialized registration to read the
+                    // pre-write file and publish over this entry.
+                    std::thread::sleep(Duration::from_millis(300));
+                    let mut root = read_codex_config(&config_path)?;
+                    let root_table = root.as_table_mut().unwrap();
+                    let hooks_table = ensure_child_table(root_table, "hooks")?;
+                    let state_table = ensure_child_table(hooks_table, "state")?;
+                    let entry = ensure_child_table(state_table, FOREIGN_KEY)?;
+                    entry.insert("enabled".to_string(), toml::Value::Boolean(true));
+                    let rendered = toml::to_string_pretty(&root).unwrap();
+                    write_text_atomically(&config_path, &rendered)
+                })
+                .unwrap();
+            });
+
+            holder_has_lock.wait();
+            register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+        });
+
+        let state = trust_state(&config_path);
+        assert!(
+            state.contains_key(FOREIGN_KEY),
+            "the concurrent writer's entry was lost: {:?}",
+            state.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.len(),
+            6,
+            "both writers' entries must survive: {:?}",
+            state.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Issue #4071: the shared config also carries other projects' trust state,
+    /// manually added entries and top-level Codex settings. Registration is a
+    /// partial update — everything it does not own comes back unchanged.
+    #[test]
+    fn registration_preserves_other_projects_state_and_top_level_settings() {
+        let worktree = worktree_with_generated_hooks();
+        let config_path = worktree.path().join("codex-config.toml");
+        let before = r#"model = "gpt-6-astra"
+model_reasoning_effort = "medium"
+
+[features]
+web_search = true
+
+[hooks.state."/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:08adeab2"
+
+[hooks.state."/Workbench/event-magazine/work/issue-2/.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:legacy-without-enabled"
+
+[model_providers.gwt-anthropic]
+name = "Anthropic"
+base_url = "http://127.0.0.1:1234/v1"
+
+[projects."/Workbench/gwt/develop"]
+trust_level = "trusted"
+"#;
+        fs::write(&config_path, before).unwrap();
+        let before: toml::Value = toml::from_str(before).unwrap();
+
+        register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+
+        let after: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        for key in [
+            "model",
+            "model_reasoning_effort",
+            "model_providers",
+            "projects",
+            "features",
+        ] {
+            assert_eq!(
+                after.get(key),
+                before.get(key),
+                "registration must not disturb the shared config's `{key}`"
+            );
+        }
+        for foreign_key in [
+            "/Workbench/160-Idina/.codex/hooks.json:post_tool_use:0:0",
+            "/Workbench/event-magazine/work/issue-2/.codex/hooks.json:stop:0:0",
+        ] {
+            assert_eq!(
+                after["hooks"]["state"].get(foreign_key),
+                before["hooks"]["state"].get(foreign_key),
+                "another project's trust entry must survive verbatim: {foreign_key}"
+            );
+        }
+    }
+
+    /// Issue #4071: a worktree is launched many times. The second registration
+    /// must add nothing and drop nothing — same entries, `enabled` intact.
+    #[test]
+    fn repeated_registration_is_idempotent() {
+        let worktree = worktree_with_generated_hooks();
+        let config_path = worktree.path().join("codex-config.toml");
+
+        register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+        let first = fs::read_to_string(&config_path).unwrap();
+        let first_state = trust_state(&config_path);
+
+        register_codex_managed_hook_trust(worktree.path(), &config_path).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            first,
+            "a repeated registration must not change the shared config"
+        );
+        assert_eq!(first_state.len(), 5);
+        assert_eq!(trust_state(&config_path), first_state);
     }
 }

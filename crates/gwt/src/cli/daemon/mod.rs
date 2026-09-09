@@ -164,7 +164,11 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
     .map_err(|err| config_error(err.to_string()))?;
 
     match action {
-        DaemonBootstrapAction::Reuse(endpoint) => {
+        // Issue #4038: the version-agnostic resolver never names a stale
+        // version here; the arm exists for exhaustiveness and reports the
+        // daemon exactly like a reusable one (its version is printed).
+        DaemonBootstrapAction::Reuse(endpoint)
+        | DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
             let probe = probe_daemon_endpoint(&endpoint);
             out.push_str(&format!(
                 "running pid={pid} bind={bind} version={version} probe={probe}\n",
@@ -413,7 +417,11 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
     .map_err(|err| config_error(err.to_string()))?;
 
     match action {
-        DaemonBootstrapAction::Reuse(endpoint) => {
+        DaemonBootstrapAction::Reuse(endpoint)
+        | DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
+            // `resolve_bootstrap_action` never compares versions, so the
+            // second arm is unreachable here; the GUI supervisor is the
+            // version-aware caller (Issue #4038 AC-6).
             out.push_str(&format!(
                 "daemon already running pid={pid} bind={bind}\n",
                 pid = endpoint.pid,

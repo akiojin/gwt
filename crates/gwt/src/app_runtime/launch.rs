@@ -875,37 +875,16 @@ pub(crate) fn heal_lost_generation_publication_best_effort(
 /// generation. When a holder Session dies without settling, every later fresh
 /// launch (Issue Monitor retries included) collides here, so the refusal names
 /// the blocking generation, its holder and durable state, and both recovery
-/// routes. Diagnostics are best effort: an unreadable holder Session degrades
-/// the detail, never the refusal.
+/// routes. Issue #4042 AC-1: the holder is read through the same
+/// `OwnerGenerationHold` projection the Issue Monitor reclaim uses, so the
+/// refusal and the reclaim can never describe one holder differently.
 fn existing_generation_conflict_detail(
     sessions_dir: &Path,
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
 ) -> String {
-    let status = ledger
-        .current_effective_status()
-        .map_or("unknown", |status| match status {
-            gwt::cli::execution_state::ExecutionControlStatus::Active => "active",
-            gwt::cli::execution_state::ExecutionControlStatus::Completed => "completed",
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked => "blocked",
-        });
-    let holder = ledger.current_generation().map(|generation| {
-        let session_id = generation.identity.initial_session_id.clone();
-        let session_state =
-            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).map_or_else(
-                |_| "durable Session unreadable".to_string(),
-                |session| format!("{:?}", session.status),
-            );
-        format!(" held by Session {session_id} ({session_state})")
-    });
-    format!(
-        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
-        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
-        owner.kind.as_str(),
-        owner.number,
-        status,
-        holder.unwrap_or_default(),
-    )
+    let hold = gwt::cli::execution_state::owner_generation_hold_from_ledger(sessions_dir, ledger);
+    gwt::cli::execution_state::execution_generation_conflict_refusal(owner, hold.as_ref())
 }
 
 struct FinalizedAgentCapabilityLaunch<'a> {
@@ -1792,6 +1771,45 @@ pub(super) fn dispatch_agent_launch_success<F>(
     spawn_project_index_bootstrap(proxy, project_index_root);
 }
 
+/// Why a restored Session cannot be handed to the agent CLI as `--resume`
+/// (SPEC-3966 AC-4).
+///
+/// `None` means the Session does carry a usable handle. Every other answer is
+/// the reason the restore falls back to a brand-new conversation, so the
+/// fallback is never silent.
+pub(super) fn resume_handle_unavailable_reason(
+    session: &gwt_agent::Session,
+) -> Option<&'static str> {
+    if session.exact_resume_session_id().is_some() {
+        return None;
+    }
+    match session.agent_session_id.as_deref().map(str::trim) {
+        None => Some(
+            "no agent_session_id was ever persisted for this Session \
+             (the SessionStart managed hook never reached persist_agent_session_id)",
+        ),
+        Some("") => Some("the persisted agent_session_id is empty"),
+        Some(_) => Some(
+            "the persisted agent_session_id is the Codex placeholder, not a conversation handle",
+        ),
+    }
+}
+
+/// Carry a restored launch's conversation identity onto the successor Session
+/// record (SPEC-3966 AC-5).
+///
+/// Without this the successor is written with no `agent_session_id`, so the
+/// *next* restore has nothing to resume from either and every restart leaves
+/// one more handle-less Session behind.
+pub(super) fn apply_resume_identity_to_session(
+    session: &mut gwt_agent::Session,
+    config: &gwt_agent::LaunchConfig,
+) {
+    if config.session_mode == gwt_agent::SessionMode::Resume {
+        session.agent_session_id = config.resume_session_id.clone();
+    }
+}
+
 pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
@@ -1838,6 +1856,18 @@ pub(super) fn launch_config_from_persisted_session(
             .resume_session_id(resume_id.to_string())
             .predecessor_session_id(session.id.clone());
     } else {
+        // SPEC-3966 AC-4: restoring without a resume handle silently started a
+        // brand-new conversation, which is how the resident PM lost its whole
+        // decision history on every gwt restart without anyone noticing. Say so
+        // instead, with the reason, so the next reader does not have to
+        // reverse-engineer it from an empty Session TOML.
+        tracing::warn!(
+            session_id = %session.id,
+            worktree = %session.worktree_path.display(),
+            agent = ?session.agent_id,
+            reason = resume_handle_unavailable_reason(session).unwrap_or("unknown"),
+            "restored Session has no resume handle; launching a new conversation instead of --resume"
+        );
         builder = builder.session_mode(gwt_agent::SessionMode::Normal);
     }
 
@@ -1953,11 +1983,26 @@ fn persist_lazy_tool_runtime_provenance_migration(
     }
 }
 
-fn apply_post_resolution_bun_cache_fast_path(config: &mut gwt_agent::LaunchConfig) -> bool {
+fn apply_post_resolution_bun_cache_fast_path(
+    config: &mut gwt_agent::LaunchConfig,
+) -> gwt_agent::HostBunxCacheFastPath {
     if config.tool_runtime_provenance.is_some() {
-        return false;
+        return gwt_agent::HostBunxCacheFastPath::NotApplicable;
     }
     gwt_agent::apply_host_bunx_cache_fast_path(config)
+}
+
+/// Issue #3857 AC-5: terminal line shown in the agent window when a validated
+/// Bun package cache entry resolved to a bin target gwt could not launch. It
+/// names the resolved path and the reason, then states that the launch falls
+/// back to the package runner.
+fn bun_cache_fast_path_rejection_terminal_bytes(executable: &Path, reason: &str) -> Vec<u8> {
+    format!(
+        "[gwt] Bun package cache entry {} was not launched directly: {}. Falling back to the bunx package runner.\r\n",
+        executable.display(),
+        reason.trim().trim_end_matches('.')
+    )
+    .into_bytes()
 }
 
 fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
@@ -2713,11 +2758,12 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
                     codex_config_path.display()
                 )
             })?;
-            if !report.untrusted_gwt_hooks.is_empty() {
-                return Err(format!(
-                    "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review` for {}",
-                    report.untrusted_gwt_hooks.join(", ")
-                ));
+            // Issue #4071 AC-2: the reason says whether any trust state was
+            // written and what each hooks file was compared against, so a
+            // skipped registration and a trusted_hash / path-form mismatch
+            // are told apart in the launch failure record.
+            if let Some(reason) = report.hooks_need_review_reason() {
+                return Err(reason);
             }
             Ok(Some(report))
         }
@@ -2875,6 +2921,17 @@ impl AppRuntime {
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
         let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
+        // request, so the pane-create route is the span from that stamp to this
+        // completion — worktree resolution, Docker probing and the PTY spawn
+        // included. Recorded before the entry is dropped below.
+        if let Some((_, (_, started_at))) = self
+            .inflight_launches
+            .iter()
+            .find(|(_, (pending_window_id, _))| pending_window_id == &window_id)
+        {
+            gwt::perf::record_route(gwt::perf::PerfRoute::PaneCreate, started_at.elapsed());
+        }
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -3718,6 +3775,12 @@ impl AppRuntime {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return Self::status_events(window_id, WindowProcessStatus::Running, None);
         }
+        // Issue #4145 AC-1: a process pane is created synchronously here —
+        // shell resolution, env, resource policy and the PTY spawn all happen
+        // before this returns — so one guard is the whole pane-create route for
+        // the non-agent half of the surface. Agent panes are asynchronous and
+        // are recorded from `handle_launch_complete` instead.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneCreate);
 
         let project_root = self
             .tab(tab_id)
@@ -3993,6 +4056,9 @@ impl AppRuntime {
         // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
         self.register_pty_writer(id, &pane);
         self.runtimes.insert(id.to_string(), runtime);
+        // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
+        // the pre-PTY failure guard.
+        self.restore_launch_windows.remove(id);
     }
 
     /// Issue #3475: start the authenticated SessionStart readiness deadline for
@@ -4430,6 +4496,13 @@ impl AppRuntime {
             );
         }
         if let Some(context) = launch_feedback_context {
+            // Issue #4084 AC-2: remember which windows are independent review
+            // dispatches (Issue #4041) so an idle one with a published verdict
+            // is classified as review rather than as an unexplained stall.
+            if context.issue_monitor_review_dispatch {
+                self.issue_monitor_review_dispatch_windows
+                    .insert(window_id.clone());
+            }
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }
@@ -4599,14 +4672,32 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_post_resolution_bun_cache_fast_path(&mut config)
-            {
-                tracing::debug!(
-                    agent = %config.agent_id,
-                    command = %config.command,
-                    "reusing fresh Bun agent package cache"
-                );
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                match apply_post_resolution_bun_cache_fast_path(&mut config) {
+                    gwt_agent::HostBunxCacheFastPath::Applied => {
+                        tracing::debug!(
+                            agent = %config.agent_id,
+                            command = %config.command,
+                            "reusing fresh Bun agent package cache"
+                        );
+                    }
+                    gwt_agent::HostBunxCacheFastPath::Rejected { executable, reason } => {
+                        tracing::warn!(
+                            agent = %config.agent_id,
+                            executable = %executable.display(),
+                            reason = %reason,
+                            "Bun agent package cache entry is not launchable; falling back to the package runner"
+                        );
+                        proxy.send(UserEvent::LaunchTerminalOutput {
+                            window_id: window_id.clone(),
+                            data: bun_cache_fast_path_rejection_terminal_bytes(
+                                &executable,
+                                &reason,
+                            ),
+                        });
+                    }
+                    gwt_agent::HostBunxCacheFastPath::NotApplicable => {}
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
@@ -4656,9 +4747,7 @@ impl AppRuntime {
             session.launch_args = config.args.clone();
             session.windows_shell = config.windows_shell;
             session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
-            if session.session_mode == gwt_agent::SessionMode::Resume {
-                session.agent_session_id = config.resume_session_id.clone();
-            }
+            apply_resume_identity_to_session(&mut session, &config);
             session.update_status(gwt_agent::AgentStatus::Running);
             // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
             // recovers producing authority through the continuation
@@ -8259,8 +8348,34 @@ mod tool_runtime_integration_tests {
         config.args = vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()];
         let expected = (config.command.clone(), config.args.clone());
 
-        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config));
+        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config).is_applied());
         assert_eq!((config.command, config.args), expected);
+    }
+
+    // Issue #3857 AC-5: a rejected cache entry is explained in the agent
+    // terminal with the resolved path and the reason it could not be launched.
+    #[test]
+    fn bun_cache_fast_path_rejection_names_the_path_and_reason_in_the_terminal() {
+        let executable =
+            Path::new("/tmp/bunx-501-opencode-ai@latest/node_modules/opencode-ai/bin/opencode.exe");
+
+        let bytes = bun_cache_fast_path_rejection_terminal_bytes(
+            executable,
+            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE).",
+        );
+        let text = String::from_utf8(bytes).expect("utf8 terminal line");
+
+        assert!(text.starts_with("[gwt] "), "{text}");
+        assert!(text.contains("opencode-ai/bin/opencode.exe"), "{text}");
+        assert!(
+            text.contains("neither a script nor a recognized native executable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Falling back to the bunx package runner"),
+            "{text}"
+        );
+        assert!(text.ends_with("\r\n"), "{text}");
     }
 
     #[cfg(windows)]

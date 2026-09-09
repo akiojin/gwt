@@ -1385,3 +1385,112 @@ fn tracked_canonical_hook_config_is_not_reported_as_binary_skew() {
         health.issues
     );
 }
+
+/// Issue #3541 AC-2 / AC-5: a handler failure must surface in `hook.health`,
+/// and a later successful event must turn it into "recovered" evidence
+/// instead of erasing it back to an empty `issues` list.
+#[test]
+fn managed_hook_health_retains_failure_evidence_after_a_later_success() {
+    use gwt::cli::{dispatch, TestEnv};
+    use gwt_agent::{runtime_state_path, AgentId, Session};
+
+    fn argv(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("isolated home");
+    let gwt_home = home.path().join(".gwt");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(&gwt_home);
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let sessions_dir = gwt_home.join("sessions");
+    let mut session = Session::new(&worktree, "work/issue-3541", AgentId::Codex);
+    session.linked_issue_number = Some(3541);
+    session.save(&sessions_dir).expect("session metadata");
+    let runtime_path = runtime_state_path(&sessions_dir, &session.id);
+    fs::create_dir_all(&runtime_path).expect("invalid runtime-state destination");
+
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let _gwt_session_id = ScopedEnvVar::set("GWT_SESSION_ID", &session.id);
+    let _runtime_path = ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &runtime_path);
+    let _profile_path = ScopedEnvVar::remove("GWT_HOOK_PROFILE_PATH");
+    let _forward_url = ScopedEnvVar::remove("GWT_HOOK_FORWARD_URL");
+    let _forward_token = ScopedEnvVar::remove("GWT_HOOK_FORWARD_TOKEN");
+    let _codex_thread_id = ScopedEnvVar::remove("CODEX_THREAD_ID");
+    let _hook_bin = stable_hook_bin_guard();
+    gwt_skills::generate_settings_local(&worktree).expect("claude hooks");
+    gwt_skills::generate_codex_hooks(&worktree).expect("codex hooks");
+
+    let payload = json!({
+        "session_id": "provider-session",
+        "cwd": worktree.display().to_string(),
+        "tool_name": "Bash",
+        "tool_input": { "command": "pwd" }
+    })
+    .to_string();
+
+    let mut failure_env = TestEnv::new(worktree.clone());
+    failure_env.stdin = payload.clone();
+    let failure_code = dispatch(
+        &mut failure_env,
+        &argv(&["gwtd", "hook", "event", "PreToolUse"]),
+    );
+    assert_eq!(failure_code, 1, "runtime-state failure must exit 1");
+
+    let failed_health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(&worktree).with_runtime_state_path(&runtime_path),
+    );
+    assert_eq!(
+        failed_health.status,
+        ManagedHookHealthStatus::Degraded,
+        "{failed_health:?}"
+    );
+    let failed_issues = failed_health.issues.join("\n");
+    for expected in ["PreToolUse/runtime-state", "unresolved", "errors.list"] {
+        assert!(
+            failed_issues.contains(expected),
+            "unresolved failure health must retain {expected:?}: {failed_issues}"
+        );
+    }
+
+    fs::remove_dir_all(&runtime_path).expect("remove invalid runtime-state destination");
+    let mut success_env = TestEnv::new(worktree.clone());
+    success_env.stdin = payload;
+    let success_code = dispatch(
+        &mut success_env,
+        &argv(&["gwtd", "hook", "event", "PostToolUse"]),
+    );
+    assert_eq!(
+        success_code,
+        0,
+        "later event must succeed in the same session: {}",
+        String::from_utf8_lossy(&success_env.stderr)
+    );
+    gwt::cli::hook::health::record_managed_hook_self_healed(&worktree).expect("self-healed marker");
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(&worktree).with_runtime_state_path(&runtime_path),
+    );
+
+    assert_eq!(health.last_event.as_deref(), Some("PostToolUse"));
+    assert_eq!(
+        health.status,
+        ManagedHookHealthStatus::NeedsAttention,
+        "recovered but unacknowledged failure must not become Ready/SelfHealed: {health:?}"
+    );
+    let issues = health.issues.join("\n");
+    for expected in ["PreToolUse/runtime-state", "recovered", "errors.list"] {
+        assert!(
+            issues.contains(expected),
+            "hook.health issues must retain {expected:?}: {issues}"
+        );
+    }
+    assert!(
+        !issues.contains("unresolved"),
+        "a later success must be reported as recovery, not as an open failure: {issues}"
+    );
+}

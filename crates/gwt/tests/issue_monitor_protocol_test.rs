@@ -148,6 +148,7 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            auto_apply_updates: false,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -208,6 +209,8 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
         claim_id: Some("claim-a".to_string()),
         blocked_by_owner: None,
         claim_expires_at: None,
+        blocked_by_claim_id: None,
+        claim_block_issue_updated_at: None,
         launched_window_id: None,
         launch_plan: Some(IssueMonitorLaunchPlan {
             branch_name: "work/issue-42".to_string(),
@@ -275,6 +278,8 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
             claim_id: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
             launched_window_id: None,
             launch_plan: None,
             error_message: None,

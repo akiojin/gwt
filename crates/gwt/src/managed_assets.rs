@@ -617,9 +617,7 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     is_ephemeral: bool,
 ) -> io::Result<()> {
     with_managed_asset_lock(worktree, || {
-        let targets = managed_targets_for_agent(agent_id)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let targets = refresh_targets_for_agent(worktree, agent_id);
         materialize_managed_gwt_assets_for_targets(
             worktree,
             &targets,
@@ -800,6 +798,24 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
     }
 }
 
+/// Targets a launch refresh must write: the launched provider plus every
+/// managed provider surface the worktree already carries (#3233). Writing only
+/// the launched provider left an existing mirror (e.g. `.codex/skills`) frozen
+/// at whatever the previous build materialized, so a bundle asset added since
+/// then appeared on one side only and broke `.claude` / `.codex` parity.
+fn refresh_targets_for_agent(worktree: &Path, agent_id: &AgentId) -> Vec<ManagedAssetTarget> {
+    // An agent with no managed surface of its own (Gemini, Copilot, …) still
+    // launches inside a worktree whose existing `.claude` / `.codex` surfaces
+    // must not be left frozen, so start from the optional primary instead of
+    // returning early.
+    let mut targets: Vec<ManagedAssetTarget> =
+        managed_targets_for_agent(agent_id).into_iter().collect();
+    for existing in detect_existing_managed_asset_targets(worktree) {
+        push_existing_target(&mut targets, true, existing);
+    }
+    targets
+}
+
 fn detect_existing_managed_asset_targets(worktree: &Path) -> Vec<ManagedAssetTarget> {
     let mut targets = Vec::new();
     push_existing_target(
@@ -846,6 +862,12 @@ fn push_existing_target(
 }
 
 fn install_hook_bin_override() -> io::Result<EnvVarGuard> {
+    // #4057: a thread-local test pin already answers the generator, so leave
+    // the process environment alone — mutating it here would leak this
+    // thread's binary into every other materialization in the process.
+    if gwt_skills::settings_local::hook_bin_override().is_some() {
+        return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
+    }
     if std::env::var_os("GWT_HOOK_BIN").is_some_and(|value| !value.is_empty()) {
         return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
     }
