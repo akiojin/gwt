@@ -26,7 +26,9 @@ use gwt_agent::{
     prepare_agent_launch, AgentId, AgentLaunchBuilder, HostRunnerProbeKind, Session, SessionMode,
     ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
 };
-use gwt_core::test_support::{WindowsNpmRegistryFixture, WindowsRealGwtFixture};
+use gwt_core::test_support::{
+    summarize_pty_output_for_diagnostics, WindowsNpmRegistryFixture, WindowsRealGwtFixture,
+};
 use gwt_terminal::{
     pty::{PtyHandle, SpawnConfig},
     TerminalError,
@@ -37,6 +39,15 @@ const SELECTOR_ENV: &str = "GWT_WINDOWS_AGENT_SELECTOR";
 const CREDENTIAL_FREE_ENV: &str = "GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE";
 const TEST_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
 const TEST_REGISTRY_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+// Issue #3656: the first ConPTY route pays the cold-cache cost of fetching
+// and extracting the provider tarball inside this budget. Saturated CI
+// runners showed a 5-7x slowdown on the preflight probes while the old
+// 60-second budget flaked, so align with the 180-second public-WS agent
+// budget below and log the observed marker latency for regression tracking.
+const TEST_AGENT_READY_TIMEOUT: Duration = Duration::from_secs(180);
+// The npx parent must exit after the marker so its shared cache is finalized;
+// the old 10-second wait is exposed to the same host saturation.
+const TEST_NPX_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
@@ -909,7 +920,7 @@ fn run_shared_launch_boundary_case(
     // harness supplies the same terminal response explicitly.
     pty.write_input(b"\x1b[1;1R")
         .unwrap_or_else(|error| panic!("{} ConPTY DSR response failed: {error}", route.id));
-    let output = read_pty_until_marker(pty, "phase75-agent-ready", Duration::from_secs(60))
+    let output = read_pty_until_marker(pty, "phase75-agent-ready", TEST_AGENT_READY_TIMEOUT)
         .unwrap_or_else(|error| panic!("{} ConPTY output failed: {error}", route.id));
     assert!(
         output.contains("phase75-agent-ready"),
@@ -1010,7 +1021,8 @@ fn read_pty_until_marker(
             }
         }
     });
-    let marker_deadline = Instant::now() + timeout;
+    let wait_started = Instant::now();
+    let marker_deadline = wait_started + timeout;
     let mut exit_deadline = None;
     let mut bytes = Vec::new();
     let result = loop {
@@ -1026,13 +1038,15 @@ fn read_pty_until_marker(
             break Err(TerminalError::PtyIoError {
                 details: if exit_deadline.is_some() {
                     format!(
-                        "PTY marker {marker:?} was observed but npx did not exit cleanly; output={:?}",
-                        String::from_utf8_lossy(&bytes)
+                        "PTY marker {marker:?} was observed but npx did not exit cleanly; waited={:?} budget={TEST_NPX_EXIT_TIMEOUT:?}; {}",
+                        wait_started.elapsed(),
+                        summarize_pty_output_for_diagnostics(&bytes)
                     )
                 } else {
                     format!(
-                        "timed out waiting for PTY marker {marker:?}; output={:?}",
-                        String::from_utf8_lossy(&bytes)
+                        "timed out waiting for PTY marker {marker:?}; waited={:?} budget={timeout:?}; {}",
+                        wait_started.elapsed(),
+                        summarize_pty_output_for_diagnostics(&bytes)
                     )
                 },
             });
@@ -1049,18 +1063,24 @@ fn read_pty_until_marker(
                 }
                 break Err(TerminalError::PtyIoError {
                     details: format!(
-                        "PTY reached EOF before marker {marker:?}; output={:?}",
-                        String::from_utf8_lossy(&bytes)
+                        "PTY reached EOF before marker {marker:?}; waited={:?} budget={timeout:?}; {}",
+                        wait_started.elapsed(),
+                        summarize_pty_output_for_diagnostics(&bytes)
                     ),
                 });
             }
             Ok(Ok(chunk)) => {
                 bytes.extend_from_slice(&chunk);
                 if exit_deadline.is_none() && String::from_utf8_lossy(&bytes).contains(marker) {
+                    eprintln!(
+                        "phase75 marker timing: marker={marker:?} elapsed_ms={} budget_ms={}",
+                        wait_started.elapsed().as_millis(),
+                        timeout.as_millis()
+                    );
                     // The package entrypoint emits the marker before returning
                     // to npx. Wait for the npx parent to exit normally so its
                     // shared cache is finalized before the next route starts.
-                    exit_deadline = Some(Instant::now() + Duration::from_secs(10));
+                    exit_deadline = Some(Instant::now() + TEST_NPX_EXIT_TIMEOUT);
                 }
             }
             Ok(Err(error)) => {
@@ -1070,8 +1090,9 @@ fn read_pty_until_marker(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 break Err(TerminalError::PtyIoError {
                     details: format!(
-                        "timed out waiting for PTY marker {marker:?}; output={:?}",
-                        String::from_utf8_lossy(&bytes)
+                        "timed out waiting for PTY marker {marker:?}; waited={:?} budget={timeout:?}; {}",
+                        wait_started.elapsed(),
+                        summarize_pty_output_for_diagnostics(&bytes)
                     ),
                 });
             }
@@ -1115,6 +1136,14 @@ fn launch_env_with_real_gwtd(
     env.insert(
         "GWT_BIN_PATH".to_string(),
         env!("CARGO_BIN_EXE_gwtd").to_string(),
+    );
+    // This E2E deliberately drives the runner installed on the CI runner, with
+    // package metadata and tarballs pinned to the loopback registry above. It
+    // is the one launch surface that opts in to the real package runner rather
+    // than stubbing it (Issue #3972).
+    env.insert(
+        gwt_core::process_console::ALLOW_REAL_RUNNER_PROBE_MARKER.to_string(),
+        "1".to_string(),
     );
     env
 }

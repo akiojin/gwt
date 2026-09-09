@@ -29,7 +29,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    coordinator_root, HeavyLeaseStatus, IndexCoordinator, JobAdmission, JobPriority, TargetKey,
+    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, IndexCoordinator, JobAdmission,
+    JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -37,6 +38,9 @@ use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::CliEnv;
+
+/// Issue #3913: `verify.run` host admission — the lease's in-process claimant.
+pub(crate) mod admission;
 
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
@@ -101,7 +105,7 @@ pub(super) fn run<E: CliEnv>(
             reason,
         } => acquire(env, ttl_minutes, reason, out),
         VerificationLeaseCommand::Release { lease_id, reason } => {
-            release(&lease_id, reason.as_deref(), out)
+            release(env, &lease_id, reason.as_deref(), out)
         }
         VerificationLeaseCommand::Extend {
             lease_id,
@@ -167,14 +171,26 @@ fn acquire<E: CliEnv>(
     if !outcome.granted {
         out.push_str(
             "note: the current holder finishes its run before the lease is released; \
-             re-run verify.lease.acquire after it reports done\n",
+             re-run verify.lease.acquire after it reports done. Your turn is reserved: \
+             background index jobs defer to this worktree until the retry is granted \
+             or the reservation lapses\n",
         );
     }
     Ok(0)
 }
 
-fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32, SpecOpsError> {
-    let control = control_dir_for(lease_id).ok_or_else(|| missing_lease(lease_id))?;
+fn release<E: CliEnv>(
+    env: &mut E,
+    lease_id: &str,
+    reason: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let Some(control) = control_dir_for(lease_id) else {
+        if held_index_lease(lease_id)? {
+            return request_index_yield(env, lease_id, reason, out);
+        }
+        return Err(missing_lease(lease_id));
+    };
     fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
         .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
     await_settled(lease_id)?;
@@ -262,6 +278,15 @@ fn hold<E: CliEnv>(
     let mut lease = match guard.acquire_heavy_with_ttl(NON_BLOCKING, ttl) {
         Ok(lease) => lease,
         Err(_) => {
+            // Issue #4086 AC-1: the refusal answers immediately, but the
+            // claimant's turn stays reserved so background index jobs defer
+            // to this worktree between retries.
+            let _ = coordinator.reserve_heavy(
+                &key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                reason,
+            );
             publish_outcome(control, &LeaseOutcome::refused(status()?));
             return Ok(0);
         }
@@ -317,12 +342,16 @@ fn spawn_holder<E: CliEnv>(
     })
     .to_string();
 
+    // The holder must not inherit our stdout/stderr: the caller reads our
+    // output to EOF, and an inherited pipe would keep it open for the whole
+    // lease. Redirecting the holder's stdio to NUL is only half of that on
+    // Windows, where `CreateProcess` also copies every inheritable handle
+    // into the child; `hidden_command` clears the inherit flag on our own
+    // standard handles so the pipe does not travel that way either (Issue
+    // #4105).
     let mut child = gwt_core::process::hidden_command(exe)
         .current_dir(env.repo_path())
         .stdin(Stdio::piped())
-        // The holder must not inherit our stdout/stderr: the caller reads our
-        // output to EOF, and an inherited pipe would keep it open for the
-        // whole lease.
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -479,6 +508,12 @@ struct LeaseStatusSnapshot {
     expired: bool,
     #[serde(default)]
     pending: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remaining_batches: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    estimated_remaining_ms: Option<u64>,
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
@@ -493,6 +528,9 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             remaining_ms: status.remaining_ms,
             expired: status.expired,
             pending: status.pending,
+            holder_kind: status.holder_kind.map(|kind| kind.as_str().to_string()),
+            remaining_batches: status.remaining_batches,
+            estimated_remaining_ms: status.estimated_remaining_ms,
         }
     }
 }
@@ -539,7 +577,7 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
         .into())
 }
 
-fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
+pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     IndexCoordinator::open_default()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
@@ -562,7 +600,7 @@ fn ensure_control_dir_is_ours(control: &Path) -> Result<(), SpecOpsError> {
     )))
 }
 
-fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
+pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
     let worktree = resolve_current_worktree_root(env.repo_path());
     let worktree_hash = compute_worktree_hash(&worktree)
         .map_err(|err| unexpected(format!("failed to identify the current worktree: {err}")))?;
@@ -576,6 +614,50 @@ fn render(out: &mut String, held_label: &str, free_label: &str, status: &LeaseSt
     let label = if status.held { held_label } else { free_label };
     out.push_str(&format!("verification lease: {label}\n"));
     push_status_fields(out, status);
+}
+
+/// The live lease named by `lease_id` when it belongs to an index job
+/// (Issue #4086): such a lease has no verification control directory, so
+/// release requests are arbitrated through the coordinator instead.
+fn held_index_lease(lease_id: &str) -> Result<bool, SpecOpsError> {
+    let status = status()?;
+    Ok(status.held
+        && status.lease_id.as_deref() == Some(lease_id)
+        && status.holder_kind.as_deref() == Some(HeavyHolderKind::Index.as_str()))
+}
+
+/// PM arbitration of an index lease (Issue #4086): leave a verification-
+/// priority reservation for the caller's worktree. The runner observes it at
+/// its next batch boundary and yields; the host then defers to the
+/// reservation instead of re-taking the lease.
+fn request_index_yield<E: CliEnv>(
+    env: &mut E,
+    lease_id: &str,
+    reason: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let key = verification_key(env)?;
+    open_coordinator()?
+        .reserve_heavy(
+            &key,
+            JobPriority::ManualRebuild,
+            VERIFICATION_RESERVATION_TTL,
+            Some(reason.unwrap_or("verify.lease.release arbitration")),
+        )
+        .map_err(|err| unexpected(format!("failed to reserve the heavy lease: {err}")))?;
+    out.push_str("verification lease: yield requested\n");
+    out.push_str(&format!("lease_id: {lease_id}\n"));
+    if let Some(reason) = reason {
+        out.push_str(&format!("reason: {reason}\n"));
+    }
+    push_status_fields(out, &status()?);
+    out.push_str(&format!(
+        "note: an index job holds this lease; it releases at its next batch boundary \
+         (at most {}s after this request when progress is published) and background index \
+         jobs defer to the reservation left for this worktree\n",
+        VERIFICATION_RESERVATION_TTL.as_secs()
+    ));
+    Ok(0)
 }
 
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
@@ -599,6 +681,15 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if status.held {
         out.push_str(&format!("expired: {}\n", status.expired));
+    }
+    if let Some(kind) = &status.holder_kind {
+        out.push_str(&format!("holder_kind: {kind}\n"));
+    }
+    if let Some(batches) = status.remaining_batches {
+        out.push_str(&format!("remaining_batches: {batches}\n"));
+    }
+    if let Some(estimate) = status.estimated_remaining_ms {
+        out.push_str(&format!("estimated_remaining_ms: {estimate}\n"));
     }
     out.push_str(&format!("pending: {}\n", status.pending));
 }
@@ -681,6 +772,9 @@ mod tests {
                 remaining_ms: Some(60_000),
                 expired: false,
                 pending: 2,
+                holder_kind: Some("verification".to_string()),
+                remaining_batches: None,
+                estimated_remaining_ms: Some(60_000),
             },
         );
         assert_eq!(
@@ -693,6 +787,8 @@ mod tests {
              expires_at_ms: 61000\n\
              remaining_ms: 60000\n\
              expired: false\n\
+             holder_kind: verification\n\
+             estimated_remaining_ms: 60000\n\
              pending: 2\n"
         );
     }
@@ -737,17 +833,39 @@ mod tests {
         path
     }
 
+    #[cfg(windows)]
+    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+
+        if path.is_dir() {
+            return OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path);
+        }
+        fs::File::options().write(true).open(path)
+    }
+
+    #[cfg(not(windows))]
+    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .or_else(|_| fs::File::open(path))
+    }
+
     /// Backdate a directory and its outcome past the grace window so the sweep
     /// treats it as residue without the test having to wait.
     fn age_out(dir: &Path) {
         let stale = std::time::SystemTime::now() - CONTROL_RESIDUE_GRACE * 2;
         for path in [dir.join(OUTCOME_FILE), dir.to_path_buf()] {
             if path.exists() {
-                let file = fs::File::options()
-                    .write(true)
-                    .open(&path)
-                    .or_else(|_| fs::File::open(&path))
-                    .expect("open for backdating");
+                let file = open_for_backdating(&path).expect("open for backdating");
                 file.set_modified(stale).expect("backdate");
             }
         }

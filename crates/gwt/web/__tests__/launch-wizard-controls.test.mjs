@@ -30,9 +30,10 @@ const CODEX_REASONING = [
   { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
 ];
 
-// SPEC-1921 US-20 / FR-122 — Codex reasoning ladders scale per model. The
-// backend sends 6 stops for gpt-5.6-sol / gpt-5.6-terra (low..ultra), 5 stops
-// for gpt-5.6-luna (low..max), and the existing 4 stops for gpt-5.5 / gpt-5.4 /
+// SPEC-1921 US-20 / FR-122 (+ Issue #3962 AC-4 — 2026-09-05 snapshot) — Codex
+// reasoning ladders scale per model. The backend sends 6 stops for
+// gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra (low..ultra), 5 stops for
+// gpt-5.6-luna (low..max), and the existing 4 stops for gpt-5.5 /
 // gpt-5.4-mini / gpt-5.3-codex-spark (low..xhigh). There is NO Auto row for
 // Codex — the whole ladder is ordinal, so no stop is lifted out of the slider.
 const CODEX_REASONING_6 = [
@@ -194,9 +195,9 @@ test("reasoningSliderModel marks Auto selection and parks slider at a sane fallb
 });
 
 test("reasoningSliderModel maps the 6-stop Codex ladder low->ultra with no Auto lift-out", () => {
-  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-sol / gpt-5.6-terra send six
-  // ordinal Codex stops (low..ultra) and no Auto row, so the whole ladder stays
-  // on the ordinal scale and ultra is the top stop.
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-6-astra / gpt-5.6-sol /
+  // gpt-5.6-terra send six ordinal Codex stops (low..ultra) and no Auto row, so
+  // the whole ladder stays on the ordinal scale and ultra is the top stop.
   const model = reasoningSliderModel(CODEX_REASONING_6, "ultra");
   assert.equal(model.hasAuto, false, "Codex has no Auto row");
   assert.equal(model.stops.length, 6);
@@ -358,7 +359,7 @@ test("buildReasoningField renders the 5-stop Codex ladder and commits 'max' at t
 });
 
 test("buildReasoningField commits 'xhigh' at the top of the 4-stop Codex ladder", () => {
-  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5 / gpt-5.4 / gpt-5.4-mini /
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5 / gpt-5.4-mini /
   // gpt-5.3-codex-spark keep the four-stop ladder that tops out at Extra high /
   // stored value 'xhigh'.
   const doc = bootDom();
@@ -474,6 +475,39 @@ const wizardSource = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), "../launch-wizard-surface.js"),
   "utf8",
 );
+
+test("Grok Build は固定 catalog ではなく config-default 付き free-text Model を表示する", () => {
+  const grokGate = wizardSource.search(
+    /launchWizard\.(?:show_grok_options|show_grok_model|show_freetext_model|show_free_text_model)|selected_agent_id\s*===\s*["']grok["']/,
+  );
+  assert.notEqual(grokGate, -1, "Grok 固有の launch profile 表示 gate が必要");
+
+  const grokProfileSurface = wizardSource.slice(grokGate, grokGate + 1800);
+  const grokBranchEnd = grokProfileSurface.indexOf("} else if");
+  assert.notEqual(grokBranchEnd, -1, "Grok Model branch を他 agent の picker と分離する");
+  const grokModelBranch = grokProfileSurface.slice(
+    0,
+    grokBranchEnd,
+  );
+  assert.match(
+    grokModelBranch,
+    /appendTextField\([\s\S]*?["']Model["'][\s\S]*?launchWizard\.selected_model[\s\S]*?blank\s*=\s*config[\s\S]*?kind:\s*["']set_model["']/i,
+    "Grok Model は selected_model を編集する free-text field で、空欄は config default と説明する",
+  );
+  assert.doesNotMatch(
+    grokModelBranch,
+    /appendSelectField\([\s\S]{0,160}?["']Model["']/,
+    "account/custom model を固定 dropdown にしない",
+  );
+});
+
+test("Launch Wizard の共通 reasoning control は Effort として set_reasoning を送る", () => {
+  assert.match(
+    wizardSource,
+    /if\s*\(launchWizard\.show_reasoning\)\s*\{[\s\S]{0,240}?selected_agent_id\s*===\s*["']grok["']\s*\?\s*["']Effort["']\s*:\s*["']Reasoning["'][\s\S]{0,500}?appendReasoningField\(\s*grid,[\s\S]{0,120}?reasoningLabel[\s\S]{0,300}?launchWizard\.reasoning_options[\s\S]{0,180}?launchWizard\.selected_reasoning[\s\S]{0,300}?kind:\s*["']set_reasoning["']/,
+    "Grok は Effort、既存 agent は Reasoning のまま共通 set_reasoning action を使う",
+  );
+});
 
 test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
   assert.match(

@@ -8,6 +8,18 @@
 
 :root {
   color-scheme: light dark;
+
+  /* SPEC #3206 FR-015 — stacking tiers (lower = further back). Persistent
+     chrome (rail, drawers) sits below modals, and everything persistent sits
+     below the transient notice stack so a toast is never covered by UI that
+     stays on screen. Reference ladder of the remaining raw tiers:
+     palette 1200 < wizard 2000 < degradation banner 3500 <
+     connection overlay 4000 < notice stack 9999 < context menu 10000 <
+     update modal 10100. */
+  --z-rail: 30;
+  --z-notification-center: 31;
+  --z-modal: 1000;
+  --z-notice-stack: 9999;
 }
 
 :root[data-theme="dark"] {
@@ -66,6 +78,16 @@
      needs-input=amber, idle=gray), so a Remote tag reads as "a place, not a
      state". violet-400 clears WCAG AA as text on dark surfaces (~7.0 / ~6.0). */
   --color-state-remote: #a78bfa;
+  /* Issue #3979 — "good / nothing to act on" severity. The notification-center
+     triage rows need a positive severity color, and it cannot be
+     --color-state-active: that token IS the accent (identical to
+     --color-focus-ring in light), so a green is the only unclaimed positive
+     signal left. green-400 shares the green family with --agent-opencode, but
+     agent brand colors live on panes and cards while severity lives inside the
+     notification drawer, so the two never co-occur. Also resolves the dangling
+     var() the wizard progress marker already referenced. AA as text on dark
+     --color-surface / --color-surface-elevated (13.3 / 9.5). */
+  --color-state-success: #4ade80;
   /* SPEC-3431 FR-020 — the resident PM agent's role accent. The PM is the
      user's single conversational window, so it needs an identity that is not
      a runtime state and not one of the agent brand colors (the PM itself runs
@@ -172,6 +194,11 @@
      violet-700 clears WCAG AA as text on bone surfaces (~7.4 / ~6.9) and is
      distinct from active/blocked/done/needs-input. */
   --color-state-remote: #6d28d9;
+  /* Issue #3979 — "good / nothing to act on" severity, light theme. green-700
+     clears WCAG AA as text on bone surfaces (5.02 / 4.62) and stays distinct
+     from --color-state-active, which in this theme is literally the accent
+     (--color-focus-ring). */
+  --color-state-success: #15803d;
   /* SPEC-3431 FR-020 — PM role accent, light theme. emerald-700 clears WCAG
      AA as text on bone surfaces (~4.9) and keeps the PM readable as an
      identity rather than a surface tint, so the PM window stays legible when
@@ -268,6 +295,7 @@
     --color-state-blocked: Mark;
     --color-state-done: GrayText;
     --color-state-needs-input: Highlight;
+    --color-state-success: CanvasText;
     --color-state-remote: LinkText;
     --color-role-pm: Highlight;
 

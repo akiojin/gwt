@@ -14,8 +14,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 ## Why gwt
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
-  `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`, and custom
-  agents from a shared canvas.
+  `Grok Build`, `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`,
+  and custom agents from a shared canvas.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
   and `question` posts.
@@ -103,10 +103,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 
   Gemini CLI remains available in gwt as a legacy option for eligible
   Standard/Enterprise or API-key workflows.
+
+  Grok Build is provided by xAI's official `grok` command. Install it with
+  `npm install -g @xai-official/grok`, then authenticate on first launch or set
+  `XAI_API_KEY` for API-key workflows.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+  - `XAI_API_KEY`
 - Python 3.9+ when gwt needs to bootstrap or repair the shared project index runtime
 
 Linux desktop builds also require WebKitGTK-related system packages. See
@@ -225,12 +230,20 @@ the live endpoint for diagnostics. Without JSON operation `daemon.start`,
 multi-instance fan-out is inactive but local file-based state and
 the file watcher continue to work as before.
 
-Windows currently has no long-running daemon: JSON operation `daemon.start`
-exits with "not yet implemented", and managed hooks fall back to
-synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
-therefore unavailable on Windows pending follow-up work; JSON operation
-`daemon.status` still works there but always reports `stopped` until
-the named-pipe path lands.
+On Windows the daemon runs the same way: the GUI's Issue Monitor starts
+and supervises it as a user-session child process, and JSON operation
+`daemon.start` starts one by hand. The transport is a named pipe
+(`\\.\pipe\gwtd-<scope>-<hash>`, local clients only; the endpoint file
+under `~/.gwt` carries the auth token). `daemon.status`,
+`daemon.subscribe`, Issue Monitor controls, and multi-instance fan-out
+behave as on macOS / Linux. A hand-started daemon stops on Ctrl-C,
+Ctrl-Break, or console close; logoff and shutdown run the same cleanup,
+and a daemon terminated by the GUI is reclaimed by the liveness checks on
+the next start. gwt does not install a Windows Service: the daemon only
+scans and claims — agent panes are still created by the GUI — so a
+service would not enable headless autonomous runs and would fight the
+per-user `~/.gwt` state. Headless autonomous execution is not a goal of
+the daemon.
 
 ## Agent Workflow
 
@@ -264,7 +277,11 @@ Common windows include:
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view.
+  open this same Work Item view. Issue Monitor launches do not open a window on
+  the canvas: the agent is mirrored read-only in the Issue window's right pane,
+  and `Windowize` promotes it to a normal window when you want to type into it.
+  Each row also carries its Work's lifecycle, attention reason, and PR state,
+  with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
 - `File Tree` — live read-only repository tree
@@ -312,10 +329,44 @@ the `gwtd` JSON operations `issue.monitor.status`,
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. All operations accept an optional
+an explicit action in the GUI. Idle agent windows free their slot on
+their own: each scan classifies every launched window as
+`review_verdict_published`, `execution_settled`, `binding_dead`, or
+`stuck_unknown` (visible per row and in `idle_windows` in
+`issue.monitor.status`), releases the first three without requeueing the Issue,
+and closes their panes. Only `stuck_unknown` — a window that is idle while its
+execution record is still active — stays for a human, and it asks for a
+decision once it has been idle for twice the stuck timeout.
+`issue.monitor.release_idle` runs the same release by hand for one Issue or
+every idle row, and `dry_run: true` reports the targets without touching
+anything. `issue.monitor.profiles` reads the launch
+candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidates the Monitor launches each Issue with the first eligible candidate
+(rate-limit holds, the usage threshold, and `prefer_for` routing decide
+eligibility; the exact rules are specified in SPEC
+[#3914](https://github.com/akiojin/gwt/issues/3914)), so one rate-limited
+provider no longer stops the queue. Saving Agent settings for a second provider
+in the GUI appends it to the same pool. All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
+
+Host free space is part of the same snapshot: `disk_space` in
+`issue.monitor.status` lists the volumes the worktrees and the verification
+coordinator live on and carries a `warning` once one of them falls below
+20 GiB or 5% free, so a filling host is visible before `verify.run` fails with
+`No space left on device`. The `worktree.gc_build_artifacts` operation
+reclaims the space: it removes the `target/` build cache of every worktree
+whose HEAD is merged into `origin/<base>` (`base` defaults to `develop`) and
+that has neither a running process nor a live gwt launch. An unqualified call
+is a dry run that lists the candidates with their sizes and every kept
+worktree with its reason (`active process …`, `tracked launch …`, `not
+merged …`); pass `dry_run: false` to delete, `include_unmerged: true` to
+also reclaim idle unmerged worktrees, and `include_protected_workspaces: true`
+to also reclaim the shared base-branch workspaces (`develop`, `main`), which
+are kept by default because their rebuild lands on whoever opens them next.
+Running worktrees, the main worktree, the calling worktree, and the worktree
+hosting the running `gwtd` are never touched, whatever the flags say.
 
 ### Autonomous mode (opt-in)
 
@@ -337,6 +388,19 @@ pass first, failures escalate to a visible `NeedsHuman` state, and the
 `Autonomous` toggle is a kill switch that actively cancels any auto-merge the
 monitor armed. The full gate design and threat model live in SPEC
 [#3200](https://github.com/akiojin/gwt/issues/3200).
+
+Once a work branch merges into `develop`, the monitor settles the delivered
+Issue itself (`Closes #N` only fires on the default branch). When every
+acceptance criterion is checked — or the PR body / an Issue comment records
+that the remaining criteria were delegated to another Issue
+(`残 AC は別 Issue に委譲`) — it posts a comment carrying the PR number and
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
+`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+is closed only after every task phase is complete. Auto-close follows the
+`Autonomous` toggle by default; `issue.monitor.config.set` with
+`auto_close_merged_issues=true|false` overrides it, and when it is off the
+monitor only records a `merge 済み・close 待ち` comment. An Issue a human
+reopened is never closed again by the same merge.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
@@ -426,6 +490,25 @@ and coordination-event summaries.
 - Outside a launch, gwt owns both Codex hook discovery locations — the
   worktree-local `.codex/hooks.json` and the workspace-home copy at the repo
   root — so hook health reporting and self-heal always target the same files.
+
+### Codex recommended config
+
+On every GUI startup gwt makes sure the host Codex config
+(`$CODEX_HOME/config.toml`, default `~/.codex/config.toml`) carries
+gwt's recommended `features.context_management.experimental_mode = true`, which
+keeps accumulated context as notes and searchable history instead of repeated
+single-summary compaction. gwt writes the key only when it is absent; every
+other table in the file is preserved and a config that already has the key is
+never rewritten. To opt out, set it explicitly in `config.toml`:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt respects any explicit value (`true` or `false`) and does not change it. A
+config that cannot be parsed or written never blocks startup; the path and
+cause are recorded in the error ledger (`errors.list`).
 
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
@@ -652,8 +735,10 @@ gwt shows an actionable hint.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
-  focused window is recentered
+- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
+  windows by activity: running/starting first, waiting/idle next, then the
+  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
+  activated when selected, and the focused Agent is recentered
 
 ## Operator Design Language (SPEC-2356)
 
@@ -768,6 +853,10 @@ JSON
 cargo build -p gwt --bin gwt --bin gwtd
 ```
 
+The `browser-check` skill (isolated GUI verification of this checkout) also
+needs `jq` on `PATH` to read `hook.doctor` evidence. It is not required to run
+gwt itself.
+
 ### Run
 
 ```bash
@@ -824,6 +913,33 @@ TTL. The default TTL is 45 minutes; a lease that lapses is released
 automatically, and a holder that is killed releases immediately. Lease
 transitions are recorded in
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
+
+### GitHub API budget
+
+Every `gh` call gwt makes shares one GitHub account budget across all
+machines, worktrees, and agents. The `pr.list` inventory is cache-first: a
+snapshot under `~/.gwt/projects/<hash>/pr-inventory-cache.json` answers
+repeated reads for 5 minutes without touching GitHub, the bulk query stays
+light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
+changed. Pass `params.refresh:true` when a decision needs the live state and
+`params.include` (`["checks","body"]`, default `["checks"]`) to choose the
+heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
+and `github_calls`; when the budget is below its reserve the last snapshot is
+served and `throttled` says why.
+
+Observe the budget with a free endpoint:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+The answer lists the primary windows GitHub reports (`graphql` / `core`),
+a local estimate of the per-minute secondary limit (GitHub does not expose
+it; the estimate comes from this machine's spawn ledger under
+`~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
+decision a periodic read would get right now.
 
 ### Releasing
 

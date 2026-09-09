@@ -1,5 +1,157 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
+export function compactText(value, fallback = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+// SPEC-2359 Phase W-12 (FR-349/FR-351): human-readable label for the
+// agent-session Work lifecycle state (active / paused / done / discarded)
+// rendered as a badge on each Work card.
+export function formatLifecycleStateLabel(state) {
+  switch (String(state || "active").toLowerCase()) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "done":
+      return "Done";
+    case "discarded":
+      return "Discarded";
+    default:
+      return "Active";
+  }
+}
+
+function attentionText(value) {
+  return compactText(value).toLowerCase();
+}
+
+function explicitAttentionReason(item) {
+  const blocked = compactText(item?.blocked_reason);
+  if (blocked) return blocked;
+  if (String(item?.status_category || "").toLowerCase() === "blocked") {
+    return compactText(item?.next_action || item?.status_text, "Resolve blocker");
+  }
+  if (Number(item?.blocked_agents) > 0) {
+    return compactText(item?.next_action || item?.status_text, "Resolve blocker");
+  }
+  const candidate = compactText(item?.next_action || item?.status_text || item?.summary);
+  if (!candidate) return "";
+  if (
+    /\b(question|request|requested|needs attention|verification pending|error|failed|failure|resolve blocker|blocked)\b/i
+      .test(candidate)
+  ) {
+    return candidate;
+  }
+  return "";
+}
+
+export function attentionForWorkspace(item) {
+  const lifecycle = attentionText(item?.lifecycle_state || "");
+  const status = attentionText(item?.status_category || "");
+  if (
+    item?.done_equivalent ||
+    lifecycle === "done" ||
+    lifecycle === "discarded" ||
+    status === "done" ||
+    status === "discarded" ||
+    status === "closed" ||
+    status === "completed"
+  ) {
+    return {
+      lane: "closed",
+      label: "Closed",
+      reason: item?.done_equivalent ? "Merged with no updates" : formatLifecycleStateLabel(lifecycle),
+    };
+  }
+  if (item?.remote_only) {
+    return { lane: "remote", label: "Remote", reason: "" };
+  }
+  const reason = explicitAttentionReason(item);
+  if (reason) {
+    return { lane: "needs_attention", label: "Needs Attention", reason };
+  }
+  if (
+    Number(item?.active_agents) > 0 ||
+    status === "active" ||
+    status === "running" ||
+    lifecycle === "active"
+  ) {
+    return { lane: "running", label: "Running", reason: compactText(item?.status_text) };
+  }
+  return {
+    lane: "paused",
+    label: "Paused",
+    reason: compactText(item?.next_action),
+  };
+}
+
+// Issue #3783: close acknowledgements and Workspace watcher updates carry
+// current membership only. Preserve the already-rendered unbounded history in
+// the browser while treating every live field and membership list in the
+// patch as authoritative. Project identity is an exact fence: history must
+// never leak across a tab switch.
+export function mergeActiveWorkProjectionPatch(previous, patch) {
+  if (!patch || !previous || previous.id !== patch.id) return patch || null;
+
+  const sessionsByAgent = new Map();
+  const rememberAgents = (agents) => {
+    for (const agent of Array.isArray(agents) ? agents : []) {
+      if (
+        agent?.session_id
+        && Array.isArray(agent.sessions)
+        && agent.sessions.length > 0
+        && !sessionsByAgent.has(agent.session_id)
+      ) {
+        sessionsByAgent.set(agent.session_id, agent.sessions);
+      }
+    }
+  };
+  const visitProjectionAgents = (projection) => {
+    rememberAgents(projection?.agents);
+    rememberAgents(projection?.unassigned_agents);
+    for (const work of Array.isArray(projection?.active_works)
+      ? projection.active_works
+      : []) {
+      rememberAgents(work?.agents);
+      for (const child of Array.isArray(work?.works) ? work.works : []) {
+        rememberAgents(child?.agents);
+      }
+    }
+  };
+  visitProjectionAgents(previous);
+
+  const restoreAgents = (agents) => (Array.isArray(agents) ? agents : []).map((agent) => {
+    if (!agent?.session_id || (Array.isArray(agent.sessions) && agent.sessions.length > 0)) {
+      return agent;
+    }
+    const sessions = sessionsByAgent.get(agent.session_id);
+    return sessions ? { ...agent, sessions } : agent;
+  });
+  const activeWorks = (Array.isArray(patch.active_works) ? patch.active_works : []).map(
+    (work) => ({
+      ...work,
+      agents: restoreAgents(work?.agents),
+      works: (Array.isArray(work?.works) ? work.works : []).map((child) => ({
+        ...child,
+        agents: restoreAgents(child?.agents),
+      })),
+    }),
+  );
+
+  return {
+    ...patch,
+    journal_entries: Array.isArray(previous.journal_entries)
+      ? previous.journal_entries
+      : [],
+    works: Array.isArray(previous.works) ? previous.works : [],
+    agents: restoreAgents(patch.agents),
+    unassigned_agents: restoreAgents(patch.unassigned_agents),
+    active_works: activeWorks,
+  };
+}
+
 export function createWorkspaceKanbanSurface({
   activeWorkspace,
   agentStatusLabel,
@@ -45,11 +197,6 @@ export function createWorkspaceKanbanSurface({
     paused: 3,
     closed: 4,
   });
-
-  function compactText(value, fallback = "") {
-    const text = String(value || "").replace(/\s+/g, " ").trim();
-    return text || fallback;
-  }
 
   function statusLabel(value) {
     const raw = String(value || "idle").toLowerCase();
@@ -104,88 +251,6 @@ export function createWorkspaceKanbanSurface({
               .join(" ")
           : "";
     }
-  }
-
-  // SPEC-2359 Phase W-12 (FR-349/FR-351): human-readable label for the
-  // agent-session Work lifecycle state (active / paused / done / discarded)
-  // rendered as a badge on each Work card.
-  function formatLifecycleStateLabel(state) {
-    switch (String(state || "active").toLowerCase()) {
-      case "active":
-        return "Active";
-      case "paused":
-        return "Paused";
-      case "done":
-        return "Done";
-      case "discarded":
-        return "Discarded";
-      default:
-        return "Active";
-    }
-  }
-
-  function attentionText(value) {
-    return compactText(value).toLowerCase();
-  }
-
-  function explicitAttentionReason(item) {
-    const blocked = compactText(item?.blocked_reason);
-    if (blocked) return blocked;
-    if (String(item?.status_category || "").toLowerCase() === "blocked") {
-      return compactText(item?.next_action || item?.status_text, "Resolve blocker");
-    }
-    if (Number(item?.blocked_agents) > 0) {
-      return compactText(item?.next_action || item?.status_text, "Resolve blocker");
-    }
-    const candidate = compactText(item?.next_action || item?.status_text || item?.summary);
-    if (!candidate) return "";
-    if (
-      /\b(question|request|requested|needs attention|verification pending|error|failed|failure|resolve blocker|blocked)\b/i
-        .test(candidate)
-    ) {
-      return candidate;
-    }
-    return "";
-  }
-
-  function attentionForWorkspace(item) {
-    const lifecycle = attentionText(item?.lifecycle_state || "");
-    const status = attentionText(item?.status_category || "");
-    if (
-      item?.done_equivalent ||
-      lifecycle === "done" ||
-      lifecycle === "discarded" ||
-      status === "done" ||
-      status === "discarded" ||
-      status === "closed" ||
-      status === "completed"
-    ) {
-      return {
-        lane: "closed",
-        label: "Closed",
-        reason: item?.done_equivalent ? "Merged with no updates" : formatLifecycleStateLabel(lifecycle),
-      };
-    }
-    if (item?.remote_only) {
-      return { lane: "remote", label: "Remote", reason: "" };
-    }
-    const reason = explicitAttentionReason(item);
-    if (reason) {
-      return { lane: "needs_attention", label: "Needs Attention", reason };
-    }
-    if (
-      Number(item?.active_agents) > 0 ||
-      status === "active" ||
-      status === "running" ||
-      lifecycle === "active"
-    ) {
-      return { lane: "running", label: "Running", reason: compactText(item?.status_text) };
-    }
-    return {
-      lane: "paused",
-      label: "Paused",
-      reason: compactText(item?.next_action),
-    };
   }
 
   function compactPath(value) {
@@ -1275,6 +1340,9 @@ export function createWorkspaceKanbanSurface({
       ["claude-code", "claude"],
       ["claude code", "claude"],
       ["codex", "codex"],
+      ["grok", "grok"],
+      ["grok build", "grok"],
+      ["grok-build", "grok"],
       ["agy", "agy"],
       ["antigravity", "agy"],
       ["antigravity cli", "agy"],

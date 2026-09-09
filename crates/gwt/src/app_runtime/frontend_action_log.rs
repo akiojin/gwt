@@ -90,11 +90,7 @@ impl FrontendUserActionLog {
 }
 
 fn sanitize_ui_action_field(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(160)
-        .collect()
+    gwt::perf::sanitize_ui_action_field(value)
 }
 
 fn sanitize_ui_action_url(value: &str) -> String {
@@ -212,6 +208,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .target(format!("{board_id}:{lane_id:?}")),
         FrontendEvent::UndockAgentWindow { id, .. } => {
             FrontendUserActionLog::new("undock_agent_window", "window").window(id)
+        }
+        FrontendEvent::DockAgentWindowToIssue { id } => {
+            FrontendUserActionLog::new("dock_agent_window_to_issue", "window").window(id)
         }
         FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
             FrontendUserActionLog::new("set_agent_kanban_card_collapsed", "window")
@@ -427,9 +426,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .target(issue_number.to_string())
         }
-        FrontendEvent::OpenIntakeSession => {
-            FrontendUserActionLog::new("open_intake_session", "launch")
-        }
         FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
             FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
                 .window(board_id)
@@ -520,6 +516,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
+        }
+        FrontendEvent::CancelUpdateAutoApply => {
+            FrontendUserActionLog::new("cancel_update_auto_apply", "update")
         }
         FrontendEvent::OpenUpdateLog { log_path } => {
             FrontendUserActionLog::new("open_update_log", "update")
@@ -647,20 +646,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
-        FrontendEvent::ImprovementPromoteIssue { id } => {
-            FrontendUserActionLog::new("improvement_promote_issue", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementResolve { id, .. } => {
-            FrontendUserActionLog::new("improvement_resolve", "improvement").target(id)
-        }
-        FrontendEvent::ImprovementSelectOwner {
-            id, owner_number, ..
-        } => FrontendUserActionLog::new("improvement_select_owner", "improvement")
-            .target(id)
-            .mode(format!("owner:{owner_number}")),
-        FrontendEvent::ImprovementDismiss { id, .. } => {
-            FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
-        }
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
         FrontendEvent::PaneSendInput { session_id, .. } => {
@@ -675,6 +660,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
@@ -721,6 +710,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             } else {
                 "off"
             })
+        }
+        FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
+            FrontendUserActionLog::new("set_pm_loop_interval", "pm")
+                .target(loop_interval_secs.to_string())
         }
         FrontendEvent::SetPmLaunchProfile {
             agent_id, model, ..
