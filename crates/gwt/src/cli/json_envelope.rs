@@ -5,10 +5,10 @@ use serde_json::{Map, Value};
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
-    memory::MemoryAddCommand, workflow::WorkflowBypassMode, ActionsCommand, CliCommand, CliEnv,
-    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
-    IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand, SkillStateAction,
-    WorkflowCommand, WorkspaceCommand,
+    memory::MemoryAddCommand, perf::PerfCommand, workflow::WorkflowBypassMode, ActionsCommand,
+    CliCommand, CliEnv, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand,
+    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
+    SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
 use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
@@ -58,7 +58,15 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     };
     let operation = parsed.operation.clone();
     let declared_block = parsed.declared_block;
-    match super::run_collect(env, parsed.command) {
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: every JSON-envelope operation
+    // funnels through here, so one timer covers the whole `op` stream. The
+    // collector is fail-open and is only installed by the `gwtd` binary, so
+    // this is a no-op in tests and in the argv path.
+    let read_only = super::hook::workflow_policy::is_read_only_json_envelope_operation(&operation);
+    let operation_started = std::time::Instant::now();
+    let outcome = super::run_collect(env, parsed.command);
+    crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
+    match outcome {
         Ok((code, output)) => {
             let mut payload = serde_json::json!({
                 "ok": code == 0,
@@ -224,6 +232,30 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 branches: optional_string_vec(params, "branches")?,
             })
         }
+        "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "dry_run",
+                    "base",
+                    "include_unmerged",
+                    "include_protected_workspaces",
+                ],
+                "worktree.gc_build_artifacts",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                // Removing a build cache is recoverable but slow to undo, so
+                // an unqualified call only reports (Issue #4009 AC-1).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                include_unmerged: optional_bool(params, "include_unmerged")?.unwrap_or(false),
+                include_protected_workspaces: optional_bool(
+                    params,
+                    "include_protected_workspaces",
+                )?
+                .unwrap_or(false),
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
@@ -252,6 +284,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.spec.list" => CliCommand::Issue(IssueCommand::SpecList {
             phase: optional_string(params, "phase")?,
+            state: optional_string(params, "state")?,
+        }),
+        "issue.spec.audit" => CliCommand::Issue(IssueCommand::SpecAudit {
             state: optional_string(params, "state")?,
         }),
         "issue.spec.pull" => CliCommand::Issue(IssueCommand::SpecPull {
@@ -824,6 +859,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
+        "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
@@ -1167,6 +1204,34 @@ fn errors_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
     }
     Ok(CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList {
         since,
+    }))
+}
+
+/// SPEC #3700 FR-007: `perf.summary` and `perf.violations` share one filter
+/// shape, so they share one parser keyed by the operation name.
+fn perf_read(params: &Map<String, Value>, operation: &str) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["since", "stream", "target"], operation)?;
+    let since = optional_string(params, "since")?;
+    if let Some(raw) = since.as_deref() {
+        super::perf::parse_since(raw)?;
+    }
+    let stream = optional_string(params, "stream")?
+        .map(|raw| super::perf::parse_stream(&raw))
+        .transpose()?;
+    let target = optional_string(params, "target")?;
+
+    Ok(CliCommand::Perf(if operation == "perf.violations" {
+        PerfCommand::Violations {
+            since,
+            stream,
+            target,
+        }
+    } else {
+        PerfCommand::Summary {
+            since,
+            stream,
+            target,
+        }
     }))
 }
 
@@ -1617,7 +1682,7 @@ fn verification_quarantine_requests(
 mod tests {
     use super::{
         parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
+        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand,
         SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
@@ -1923,6 +1988,58 @@ mod tests {
     fn branch_prune_merged_rejects_an_unknown_param() {
         let error = err("branch.prune_merged", json!({ "dryrun": false }));
         assert!(format!("{error}").contains("dryrun"), "{error}");
+    }
+
+    /// Issue #4009 AC-1 / AC-3: an unqualified `worktree.gc_build_artifacts`
+    /// is a dry run that keeps unmerged worktrees.
+    #[test]
+    fn worktree_gc_build_artifacts_defaults_to_a_dry_run_that_keeps_unmerged() {
+        match ok("worktree.gc_build_artifacts", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+                include_protected_workspaces,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(!include_unmerged);
+                assert!(!include_protected_workspaces);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_accepts_apply_base_and_both_opt_ins() {
+        match ok(
+            "worktree.gc-build-artifacts",
+            json!({
+                "dry_run": false,
+                "base": "main",
+                "include_unmerged": true,
+                "include_protected_workspaces": true,
+            }),
+        ) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+                include_protected_workspaces,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("main"));
+                assert!(include_unmerged);
+                assert!(include_protected_workspaces);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_rejects_an_unknown_param() {
+        let error = err("worktree.gc_build_artifacts", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
     }
 
     #[test]
@@ -4060,6 +4177,53 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` share one filter.
+    #[test]
+    fn perf_operations_parse_their_shared_filter() {
+        assert!(matches!(
+            ok("perf.summary", json!({})),
+            CliCommand::Perf(PerfCommand::Summary {
+                since: None,
+                stream: None,
+                target: None
+            })
+        ));
+        match ok(
+            "perf.violations",
+            json!({"since": "2026-09-08T00:00:00Z", "stream": "op", "target": "issue."}),
+        ) {
+            CliCommand::Perf(PerfCommand::Violations {
+                since,
+                stream,
+                target,
+            }) => {
+                assert_eq!(since.as_deref(), Some("2026-09-08T00:00:00Z"));
+                assert_eq!(stream.as_deref(), Some("op"));
+                assert_eq!(target.as_deref(), Some("issue."));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perf_operations_reject_malformed_filters() {
+        match err("perf.summary", json!({"since": "yesterday"})) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "since");
+                assert!(reason.contains("RFC3339"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("perf.summary", json!({"stream": "frontend"})) {
+            CliParseError::InvalidValue { flag, .. } => assert_eq!(flag, "stream"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(matches!(
+            err("perf.violations", json!({"limit": 5})),
+            CliParseError::InvalidJson(_)
+        ));
     }
 
     #[test]

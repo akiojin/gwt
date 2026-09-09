@@ -389,7 +389,12 @@ host CPU with every other agent worktree. Serialize every one of them
 through JSON operation `verify.lease.acquire` (SPEC #3576); a raw `cargo`
 started without the lease is exactly the parallel run that saturates the
 host (Issue #3913). A contended acquire answers immediately with the
-current holder instead of queueing, so the wait loop is yours:
+current holder instead of queueing, so the wait loop is yours. A refusal
+also reserves your turn (Issue #4086): background index jobs defer to
+this worktree until a retry is granted or the reservation lapses, and the
+refusal names `holder_kind` (`verification` / `index` / `other`) plus
+`estimated_remaining_ms` (`remaining_batches` for an index holder), so you
+know whether to wait one batch or a whole verification run:
 
 1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
    success run the matrix, then `verify.lease.release` with the lease id.
