@@ -3283,12 +3283,20 @@ struct VerificationCallerAuthority {
 /// and saying only that leaves it with nothing to try — the window in Issue
 /// #4140 concluded it was completely stuck. The host verification queue is
 /// reachable without any execution authority, so the refusal names it.
+///
+/// It also has to say what the queue buys, which Issue #4196 found it did not:
+/// naming `verify.lease.acquire` right after refusing read as the way out, and
+/// a window that took the lease was still refused by `verify.plan` and
+/// `verify.run` for the same reason. The queue reserves this worktree's turn
+/// on the host; only restoring authority makes `verify.*` run.
 fn verification_entry_refusal(err: &io::Error) -> String {
     if err.kind() == ErrorKind::PermissionDenied {
         format!(
-            "{err}. This window cannot register a verification plan or record, but it can still \
-             take its turn in the host verification queue: `verify.lease.status` and \
-             `verify.lease.acquire` need no execution authority."
+            "{err}. `verify.plan` and `verify.run` need that authority, and taking the host \
+             verification lease will not unblock them. `verify.lease.status` and \
+             `verify.lease.acquire` need no execution authority, but they only reserve this \
+             worktree's turn on the host. To run verification here, restore authority first: \
+             `execution.continue` in the owning Session, or relaunch this owner from gwt."
         )
     } else {
         format!("failed to resolve verification authority: {err}")
@@ -3828,15 +3836,37 @@ pub(super) fn run<E: CliEnv>(
             commands,
             max_wait_secs,
         } => {
-            // Issue #3913: claim host admission (the SPEC #3576 lease plus a
-            // quiet host) before anything heavy starts. A budget overrun
-            // answers `deferred` without writing a record.
+            // Issue #3913: heavy verification claims host admission (the SPEC
+            // #3576 lease plus a quiet host) before anything starts, and a
+            // budget overrun answers `deferred` without writing a record.
+            // Issue #4196: whether this run is heavy is decided by reading the
+            // commands first. Admitting unconditionally made a matrix narrowed
+            // to one named test target wait out a workspace-wide run's lease,
+            // which capped the fleet at one verifying window at a time.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
             let admission =
-                crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
-            out.push_str(&admission.summary());
-            out.push('\n');
+                match crate::cli::verification_lease::admission::first_heavy_command(&commands) {
+                    Some(heavy) => {
+                        out.push_str(&format!(
+                            "verify: scope — heavy; `{heavy}` needs the host to itself\n"
+                        ));
+                        let granted = crate::cli::verification_lease::admission::admit(
+                            env, &worktree, max_wait,
+                        )?;
+                        out.push_str(&granted.summary());
+                        out.push('\n');
+                        Some(granted)
+                    }
+                    None => {
+                        out.push_str(&format!(
+                        "verify: scope — light; {count} command(s) narrowly scoped, so this run \
+                         shares the host instead of claiming the lease\n",
+                        count = commands.len()
+                    ));
+                        None
+                    }
+                };
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to load verification plan for quarantine preparation: {error}"
@@ -3985,6 +4015,19 @@ pub(crate) mod tests {
         assert!(
             refused.contains("verify.lease.acquire") && refused.contains("verify.lease.status"),
             "the refusal must name the queue entry points that need no authority: {refused}"
+        );
+        // Issue #4196 AC-5: naming the authority-free queue read as "do this
+        // and you are unblocked", and the window that followed it queued for a
+        // lease that could not make `verify.plan` or `verify.run` succeed. The
+        // refusal must say what the queue does and does not buy, and name the
+        // operation that actually restores authority.
+        assert!(
+            refused.contains("execution.continue"),
+            "the refusal must name the operation that restores authority: {refused}"
+        );
+        assert!(
+            refused.contains("will not"),
+            "the refusal must say the lease does not unblock verify.*: {refused}"
         );
 
         let other = verification_entry_refusal(&io::Error::other("disk on fire"));
@@ -5698,6 +5741,64 @@ mod tests {
         )
         .expect_err("missing GWT_SESSION_ID must fail");
         assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
+    }
+
+    /// Issue #4196 AC-2 / AC-4: `verify.run` decides on host admission by
+    /// reading the commands it was given. A matrix narrowed to one named test
+    /// target starts while another target holds the host lease — before this,
+    /// admission ran unconditionally and the same matrix answered `deferred`
+    /// after waiting out its whole budget.
+    #[test]
+    fn verify_run_skips_host_admission_for_a_light_matrix() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+        let coordinator = IndexCoordinator::open_default().unwrap();
+        let other = TargetKey::repo_shared("other-repo", "issues");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(
+                &other,
+                JobPriority::ManualRebuild,
+                std::time::Duration::from_millis(250),
+            )
+            .unwrap()
+        else {
+            panic!("a private lease root must admit the owner");
+        };
+        let _lease = guard
+            .acquire_heavy_with_ttl(
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+
+        // Narrowed to one named integration test of one package, and pointed
+        // at a directory with no manifest so cargo answers immediately: the
+        // command's outcome is irrelevant here, its classification is not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (_code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                max_wait_secs: Some(0),
+            }),
+        )
+        .unwrap_or_else(|err| panic!("a light matrix must not queue behind the host lease: {err}"));
+        assert!(
+            out.contains("scope — light"),
+            "the run must report the classification it acted on: {out}"
+        );
+        assert!(
+            !out.contains("host admission"),
+            "a light matrix must not claim the host lease: {out}"
+        );
     }
 
     #[test]
