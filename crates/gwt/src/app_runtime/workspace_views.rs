@@ -382,6 +382,9 @@ fn attach_managed_hook_health_to_active_works(
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
 ) {
+    // Count the input Work rows, including rows without a materialized worktree.
+    let work_count = active_works.len();
+    let started = std::time::Instant::now();
     for work in active_works {
         let Some(worktree) = work.worktree_path.as_deref().map(Path::new) else {
             continue;
@@ -394,6 +397,45 @@ fn attach_managed_hook_health_to_active_works(
         work.managed_hook_health =
             managed_hook_health_view_for_worktree(worktree, sessions_dir, &matching_sessions);
     }
+    log_work_hook_health_timing(started.elapsed().as_millis() as u64, work_count);
+}
+
+fn log_work_hook_health_timing(elapsed_ms: u64, work_count: usize) {
+    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            stage = "work_rows_hook_health_excluding_project",
+            elapsed_ms,
+            work_count,
+            "Work row hook health aggregation exceeded budget (project health excluded)"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            stage = "work_rows_hook_health_excluding_project",
+            elapsed_ms,
+            work_count,
+            "Work row hook health aggregated (project health excluded)"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn work_hook_health_timing_warns_at_budget_with_work_count() {
+    let output = crate::tests::capture_timing_warnings(|| {
+        log_work_hook_health_timing(30, 9);
+        log_work_hook_health_timing(29, 9);
+    });
+    let logs: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("hook health timing JSON"))
+        .collect();
+    assert_eq!(logs.len(), 1, "29ms must not warn; 30ms must warn");
+    let fields = &logs[0]["fields"];
+    assert_eq!(fields["stage"], "work_rows_hook_health_excluding_project");
+    assert_eq!(fields["elapsed_ms"], 30);
+    assert_eq!(fields["work_count"], 9);
 }
 
 fn managed_hook_health_status_wire(

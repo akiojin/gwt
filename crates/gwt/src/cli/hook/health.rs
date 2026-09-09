@@ -440,6 +440,7 @@ fn expected_hook_bin_for_config_path<'a>(
     path: &Path,
     configured: Option<&'a str>,
 ) -> Option<&'a str> {
+    configured?;
     if gwt_skills::managed_hook_config_is_git_tracked(path) {
         return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
     }

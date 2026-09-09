@@ -1,5 +1,8 @@
 # Issue #4172: Windows 入力停止の診断（2026-09-09）
 
+「結論と未確定範囲」から「検証と保全範囲」までは先行診断コミット `ebd29f32d` 時点の記録。
+その後の実装・headed測定・PM裁定は末尾の「追加計装と最小修正」に記載する。
+
 ## 結論と未確定範囲
 
 稼働中の Windows GUI で、WebSocket 接続を受理した後の `pane.list` 無応答を再現した。
@@ -118,3 +121,110 @@ PM指示に従い `execution.reopen` は実行していない。Issueは未完�
 
 採取APIの契約は [Microsoftのnoninvasive debugging説明](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/noninvasive-debugging--user-mode-)
 を参照。今回使ったパッケージは `Microsoft.Debugging.Platform.DbgEng 20260319.1511.0`。
+
+## 追加計装と最小修正（22:49 JST の検証）
+
+上記は先行診断コミット `ebd29f32d` 時点の記録。後続変更では、次の計装と修正を追加した。
+
+- WebSocket受信時刻をfrontendイベントへ保持し、queue wait、handler、受信からhandler完了までを分離する。
+  既存の `elapsed_ms` はhandler時間の意味を保ち、合計30ms以上でWARNを出す。`window_count` は全window数。
+  `queue_wait_ms` は受信からhandler開始までで、キュー滞留だけでなく認証・parse・配送前処理も含む。
+- terminal fast pathは受信からPTY書き込み成功までを計測し、30ms以上でWARNを出す。
+  `pty_writer_count` は同じwriter mapの要素数。入力本文は新規ログに渡さない。
+- Work行のhook health集計を計測する。`work_count` はworktree未設定行も含む入力行総数で、
+  project単独のhealth処理は含まない。既存のdispatchログと時刻を照合できる。
+- hook binaryの比較対象がない場合、configのtracked判定を省く。
+  戻り値はtracked/untrackedのどちらでもNoneなので、Git照会自体が不要だった。
+  比較対象がある場合のcanonical fallback判定は維持する。
+
+この修正は不要な同期Git照会を取り除くもの。27秒停止すべての解消を主張するものではない。
+同期Work投影、cherry、error ledger走査などの残る占有時間は追加計測が必要である。
+
+### 隔離したWindows Chromiumでの結果
+
+checkoutの両binaryを再ビルドし、fresh HOMEとruntime junction、現在checkoutのsession seedを使って起動した。
+HTTP 200、起動前後のhook convergenceでissuesゼロを確認した。
+実Chromiumのheadedモードでdark/lightを切り替え、各条件3回、計18回のshell echoを測定した。
+raw数値と選択した計測ログは [input evidence](issue-4172-input-evidence.json)、
+採取手順は [measurement script](../../scripts/diagnostics/measure-input-4172.cjs) に保全した。
+
+| shell数 | echo最小 / 中央値 / 最大 (ms) | dark / light 切替と確認 (ms) |
+| --- | --- | --- |
+| 1 | 121.1 / 122.5 / 150.5 | 75.4 / 83.5 |
+| 8 | 109.5 / 121.1 / 128.1 | 114.3 / 102.4 |
+| 24 | 118.9 / 119.5 / 139.2 | 181.4 / 147.7 |
+
+この条件ではshell枚数によるecho遅延の増大は見られない。受信からPTY書き込みまでは118標本で0〜3ms。
+内訳はshell宛115標本（0〜3ms）と、起動時agent宛の付随入力3標本（すべて0ms）である。
+一方、GUIのUpdateWindowGeometryはqueue wait 211ms、handler 0msのWARNを残し、
+入力受付が速い場合にもGUI待ちを分離できることを確認した。
+dark/lightの画面を確認し、console error・page error・作成shellのcleanup errorはすべてゼロだった。
+
+echoの測定対象はshellであり、実運用のPM/agent・復元されたWorkやerror ledgerの負荷は再現していない。
+echo値にはshell実行と出力配送、animation frameの観測待ちを含む。テーマ値にはPlaywrightのclick待ちを含む。
+同一条件の修正前測定はなく、性能改善率は算出していない。
+
+### WindowsとmacOSの共通経路、過去修正との差
+
+PMはBoard `fe2c1ad6-e29b-4f90-8dd2-e62260235503` と `c301b652-2f8d-4536-abfc-8deafce27450` で、
+AC-1/2を診断結果から受け入れ、AC-5を「macOS実機採取ではなく共通コード経路の論証」と裁定した。
+実機で同程度の停止が起きることまで検証した、とは扱わない。
+
+現在のソースで `main.rs:9216` のBoardProjectionChangedは、`board.rs:677` からtitle syncへ同期的に進み、
+`title_sync.rs:55` がcache-onlyではないWork投影を選ぶ。
+`workspace_views.rs` のhook healthから `health.rs:439` のtracked判定へ進み、
+`gwt-skills/src/settings_local.rs:596` がGitの `.output()` を同期実行する。
+WorkTipSubjectsも、tip取得は別threadだが、結果反映時の投影再構築は同じイベントループ上である。
+この経路にWindows限定の条件はない。`gwt-core/src/process.rs:356` のCommand生成と`:419`付近のOS分岐は、
+Windowsのhandle/creation flagsを整えるもので、macOS側のGit実行を非同期化しない。
+したがって、修正前に不要なGit照会でイベントループを待たせる構造は両OSに共通する。
+待機handleの対象が未解決という、Windows stack採取の制約は引き続き残る。
+
+Issue #2725の `545be4185` はcleanup候補算出のbranch列挙を削除し、repo hash計算のremote URL取得をconfig読取へ変えた。
+今回のtracked config照会は、その後の `d97046bcf`（#3567関連）でhealth auditorへ追加された経路である。
+以前の削除箇所がそのまま復活したわけではない。
+今回の `configured?` による修正は、比較対象なしの場合の照会を単一レイヤで除去する。
+Work投影全体を非同期化する契約変更は、この修正には含めない。
+
+### 検証結果と未完了ゲート
+
+| コマンド / 検証 | 結果 |
+| --- | --- |
+| `cargo test -p gwt --all-features --bin gwt handle_frontend_message` | 既存2件PASS、受信時刻の引継ぎを確認 |
+| `cargo test -p gwt --all-features --bin gwt timing_warns` | 3件PASS（frontend、fast path、Work集計の30ms境界） |
+| `cargo test -p gwt --all-features --bin gwt managed_hook_health` | 既存3件PASS（投影へのhealth付与、ambient状態除外、最新session選択） |
+| `cargo test -p gwt --all-features --test hook_health_test` | 28PASS / 3FAIL。新規Git非実行回帰はPASS |
+| `cargo build -p gwt --bin gwt --bin gwtd` | PASS |
+| `cargo clippy --all-targets --all-features -- -D warnings` | workspace全体PASS |
+| `cargo fmt --all -- --check` | PASS |
+| `node --check scripts/diagnostics/measure-input-4172.cjs` | PASS |
+| `npx --yes markdownlint-cli2 docs/diagnostics/issue-4172.md` | PASS |
+| headed Chromium、dark/light、shell echo18回 | PASS。検査用GUI PID8916は検査後に停止 |
+| `RUST_TEST_THREADS=1 cargo test -p gwt --all-features --bin gwt` | 停止を検知して中断、PASSではない |
+
+hook healthの3失敗は、修正前の22:31 JSTの既存suite実行でも同じ名前で失敗している。
+
+- `committed_install_path_in_tracked_codex_hooks_is_normalized_on_repair`
+- `contaminated_tracked_codex_hooks_converge_back_to_canonical`
+- `repairing_another_worktree_never_writes_a_worktree_local_build_path`
+
+修正前は26PASS/4FAILで、上記3件に加え、自動生成されたWindows用 `.codex/hooks.json` に対する
+portable assertionも失敗していた。tracked版へ戻して再ビルドした修正後は、この追加1件が解消した。
+したがって上記3件は今回のGit guard導入による新規失敗ではない。比較対象のない新規回帰は、
+修正前にGit Trace2の `ls-files` を検出してRED、修正後は同じfixtureでGREENだった。
+
+main suiteは1498件の実行を開始したが、`explicit_pm_open_bypasses_the_crash_backoff_floor` の途中で停止した。
+PID13368の出力は23:03:01〜23:03:45 JSTで95126bytesのまま、CPUは58.640625→58.6875秒。
+その直接子には `cmd /d /s /c "exit /b 0"` が9個残っていた。
+実行前から `RUST_TEST_THREADS=1` を設定しており、並列度制限だけで解消したとは扱わない。
+現在checkoutの当該test process treeだけを停止し、leaseを解放してPMへ報告した。
+このsuiteと全体coverageは検証完了ではなく、canonical verification / User Verification / PR gateも未完了である。
+
+Launch mode: interactive。Agent Visual Check: pass（上記の限定条件）。User Verification Result: pending。
+Overall: FAIL（既存fixture失敗、main suite中断、受け入れ残件）。Ready PRを作成しない。
+
+PM Board `3231fce0-0970-427c-afd6-928c49228684` により、AC-4の次の調査対象は
+実運用Work / Board / error ledgerの蓄積量へ変更された。
+shell枚数については「今回のfresh HOME条件では相関を認めない」と記録し、あらゆる実運用条件で無関係と断定しない。
+実運用状態のコピーを冷起動すると既存worktreeのhook self-heal等が走るため、HOME隔離だけで無変更は保証できない。
+追加比較は、セッション復元を避ける安全な採取方法の確定から引き継ぐ。
