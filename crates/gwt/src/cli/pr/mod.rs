@@ -524,6 +524,7 @@ pub(super) fn run<E: CliEnv>(
                 || env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels),
             )
             .map_err(super::io_as_api_error)?;
+            sync_edited_workspace_pr_metadata(env, &pr);
             out.push_str("updated pull request\n");
             render_pr(out, &pr);
             0
@@ -545,6 +546,7 @@ pub(super) fn run<E: CliEnv>(
                 || env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels),
             )
             .map_err(super::io_as_api_error)?;
+            sync_edited_workspace_pr_metadata(env, &pr);
             out.push_str("updated pull request\n");
             render_pr(out, &pr);
             0
@@ -662,8 +664,20 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
+fn sync_edited_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus) {
+    let matches_current =
+        gwt_core::workspace_projection::load_workspace_projection(env.repo_path())
+            .ok()
+            .flatten()
+            .and_then(|projection| projection.git_details)
+            .is_some_and(|details| details.pr_number == Some(pr.number));
+    if matches_current {
+        sync_workspace_pr_metadata(env, pr, None);
+    }
+}
+
 fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
-    let work_item_id = gwt_core::workspace_projection::mutate_existing_workspace_projection(
+    let pr_event = gwt_core::workspace_projection::mutate_existing_workspace_projection(
         env.repo_path(),
         |projection| {
             let stored_branch = projection
@@ -681,20 +695,62 @@ fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head:
             details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
             details.pr_created_at = pr.created_at;
             projection.updated_at = chrono::Utc::now();
-            Ok(Some(projection.id.clone()))
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Pr,
+                projection.id.clone(),
+                projection.updated_at,
+            );
+            event.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: details.branch.clone(),
+                    worktree_path: details.worktree_path.clone(),
+                    pr_number: details.pr_number,
+                    pr_url: details.pr_url.clone(),
+                    pr_state: details.pr_state.clone(),
+                },
+            );
+            Ok(Some(event))
         },
     )
     .ok()
     .flatten()
     .flatten();
 
+    let Some(mut pr_event) = pr_event else {
+        return;
+    };
+    let work_item_id = pr_event.work_item_id.clone();
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(env.repo_path())
+        .ok()
+        .flatten();
+    let item = work_items.as_ref().and_then(|projection| {
+        projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+    });
+    let already_recorded = item.is_some_and(|item| {
+        pr_event
+            .execution_container
+            .as_ref()
+            .is_some_and(|incoming| {
+                item.execution_containers
+                    .iter()
+                    .any(|existing| existing == incoming)
+            })
+    });
+    if let Some(item) = item {
+        pr_event.status_category = Some(item.status_category);
+    }
+    if !already_recorded {
+        let _ =
+            gwt_core::workspace_projection::record_workspace_work_event(env.repo_path(), pr_event);
+    }
+
     // SPEC-2359 US-37 / FR-117: auto-emit Done for the linked Workspace WorkItem
     // when the PR transitions to merged. The helper is idempotent per work_item_id,
     // so repeated polling does not duplicate Done events.
     if pr.state.to_string().eq_ignore_ascii_case("merged") {
-        let Some(work_item_id) = work_item_id else {
-            return;
-        };
         let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
             env.repo_path(),
             &work_item_id,
@@ -2593,6 +2649,154 @@ mod tests {
             details.pr_created_at.expect("pr_created_at").to_rfc3339(),
             "2026-05-07T08:20:00+00:00"
         );
+    }
+
+    fn assert_pr_command_writes_work_event_pr_metadata(command: PrCommand) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
+        env.repo_path = repo.clone();
+        let pr = gwt_git::PrStatus {
+            number: 3672,
+            title: "Work event PR metadata".to_string(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://github.com/akiojin/gwt/pull/3672".to_string(),
+            created_at: Some("2026-08-19T08:20:00Z".parse().expect("created_at")),
+            ci_status: "PENDING".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: "UNKNOWN".to_string(),
+            review_status: "REVIEW_REQUIRED".to_string(),
+        };
+        env.seed_current_pr(Some(pr.clone()));
+        env.seed_created_pr(pr.clone());
+        env.seed_pr(pr.number, pr);
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.id = "work-work-issue-3640".to_string();
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/issue-3640".to_string()),
+            worktree_path: Some(repo.join("work/issue-3640")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: matches!(command, PrCommand::EditBody { .. }).then_some(3672),
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            "work-work-issue-3640",
+            "2026-08-19T01:00:00Z".parse().expect("start time"),
+        );
+        start.title = Some("Issue 3640".to_string());
+        start.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked);
+        start.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3640".to_string()),
+                worktree_path: Some(repo.join("work/issue-3640")),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+            .expect("seed start event");
+
+        let mut out = String::new();
+        let code = run(&mut env, command, &mut out).expect("run pr command");
+        assert_eq!(code, 0, "{out}");
+
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-work-issue-3640")
+            .expect("work item");
+        let container = item
+            .execution_containers
+            .iter()
+            .find(|container| container.branch.as_deref() == Some("work/issue-3640"))
+            .expect("execution container");
+        assert_eq!(
+            item.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked,
+            "metadata synchronization must not resume a blocked Work"
+        );
+        assert_eq!(container.pr_number, Some(3672));
+        assert_eq!(
+            container.pr_url.as_deref(),
+            Some("https://github.com/akiojin/gwt/pull/3672")
+        );
+        assert_eq!(container.pr_state.as_deref(), Some("OPEN"));
+        assert!(
+            item.events.iter().any(|event| {
+                event.kind == gwt_core::workspace_projection::WorkEventKind::Pr
+                    && event
+                        .execution_container
+                        .as_ref()
+                        .is_some_and(|container| container.pr_number == Some(3672))
+            }),
+            "PR sync must append a Work event that carries PR metadata: {:?}",
+            item.events
+                .iter()
+                .map(|event| (event.kind, event.execution_container.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        let event_count = item.events.len();
+        run(&mut env, PrCommand::Current, &mut out).expect("repeat PR sync");
+        let repeated = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("reload Work")
+            .expect("Work projection");
+        let item = repeated
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-work-issue-3640")
+            .expect("same Work");
+        assert_eq!(
+            item.events.len(),
+            event_count,
+            "unchanged PR sync is idempotent"
+        );
+    }
+
+    #[test]
+    fn pr_family_current_writes_work_event_pr_metadata() {
+        assert_pr_command_writes_work_event_pr_metadata(PrCommand::Current);
+    }
+
+    #[test]
+    fn pr_family_create_writes_work_event_pr_metadata() {
+        assert_pr_command_writes_work_event_pr_metadata(PrCommand::CreateBody {
+            base: "develop".to_string(),
+            head: None,
+            title: "Work event PR metadata".to_string(),
+            body: "Regression coverage".to_string(),
+            labels: vec![],
+            draft: true,
+        });
+    }
+
+    #[test]
+    fn pr_family_edit_writes_work_event_pr_metadata() {
+        assert_pr_command_writes_work_event_pr_metadata(PrCommand::EditBody {
+            number: 3672,
+            title: Some("Updated PR".to_string()),
+            body: None,
+            add_labels: vec![],
+        });
     }
 
     #[test]
