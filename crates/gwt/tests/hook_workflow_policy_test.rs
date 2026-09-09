@@ -6,26 +6,22 @@ use std::{
 };
 
 use chrono::Utc;
-use gwt::cli::hook::{
-    event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput,
+use gwt::cli::{
+    governance::GovernanceEffect,
+    hook::{
+        effect_classifier::{self, ObservationConfidence, RepositoryTarget},
+        event_dispatcher, workflow_policy, HookEvent, HookOutput,
+    },
 };
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session, GWT_SESSION_RUNTIME_PATH_ENV};
+use gwt_core::process::hidden_command;
 use gwt_core::{
-    coordination::{
-        post_entry, AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
-    },
     paths::gwt_sessions_dir,
-    repo_hash::compute_repo_hash,
     test_support::{ScopedEnvVar, ScopedGwtHome},
     workspace_projection::{
-        record_workspace_work_event, save_workspace_projection, WorkEvent, WorkEventKind,
-        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
-        WorkspaceStatusCategory,
+        save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+        WorkspaceProjection, WorkspaceStatusCategory,
     },
-};
-use gwt_github::{
-    client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
-    Cache,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -40,10 +36,7 @@ fn root() -> PathBuf {
 }
 
 fn outside_root() -> PathBuf {
-    root()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("gwt-test-outside")
+    std::env::temp_dir().join("gwt-test-outside")
 }
 
 fn event(tool_name: &str, tool_input: serde_json::Value) -> HookEvent {
@@ -72,6 +65,272 @@ fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Opt
     }
 }
 
+#[test]
+fn semantic_classifier_distinguishes_json_operation_effects() {
+    let cases = [
+        ("issue.view", json!({}), GovernanceEffect::Observe),
+        (
+            "pr.create",
+            json!({ "draft": true }),
+            GovernanceEffect::Reversible,
+        ),
+        ("pr.create", json!({}), GovernanceEffect::Protected),
+        (
+            "pr.create",
+            json!({ "draft": false }),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "pr.create",
+            json!({ "draft": "true" }),
+            GovernanceEffect::Protected,
+        ),
+        ("pr.edit", json!({}), GovernanceEffect::Reversible),
+        ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        ("workspace.update", json!({}), GovernanceEffect::Reversible),
+        ("execution.continue", json!({}), GovernanceEffect::Protected),
+        ("execution.adopt", json!({}), GovernanceEffect::Protected),
+        ("execution.repair", json!({}), GovernanceEffect::Protected),
+        ("execution.reopen", json!({}), GovernanceEffect::Protected),
+        ("workspace.ensure", json!({}), GovernanceEffect::Protected),
+        ("pr.ready", json!({}), GovernanceEffect::Protected),
+        ("build.complete", json!({}), GovernanceEffect::Protected),
+        ("release.publish", json!({}), GovernanceEffect::Protected),
+        ("pr.comment", json!({}), GovernanceEffect::Protected),
+        (
+            "pr.unknown_remote_mutation",
+            json!({}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "pr.review_threads.reply_and_resolve",
+            json!({}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "future.local.operation",
+            json!({}),
+            GovernanceEffect::Protected,
+        ),
+    ];
+
+    for (operation, params, expected_effect) in cases {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, params) }),
+        );
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .unwrap_or_else(|| panic!("expected classification for {operation}"));
+
+        assert_eq!(observation.target, RepositoryTarget::ManagedCurrent);
+        assert_eq!(observation.operation, operation);
+        assert_eq!(observation.effect, expected_effect, "{operation}");
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+            None,
+            "classifier observation must preserve the exact existing HookOutput for {operation}"
+        );
+    }
+}
+
+#[test]
+fn protected_observation_does_not_change_workflow_hook_output() {
+    // P6-A observes these protected effects but deliberately leaves exact
+    // authorization to their operation/transport sinks.
+    for operation in ["execution.continue", "pr.ready", "build.complete"] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({})) }),
+        );
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .expect("protected operation must be observed");
+
+        assert_eq!(
+            observation.effect,
+            GovernanceEffect::Protected,
+            "{operation}"
+        );
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+            None,
+            "classifier observation must not add a protected deny for {operation}"
+        );
+    }
+
+    let scratch = root()
+        .parent()
+        .unwrap_or_else(|| Path::new("/tmp"))
+        .join("semantic-classifier-scratch");
+    let event = event(
+        "Bash",
+        json!({ "command": format!("git -C {} status --short", scratch.display()) }),
+    );
+    let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+        .expect("scratch read must be observed");
+
+    assert_eq!(observation.target, RepositoryTarget::ExternalPath);
+    assert_eq!(observation.effect, GovernanceEffect::Observe);
+    assert_eq!(
+        evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+        None,
+        "scratch read-only work must keep the existing allow decision"
+    );
+}
+
+#[test]
+fn file_tool_authority_surfaces_are_protected_observations_only() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cases = vec![
+        (
+            event(
+                "Edit",
+                json!({ "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" }),
+            ),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            event(
+                "Write",
+                json!({ "file_path": ".git/config", "content": "[core]" }),
+            ),
+            GovernanceEffect::Protected,
+        ),
+        (
+            event(
+                "Edit",
+                json!({ "file_path": ".gwt/config.json", "old_string": "old", "new_string": "new" }),
+            ),
+            GovernanceEffect::Protected,
+        ),
+        (
+            event(
+                "apply_patch",
+                json!({
+                    "patch": "*** Begin Patch\n*** Update File: .gwt/work/events.jsonl\n@@\n-old\n+new\n*** End Patch\n"
+                }),
+            ),
+            GovernanceEffect::Protected,
+        ),
+        (
+            event(
+                "apply_patch",
+                json!({
+                    "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"
+                }),
+            ),
+            GovernanceEffect::Reversible,
+        ),
+    ];
+
+    for (event, expected_effect) in cases {
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .expect("file mutation must be observed");
+
+        assert_eq!(observation.effect, expected_effect, "{event:?}");
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+            None,
+            "observe-only classification must preserve the exact existing HookOutput for {event:?}"
+        );
+    }
+}
+
+#[test]
+fn multi_edit_and_notebook_payloads_use_security_strongest_path_observations_only() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let external = outside_root().join("external.rs");
+    let cases = vec![
+        (
+            "multi-edit source paths",
+            event(
+                "MultiEdit",
+                json!({
+                    "edits": [
+                        { "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" },
+                        { "file_path": "src/main.rs", "old_string": "old", "new_string": "new" }
+                    ]
+                }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Reversible,
+            "lexical_managed_path_unverified",
+        ),
+        (
+            "multi-edit authority path",
+            event(
+                "MultiEdit",
+                json!({
+                    "edits": [
+                        { "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" },
+                        { "file_path": ".git/config", "old_string": "old", "new_string": "new" }
+                    ]
+                }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Protected,
+            "lexical_managed_path_unverified",
+        ),
+        (
+            "multi-edit external path",
+            event(
+                "MultiEdit",
+                json!({
+                    "edits": [
+                        { "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" },
+                        { "file_path": external, "old_string": "old", "new_string": "new" }
+                    ]
+                }),
+            ),
+            RepositoryTarget::ExternalPath,
+            GovernanceEffect::Reversible,
+            "lexical_external_repository_unverified",
+        ),
+        (
+            "notebook source path",
+            event(
+                "NotebookEdit",
+                json!({ "notebook_path": "notebooks/report.ipynb", "new_source": "1 + 1" }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Reversible,
+            "lexical_managed_path_unverified",
+        ),
+        (
+            "notebook authority path",
+            event(
+                "NotebookEdit",
+                json!({ "notebook_path": ".gwt/notebooks/report.ipynb", "new_source": "1 + 1" }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Protected,
+            "lexical_managed_path_unverified",
+        ),
+    ];
+
+    for (label, event, expected_target, expected_effect, expected_reason) in cases {
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .unwrap_or_else(|| panic!("{label} must be observed"));
+
+        assert_eq!(observation.target, expected_target, "{label}");
+        assert_eq!(observation.effect, expected_effect, "{label}");
+        assert_eq!(
+            observation.confidence,
+            ObservationConfidence::Heuristic,
+            "{label}"
+        );
+        assert_eq!(observation.reason, expected_reason, "{label}");
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+            None,
+            "observation must preserve the exact existing HookOutput for {label}"
+        );
+    }
+}
+
 fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
     let _guard = env_lock()
         .lock()
@@ -83,248 +342,105 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
     f(&home)
 }
 
-fn write_improvement_store(repo_path: &Path, candidates: serde_json::Value) {
-    let path = repo_path
-        .join(".gwt")
-        .join("improvements")
-        .join("candidates.json");
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("create improvements dir");
-    std::fs::write(path, candidates.to_string()).expect("write candidates");
-}
+#[test]
+fn structured_prompt_obligation_still_blocks_stop() {
+    with_temp_home(|_| {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let sessions_dir = gwt_sessions_dir();
+        let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
+        session.agent_session_id = Some("agent-structured-obligation".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
 
-fn init_repo_with_origin(remote_url: &str) -> TempDir {
-    let repo = tempfile::tempdir().expect("repo");
-    assert!(std::process::Command::new("git")
-        .arg("init")
-        .arg("-q")
-        .arg(repo.path())
-        .status()
-        .expect("git init")
-        .success());
-    assert!(std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo.path())
-        .args(["remote", "add", "origin", remote_url])
-        .status()
-        .expect("git remote add")
-        .success());
-    repo
+        let prompt = json!({
+            "prompt": "バグを修正して、検証してください",
+            "session_id": "agent-structured-obligation",
+        })
+        .to_string();
+        event_dispatcher::handle_with_input(
+            "UserPromptSubmit",
+            &prompt,
+            worktree.path(),
+            Some(&session_id),
+        )
+        .expect("prompt hook");
+
+        let stop = json!({
+            "session_id": "agent-structured-obligation",
+            "stop_hook_active": false,
+        })
+        .to_string();
+        let output =
+            event_dispatcher::handle_with_input("Stop", &stop, worktree.path(), Some(&session_id))
+                .expect("stop hook");
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("structured prompt obligation must still block Stop: {output:?}");
+        };
+        assert!(reason.contains("Producing obligations"), "{reason}");
+        assert!(reason.contains("implementation"), "{reason}");
+        assert!(reason.contains("verification"), "{reason}");
+    });
 }
 
 #[test]
-fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gwt_repo() {
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
-            "candidates": [{
-                "id": "impr-high",
-                "created_at": "2026-06-23T00:00:00Z",
-                "updated_at": "2026-06-23T00:00:00Z",
-                "source": "agent-failure",
-                "target_artifact": "skill",
-                "classification": "gwt-caused",
-                "confidence": "high",
-                "state": "pending",
-                "dedupe_key": "skill:gwt-discussion:self-improvement",
-                "occurrences": 1,
-                "sanitized_summary": "Skill failed to update after agent failure",
-                "sanitized_details": "Public-safe detail",
-                "evidence_digest": "Public-safe digest",
-                "local_evidence": [],
-                "linked_issue": null,
-                "dismissed_reason": null
-            }]
-        }),
-    );
+fn completion_and_history_prose_do_not_block_stop() {
+    with_temp_home(|_| {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let sessions_dir = gwt_sessions_dir();
+        let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
+        session.agent_session_id = Some("agent-completion-prose".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let transcript = worktree.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"過去の担当者は実装しましたと報告しました。\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"実装しました。検証しました。Issue #3393 は push 済みです。\"}]}}\n",
+            ),
+        )
+        .expect("write transcript");
+        let stop = json!({
+            "session_id": "agent-completion-prose",
+            "transcript_path": transcript,
+            "stop_hook_active": false,
+        })
+        .to_string();
 
-    let output = gwt_self_improvement_stop::evaluate(repo.path(), false, false);
-    let HookOutput::StopBlock { reason } = output else {
-        panic!("expected StopBlock, got {output:?}");
-    };
-    assert!(reason.contains("impr-high"));
-    assert!(reason.contains("improvement.promote_issue"));
-    assert!(reason.contains("improvement.dismiss"));
+        let output =
+            event_dispatcher::handle_with_input("Stop", &stop, worktree.path(), Some(&session_id))
+                .expect("stop hook");
 
-    // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
-    // (Curate) session must NOT block Stop — intake owns no Work and is not the
-    // producing-work self-improvement loop.
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, true),
-        HookOutput::Silent,
-        "intake sessions must not be forced to handle improvement candidates"
-    );
-}
-
-#[test]
-fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
-    let repo = init_repo_with_origin("git@github.com:akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
-            "candidates": [
-                {
-                    "id": "impr-low",
-                    "created_at": "2026-06-23T00:00:00Z",
-                    "updated_at": "2026-06-23T00:00:00Z",
-                    "source": "agent-failure",
-                    "target_artifact": "skill",
-                    "classification": "gwt-caused",
-                    "confidence": "low",
-                    "state": "pending",
-                    "dedupe_key": "skill:low",
-                    "occurrences": 1,
-                    "sanitized_summary": "Low confidence",
-                    "sanitized_details": null,
-                    "evidence_digest": null,
-                    "local_evidence": [],
-                    "linked_issue": null,
-                    "dismissed_reason": null
-                },
-                {
-                    "id": "impr-promoted",
-                    "created_at": "2026-06-23T00:00:00Z",
-                    "updated_at": "2026-06-23T00:00:00Z",
-                    "source": "agent-failure",
-                    "target_artifact": "skill",
-                    "classification": "gwt-caused",
-                    "confidence": "high",
-                    "state": "promoted",
-                    "dedupe_key": "skill:promoted",
-                    "occurrences": 1,
-                    "sanitized_summary": "Already promoted",
-                    "sanitized_details": null,
-                    "evidence_digest": null,
-                    "local_evidence": [],
-                    "linked_issue": {"number": 1, "url": "https://github.com/akiojin/gwt/issues/1", "repository": "akiojin/gwt"},
-                    "dismissed_reason": null
-                }
-            ]
-        }),
-    );
-
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
-        HookOutput::Silent
-    );
-}
-
-#[test]
-fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
-    let repo = init_repo_with_origin("https://github.com/example/target-project.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
-            "candidates": [{
-                "id": "impr-target",
-                "created_at": "2026-06-23T00:00:00Z",
-                "updated_at": "2026-06-23T00:00:00Z",
-                "source": "agent-failure",
-                "target_artifact": "skill",
-                "classification": "gwt-caused",
-                "confidence": "high",
-                "state": "pending",
-                "dedupe_key": "target:skill",
-                "occurrences": 1,
-                "sanitized_summary": "Target project saw a gwt hook problem",
-                "sanitized_details": null,
-                "evidence_digest": null,
-                "local_evidence": [],
-                "linked_issue": null,
-                "dismissed_reason": null
-            }]
-        }),
-    );
-
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
-        HookOutput::Silent
-    );
-}
-
-#[test]
-fn gwt_self_improvement_stop_respects_stop_hook_active() {
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
-            "candidates": [{
-                "id": "impr-active-stop",
-                "created_at": "2026-06-23T00:00:00Z",
-                "updated_at": "2026-06-23T00:00:00Z",
-                "source": "agent-failure",
-                "target_artifact": "hook",
-                "classification": "gwt-caused",
-                "confidence": "high",
-                "state": "pending",
-                "dedupe_key": "hook:active-stop",
-                "occurrences": 1,
-                "sanitized_summary": "Stop hook recursion must not block again",
-                "sanitized_details": null,
-                "evidence_digest": null,
-                "local_evidence": [],
-                "linked_issue": null,
-                "dismissed_reason": null
-            }]
-        }),
-    );
-
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), true, false),
-        HookOutput::Silent
-    );
-}
-
-#[test]
-fn common_stop_dispatcher_does_not_run_gwt_self_improvement_stop() {
-    let _env_guard = env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
-    let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
-            "candidates": [{
-                "id": "impr-common-stop",
-                "created_at": "2026-06-23T00:00:00Z",
-                "updated_at": "2026-06-23T00:00:00Z",
-                "source": "agent-failure",
-                "target_artifact": "hook",
-                "classification": "gwt-caused",
-                "confidence": "high",
-                "state": "pending",
-                "dedupe_key": "hook:common-stop",
-                "occurrences": 1,
-                "sanitized_summary": "Common Stop dispatcher must not own self-improvement",
-                "sanitized_details": null,
-                "evidence_digest": null,
-                "local_evidence": [],
-                "linked_issue": null,
-                "dismissed_reason": null
-            }]
-        }),
-    );
-
-    let output = event_dispatcher::handle_with_input("Stop", "{}", repo.path(), None)
-        .expect("Stop dispatch");
-    assert!(
-        !matches!(output, HookOutput::StopBlock { .. }),
-        "self-improvement must be invoked by direct gwt repo hook config, not common Stop dispatcher: {output:?}"
-    );
+        assert!(
+            !matches!(output, HookOutput::StopBlock { .. }),
+            "assistant completion/history prose must not be interpreted as gate state: {output:?}"
+        );
+    });
 }
 
 fn init_repo(home: &TempDir) -> PathBuf {
     let repo_path = home.path().join("repo");
     std::fs::create_dir_all(&repo_path).expect("create repo dir");
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg(&repo_path)
         .status()
         .expect("git init")
         .success());
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(&repo_path)
         .args([
@@ -339,66 +455,12 @@ fn init_repo(home: &TempDir) -> PathBuf {
     repo_path
 }
 
-fn seed_issue_cache(
-    repo_path: &Path,
-    issue_number: u64,
-    labels: Vec<&str>,
-    plan: &str,
-    tasks: &str,
-) {
-    let repo_hash = compute_repo_hash("https://github.com/example/gwt-test.git");
-    let cache_root = repo_path
-        .parent()
-        .expect("repo parent")
-        .join(".gwt/cache/issues")
-        .join(repo_hash.as_str());
-    let cache = Cache::new(cache_root);
-    let body = format!(
-        "<!-- gwt-spec id={issue_number} version=1 -->\n\
-<!-- sections:\n\
-spec=body\n\
-plan=body\n\
-tasks=body\n\
--->\n\
-<!-- artifact:spec BEGIN -->\n\
-Workflow policy\n\
-<!-- artifact:spec END -->\n\
-<!-- artifact:plan BEGIN -->\n\
-{plan}\n\
-<!-- artifact:plan END -->\n\
-<!-- artifact:tasks BEGIN -->\n\
-{tasks}\n\
-<!-- artifact:tasks END -->\n"
-    );
-    cache
-        .write_snapshot(&IssueSnapshot {
-            number: IssueNumber(issue_number),
-            title: format!("Issue {issue_number}"),
-            body,
-            labels: labels.into_iter().map(str::to_string).collect(),
-            state: IssueState::Open,
-            updated_at: UpdatedAt::new("2026-04-13T00:00:00Z"),
-            comments: vec![],
-        })
-        .expect("seed issue cache");
-}
-
 fn save_session(repo_path: &Path, branch: &str, linked_issue_number: Option<u64>) -> String {
     let mut session = Session::new(repo_path, branch, AgentId::Codex);
     session.id = "session-workflow-policy".to_string();
     session.linked_issue_number = linked_issue_number;
     session.save(&gwt_sessions_dir()).expect("save session");
     session.id
-}
-
-fn seed_workspace_agent_title(repo_path: &Path, session_id: &str) {
-    let mut projection = WorkspaceProjection::default_for_project(repo_path);
-    projection.agents.push(workspace_agent(
-        session_id,
-        "Testing workflow policy",
-        "Workflow policy test",
-    ));
-    save_workspace_projection(repo_path, &projection).expect("save workspace projection");
 }
 
 fn workspace_agent(
@@ -445,138 +507,11 @@ fn unassigned_workspace_agent(session_id: &str) -> WorkspaceAgentSummary {
     }
 }
 
-fn seed_workspace_agents(
-    repo_path: &Path,
-    current_session_id: &str,
-    current_title: &str,
-    other_session_id: &str,
-    other_title: &str,
-) {
-    let mut projection = WorkspaceProjection::default_for_project(repo_path);
-    projection.title = "Workspace semantic coordination".to_string();
-    projection.status_category = WorkspaceStatusCategory::Active;
-    projection.summary = Some("Coordinate same-work detection across agents".to_string());
-    projection.agents.push(workspace_agent(
-        current_session_id,
-        "Implement Workspace semantic coordination gate",
-        current_title,
-    ));
-    projection.agents.push(workspace_agent(
-        other_session_id,
-        "Implement duplicate Workspace semantic coordination protection",
-        other_title,
-    ));
-    save_workspace_projection(repo_path, &projection).expect("save workspace projection");
-}
-
-fn seed_workspace_current_agent(repo_path: &Path, session_id: &str, title: &str, focus: &str) {
-    let mut projection = WorkspaceProjection::default_for_project(repo_path);
-    projection
-        .agents
-        .push(workspace_agent(session_id, focus, title));
-    save_workspace_projection(repo_path, &projection).expect("save workspace projection");
-}
-
-fn seed_workspace_work_item(
-    repo_path: &Path,
-    work_item_id: &str,
-    kind: WorkEventKind,
-    title: &str,
-    session_id: &str,
-) {
-    let mut event = WorkEvent::new(kind, work_item_id, Utc::now());
-    event.title = Some(title.to_string());
-    event.intent = Some("Implement Workspace WorkItem lifecycle history".to_string());
-    event.summary =
-        Some("Workspace WorkItem history should be joined instead of duplicated.".to_string());
-    event.status_category = Some(match kind {
-        WorkEventKind::Done => WorkspaceStatusCategory::Done,
-        _ => WorkspaceStatusCategory::Active,
-    });
-    event.agent_session_id = Some(session_id.to_string());
-    event.agent_id = Some("codex".to_string());
-    event.display_name = Some("Codex".to_string());
-    record_workspace_work_event(repo_path, event).expect("record workspace work item");
-}
-
-fn seed_issue_linkage(repo_path: &Path, branch: &str, issue_number: u64) {
-    let repo_hash = compute_repo_hash("https://github.com/example/gwt-test.git");
-    let store_path = repo_path
-        .parent()
-        .expect("repo parent")
-        .join(".gwt/cache/issue-links")
-        .join(format!("{}.json", repo_hash.as_str()));
-    std::fs::create_dir_all(store_path.parent().expect("store parent")).expect("create store dir");
-    std::fs::write(
-        store_path,
-        serde_json::to_vec_pretty(&json!({
-            "branches": {
-                branch: issue_number,
-            }
-        }))
-        .expect("serialize linkage store"),
-    )
-    .expect("write linkage store");
-}
-
 #[test]
 fn allows_read_only_tools_without_owner() {
     let event = event("Read", json!({ "file_path": "src/lib.rs" }));
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
     assert!(decision.is_none(), "read-only tools must stay allowed");
-}
-
-#[test]
-fn blocks_worktree_internal_edit_without_owner() {
-    let wt = root();
-    let event = event(
-        "Edit",
-        json!({ "file_path": format!("{}/src/lib.rs", wt.display()), "old_string": "x", "new_string": "y" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("worktree-internal implementation edit must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn blocks_worktree_internal_edit_with_relative_path() {
-    let event = event(
-        "Edit",
-        json!({ "file_path": "src/lib.rs", "old_string": "x", "new_string": "y" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("relative implementation edit must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn blocks_edit_outside_worktree_without_owner() {
-    let event = event(
-        "Edit",
-        json!({ "file_path": "/outside/project/src/lib.rs", "old_string": "x", "new_string": "y" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("owner guard should block mutating edit without owner");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn blocks_docs_edit_outside_worktree_without_owner() {
-    let event = event(
-        "Edit",
-        json!({ "file_path": "/outside/project/README.md", "old_string": "x", "new_string": "y" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("owner guard should block outside-worktree docs edit");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
@@ -601,91 +536,6 @@ fn allows_docs_only_apply_patch_without_owner_as_chore_exemption() {
     assert!(
         decision.is_none(),
         "docs-only apply_patch changes should stay allowed"
-    );
-}
-
-#[test]
-fn blocks_source_apply_patch_without_owner() {
-    let event = event(
-        "apply_patch",
-        json!({
-            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"
-        }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("source apply_patch without owner must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn allows_docs_only_apply_patch_for_spec_owner_before_plan_refresh() {
-    let event = event(
-        "apply_patch",
-        json!({
-            "patch": "*** Begin Patch\n*** Update File: docs/hooks.md\n@@\n-old\n+new\n*** End Patch\n"
-        }),
-    );
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::spec_issue(1935, false, false),
-    );
-    assert!(
-        decision.is_none(),
-        "docs-only patch should not require spec plan/tasks"
-    );
-}
-
-#[test]
-fn allows_mutation_for_plain_issue_owner() {
-    let event = event(
-        "Write",
-        json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::plain_issue(1942));
-    assert!(
-        decision.is_none(),
-        "plain issue flow must not require spec plan/tasks"
-    );
-}
-
-#[test]
-fn allows_git_push_even_for_spec_without_plan() {
-    let event = event("Bash", json!({ "command": "git push" }));
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::spec_issue(1935, false, true),
-    );
-    assert!(
-        decision.is_none(),
-        "git push is transport and must not be gated by plan/tasks"
-    );
-}
-
-#[test]
-fn allows_git_push_even_for_spec_without_tasks() {
-    let event = event("Bash", json!({ "command": "git push" }));
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::spec_issue(1935, true, false),
-    );
-    assert!(
-        decision.is_none(),
-        "git push is transport and must not be gated by plan/tasks"
-    );
-}
-
-#[test]
-fn allows_spec_owner_when_plan_and_tasks_exist() {
-    let event = event("Bash", json!({ "command": "git push origin main" }));
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::spec_issue(1935, true, true),
-    );
-    assert!(
-        decision.is_none(),
-        "ready spec owner should allow external ops"
     );
 }
 
@@ -736,19 +586,6 @@ fn allows_cargo_fmt_without_owner() {
 }
 
 #[test]
-fn blocks_git_commit_without_owner() {
-    let event = event(
-        "Bash",
-        json!({ "command": "git add . && git commit -m 'chore: release'" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("git commit without owner must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
 fn allows_git_push_without_owner() {
     let event = event("Bash", json!({ "command": "git push origin main" }));
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
@@ -780,6 +617,9 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
             json!({ "number": 1935, "section": "spec" }),
         ),
         ("issue.spec.list", json!({ "state": "open" })),
+        // Issue #4146 AC-4: auditing which SPECs were misjudged as complete
+        // is a read, so it must not be gated by an owner either.
+        ("issue.spec.audit", json!({ "state": "closed" })),
         (
             "issue.create",
             json!({ "title": "bug", "body": "body", "labels": ["bug"] }),
@@ -792,7 +632,16 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
             "issue.spec.edit",
             json!({ "number": 1935, "section": "plan", "body": "plan" }),
         ),
+        // Issue #3865 AC-4: the PM corrects a plain Issue body from its own
+        // surface, so the edit must not be gated by an owner either.
+        (
+            "issue.edit",
+            json!({ "number": 3858, "body": "- [ ] AC-1: corrected" }),
+        ),
         ("pr.current", json!({})),
+        ("pr.list", json!({})),
+        // Issue #3891 AC-3: budget observation is a read, ownerless-safe.
+        ("github.budget", json!({})),
         ("pr.view", json!({ "number": 1 })),
         ("pr.checks", json!({ "number": 1 })),
         ("search", json!({ "query": "workflow policy owner" })),
@@ -806,6 +655,9 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         ),
         ("pane.list", json!({})),
         ("pane.read", json!({ "id": "pane-1" })),
+        // SPEC-3431: PM diagnostics must stay diagnosable before an owner is
+        // linked (ownerless-safe, read-only).
+        ("pm.status", json!({})),
     ] {
         let event = event(
             "Bash",
@@ -820,77 +672,6 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
 }
 
 #[test]
-fn blocks_chained_json_envelope_plus_mutation_without_owner() {
-    let command = format!(
-        "{}\n&& git add . && git commit -m 'fix: hidden mutation'",
-        json_envelope_command("issue.view", json!({ "number": 3253 }))
-    );
-    let event = event("Bash", json!({ "command": command }));
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("chained implementation mutation must still be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn blocks_json_envelope_redirect_without_owner() {
-    let command = format!(
-        "{} > output.json",
-        json_envelope_command("issue.view", json!({ "number": 3253 }))
-    );
-    let event = event("Bash", json!({ "command": command }));
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("redirected JSON envelope output mutates the worktree");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn allows_git_push_with_session_bypass() {
-    let event = event("Bash", json!({ "command": "git push origin main" }));
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::with_bypass(gwt_agent::types::WorkflowBypass::Release),
-    );
-    assert!(decision.is_none(), "session bypass must allow git push");
-}
-
-#[test]
-fn allows_git_push_with_chore_bypass() {
-    let event = event("Bash", json!({ "command": "git push" }));
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::with_bypass(gwt_agent::types::WorkflowBypass::Chore),
-    );
-    assert!(decision.is_none(), "chore bypass must allow git push");
-}
-
-#[test]
-fn blocks_sed_in_place_without_owner() {
-    let event = event(
-        "Bash",
-        json!({ "command": "sed -i 's/old/new/' Cargo.toml" }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("sed -i without owner must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
-fn blocks_shell_redirect_without_owner() {
-    let event = event("Bash", json!({ "command": "echo '1.0.0' > version.txt" }));
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    let decision = decision.expect("shell redirect without owner must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
-}
-
-#[test]
 fn allows_git_push_in_chained_command() {
     let event = event(
         "Bash",
@@ -901,316 +682,6 @@ fn allows_git_push_in_chained_command() {
         decision.is_none(),
         "chained command with git push must not be gated by owner"
     );
-}
-
-#[test]
-fn worktree_external_file_op_is_blocked_before_owner_gate() {
-    let event = event(
-        "Bash",
-        json!({ "command": format!("rm -rf {}", outside_root().display()) }),
-    );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("out-of-worktree file ops must be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("outside worktree"));
-}
-
-#[test]
-fn reuses_legacy_bash_policy_rules_before_spec_gate() {
-    let event = event("Bash", json!({ "command": "gh issue view 1935" }));
-    let decision = evaluate(
-        &event,
-        workflow_policy::WorkflowContext::spec_issue(1935, true, true),
-    )
-    .expect("issue cli must still be blocked");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("GitHub workflow CLI"));
-}
-
-#[test]
-fn evaluate_resolves_spec_owner_from_session_cache() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        seed_issue_cache(&repo_path, 1935, vec!["gwt-spec"], "", "- [ ] T-001");
-        let session_id = save_session(&repo_path, "feature/workflow", Some(1935));
-        seed_workspace_agent_title(&repo_path, &session_id);
-        std::env::set_var(GWT_SESSION_ID_ENV, session_id);
-
-        let event = event("Bash", json!({ "command": "git push" }));
-        let decision =
-            workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "git push is transport and must not be gated by plan/tasks"
-        );
-    });
-}
-
-#[test]
-fn evaluate_falls_back_to_issue_linkage_store_for_plain_issue_owner() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        seed_issue_cache(&repo_path, 1942, vec!["bug"], "n/a", "n/a");
-        let session_id = save_session(&repo_path, "feature/workflow", None);
-        seed_workspace_agent_title(&repo_path, &session_id);
-        seed_issue_linkage(&repo_path, "feature/workflow", 1942);
-        std::env::set_var(GWT_SESSION_ID_ENV, session_id);
-
-        let event = event(
-            "Write",
-            json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
-        );
-        let decision =
-            workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "plain issue owner from linkage store should allow implementation"
-        );
-    });
-}
-
-#[test]
-fn similar_active_workspace_does_not_hard_block_mutation() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        seed_workspace_agents(
-            &repo_path,
-            &session_id,
-            "Workspace semantic coordination gate",
-            "session-other",
-            "Workspace semantic coordination duplicate guard",
-        );
-
-        let event = event(
-            "Edit",
-            json!({
-                "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs",
-                "old_string": "old",
-                "new_string": "new"
-            }),
-        );
-
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "active Workspace similarity is coordination context; duplicate prevention belongs to explicit workspace affiliation"
-        );
-    });
-}
-
-#[test]
-fn allows_mutation_after_split_claim_targets_matching_workspace_agent() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        seed_workspace_agents(
-            &repo_path,
-            &session_id,
-            "Workspace semantic coordination gate",
-            "session-other",
-            "Workspace semantic coordination duplicate guard",
-        );
-
-        let entry = BoardEntry::new(
-            AuthorKind::Agent,
-            "Codex",
-            BoardEntryKind::Claim,
-            "Split accepted for same Workspace work.\n\nBoundary: current session owns workflow-policy tests and policy gate only.",
-            None,
-            None,
-            vec!["workspace-semantic-coordination".to_string()],
-            vec!["2359".to_string()],
-        )
-        .with_origin_session_id(session_id.clone())
-        .with_mention(BoardMention::new(
-            BoardMentionTargetKind::Session,
-            "session-other",
-        ));
-        post_entry(&repo_path, entry).expect("post split claim");
-
-        let event = event(
-            "Edit",
-            json!({
-                "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs",
-                "old_string": "old",
-                "new_string": "new"
-            }),
-        );
-
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "Boundary-targeted split claim should allow disjoint implementation"
-        );
-    });
-}
-
-#[test]
-fn active_board_claim_does_not_hard_block_mutation() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
-        projection.agents.push(workspace_agent(
-            &session_id,
-            "Implement Workspace semantic coordination gate",
-            "Workspace semantic coordination gate",
-        ));
-        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
-
-        let entry = BoardEntry::new(
-            AuthorKind::Agent,
-            "Other Codex",
-            BoardEntryKind::Claim,
-            "Implement Workspace semantic coordination duplicate guard for active agents.",
-            None,
-            None,
-            vec!["workspace-semantic-coordination".to_string()],
-            vec!["2359".to_string()],
-        )
-        .with_origin_session_id("session-other");
-        post_entry(&repo_path, entry).expect("post active claim");
-
-        let event = event(
-            "Write",
-            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
-        );
-
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "active Board claims should coordinate duplicate risk without blocking unrelated tool execution"
-        );
-    });
-}
-
-#[test]
-fn unassigned_agent_does_not_inherit_projection_title_for_duplicate_gate() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/unassigned", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
-        projection.title = "Workspace affiliation fix".to_string();
-        projection.summary = Some("Stale project-level workspace title".to_string());
-        projection.status_category = WorkspaceStatusCategory::Active;
-        projection
-            .agents
-            .push(unassigned_workspace_agent(&session_id));
-        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
-
-        let entry = BoardEntry::new(
-            AuthorKind::Agent,
-            "Other Codex",
-            BoardEntryKind::Claim,
-            "Workspace affiliation fix is in progress on another branch.",
-            None,
-            None,
-            vec!["workspace-materialization".to_string()],
-            vec!["2359".to_string()],
-        )
-        .with_origin_session_id("session-other");
-        post_entry(&repo_path, entry).expect("post stale active claim");
-
-        let event = event(
-            "Write",
-            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
-        );
-
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "Unassigned Agents must not inherit stale projection-level title as duplicate-gate intent"
-        );
-    });
-}
-
-#[test]
-fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
-    // SPEC-2359 FR-099 / SC-031: a claim audienced only to a different
-    // Workspace must not gate the current Agent. With Codex's
-    // affiliation field landed, the current Agent is assigned to
-    // `workspace-existing` (per workspace_agent helper); the claim
-    // audienced to `ws-other-only` does not intersect, so the gate
-    // must stay silent.
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
-        projection.agents.push(workspace_agent(
-            &session_id,
-            "Implement Workspace audience scoped gate",
-            "Workspace audience scoped gate",
-        ));
-        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
-
-        let entry = BoardEntry::new(
-            AuthorKind::Agent,
-            "Other Codex",
-            BoardEntryKind::Claim,
-            "Implement Workspace audience scoped gate for active agents.",
-            None,
-            None,
-            vec!["workspace-audience".to_string()],
-            vec!["2359".to_string()],
-        )
-        .with_origin_session_id("session-other")
-        .with_audience(vec!["ws-other-only".to_string()]);
-        post_entry(&repo_path, entry).expect("post audienced claim");
-
-        let event = event(
-            "Write",
-            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
-        );
-
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
-        match decision {
-            HookOutput::PreToolUsePermission { detail, .. } => {
-                panic!(
-                    "audience-only claim must not block the current Agent when audience does not intersect: {detail}"
-                );
-            }
-            HookOutput::Silent => {}
-            other => panic!("expected silent allow, got {other:?}"),
-        }
-    });
 }
 
 #[test]
@@ -1307,10 +778,25 @@ fn actionable_unassigned_agent_can_run_workspace_ensure_command() {
 }
 
 #[test]
-fn assigned_agent_without_title_summary_remains_title_blocked() {
+fn assigned_agent_without_ensured_container_is_not_bricked_by_title_guard() {
+    // Before SPEC #3245 this scenario looked title-blocked, but the block
+    // actually came from the owner guard: the title requirement itself opts
+    // out whenever `resolve_session_work_mutation_target` fails (here the
+    // canonical assignment container is not ensured), because in that state
+    // `workspace.update` cannot succeed either — blocking would brick the
+    // session with no recovery operation. The title-block contract itself is
+    // pinned by the `title_summary_guard_*` tests with an explicit context.
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/assigned", None);
+        let branch_output = hidden_command("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git symbolic-ref");
+        let branch = String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string();
+        let session_id = save_session(&repo_path, &branch, None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         let mut agent = workspace_agent(&session_id, "Implement assigned work", "");
@@ -1331,90 +817,398 @@ fn assigned_agent_without_title_summary_remains_title_blocked() {
             workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
 
         assert!(
-            matches!(decision, HookOutput::PreToolUsePermission { .. }),
-            "Assigned Agents still need a title-summary before implementation"
+            matches!(decision, HookOutput::Silent),
+            "a session that cannot run workspace.update must not be blocked on the missing title"
         );
     });
 }
 
 #[test]
-fn incomplete_work_item_history_does_not_hard_block_mutation() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        seed_workspace_current_agent(
-            &repo_path,
-            &session_id,
-            "Workspace WorkItem history",
-            "Implement Workspace WorkItem lifecycle history",
-        );
-        seed_workspace_work_item(
-            &repo_path,
-            "workitem-existing",
-            WorkEventKind::Start,
-            "Workspace WorkItem history duplicate prevention",
-            "session-other",
-        );
-
-        let event = event(
-            "Edit",
-            json!({
-                "file_path": "crates/gwt-core/src/workspace_projection.rs",
-                "old_string": "old",
-                "new_string": "new"
-            }),
-        );
-
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "incomplete Workspace history is context; explicit workspace join/create owns duplicate prevention"
-        );
-    });
+fn allows_gh_release_view_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh release view v9.65.0 --repo akiojin/gwt --json isDraft,assets" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "gh release view is read-only");
 }
 
 #[test]
-fn completed_work_item_history_does_not_block_new_related_work() {
-    with_temp_home(|home| {
-        let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", Some(1942));
-        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        seed_workspace_current_agent(
-            &repo_path,
-            &session_id,
-            "Workspace WorkItem history",
-            "Implement Workspace WorkItem lifecycle history follow-up",
-        );
-        seed_workspace_work_item(
-            &repo_path,
-            "workitem-completed",
-            WorkEventKind::Done,
-            "Workspace WorkItem history",
-            "session-other",
-        );
+fn allows_gh_release_list_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh release list --repo akiojin/gwt --limit 1" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "gh release list is read-only");
+}
 
-        let event = event(
-            "Write",
-            json!({ "file_path": "crates/gwt-core/src/workspace_projection.rs", "content": "x" }),
-        );
+#[test]
+fn allows_gh_run_list_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh run list --workflow release.yml --branch main --limit 5 --repo akiojin/gwt" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "gh run list is read-only");
+}
 
-        let decision = workflow_policy::evaluate_with_context(
-            &event,
-            &repo_path,
-            &workflow_policy::WorkflowContext::plain_issue(1942),
-        )
-        .expect("workflow evaluation succeeds");
-
+#[test]
+fn allows_stderr_dev_null_redirect_in_read_only_command() {
+    for command in [
+        "ls /tmp/does-not-exist 2>/dev/null",
+        "grep -rn pattern src 2> /dev/null",
+        "git log --oneline -3 2>/dev/null",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
         assert!(
-            matches!(decision, HookOutput::Silent),
-            "completed WorkItem history must be context only"
+            decision.is_none(),
+            "stderr-to-devnull must stay read-only: {command}"
         );
-    });
+    }
+}
+
+#[test]
+fn allows_stderr_merge_redirect_in_read_only_command() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git log --oneline -3 2>&1 | head -3" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "2>&1 does not write the worktree");
+}
+
+#[test]
+fn allows_git_ls_remote_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git ls-remote --tags origin v9.65.0" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "git ls-remote is read-only transport");
+}
+
+#[test]
+fn allows_git_rev_list_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git rev-list v9.64.2..HEAD --count" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "git rev-list is read-only");
+}
+
+#[test]
+fn allows_git_tag_queries_without_owner() {
+    for command in [
+        "git tag",
+        "git tag --list 'v[0-9]*' --sort=-version:refname",
+        "git tag -l 'v9.*'",
+        "git tag --contains 7723d167d",
+        "git tag --points-at HEAD",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "git tag query must stay read-only: {command}"
+        );
+    }
+}
+
+#[test]
+fn allows_gwt_bin_variable_json_envelope() {
+    for (variable, operation) in [
+        ("\"$GWT_BIN\"", "issue.view"),
+        ("$GWT_BIN", "pr.view"),
+        ("\"${GWT_BIN}\"", "issue.comment"),
+    ] {
+        let body = json!({
+            "schema_version": 1,
+            "operation": operation,
+            "params": { "number": 3267 },
+        });
+        let command = format!("{variable} <<'JSON'\n{body}\nJSON");
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "GWT_BIN-style standalone envelope must match literal gwtd: {command}"
+        );
+    }
+}
+
+#[test]
+fn allows_sort_and_text_utils_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "grep -o 'x' file.txt | sort -u | uniq -c | cut -d: -f1 | tr -d ' '" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "text utils are read-only");
+}
+
+#[test]
+fn allows_plan_file_write_under_home_claude_plans_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("temp home");
+    let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+    let plan_path = home.path().join(".claude/plans/3267-release.md");
+    let event = event(
+        "Write",
+        json!({ "file_path": plan_path.to_string_lossy(), "content": "# Plan" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "plan-mode plan files under ~/.claude/plans are documentation"
+    );
+}
+
+#[test]
+fn allows_read_only_semicolon_compound_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "command -v gwtd; ls -la .gwt; echo ready" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "semicolon-joined read-only commands must stay allowed"
+    );
+}
+
+#[test]
+fn allows_read_only_newline_compound_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "command -v gwtd\nls -la .gwt\necho ready" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "newline-joined read-only commands must stay allowed"
+    );
+}
+
+#[test]
+fn allows_jq_to_gwtd_pipeline_without_owner() {
+    // gwt-register-spec builds the envelope with jq and pipes it into gwtd;
+    // the pipe is transport, equivalent to the sanctioned heredoc envelope.
+    let event = event(
+        "Bash",
+        json!({ "command": r#"jq -n --rawfile body .gwt/work/register-spec/body.md '{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: x","body":$body}}' | gwtd"# }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "jq -> gwtd envelope pipeline is transport and must not be owner-gated"
+    );
+}
+
+#[test]
+fn allows_read_only_pipe_into_gwt_bin_variable_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "cat .gwt/work/register-spec/envelope.json | \"$GWT_BIN\"" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "piping a prepared envelope into the resolved gwtd binary is transport"
+    );
+}
+
+#[test]
+fn allows_redirect_into_worktree_dot_gwt_without_owner() {
+    for command in [
+        r#"jq -n '{"title":"x"}' > .gwt/work/register-spec/envelope.json"#,
+        "echo checkpoint >> .gwt/work/register-spec/progress.log",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "redirects into worktree-local .gwt/ are bookkeeping: {command}"
+        );
+    }
+}
+
+#[test]
+fn allows_redirect_into_absolute_dot_gwt_under_worktree_without_owner() {
+    let command = format!(
+        "jq -n '{{}}' > {}/.gwt/work/register-spec/envelope.json",
+        root().display()
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "absolute .gwt/ paths under the worktree are bookkeeping"
+    );
+}
+
+#[test]
+fn allows_heredoc_envelope_with_shell_symbols_in_body_without_owner() {
+    // Reproduces the #3265 issue.create block: the JSON payload quotes shell
+    // snippets (pipes, semicolons, redirects, heredoc markers). Those are
+    // data, not command structure, and must not trip the lexical scan.
+    let command = json_envelope_command(
+        "issue.create",
+        json!({
+            "title": "bug: repro snippets",
+            "body": "Repro: `jq -n '{}' | gwtd`; then `cat out > .gwt/x.json` and `gwtd <<'JSON' ... JSON`",
+            "labels": ["bug"],
+        }),
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "shell symbols inside the heredoc JSON payload are data, not commands"
+    );
+}
+
+#[test]
+fn allows_quoted_redirect_text_in_read_only_command_without_owner() {
+    let event = event("Bash", json!({ "command": "grep -n \"a>b\" README.md" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "a quoted `>` is search text, not an output redirection"
+    );
+}
+
+#[test]
+fn allows_leading_comment_line_before_read_only_pipeline_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "# stage the envelope\njq -n '{}' | gwtd" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "a leading shell comment must not poison classification"
+    );
+}
+
+#[test]
+fn safety_policy_still_blocks_github_workflow_cli_in_the_chain() {
+    // The consolidated Bash safety policy stays first in the chain even after
+    // the owner guard removal (SPEC #3245 FR-009).
+    let event = event("Bash", json!({ "command": "gh issue view 1935" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("github workflow cli must still be blocked by the safety policy");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("GitHub workflow CLI"));
+}
+
+// SPEC #3245 FR-009 / AC-7 — the owner guard is removed entirely. The six
+// false positives recorded on 2026-07-31 stay pinned here so no future guard
+// reintroduces a default-deny classification over ownerless sessions.
+
+fn assert_ownerless_silent(
+    event: &HookEvent,
+    context: workflow_policy::WorkflowContext,
+    why: &str,
+) {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let decision = evaluate(event, context);
+    assert!(
+        decision.is_none(),
+        "workflow-policy must stay silent for ownerless sessions ({why}); got: {decision:?}"
+    );
+}
+
+#[test]
+fn ownerless_gh_issue_search_stays_silent() {
+    let event = event(
+        "Bash",
+        json!({ "command": r#"gh issue list --search "intake lane" --repo akiojin/gwt --limit 20"# }),
+    );
+    assert_ownerless_silent(
+        &event,
+        workflow_policy::WorkflowContext::unknown(),
+        "AC-7 case 1: read-only gh issue search",
+    );
+}
+
+#[test]
+fn ownerless_gwt_bin_search_envelope_stays_silent() {
+    let event = event(
+        "Bash",
+        json!({ "command": "\"$GWT_BIN\" <<'JSON'\n{\"schema_version\":1,\"operation\":\"search\",\"params\":{\"query\":\"intake lane\",\"scopes\":[\"specs\"]}}\nJSON" }),
+    );
+    assert_ownerless_silent(
+        &event,
+        workflow_policy::WorkflowContext::unknown(),
+        "AC-7 case 2: gwt-search skill's sanctioned $GWT_BIN envelope",
+    );
+}
+
+#[test]
+fn ownerless_read_only_loop_with_command_substitution_stays_silent() {
+    let event = event(
+        "Bash",
+        json!({ "command": "for f in $(rg -l \"SessionKind\" crates); do rg -n \"intake\" \"$f\"; done" }),
+    );
+    assert_ownerless_silent(
+        &event,
+        workflow_policy::WorkflowContext::unknown(),
+        "AC-7 case 3: read-only rg loop with command substitution",
+    );
+}
+
+#[test]
+fn ownerless_agent_memory_write_outside_worktree_stays_silent() {
+    let event = event(
+        "Write",
+        json!({
+            "file_path": "/Users/someone/.claude/projects/-Users-someone-repo/memory/project_note.md",
+            "content": "# note",
+        }),
+    );
+    assert_ownerless_silent(
+        &event,
+        workflow_policy::WorkflowContext::unknown(),
+        "AC-7 case 4: agent persistent memory outside the worktree",
+    );
+}
+
+#[test]
+fn ownerless_issue_create_envelope_stays_silent() {
+    let event = event(
+        "Bash",
+        json!({ "command": json_envelope_command(
+            "issue.create",
+            json!({ "title": "bug: x", "body": "- [ ] AC-1: repro" }),
+        ) }),
+    );
+    assert_ownerless_silent(
+        &event,
+        workflow_policy::WorkflowContext::unknown(),
+        "AC-7 / AC-2: ownerless issue registration (#3356)",
+    );
+}
+
+#[test]
+fn spec_owner_without_plan_or_tasks_implementation_edit_stays_silent() {
+    // The owner/plan/tasks distinction no longer exists in WorkflowContext:
+    // a spec owner with missing plan/tasks evaluates exactly like any other
+    // session, so the removed `requires_spec_plan_tasks` block cannot return.
+    let event = event(
+        "Edit",
+        json!({ "file_path": "src/lib.rs", "old_string": "x", "new_string": "y" }),
+    );
+    assert_ownerless_silent(
+        &event,
+        workflow_policy::WorkflowContext::unknown(),
+        "AC-7 case 6: spec owner before plan/tasks refresh (requires_spec_plan_tasks removed)",
+    );
 }

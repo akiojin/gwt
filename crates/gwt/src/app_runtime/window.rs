@@ -22,9 +22,21 @@
 use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
-    close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus,
+    close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
+    WindowPreset, WindowProcessStatus,
 };
+
+fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
+    matches!(preset, WindowPreset::Work | WindowPreset::Branches)
+}
+
+/// Result of a close request (Issue #3629 AC-10): `closed` reports whether the
+/// workspace record was actually removed, so callers can answer the requester
+/// instead of treating an empty event list as success.
+pub(crate) struct CloseWindowOutcome {
+    pub(crate) closed: bool,
+    pub(crate) events: Vec<OutboundEvent>,
+}
 
 impl AppRuntime {
     pub(crate) fn create_window_events(
@@ -38,6 +50,31 @@ impl AppRuntime {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
+        if shares_work_surface_singleton(preset) {
+            let existing_id = {
+                let Some(tab) = self.tab_mut(&tab_id) else {
+                    return Vec::new();
+                };
+                let existing_id = tab
+                    .workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| shares_work_surface_singleton(window.preset))
+                    .max_by_key(|window| window.z_index)
+                    .map(|window| window.id.clone());
+                if let Some(existing_id) = existing_id.as_deref() {
+                    let _ = tab.workspace.activate_window_tab(existing_id);
+                    let _ = tab
+                        .workspace
+                        .focus_window(existing_id, Some(bounds.clone()));
+                }
+                existing_id
+            };
+            if existing_id.is_some() {
+                return self.activate_tab_for_window_events(tab_id);
+            }
+        }
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
@@ -66,9 +103,22 @@ impl AppRuntime {
         if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
         }
-        self.active_tab_id = Some(address.tab_id);
+        self.activate_tab_for_window_events(address.tab_id)
+    }
+
+    fn activate_tab_for_window_events(&mut self, tab_id: String) -> Vec<OutboundEvent> {
+        let previous_tab_id = self.active_tab_id.clone();
+        let wizard_closed = self.set_active_tab(tab_id);
+        let tab_changed = self.active_tab_id != previous_tab_id;
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        let mut events = vec![self.workspace_state_broadcast()];
+        if tab_changed {
+            events.extend(self.active_project_snapshot_broadcasts());
+        }
+        if wizard_closed {
+            events.push(self.launch_wizard_state_broadcast(None));
+        }
+        events
     }
 
     pub(crate) fn cycle_focus_events(
@@ -155,36 +205,19 @@ impl AppRuntime {
         if address.tab_id != target_address.tab_id {
             return Vec::new();
         }
-        let resize_window_ids = {
+        let updated = {
             let Some(tab) = self.tab_mut(&address.tab_id) else {
                 return Vec::new();
             };
-            if !tab
-                .workspace
-                .dock_window_tab(&address.raw_id, &target_address.raw_id)
-            {
-                return Vec::new();
-            }
             tab.workspace
-                .window(&address.raw_id)
-                .and_then(|window| window.tab_group_id.clone())
-                .map(|group_id| {
-                    tab.workspace
-                        .persisted()
-                        .windows
-                        .iter()
-                        .filter(|window| window.tab_group_id.as_deref() == Some(group_id.as_str()))
-                        .map(|window| combined_window_id(&address.tab_id, &window.id))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| vec![id.to_string(), target_id.to_string()])
+                .dock_window_tab(&address.raw_id, &target_address.raw_id)
         };
-        let _ = self.set_active_tab(address.tab_id);
-        for window_id in resize_window_ids {
-            self.resize_runtime_to_window(&window_id);
+        if !updated {
+            return Vec::new();
         }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        // Docking mutates shared canvas geometry, but the frontend's
+        // revisioned xterm fit remains authoritative for the live PTY grid.
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn activate_window_tab_events(&mut self, id: &str) -> Vec<OutboundEvent> {
@@ -200,14 +233,12 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
         // Tab activation only changes the active marker/z-order. The revealed
         // terminal's real grid is owned by the frontend xterm fit; resizing
         // from backend geometry here clobbers that fit, especially for
         // maximized tab groups where shared window geometry is only an
         // approximation of the visible terminal body.
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn detach_window_tab_events(
@@ -227,10 +258,9 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        // Detaching mutates canvas geometry, but the frontend's revisioned
+        // xterm fit remains authoritative for the live PTY grid.
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn place_agent_window_in_kanban_events(
@@ -263,9 +293,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn move_agent_kanban_card_events(
@@ -298,9 +326,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn undock_agent_window_events(
@@ -320,9 +346,26 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
+    }
+
+    /// SPEC-3885 FR-012: return a Windowized Issue window to the Issue list. The
+    /// canvas resolves both the Issue and its host window, so a stale frontend cannot
+    /// send the window somewhere it does not belong.
+    pub(crate) fn dock_agent_window_to_issue_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.dock_agent_window_to_issue(&address.raw_id)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn set_agent_kanban_card_collapsed_events(
@@ -343,9 +386,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn update_terminal_grid_events(
@@ -404,25 +445,137 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        self.clear_agent_window_startup_restore(id);
-        self.stop_window_runtime(id);
-        self.remove_window_state_tracking(id);
-        self.profile_selections.remove(id);
+        self.close_window_outcome(id).events
+    }
+
+    /// Close a window and report whether the workspace record was actually
+    /// removed (Issue #3629 AC-10): the agent pane route must be able to
+    /// distinguish a landed close from the silent no-op that an unknown or
+    /// already-closed window produces.
+    pub(crate) fn close_window_outcome(&mut self, id: &str) -> CloseWindowOutcome {
+        self.close_window_outcome_with_monitor_notification(id, true, None)
+    }
+
+    /// Close a window whose Issue Monitor lifecycle transition was already
+    /// committed by the daemon or the fail-closed local fallback. Re-entering
+    /// the normal window-closed hook here would publish a second control for
+    /// the same lifecycle edge and could requeue the just-failed issue.
+    pub(crate) fn close_window_after_issue_monitor_finalize_events(
+        &mut self,
+        id: &str,
+    ) -> Vec<OutboundEvent> {
+        self.close_window_outcome_with_monitor_notification(id, false, None)
+            .events
+    }
+
+    pub(super) fn close_window_outcome_with_self_close_ticket(
+        &mut self,
+        id: &str,
+        ticket: crate::AgentSelfCloseCapabilityTicket,
+    ) -> CloseWindowOutcome {
+        self.close_window_outcome_with_monitor_notification(id, true, Some(ticket))
+    }
+
+    fn close_window_outcome_with_monitor_notification(
+        &mut self,
+        id: &str,
+        notify_issue_monitor: bool,
+        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+    ) -> CloseWindowOutcome {
+        // Issue #4145 AC-1: every close route converges here, and Issue #3783
+        // designed the accepted close to stay on the event loop, so this guard
+        // measures exactly the latency a person sees when a pane disappears.
+        // The detached teardown that follows is deliberately outside it.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneClose);
+        let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
             &mut self.window_details,
             id,
         ) {
-            return Vec::new();
+            return CloseWindowOutcome {
+                closed: false,
+                events: Vec::new(),
+            };
         }
+        // Issue #4084: the review-dispatch marker dies with its window.
+        self.issue_monitor_review_dispatch_windows.remove(id);
+        // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
+        // in-flight restore marker must not outlive its window.
+        self.restore_launch_windows.remove(id);
+        // Issue #3783: the accepted close is the in-memory removal above.
+        // Everything that may wait on PTY, execution, Session, or Work locks
+        // runs in one detached finalizer and cannot delay PaneCloseResult.
+        self.queue_accepted_window_close_finalizer(
+            id,
+            issue_monitor_project_root,
+            notify_issue_monitor,
+            self_close_ticket,
+        );
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+        if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }
-        events.extend(self.issue_monitor_windows_closed_events(&[id.to_string()]));
-        events
+        CloseWindowOutcome {
+            closed: true,
+            events,
+        }
+    }
+
+    /// Move an already-accepted window lifecycle into its detached finalizer.
+    /// Callers must first remove the window from the visible workspace, but
+    /// must leave runtime/session ownership intact for this method to capture.
+    pub(super) fn queue_accepted_window_close_finalizer(
+        &mut self,
+        id: &str,
+        project_root: Option<std::path::PathBuf>,
+        notify_issue_monitor: bool,
+        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+    ) {
+        // SPEC-3431 FR-013: snapshot the closing window's session while the
+        // active entry still exists — an explicit close of the PM pane is an
+        // intentional stop and clears the durable PM registration below.
+        let closing_session_id = self
+            .active_agent_sessions
+            .get(id)
+            .map(|session| session.session_id.clone());
+        let closing_window_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .copied();
+        // PR #3787 review: the fence must count only closes of the registered
+        // PM session — any other agent pane close in the project would
+        // otherwise suppress PM ensure (Automatic/Explicit) and crash respawn
+        // through `pending_pm_closes` until its finalizer completes.
+        let closing_pm_session = match (project_root.as_ref(), closing_session_id.as_ref()) {
+            (Some(project_root), Some(session_id)) => {
+                self.pm_sessions.get(project_root) == Some(session_id)
+            }
+            _ => false,
+        };
+        if closing_pm_session {
+            if let Some(project_root) = project_root.as_ref() {
+                *self
+                    .pending_pm_closes
+                    .entry(project_root.clone())
+                    .or_default() += 1;
+                self.pm_sessions.remove(project_root);
+            }
+        }
+        self.queue_window_close_finalizer(
+            id,
+            project_root,
+            closing_session_id,
+            closing_pm_session,
+            notify_issue_monitor,
+            self_close_ticket,
+            closing_window_generation,
+        );
+        self.profile_selections.remove(id);
     }
 
     /// SPEC-2356 安心 Addendum (FR-041): stop a single window's agent runtime
@@ -537,5 +690,20 @@ impl AppRuntime {
             .flat_map(|tab| self.workspace_view_for_tab(tab).windows)
             .collect();
         BackendEvent::WindowList { windows }
+    }
+}
+
+#[cfg(test)]
+mod singleton_tests {
+    use super::*;
+
+    #[test]
+    fn work_surface_singleton_excludes_multi_instance_terminal_presets() {
+        assert!(shares_work_surface_singleton(WindowPreset::Work));
+        assert!(shares_work_surface_singleton(WindowPreset::Branches));
+        assert!(!shares_work_surface_singleton(WindowPreset::Agent));
+        assert!(!shares_work_surface_singleton(WindowPreset::Shell));
+        assert!(!shares_work_surface_singleton(WindowPreset::Claude));
+        assert!(!shares_work_surface_singleton(WindowPreset::Codex));
     }
 }

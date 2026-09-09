@@ -191,7 +191,16 @@ pub fn extract_sections(text: &str) -> Result<Vec<ExtractedSection>, SectionPars
                 };
                 let body_end = end_marker.marker_start;
                 let raw = &text[body_start..body_end];
-                let content = trim_surrounding_newlines(raw).to_string();
+                // Unmarked sections keep the legacy strip-all-edge-newlines
+                // behavior. Part-marked sections (SPEC-3248 P7C / #3284)
+                // strip exactly the one newline the writer places on each
+                // side of the content, so a part may itself begin or end
+                // with newlines and multipart content rejoins losslessly.
+                let content = if begin_part.is_some() {
+                    trim_exactly_one_newline(raw).to_string()
+                } else {
+                    trim_surrounding_newlines(raw).to_string()
+                };
                 // Duplicate detection: same name AND same part.
                 let is_duplicate = out
                     .iter()
@@ -210,9 +219,28 @@ pub fn extract_sections(text: &str) -> Result<Vec<ExtractedSection>, SectionPars
     Ok(out)
 }
 
+/// Strip exactly one leading and one trailing newline (`\n` or `\r\n`) —
+/// the ones the multipart writer places around each part's content. Interior
+/// and any additional edge newlines are content and must survive.
+fn trim_exactly_one_newline(raw: &str) -> &str {
+    let mut s = raw;
+    if let Some(rest) = s.strip_prefix("\r\n") {
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix('\n') {
+        s = rest;
+    }
+    if let Some(rest) = s.strip_suffix("\r\n") {
+        s = rest;
+    } else if let Some(rest) = s.strip_suffix('\n') {
+        s = rest;
+    }
+    s
+}
+
 /// Strip at most the leading/trailing newline characters from the section
-/// body without touching interior whitespace.
-fn trim_surrounding_newlines(raw: &str) -> &str {
+/// body without touching interior whitespace. Shared with the writer side
+/// (`spec_ops`) so canonical content matches what a later parse returns.
+pub(crate) fn trim_surrounding_newlines(raw: &str) -> &str {
     let bytes = raw.as_bytes();
     let mut start = 0usize;
     let mut end = bytes.len();

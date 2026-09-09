@@ -124,4 +124,20 @@ mod tests {
             HookOutput::Silent,
         );
     }
+
+    #[test]
+    fn active_build_state_gates_uniformly_after_lane_removal() {
+        // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
+        // active build-spec state blocks Stop in every worktree the same way.
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), SKILL_NAME, &active_state("sess-1", "red")).unwrap();
+
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the build-spec gate fires uniformly after the lane removal"
+        );
+    }
 }

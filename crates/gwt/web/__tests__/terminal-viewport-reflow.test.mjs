@@ -13,14 +13,18 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import * as terminalViewportReflow from "../terminal-viewport-reflow.js";
 
 import {
   applyVisibilityTransition,
   attachContainerResizeReflow,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
+  clearTerminalOutputBeforeSnapshot,
   createTerminalFitScheduler,
+  createTerminalSnapshotWriteCoordinator,
   createTerminalViewportRefreshScheduler,
+  decodeTerminalSnapshotBoundary,
   elementHasLayoutBox,
   gateTerminalInputForReadiness,
   rearmRefreshOnVisible,
@@ -43,6 +47,522 @@ function fixtureWindow() {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   return document.defaultView;
 }
+
+function asyncTerminalStub() {
+  const writes = [];
+  const resets = [];
+  const callbacks = [];
+  let nextResetFailure = null;
+  let nextWriteFailure = null;
+  return {
+    writes,
+    resets,
+    write(text, callback) {
+      if (nextWriteFailure) {
+        const { beforeThrow, error } = nextWriteFailure;
+        nextWriteFailure = null;
+        beforeThrow?.();
+        throw error;
+      }
+      writes.push(text);
+      if (typeof callback === "function") {
+        callbacks.push(callback);
+      }
+    },
+    reset() {
+      if (nextResetFailure) {
+        const { beforeThrow, error } = nextResetFailure;
+        nextResetFailure = null;
+        beforeThrow?.();
+        throw error;
+      }
+      resets.push(writes.length);
+    },
+    failNextReset(error, beforeThrow) {
+      nextResetFailure = { beforeThrow, error };
+    },
+    failNextWrite(error, beforeThrow) {
+      nextWriteFailure = { beforeThrow, error };
+    },
+    completeNextWrite() {
+      const callback = callbacks.shift();
+      assert.equal(typeof callback, "function", "expected a pending xterm write callback");
+      callback();
+    },
+  };
+}
+
+function snapshotWriteHarness({
+  completionRefreshError = null,
+  failureSettlementError = null,
+} = {}) {
+  const windowId = "wt-async-snapshot";
+  const terminal = asyncTerminalStub();
+  const pendingSnapshotMap = new Map();
+  const pendingOutputMap = new Map();
+  const runtime = { deferredWrites: [] };
+  const installedDecoders = [];
+  const decodedSnapshots = [];
+  const errors = [];
+  const failureSettlements = [];
+  const refreshes = [];
+  let nextDecodeFailure = null;
+  let nextTakeError = null;
+  let runtimeCurrent = true;
+
+  const coordinator = createTerminalSnapshotWriteCoordinator({
+    terminal,
+    hasPendingSnapshot: () => pendingSnapshotMap.has(windowId),
+    takePendingSnapshot: () => {
+      if (nextTakeError) {
+        const error = nextTakeError;
+        nextTakeError = null;
+        throw error;
+      }
+      if (!pendingSnapshotMap.has(windowId)) {
+        return { present: false };
+      }
+      const snapshot = pendingSnapshotMap.get(windowId);
+      pendingSnapshotMap.delete(windowId);
+      return { present: true, snapshot };
+    },
+    discardPendingSnapshot: () => pendingSnapshotMap.delete(windowId),
+    decodeSnapshot: (snapshot) => {
+      if (nextDecodeFailure) {
+        const { beforeThrow, error } = nextDecodeFailure;
+        nextDecodeFailure = null;
+        beforeThrow?.();
+        throw error;
+      }
+      decodedSnapshots.push(snapshot);
+      return {
+        snapshotText: snapshot ? `decoded:${snapshot}` : "",
+        nextLiveDecoder: `decoder:${snapshot}`,
+      };
+    },
+    isRuntimeCurrent: () => runtimeCurrent,
+    installLiveDecoder: (decoder) => installedDecoders.push(decoder),
+    onSnapshotFailureSettled: () => {
+      failureSettlements.push("settled");
+      if (failureSettlementError) {
+        throw failureSettlementError;
+      }
+      installedDecoders.push("decoder:failure");
+      flushDeferredWrites();
+    },
+    onLatestSnapshotWritten: () => {
+      try {
+        refreshes.push("refresh");
+        if (completionRefreshError) {
+          throw completionRefreshError;
+        }
+      } finally {
+        flushDeferredWrites();
+      }
+    },
+    onError: (error, stage) => errors.push({ error, stage }),
+  });
+
+  function receiveSnapshot(snapshot) {
+    clearTerminalOutputBeforeSnapshot({
+      windowId,
+      runtime,
+      pendingOutputMap,
+      clearBatchedOutput: () => {},
+    });
+    pendingSnapshotMap.set(windowId, snapshot);
+    return coordinator.start();
+  }
+
+  function receiveLive(text) {
+    if (coordinator.shouldDeferOutput()) {
+      runtime.deferredWrites.push(text);
+    } else {
+      terminal.write(text);
+    }
+  }
+
+  function flushDeferredWrites() {
+    const deferred = runtime.deferredWrites;
+    runtime.deferredWrites = [];
+    for (const text of deferred) {
+      terminal.write(text);
+    }
+  }
+
+  return {
+    coordinator,
+    decodedSnapshots,
+    errors,
+    failureSettlements,
+    failNextDecode(error, beforeThrow) {
+      nextDecodeFailure = { beforeThrow, error };
+    },
+    failNextTake(error) {
+      nextTakeError = error;
+    },
+    installedDecoders,
+    receiveLive,
+    receiveSnapshot,
+    refreshes,
+    runtime,
+    setRuntimeCurrent(value) {
+      runtimeCurrent = value;
+    },
+    terminal,
+  };
+}
+
+test("decodeTerminalSnapshotBoundary isolates snapshot and subsequent live UTF-8 state (T-159/T-162)", () => {
+  const windowId = "wt-decoder-boundary";
+  const decoderMap = new Map([[windowId, new TextDecoder()]]);
+  const previousLiveDecoder = decoderMap.get(windowId);
+
+  assert.equal(
+    previousLiveDecoder.decode(Uint8Array.of(0xe3), { stream: true }),
+    "",
+    "the live decoder must retain the incomplete Japanese prefix before snapshot replacement",
+  );
+
+  const expectedSnapshot = "snapshot 日本語";
+  const { snapshotText, nextLiveDecoder } = decodeTerminalSnapshotBoundary(
+    new TextEncoder().encode(expectedSnapshot),
+  );
+  decoderMap.set(windowId, nextLiveDecoder);
+
+  assert.equal(snapshotText, expectedSnapshot);
+  assert.equal(snapshotText.includes("\uFFFD"), false);
+  assert.notEqual(nextLiveDecoder, previousLiveDecoder);
+  assert.equal(
+    decoderMap.get(windowId).decode(new TextEncoder().encode("後続ライブ"), { stream: true }),
+    "後続ライブ",
+    "post-snapshot live output must decode through a fresh streaming decoder",
+  );
+});
+
+test("clearTerminalOutputBeforeSnapshot drops only output before the latest snapshot boundary", () => {
+  const windowId = "wt-snapshot-boundary";
+  const pendingOutputMap = new Map([[windowId, ["pending-before-first"]]]);
+  const runtime = { deferredWrites: ["deferred-before-first"] };
+  const batchedOutputMap = new Map([[windowId, ["batched-before-first"]]]);
+  const clearedBatches = [];
+  const clearBoundary = () =>
+    clearTerminalOutputBeforeSnapshot({
+      windowId,
+      runtime,
+      pendingOutputMap,
+      clearBatchedOutput: (id) => {
+        clearedBatches.push(id);
+        batchedOutputMap.delete(id);
+      },
+    });
+
+  clearBoundary();
+
+  assert.deepEqual(clearedBatches, [windowId]);
+  assert.equal(pendingOutputMap.has(windowId), false);
+  assert.deepEqual(runtime.deferredWrites, []);
+  assert.equal(batchedOutputMap.has(windowId), false);
+
+  pendingOutputMap.set(windowId, ["pending-between-snapshots"]);
+  runtime.deferredWrites.push("deferred-between-snapshots");
+  batchedOutputMap.set(windowId, ["batched-between-snapshots"]);
+  clearBoundary();
+
+  assert.deepEqual(clearedBatches, [windowId, windowId]);
+  assert.equal(pendingOutputMap.has(windowId), false);
+  assert.deepEqual(runtime.deferredWrites, []);
+  assert.equal(batchedOutputMap.has(windowId), false);
+
+  pendingOutputMap.set(windowId, ["pending-after-latest"]);
+  runtime.deferredWrites.push("deferred-after-latest");
+  batchedOutputMap.set(windowId, ["batched-after-latest"]);
+
+  assert.deepEqual(pendingOutputMap.get(windowId), ["pending-after-latest"]);
+  assert.deepEqual(runtime.deferredWrites, ["deferred-after-latest"]);
+  assert.deepEqual(batchedOutputMap.get(windowId), ["batched-after-latest"]);
+});
+
+test("snapshot coordinator drains issued live writes and applies only the latest empty snapshot", () => {
+  const harness = snapshotWriteHarness();
+  harness.terminal.write("live-before-snapshot", () => {});
+
+  harness.receiveSnapshot("A");
+  harness.receiveSnapshot("B");
+  harness.receiveSnapshot("");
+
+  assert.deepEqual(harness.terminal.writes, ["live-before-snapshot", ""]);
+  assert.deepEqual(harness.terminal.resets, []);
+
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.terminal.resets, [], "the barrier must wait behind issued live output");
+
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.decodedSnapshots, [""]);
+  assert.equal(harness.terminal.resets.length, 1);
+  assert.deepEqual(harness.terminal.writes, ["live-before-snapshot", "", ""]);
+
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.installedDecoders, ["decoder:"]);
+  assert.deepEqual(harness.refreshes, ["refresh"]);
+});
+
+test("snapshot coordinator serializes a newer snapshot and its live output after an in-flight snapshot", () => {
+  const harness = snapshotWriteHarness();
+
+  harness.receiveSnapshot("A");
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.decodedSnapshots, ["A"]);
+  assert.deepEqual(harness.terminal.writes, ["", "decoded:A"]);
+
+  harness.receiveSnapshot("B");
+  harness.receiveLive("live-after-B");
+  assert.deepEqual(harness.runtime.deferredWrites, ["live-after-B"]);
+
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.decodedSnapshots, ["A", "B"]);
+  assert.equal(harness.terminal.resets.length, 2);
+  assert.deepEqual(harness.installedDecoders, []);
+  assert.deepEqual(harness.refreshes, []);
+  assert.deepEqual(harness.terminal.writes, ["", "decoded:A", "decoded:B"]);
+
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.installedDecoders, ["decoder:B"]);
+  assert.deepEqual(harness.refreshes, ["refresh"]);
+  assert.deepEqual(harness.runtime.deferredWrites, []);
+  assert.deepEqual(harness.terminal.writes, ["", "decoded:A", "decoded:B", "live-after-B"]);
+});
+
+test("snapshot coordinator callbacks are no-ops after terminal runtime teardown", () => {
+  const harness = snapshotWriteHarness();
+
+  harness.receiveSnapshot("A");
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.terminal.writes, ["", "decoded:A"]);
+
+  harness.receiveLive("must-not-flush");
+  harness.setRuntimeCurrent(false);
+  harness.terminal.completeNextWrite();
+
+  assert.deepEqual(harness.installedDecoders, []);
+  assert.deepEqual(harness.refreshes, []);
+  assert.deepEqual(harness.runtime.deferredWrites, ["must-not-flush"]);
+  assert.deepEqual(harness.terminal.writes, ["", "decoded:A"]);
+});
+
+for (const [stage, armFailure] of [
+  ["take", (harness, error) => harness.failNextTake(error)],
+  ["decode", (harness, error) => harness.failNextDecode(error)],
+  ["reset", (harness, error) => harness.terminal.failNextReset(error)],
+  ["snapshot-write", (harness, error) => harness.terminal.failNextWrite(error)],
+]) {
+  test(`snapshot coordinator releases the latch after a synchronous ${stage} failure`, () => {
+    const harness = snapshotWriteHarness();
+    const failure = new Error(`${stage} failed`);
+
+    assert.equal(harness.receiveSnapshot("broken"), true);
+    harness.receiveLive("live-after-snapshot");
+    armFailure(harness, failure);
+    assert.doesNotThrow(() => harness.terminal.completeNextWrite());
+
+    assert.equal(harness.coordinator.shouldDeferOutput(), false);
+    assert.deepEqual(harness.errors, [{ error: failure, stage }]);
+    assert.deepEqual(harness.failureSettlements, ["settled"]);
+    assert.deepEqual(harness.runtime.deferredWrites, []);
+    assert.equal(harness.terminal.writes.at(-1), "live-after-snapshot");
+    assert.deepEqual(harness.installedDecoders, ["decoder:failure"]);
+    harness.receiveLive("live-after-failure");
+    assert.equal(harness.terminal.writes.at(-1), "live-after-failure");
+
+    assert.equal(harness.receiveSnapshot("valid"), true);
+    harness.terminal.completeNextWrite();
+    harness.terminal.completeNextWrite();
+    assert.deepEqual(harness.installedDecoders, ["decoder:failure", "decoder:valid"]);
+  });
+}
+
+test("snapshot coordinator discards a snapshot when the barrier write throws synchronously", () => {
+  const harness = snapshotWriteHarness();
+  const failure = new Error("barrier write failed");
+  harness.terminal.failNextWrite(failure);
+
+  assert.doesNotThrow(() => assert.equal(harness.receiveSnapshot("broken"), false));
+  assert.equal(harness.coordinator.shouldDeferOutput(), false);
+  assert.deepEqual(harness.errors, [{ error: failure, stage: "barrier-write" }]);
+  assert.deepEqual(harness.failureSettlements, ["settled"]);
+  assert.deepEqual(harness.installedDecoders, ["decoder:failure"]);
+
+  harness.receiveLive("live-after-barrier-failure");
+  assert.equal(harness.terminal.writes.at(-1), "live-after-barrier-failure");
+  assert.equal(harness.receiveSnapshot("valid"), true);
+  harness.terminal.completeNextWrite();
+  harness.terminal.completeNextWrite();
+  assert.deepEqual(harness.installedDecoders, ["decoder:failure", "decoder:valid"]);
+});
+
+for (const [stage, armFailure] of [
+  ["decode", (harness, error, beforeThrow) => harness.failNextDecode(error, beforeThrow)],
+  [
+    "reset",
+    (harness, error, beforeThrow) => harness.terminal.failNextReset(error, beforeThrow),
+  ],
+  [
+    "snapshot-write",
+    (harness, error, beforeThrow) => harness.terminal.failNextWrite(error, beforeThrow),
+  ],
+]) {
+  test(`snapshot coordinator automatically starts pending B after A ${stage} failure`, () => {
+    const harness = snapshotWriteHarness();
+    const failure = new Error(`A ${stage} failed`);
+
+    harness.receiveSnapshot("A");
+    harness.receiveLive("live-after-A");
+    armFailure(harness, failure, () => {
+      harness.receiveSnapshot("B");
+      harness.receiveLive("live-after-B");
+    });
+    harness.terminal.completeNextWrite();
+
+    assert.equal(harness.coordinator.shouldDeferOutput(), true);
+    assert.deepEqual(harness.errors, [{ error: failure, stage }]);
+    assert.deepEqual(harness.failureSettlements, []);
+    assert.deepEqual(harness.runtime.deferredWrites, ["live-after-B"]);
+    assert.equal(harness.terminal.writes.includes("live-after-A"), false);
+    assert.equal(harness.terminal.writes.at(-1), "", "B must receive a fresh barrier");
+
+    harness.terminal.completeNextWrite();
+    harness.terminal.completeNextWrite();
+    assert.deepEqual(harness.installedDecoders, ["decoder:B"]);
+    assert.deepEqual(harness.runtime.deferredWrites, []);
+    assert.equal(harness.terminal.writes.at(-1), "live-after-B");
+    assert.equal(harness.coordinator.shouldDeferOutput(), false);
+  });
+}
+
+test("snapshot failure settlement replaces an incomplete live decoder before flushing", () => {
+  const windowId = "wt-failed-snapshot-decoder";
+  const terminal = asyncTerminalStub();
+  const pendingSnapshotMap = new Map([[windowId, "A"]]);
+  const deferredLive = [new TextEncoder().encode("live-after-A")];
+  const decodedLive = [];
+  const errors = [];
+  let liveDecoder = new TextDecoder();
+  const incompleteLiveDecoder = liveDecoder;
+  incompleteLiveDecoder.decode(Uint8Array.of(0xe3), { stream: true });
+
+  const coordinator = createTerminalSnapshotWriteCoordinator({
+    terminal,
+    hasPendingSnapshot: () => pendingSnapshotMap.has(windowId),
+    takePendingSnapshot: () => {
+      const snapshot = pendingSnapshotMap.get(windowId);
+      pendingSnapshotMap.delete(windowId);
+      return { present: true, snapshot };
+    },
+    discardPendingSnapshot: () => pendingSnapshotMap.delete(windowId),
+    decodeSnapshot: () => {
+      throw new Error("decode failed");
+    },
+    isRuntimeCurrent: () => true,
+    installLiveDecoder: (decoder) => {
+      liveDecoder = decoder;
+    },
+    onSnapshotFailureSettled: () => {
+      liveDecoder = new TextDecoder();
+      for (const bytes of deferredLive.splice(0)) {
+        decodedLive.push(liveDecoder.decode(bytes, { stream: true }));
+      }
+    },
+    onLatestSnapshotWritten: () => {},
+    onError: (error, stage) => errors.push({ error, stage }),
+  });
+
+  coordinator.start();
+  terminal.completeNextWrite();
+
+  assert.notEqual(liveDecoder, incompleteLiveDecoder);
+  assert.deepEqual(decodedLive, ["live-after-A"]);
+  assert.equal(decodedLive[0].includes("\uFFFD"), false);
+  assert.equal(
+    liveDecoder.decode(new TextEncoder().encode("後続ライブ"), { stream: true }),
+    "後続ライブ",
+  );
+  assert.equal(coordinator.shouldDeferOutput(), false);
+  assert.equal(errors[0]?.stage, "decode");
+});
+
+test("snapshot failure settlement callback errors are isolated after latch release", () => {
+  const settlementFailure = new Error("settlement failed");
+  const harness = snapshotWriteHarness({ failureSettlementError: settlementFailure });
+  const decodeFailure = new Error("decode failed");
+
+  harness.receiveSnapshot("A");
+  harness.failNextDecode(decodeFailure);
+  assert.doesNotThrow(() => harness.terminal.completeNextWrite());
+
+  assert.equal(harness.coordinator.shouldDeferOutput(), false);
+  assert.deepEqual(harness.errors, [
+    { error: decodeFailure, stage: "decode" },
+    { error: settlementFailure, stage: "failure-settlement" },
+  ]);
+});
+
+test("snapshot completion flushes deferred live output when its refresh effect throws", () => {
+  const refreshFailure = new Error("refresh failed");
+  const harness = snapshotWriteHarness({ completionRefreshError: refreshFailure });
+
+  harness.receiveSnapshot("A");
+  harness.receiveLive("live-after-A");
+  harness.terminal.completeNextWrite();
+  assert.doesNotThrow(() => harness.terminal.completeNextWrite());
+
+  assert.deepEqual(harness.runtime.deferredWrites, []);
+  assert.equal(harness.terminal.writes.at(-1), "live-after-A");
+  assert.equal(harness.coordinator.shouldDeferOutput(), false);
+  assert.deepEqual(harness.errors, [{ error: refreshFailure, stage: "completion" }]);
+});
+
+test("app routes snapshot receipts and live output through the async snapshot coordinator", () => {
+  assert.match(
+    appSource,
+    /createTerminalSnapshotWriteCoordinator,/,
+    "app.js must import the async snapshot write coordinator",
+  );
+  assert.match(
+    appSource,
+    /runtime\.snapshotWriteCoordinator\s*=\s*createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?terminal,[\s\S]*?hasPendingSnapshot:[\s\S]*?takePendingSnapshot:[\s\S]*?discardPendingSnapshot:[\s\S]*?decodeSnapshot:[\s\S]*?isRuntimeCurrent:[\s\S]*?installLiveDecoder:[\s\S]*?onSnapshotFailureSettled:[\s\S]*?onLatestSnapshotWritten:[\s\S]*?onError:/,
+    "each terminal runtime must settle failed snapshots, guard stale callbacks, and report isolated errors",
+  );
+  assert.match(
+    appSource,
+    /onSnapshotFailureSettled:\s*\(\)\s*=>\s*\{[\s\S]*?decoderMap\.set\(windowId,\s*new TextDecoder\(\)\);[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);/,
+    "failed snapshot settlement must publish a fresh live decoder before flushing deferred output",
+  );
+  assert.match(
+    appSource,
+    /onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?snapshotWriteCoordinator\?\.shouldDeferOutput\(\)\s*===\s*true[\s\S]*?return;[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);/,
+    "callbacks from writes issued before the barrier must not refresh an in-flight snapshot",
+  );
+  assert.match(
+    appSource,
+    /runtime\.isReady\s*===\s*false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\)\s*===\s*true[\s\S]*?runtime\.deferredWrites\.push\(base64\);/,
+    "live output must stay encoded and deferred while a snapshot write is pending or in flight",
+  );
+  assert.match(
+    appSource,
+    /function replaceTerminalSnapshot\(windowId,\s*base64\)\s*\{[\s\S]*?clearTerminalOutputBeforeSnapshot\(\{[\s\S]*?pendingSnapshotMap\.set\(windowId,\s*base64\);[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);/,
+    "every snapshot receipt must clear older queues, replace the pending snapshot, and start or join the coordinator",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(pendingSnapshotMap\.has\(windowId\)\)\s*\{[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);[\s\S]*?\}/,
+    "the initial-fit handshake must start queued empty snapshots without consuming them outside the coordinator",
+  );
+  assert.match(
+    appSource,
+    /onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{\s*try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);[\s\S]*?\}/,
+    "final snapshot completion must flush post-boundary live output even when viewport refresh throws",
+  );
+});
 
 test("attachHostResizeReflow fans fitTerminal(persist=true) across visible terminals (T-184/T-187)", () => {
   const window = fixtureWindow();
@@ -232,6 +752,661 @@ test("rearmRefreshOnVisible is a no-op when no hidden refresh is pending (T-199)
   });
   assert.equal(didRearm, false);
   assert.deepEqual(calls, []);
+});
+
+test("runTerminalFitRequest marks hidden persisted fits pending without stale activation", () => {
+  const calls = [];
+  const result = terminalViewportReflow.runTerminalFitRequest({
+    persist: true,
+    canFit: () => {
+      calls.push("can-fit");
+      return false;
+    },
+    activate: () => {
+      calls.push("activate");
+      return { ran: true };
+    },
+    markPending: () => calls.push("mark-pending"),
+    clearPending: () => calls.push("clear-pending"),
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(calls, ["can-fit", "mark-pending"]);
+});
+
+test("runTerminalFitRequest keeps unresolved persisted activation pending", () => {
+  const calls = [];
+  const activation = { ran: false, reason: "layout-pending" };
+  const result = terminalViewportReflow.runTerminalFitRequest({
+    persist: true,
+    canFit: () => {
+      calls.push("can-fit");
+      return true;
+    },
+    activate: () => {
+      calls.push("activate");
+      return activation;
+    },
+    markPending: () => calls.push("mark-pending"),
+    clearPending: () => calls.push("clear-pending"),
+  });
+
+  assert.equal(result, activation);
+  assert.deepEqual(calls, ["can-fit", "activate", "mark-pending"]);
+});
+
+test("runTerminalFitRequest clears pending after a successful persisted fit", () => {
+  const calls = [];
+  const activation = { ran: true, geometrySent: true };
+  const result = terminalViewportReflow.runTerminalFitRequest({
+    persist: true,
+    canFit: () => {
+      calls.push("can-fit");
+      return true;
+    },
+    activate: () => {
+      calls.push("activate");
+      return activation;
+    },
+    markPending: () => calls.push("mark-pending"),
+    clearPending: () => calls.push("clear-pending"),
+  });
+
+  assert.equal(result, activation);
+  assert.deepEqual(calls, ["can-fit", "activate", "clear-pending"]);
+});
+
+test("runTerminalFitRequest leaves pending ownership unchanged after a non-persisted fit", () => {
+  const calls = [];
+  const activation = { ran: true };
+  const result = terminalViewportReflow.runTerminalFitRequest({
+    persist: false,
+    canFit: () => {
+      calls.push("can-fit");
+      return true;
+    },
+    activate: () => {
+      calls.push("activate");
+      return activation;
+    },
+    markPending: () => calls.push("mark-pending"),
+    clearPending: () => calls.push("clear-pending"),
+  });
+
+  assert.equal(result, activation);
+  assert.deepEqual(calls, ["can-fit", "activate"]);
+});
+
+test("runTerminalRevealActivation schedules one persisted activation after consuming pending refresh", () => {
+  const calls = [];
+  const result = terminalViewportReflow.runTerminalRevealActivation({
+    schedulePendingOutput: () => {
+      calls.push("schedule-output");
+      return true;
+    },
+    consumePendingRefresh: () => {
+      calls.push("consume-pending-refresh");
+      return true;
+    },
+    scheduleActivation: (options) => calls.push(["activation", options]),
+  });
+
+  assert.deepEqual(calls, [
+    "schedule-output",
+    "consume-pending-refresh",
+    ["activation", { shouldPersistGeometry: true }],
+  ]);
+  assert.deepEqual(result, {
+    pendingOutputScheduled: true,
+    pendingRefreshConsumed: true,
+    activationScheduled: true,
+  });
+});
+
+test("runTerminalRevealActivation schedules exactly one persisted activation without pending refresh", () => {
+  const calls = [];
+  const result = terminalViewportReflow.runTerminalRevealActivation({
+    schedulePendingOutput: () => {
+      calls.push("schedule-output");
+      return false;
+    },
+    consumePendingRefresh: () => {
+      calls.push("consume-pending-refresh");
+      return false;
+    },
+    scheduleActivation: (options) => calls.push(["activation", options]),
+  });
+
+  assert.deepEqual(calls, [
+    "schedule-output",
+    "consume-pending-refresh",
+    ["activation", { shouldPersistGeometry: true }],
+  ]);
+  assert.deepEqual(result, {
+    pendingOutputScheduled: false,
+    pendingRefreshConsumed: false,
+    activationScheduled: true,
+  });
+});
+
+test("activation intent coalescing keeps authoritative persistence through retries", () => {
+  let pendingIntent = terminalViewportReflow.mergeTerminalActivationIntent(null, {
+    shouldPersistGeometry: false,
+    reason: "topmost_focus",
+  });
+  pendingIntent = terminalViewportReflow.mergeTerminalActivationIntent(pendingIntent, {
+    shouldPersistGeometry: true,
+    reason: "visibility_reveal",
+  });
+  pendingIntent = terminalViewportReflow.mergeTerminalActivationIntent(pendingIntent, {
+    shouldPersistGeometry: false,
+    reason: "topmost_focus",
+  });
+
+  const consumed = terminalViewportReflow.takeTerminalActivationIntent(pendingIntent);
+  assert.deepEqual(consumed, {
+    intent: {
+      shouldPersistGeometry: true,
+      reason: "visibility_reveal",
+    },
+    pendingIntent: null,
+  });
+  let retryIntent = terminalViewportReflow.mergeTerminalActivationIntent(
+    null,
+    consumed.intent,
+  );
+  retryIntent = terminalViewportReflow.mergeTerminalActivationIntent(retryIntent, {
+    shouldPersistGeometry: false,
+    reason: "topmost_focus",
+  });
+  assert.deepEqual(terminalViewportReflow.takeTerminalActivationIntent(retryIntent), {
+    intent: {
+      shouldPersistGeometry: true,
+      reason: "visibility_reveal",
+    },
+    pendingIntent: null,
+  });
+});
+
+test("activation settlement rearms only failed authoritative viewport refreshes", () => {
+  const settle = terminalViewportReflow.resolveTerminalViewportRefreshSettlement;
+  const cases = [
+    {
+      name: "persisted activation failure",
+      input: {
+        activationRan: false,
+        shouldPersistGeometry: true,
+        hasAuthoritativePendingRefresh: false,
+      },
+      expected: { shouldUpdate: true, pending: true },
+    },
+    {
+      name: "consumed pending refresh failure",
+      input: {
+        activationRan: false,
+        shouldPersistGeometry: false,
+        hasAuthoritativePendingRefresh: true,
+      },
+      expected: { shouldUpdate: true, pending: true },
+    },
+    {
+      name: "focus-only failure",
+      input: {
+        activationRan: false,
+        shouldPersistGeometry: false,
+        hasAuthoritativePendingRefresh: false,
+      },
+      expected: { shouldUpdate: false, pending: false },
+    },
+  ];
+
+  for (const { name, input, expected } of cases) {
+    assert.deepEqual(settle?.(input), expected, name);
+  }
+});
+
+test("successful authoritative activation clears the viewport refresh settlement", () => {
+  assert.deepEqual(
+    terminalViewportReflow.resolveTerminalViewportRefreshSettlement?.({
+      activationRan: true,
+      shouldPersistGeometry: true,
+      hasAuthoritativePendingRefresh: true,
+    }),
+    { shouldUpdate: true, pending: false },
+  );
+});
+
+test("ordinary redraw suppresses the focus fast path without becoming authoritative pending", () => {
+  const callOrder = [];
+  const parent = {
+    clientWidth: 960,
+    clientHeight: 540,
+    getBoundingClientRect: () => ({ width: 960, height: 540 }),
+  };
+  const runtime = {
+    viewportRefreshPending: false,
+    isReady: true,
+    lastSuccessfulActivationSnapshot: {
+      width: 960,
+      height: 540,
+      cols: 132,
+      rows: 38,
+    },
+    terminal: {
+      cols: 132,
+      rows: 38,
+      element: { parentElement: parent },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      proposeDimensions: () => undefined,
+      fit: () => callOrder.push("fit"),
+    },
+  };
+
+  const activation = runTerminalActivationSequence({
+    runtime,
+    windowId: "ordinary-redraw",
+    shouldPersistGeometry: false,
+    allowFastPath: true,
+    hasPendingRefresh: true,
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+  const settlement =
+    terminalViewportReflow.resolveTerminalViewportRefreshSettlement({
+      activationRan: activation.ran,
+      shouldPersistGeometry: false,
+      hasAuthoritativePendingRefresh: runtime.viewportRefreshPending,
+    });
+  if (settlement.shouldUpdate) {
+    runtime.viewportRefreshPending = settlement.pending;
+  }
+
+  assert.equal(activation.ran, false);
+  assert.equal(activation.fastPath, false);
+  assert.equal(activation.reason, "fit-dimensions-unavailable");
+  assert.deepEqual(callOrder, ["refresh"]);
+  assert.equal(runtime.viewportRefreshPending, false);
+  assert.match(
+    appSource,
+    /const hasAuthoritativePendingRefresh =\s*activeRuntime\.viewportRefreshPending === true;[\s\S]*?const hasPendingRefresh =\s*hasAuthoritativePendingRefresh \|\|[\s\S]*?terminalViewportRefreshScheduler\?\.hasPending\?\.\(windowId\) === true;[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?hasAuthoritativePendingRefresh,/,
+    "focus activation must separate the fast-path redraw guard from authoritative pending settlement",
+  );
+});
+
+test("retry exhaustion preserves refresh intent for a later visibility restore", () => {
+  const settle = terminalViewportReflow.resolveTerminalViewportRefreshSettlement;
+  assert.match(
+    appSource,
+    /function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?restartRetryBudget = false[\s\S]*?\} = \{\},\s*\) \{[\s\S]*?if \(restartRetryBudget\) \{\s*runtime\.activationAttempts = 0;\s*\}[\s\S]*?if \(runtime\.activationFrame !== null\) \{\s*return;/,
+    "external activation triggers must restart the bounded retry budget before a coalesced-frame early return",
+  );
+  for (const reason of [
+    "force_refresh_retry",
+    "visibility_reveal",
+    "visibility_restore",
+  ]) {
+    assert.match(
+      appSource,
+      new RegExp(
+        `scheduleTerminalFocusActivation\\(windowId,\\s*\\{[\\s\\S]*?reason:\\s*"${reason}",\\s*restartRetryBudget:\\s*true`,
+      ),
+      `${reason} must restart a previously exhausted retry budget`,
+    );
+  }
+  assert.equal(
+    (appSource.match(/restartRetryBudget:\s*true/g) || []).length,
+    3,
+    "internal retries and topmost focus must not restart the bounded retry budget",
+  );
+
+  const frameQueue = [];
+  const host = {
+    clientWidth: 0,
+    clientHeight: 0,
+    getBoundingClientRect: () => ({
+      width: host.clientWidth,
+      height: host.clientHeight,
+    }),
+  };
+  const geometry = [];
+  const runtime = {
+    viewportRefreshPending: false,
+    activationAttempts: 0,
+    activationFrame: null,
+    pendingActivationIntent: null,
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: { parentElement: host },
+      refresh: () => {},
+      focus: () => {},
+    },
+    fitAddon: {
+      proposeDimensions: () => ({ cols: 120, rows: 36 }),
+      fit: () => {
+        runtime.terminal.cols = 120;
+        runtime.terminal.rows = 36;
+      },
+    },
+  };
+  const scheduleActivation = ({
+    shouldPersistGeometry,
+    reason,
+    restartRetryBudget = false,
+  }) => {
+    runtime.pendingActivationIntent =
+      terminalViewportReflow.mergeTerminalActivationIntent(
+        runtime.pendingActivationIntent,
+        { shouldPersistGeometry, reason },
+      );
+    if (restartRetryBudget) {
+      runtime.activationAttempts = 0;
+    }
+    if (runtime.activationFrame !== null) {
+      return;
+    }
+    runtime.activationFrame = frameQueue.length + 1;
+    frameQueue.push(() => {
+      runtime.activationFrame = null;
+      const { intent, pendingIntent } =
+        terminalViewportReflow.takeTerminalActivationIntent(
+          runtime.pendingActivationIntent,
+        );
+      runtime.pendingActivationIntent = pendingIntent;
+      const hasPendingRefresh = runtime.viewportRefreshPending;
+      const activation = runTerminalActivationSequence({
+        runtime,
+        windowId: "retry-exhaustion",
+        shouldPersistGeometry: intent.shouldPersistGeometry,
+        hasPendingRefresh,
+        sendGeometry: (windowId, cols, rows) =>
+          geometry.push({ windowId, cols, rows }),
+      });
+      const settlement = settle?.({
+        activationRan: activation.ran,
+        shouldPersistGeometry: intent.shouldPersistGeometry,
+        hasAuthoritativePendingRefresh: runtime.viewportRefreshPending,
+      });
+      if (settlement?.shouldUpdate) {
+        runtime.viewportRefreshPending = settlement.pending;
+      }
+      if (!activation.ran) {
+        runtime.activationAttempts += 1;
+        if (runtime.activationAttempts <= 60) {
+          scheduleActivation({
+            shouldPersistGeometry: intent.shouldPersistGeometry,
+            reason: intent.reason,
+          });
+        }
+        return;
+      }
+      runtime.activationAttempts = 0;
+    });
+  };
+
+  // One initial frame plus HANDSHAKE_RETRY_LIMIT (60) bounded retries.
+  scheduleActivation({
+    shouldPersistGeometry: true,
+    reason: "visibility_reveal",
+    restartRetryBudget: true,
+  });
+  for (let attempt = 0; attempt <= 60; attempt += 1) {
+    assert.equal(frameQueue.length, 1);
+    frameQueue.shift()();
+  }
+
+  assert.equal(runtime.viewportRefreshPending, true);
+  assert.equal(runtime.activationAttempts, 61);
+  assert.equal(frameQueue.length, 0);
+  assert.deepEqual(geometry, []);
+
+  // A later document visibility restore owns a fresh bounded budget. Its
+  // first frame may still see unsettled layout and must queue an internal
+  // retry without resetting the attempt it just consumed.
+  const pendingConsumed = rearmRefreshOnVisible({
+    hasPendingRefresh: () => runtime.viewportRefreshPending,
+    canRefresh: () => true,
+    clearPendingRefresh: () => {
+      runtime.viewportRefreshPending = false;
+    },
+  });
+  assert.equal(pendingConsumed, true);
+  scheduleActivation({
+    shouldPersistGeometry: true,
+    reason: "visibility_restore",
+    restartRetryBudget: true,
+  });
+  assert.equal(runtime.activationAttempts, 0);
+  assert.equal(frameQueue.length, 1);
+  frameQueue.shift()();
+  assert.equal(runtime.activationAttempts, 1);
+  assert.equal(runtime.viewportRefreshPending, true);
+  assert.equal(frameQueue.length, 1);
+
+  host.clientWidth = 960;
+  host.clientHeight = 540;
+  frameQueue.shift()();
+
+  assert.equal(runtime.activationAttempts, 0);
+  assert.equal(runtime.viewportRefreshPending, false);
+  assert.equal(frameQueue.length, 0);
+  assert.deepEqual(geometry, [
+    { windowId: "retry-exhaustion", cols: 120, rows: 36 },
+  ]);
+});
+
+test("queued plain redraw cannot clear a failed authoritative activation settlement", () => {
+  const frames = [];
+  let viewportRefreshPending = false;
+  let refreshCount = 0;
+  const scheduler = createTerminalViewportRefreshScheduler({
+    schedule: (callback) => frames.push(callback),
+    canRefresh: () => true,
+    refresh: () => {
+      refreshCount += 1;
+    },
+    markPending: () => {
+      viewportRefreshPending = true;
+    },
+  });
+
+  scheduler.enqueue("queued-redraw");
+  viewportRefreshPending = true;
+  frames.shift()();
+
+  assert.equal(refreshCount, 1);
+  assert.equal(viewportRefreshPending, true);
+
+  const fallbackStart = appSource.indexOf(
+    "function scheduleTerminalViewportRefresh(",
+  );
+  const redrawStart = appSource.indexOf(
+    "function refreshTerminalViewport(",
+    fallbackStart,
+  );
+  const fallbackSource = appSource.slice(fallbackStart, redrawStart);
+  assert.doesNotMatch(
+    fallbackSource,
+    /viewportRefreshPending\s*=\s*false/,
+    "plain fallback redraw must not clear authoritative pending refresh state",
+  );
+
+  const schedulerStart = appSource.indexOf(
+    "terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({",
+  );
+  const forceRefreshStart = appSource.indexOf(
+    "function forceTerminalViewportRefresh(",
+    schedulerStart,
+  );
+  const schedulerSource = appSource.slice(schedulerStart, forceRefreshStart);
+  assert.doesNotMatch(
+    schedulerSource,
+    /viewportRefreshPending\s*=\s*false/,
+    "plain scheduler redraw must not clear authoritative pending refresh state",
+  );
+});
+
+test("pending reveal and topmost focus share one authoritative activation frame", () => {
+  const frameQueue = [];
+  let scheduledFrameCount = 0;
+  const callOrder = [];
+  const parent = {
+    clientWidth: 960,
+    clientHeight: 540,
+    getBoundingClientRect: () => {
+      callOrder.push("flush-layout");
+      return { width: 960, height: 540 };
+    },
+  };
+  const runtime = {
+    viewportRefreshPending: true,
+    activationFrame: null,
+    // A persisted request already ran while hidden: its frame was consumed,
+    // but the authoritative intent must remain queued for the next reveal.
+    pendingActivationIntent: {
+      shouldPersistGeometry: true,
+      reason: "hidden_persisted_request",
+    },
+    isReady: true,
+    lastSuccessfulActivationSnapshot: {
+      width: 960,
+      height: 540,
+      cols: 132,
+      rows: 38,
+    },
+    terminal: {
+      cols: 132,
+      rows: 38,
+      element: { parentElement: parent },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      proposeDimensions: () => ({ cols: 132, rows: 38 }),
+      fit: () => callOrder.push("fit"),
+    },
+  };
+  const activations = [];
+
+  const scheduleFocusActivation = ({ shouldPersistGeometry, reason }) => {
+    runtime.pendingActivationIntent =
+      terminalViewportReflow.mergeTerminalActivationIntent(
+        runtime.pendingActivationIntent,
+        { shouldPersistGeometry, reason },
+      );
+    if (runtime.activationFrame !== null) return;
+    scheduledFrameCount += 1;
+    runtime.activationFrame = scheduledFrameCount;
+    frameQueue.push(() => {
+      runtime.activationFrame = null;
+      const consumed = terminalViewportReflow.takeTerminalActivationIntent(
+        runtime.pendingActivationIntent,
+      );
+      runtime.pendingActivationIntent = consumed.pendingIntent;
+      const activation = runTerminalActivationSequence({
+        runtime,
+        windowId: "pending-reveal",
+        shouldFocus: true,
+        shouldPersistGeometry: consumed.intent.shouldPersistGeometry,
+        syncGeometryOnGridChange: true,
+        allowFastPath: true,
+        sendGeometry: () => callOrder.push("sendGeometry"),
+      });
+      activations.push({ intent: consumed.intent, activation });
+    });
+  };
+
+  const reveal = terminalViewportReflow.runTerminalRevealActivation({
+    schedulePendingOutput: () => false,
+    consumePendingRefresh: () =>
+      rearmRefreshOnVisible({
+        hasPendingRefresh: () => runtime.viewportRefreshPending,
+        canRefresh: () => true,
+        clearPendingRefresh: () => {
+          runtime.viewportRefreshPending = false;
+        },
+      }),
+    scheduleActivation: ({ shouldPersistGeometry }) =>
+      scheduleFocusActivation({
+        shouldPersistGeometry,
+        reason: "visibility_reveal",
+      }),
+  });
+  scheduleFocusActivation({
+    shouldPersistGeometry: false,
+    reason: "topmost_focus",
+  });
+
+  assert.deepEqual(reveal, {
+    pendingOutputScheduled: false,
+    pendingRefreshConsumed: true,
+    activationScheduled: true,
+  });
+  assert.equal(runtime.viewportRefreshPending, false);
+  assert.equal(scheduledFrameCount, 1);
+  assert.equal(frameQueue.length, 1);
+
+  frameQueue.shift()();
+
+  assert.deepEqual(callOrder, ["refresh", "flush-layout", "fit", "sendGeometry", "focus"]);
+  assert.equal(callOrder.filter((call) => call === "sendGeometry").length, 1);
+  assert.equal(callOrder.filter((call) => call === "focus").length, 1);
+  assert.equal(runtime.viewportRefreshPending, false);
+  assert.equal(runtime.pendingActivationIntent, null);
+  assert.equal(runtime.activationFrame, null);
+  assert.equal(activations.length, 1);
+  assert.deepEqual(activations[0].intent, {
+    shouldPersistGeometry: true,
+    reason: "hidden_persisted_request",
+  });
+  assert.equal(activations[0].activation.fastPath, false);
+  assert.equal(activations[0].activation.geometrySent, true);
+});
+
+test("observeTerminalFontMetricsReady routes only current runtimes by visibility", async () => {
+  let resolveFontsReady;
+  const fontsReady = new Promise((resolve) => {
+    resolveFontsReady = resolve;
+  });
+  const currentRuntimes = new Map([
+    ["visible", {}],
+    ["hidden", {}],
+    ["removed-before-ready", {}],
+  ]);
+  const calls = [];
+
+  assert.equal(
+    terminalViewportReflow.observeTerminalFontMetricsReady({
+      fontsReady,
+      terminalIds: () => currentRuntimes.keys(),
+      canRefresh: (windowId) => {
+        calls.push(`can-refresh:${windowId}`);
+        return windowId !== "hidden";
+      },
+      scheduleFit: (windowId, persist) =>
+        calls.push(`fit:${windowId}:${String(persist)}`),
+      markPending: (windowId) => calls.push(`pending:${windowId}`),
+    }),
+    true,
+  );
+
+  currentRuntimes.delete("removed-before-ready");
+  currentRuntimes.set("created-before-ready", {});
+  resolveFontsReady();
+  await fontsReady;
+  await Promise.resolve();
+
+  assert.deepEqual(calls, [
+    "can-refresh:visible",
+    "fit:visible:true",
+    "can-refresh:hidden",
+    "pending:hidden",
+    "can-refresh:created-before-ready",
+    "fit:created-before-ready:true",
+  ]);
+  assert.equal(calls.some((call) => call.includes("removed-before-ready")), false);
 });
 
 test("runTerminalActivationSequence renders before fit and emits geometry (T-199 / FR-056)", () => {
@@ -457,6 +1632,53 @@ test("runTerminalActivationSequence uses a focus-only fast path for same-grid re
     geometrySent: false,
     reason: "same-grid",
   });
+});
+
+test("runTerminalActivationSequence prioritizes persisted geometry over the same-grid fast path", () => {
+  const callOrder = [];
+  const parent = {
+    clientWidth: 960,
+    clientHeight: 540,
+    getBoundingClientRect: () => {
+      callOrder.push("flush-layout");
+      return { width: 960, height: 540 };
+    },
+  };
+  const runtime = {
+    isReady: true,
+    lastSuccessfulActivationSnapshot: {
+      width: 960,
+      height: 540,
+      cols: 132,
+      rows: 38,
+    },
+    terminal: {
+      cols: 132,
+      rows: 38,
+      element: { parentElement: parent },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => ({ cols: 132, rows: 38 }),
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-authoritative-same-grid",
+    shouldFocus: false,
+    shouldPersistGeometry: true,
+    syncGeometryOnGridChange: true,
+    allowFastPath: true,
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(callOrder, ["refresh", "flush-layout", "fit", "sendGeometry"]);
+  assert.equal(result.fastPath, false);
+  assert.equal(result.gridChanged, false);
+  assert.equal(result.geometrySent, true);
 });
 
 test("runTerminalActivationSequence keeps full activation for pending output, refresh, unready, and changed layout (T-308)", () => {
@@ -1061,6 +2283,20 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     /createTerminalFitScheduler\(\{\s*fitTerminal\s*\}\)/,
     "app.js must construct the shared terminal fit scheduler from fitTerminal",
   );
+  const fitTerminalSource = appSource.slice(
+    appSource.indexOf("function fitTerminal("),
+    appSource.indexOf("function scheduleTerminalFit("),
+  );
+  assert.match(
+    fitTerminalSource,
+    /runTerminalFitRequest\(\{[\s\S]*?persist,[\s\S]*?canFit:[\s\S]*?markPending:[\s\S]*?clearPending:[\s\S]*?viewportRefreshPending = false[\s\S]*?activate:[\s\S]*?runTerminalActivationSequence\(\{/,
+    "fitTerminal must settle pending state after persisted hidden, failed, and successful fits",
+  );
+  assert.doesNotMatch(
+    fitTerminalSource,
+    /sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\)/,
+    "hidden persisted fits must never send stale runtime cols/rows",
+  );
   assert.match(
     appSource,
     /createTerminalViewportRefreshScheduler\(\{[\s\S]*?canRefresh:\s*canRefreshTerminalViewport[\s\S]*?refresh:\s*\(windowId\)\s*=>[\s\S]*?refreshTerminalViewport\(windowId\)[\s\S]*?markPending:\s*markTerminalViewportRefreshPending[\s\S]*?\}\)/,
@@ -1120,10 +2356,52 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     /rearmRefreshOnVisible/,
     "hidden refresh requests must re-arm through the shared visibility helper",
   );
+  const pendingRearmStart = appSource.indexOf(
+    "function consumePendingTerminalViewportRefresh(",
+  );
+  const revealActivationStart = appSource.indexOf(
+    "function activateTerminalOnReveal(",
+  );
+  assert.notEqual(pendingRearmStart, -1);
+  assert.notEqual(revealActivationStart, -1);
+  const pendingRearmSource = appSource.slice(
+    pendingRearmStart,
+    revealActivationStart,
+  );
+  assert.doesNotMatch(
+    pendingRearmSource,
+    /forceTerminalViewportRefresh/,
+    "pending viewport rearm must not synchronously compete with the activation scheduler",
+  );
+  assert.doesNotMatch(
+    pendingRearmSource,
+    /scheduleRefresh:/,
+    "pending viewport rearm must only consume the flag; reveal/restore owns scheduling",
+  );
+  assert.match(
+    appSource,
+    /function activateTerminalOnReveal\(windowId\)[\s\S]*?runTerminalRevealActivation\(\{[\s\S]*?shouldPersistGeometry[\s\S]*?visibility_reveal/,
+    "all reveal paths must share one persisted geometry router",
+  );
+  assert.equal(
+    (appSource.match(/onReveal:\s*\(\)\s*=>\s*activateTerminalOnReveal\(/g) || []).length,
+    2,
+    "both workspace reveal surfaces must delegate exactly once to the common router",
+  );
+  assert.match(
+    appSource,
+    /observeTerminalFontMetricsReady\(\{[\s\S]*?fontsReady:\s*document\.fonts\?\.ready,[\s\S]*?terminalIds:\s*\(\)\s*=>\s*terminalMap\.keys\(\),[\s\S]*?scheduleFit:\s*scheduleTerminalFit,[\s\S]*?markPending:\s*markTerminalViewportRefreshPending/,
+    "font readiness must fan out over the current terminal map using existing fit/pending paths",
+  );
   assert.match(
     appSource,
     /document\.addEventListener\("visibilitychange"[\s\S]*?rearmVisibleTerminalViewportRefreshes\(\);/,
     "document visibility restore must re-arm visible terminal viewport refreshes",
+  );
+  assert.match(
+    appSource,
+    /function rearmVisibleTerminalViewportRefreshes\(\)[\s\S]*?if\s*\(consumePendingTerminalViewportRefresh\(windowId\)\)\s*\{[\s\S]*?scheduleTerminalFocusActivation\(windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*true,[\s\S]*?reason:\s*"visibility_restore"[\s\S]*?continue;[\s\S]*?scheduleTerminalViewportRefresh\(windowId\)/,
+    "visibility restore must route pending authoritative geometry through the activation scheduler",
   );
   assert.match(
     appSource,
@@ -1132,7 +2410,7 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /replaceTerminalSnapshot\([\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);/,
+    /onLatestSnapshotWritten:[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);/,
     "snapshot replay must use the force refresh path so terminal.reset() cannot strand scrollback",
   );
   // SPEC-2008 Phase 26.B / FR-056 wiring: activation path must delegate
@@ -1154,6 +2432,36 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /function scheduleTerminalFocusActivation\([\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?shouldPersistGeometry,[\s\S]*?syncGeometryOnGridChange:\s*true,[\s\S]*?sendGeometry,[\s\S]*?\}\);/,
     "focus activation must opt into grid-change geometry sync while keeping caller-owned persistence",
+  );
+  assert.match(
+    appSource,
+    /pendingActivationIntent\s*=\s*mergeTerminalActivationIntent\([\s\S]*?if\s*\(runtime\.activationFrame\s*!==\s*null\)\s*\{\s*return;/,
+    "focus activation requests must merge persistence intent before an existing-frame early return",
+  );
+  assert.match(
+    appSource,
+    /takeTerminalActivationIntent\(\s*activeRuntime\.pendingActivationIntent,?\s*\)[\s\S]*?activeRuntime\.pendingActivationIntent\s*=\s*pendingIntent;[\s\S]*?\{\s*shouldPersistGeometry,\s*reason\s*\}\s*=\s*intent;/,
+    "the scheduled frame must consume and clear the effective coalesced activation intent",
+  );
+  assert.match(
+    appSource,
+    /runTerminalActivationSequence\(\{[\s\S]*?shouldPersistGeometry,[\s\S]*?traceTerminalActivation\(windowId,\s*activation,\s*\{[\s\S]*?activation_reason:\s*reason,[\s\S]*?should_persist_geometry:\s*shouldPersistGeometry/,
+    "activation and trace must use the consumed effective intent",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(!activation\.ran\)[\s\S]*?scheduleTerminalFocusActivation\(windowId,\s*\{\s*shouldPersistGeometry,\s*reason,/,
+    "a bounded retry must inherit the consumed effective intent",
+  );
+  assert.match(
+    appSource,
+    /const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasAuthoritativePendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)/,
+    "activation settlement must rearm failed authoritative refreshes before retry exhaustion and clear successful ones before the fast path returns",
+  );
+  assert.match(
+    appSource,
+    /pendingActivationIntent:\s*null,/,
+    "terminal runtimes must initialize their coalesced activation intent",
   );
 
   // Issue #2937 — the focus-change reflow path must not give up after one

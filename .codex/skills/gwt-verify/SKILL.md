@@ -40,6 +40,17 @@ Playwright recipe. Instead it executes the following four-part contract:
    launch → navigate → observe) and ask the user to confirm or reject. See
    `references/user-verification-guide.md`.
 
+For every new or changed blocking gate, the verification evidence must also
+cover the complete gate acceptance contract:
+
+- an **agent-reachable recovery operation**
+- **diagnostic visibility** for both the requirement and current state
+- a **positive test** proving the invalid state is rejected
+- a **false-positive negative test** proving legitimate work is not rejected
+
+A gate missing any of these four elements fails verification. Warning-only
+diagnostics are not classified as blocking gates.
+
 Project-local rules always win. If the project root has an AGENTS.md / README
 section describing its own testing approach (e.g., "run `make verify`",
 "use Unity Editor batch mode test runner"), the agent follows that instead of
@@ -61,6 +72,54 @@ Additional flag:
   Default is **off**; `--mode full` and `--mode pre-pr` require user
   verification unless this flag is set. The reason is recorded in the
   evidence bundle as `User Verification: skipped(--skip-user-check)`.
+
+## Launch mode (autonomous vs interactive)
+
+Verification behavior depends on **who launched the work**, not on how hard
+the check looks. Read it from the launcher's own environment — never from the
+agent's judgement:
+
+| Launch mode | Detection | User Verification Handoff |
+|---|---|---|
+| `autonomous` | `GWT_AUTONOMOUS_EXECUTION` is set to a truthy value (paired with `GWT_AUTONOMOUS_ISSUE`) — an unattended gwt Issue Monitor launch | **Waived.** Nobody is watching the session. |
+| `interactive` | the variable is absent — a human started this work | Unchanged: the handoff below runs as written. |
+
+Record the detected mode on the evidence bundle's `Launch mode:` line.
+
+In `autonomous` mode:
+
+- **Skip the User Verification Handoff phase entirely.** Do not prepare an
+  instance, do not share a URL, and do not call the platform's question tool —
+  in an autonomous session a question is converted into a NeedsHuman handoff
+  that parks the owner Issue, so asking ends the execution instead of pausing
+  it.
+- Record `User Verification Result: n/a (autonomous)`. This is a launch-mode
+  fact, not a judgement call. It is **not** interchangeable with
+  `skipped(<reason>)`, which still means *an agent decided to defer a check a
+  human could have done*.
+- A UI surface in scope is covered instead by the agent's own automated headed
+  run — see **Agent Visual Check** below. `n/a (autonomous)` never excuses a
+  missing or failing Agent Visual Check.
+
+## Agent Visual Check (the agent's own browser-check)
+
+The agent's own headed run is evidence the **agent** produced. It is recorded
+on its own line and is **never a User Verification Result** — a self-reported
+"looks right" must not be readable as a human having confirmed anything.
+
+Run it whenever a UI surface is in scope (by diff or by acceptance-aware
+escalation) and the project ships a headed runner, in every launch mode:
+
+- a real browser / WebView instance, not headless-only, not a DOM shim
+- both `dark` and `light` themes
+- zero console errors and zero page errors
+- the concrete changed behavior actually exercised, not just page load
+
+Record the result as `Agent Visual Check: pass | fail(<reason>) | n/a (no UI
+surface)`, and list the executed headed command under `Executed` so the claim
+is backed by a `PASS` entry. In `autonomous` mode this is the GUI quality bar
+that replaces the human's eyes, so `Agent Visual Check: fail(<reason>)` — or a
+UI surface in scope with no Agent Visual Check at all — makes `Overall: FAIL`.
 
 ## Invocation Sequence
 
@@ -95,6 +154,14 @@ gwt-verify
      server per `references/playwright-runbook.md` before invoking the
      runner. When the runner supports a structured reporter (JSON / TAP /
      list / JUnit XML), use it so test-level results can be extracted.
+     In gwt-managed execution worktrees, first register the derived matrix
+     with JSON operation `verify.plan` (`params.commands:[...]`), then run
+     it in full through `verify.run` (one plain command per entry, no shell
+     operators): gwtd executes the commands itself and writes the
+     tool-generated Verification Run Record that `execution.complete` and
+     Ready PR handoffs require (SPEC-3248 P8b/T-130). A run that does not
+     cover the registered plan — or a run without a plan — never satisfies
+     those gates, and prose summaries of test runs do not either.
   7. Extract a Test Inventory from each runner's output: test name,
      describe block, scenario / snapshot title, lint rule name, etc.
      If extraction fails for a runner, record
@@ -122,6 +189,7 @@ Output to stdout in the following shape (Markdown):
 ## Verification Report
 
 Mode: <quick|full|pre-pr>
+Launch mode: autonomous | interactive
 Baseline: merge-base HEAD..origin/develop (<N> commits, <M> files)
 Changed surfaces: <abstract surface list>
 Acceptance Surface: <user-facing surface the change is escalated to, or `non-user-facing(<justification>)`>
@@ -144,23 +212,38 @@ Skipped (no matching surface or not applicable):
 (inventory unavailable: <reason>)  # when extraction failed for a runner
 
 ### User Verification
-Status: required | recommended | skipped(<reason>)
+Status: required | recommended | skipped(<reason>) | waived(autonomous launch)
 Surfaces requiring user check: <list>
+
+#### Verification Target Card
+Owner Issue/SPEC: <Issue #N, SPEC #N, or approved standalone task label>
+Work purpose: <short concrete objective that distinguishes this work from other active agents>
+Success Goal: <user-visible behavior achieved and the observation that proves it>
+Requesting agent/session: <agent provider/name plus GWT_SESSION_ID or equivalent stable session ID>
+Branch: <exact branch>
+Absolute worktree: <absolute path of the target checkout>
+Commit: <full or unambiguous short HEAD SHA>
+Prepared instance ID: <runtime-specific PID, window/pane ID, port, or invocation label tied to this checkout>
+URL or launch target: <verified URL, GUI/editor target, or exact CLI/TUI invocation>
 
 #### 導線 (How to access the changed behavior)
 1. build:     <project-specific build command>
 2. launch:    <how to start the app / open the editor / run the binary>
 3. navigate:  <how to reach the changed feature inside the running app>
-4. observe:   <what the user should look at / interact with>
+4. observe:   <action to perform and the exact result that proves the Success Goal>
 
 #### Check Items
-- [ ] <expected behavior — the representative happy path>
-- [ ] <edge case / failure handling — at least one>
-- [ ] <adjacent feature regression sanity — at least one>
+- [ ] Expected — Action: <concrete click/input/command> → Expected: <decidable result>
+- [ ] Edge — Action: <reachable boundary action> → Expected: <decidable handling>
+- [ ] Regression — Action: <adjacent feature action> → Expected: <unchanged result>
+
+#### Automated-only Evidence
+- <unreachable manual boundary>: Executed item `<exact command>` — PASS (<named test/scenario>)
 
 Expected: <one-line summary of the intended behavior>
 Observed: <user response slot>
-User Verification Result: pending | confirmed | rejected(<reason>) | n/a
+User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous)
+Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)
 
 Headed verification: <yes|no>
 Tooling installed during run: <list, or "none">
@@ -171,8 +254,17 @@ Overall: PASS|FAIL
 Rules:
 
 - `Overall: PASS` requires **both** every entry in `Executed` reporting `PASS`
-  **and** `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
-  `pending` must never resolve to `PASS`.
+  **and** `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
+  skipped(<reason>)}`. `pending` must never resolve to `PASS`.
+- When a UI surface is in scope, `Overall: PASS` additionally requires
+  `Agent Visual Check: pass`. In `autonomous` mode that line carries the GUI
+  quality bar on its own, so a missing or failing Agent Visual Check is
+  `Overall: FAIL` even though `User Verification Result` is
+  `n/a (autonomous)`.
+- Every acceptance boundary in scope must map to either a reachable manual
+  checkbox or an Automated-only Evidence item that names the exact command and
+  test. An Automated-only Evidence item must match a `PASS` entry under
+  `Executed`; missing, failed, or unlinked coverage makes `Overall: FAIL`.
 - If any executed command fails, `Overall: FAIL` and the failing command's
   detail block is captured verbatim.
 - If the user rejects, `Overall: FAIL` and the reason is preserved.
@@ -194,11 +286,21 @@ project-specific specialization, see `references/surface-taxonomy.md`.
 | Skill asset / agent config | **Recommended** | Describe the trigger phrase or scenario that should activate the modified skill / agent, plus the expected effect. |
 | Docs / config-only (markdownlint clean) | **Skipped(docs-only)** | Automated checks are sufficient. |
 
+The `User Check` column applies to `interactive` launches. In `autonomous`
+mode every row collapses to `waived(autonomous launch)`; a **Required** row
+means the Agent Visual Check is mandatory instead, not that a human is
+summoned.
+
 ## User Verification Handoff (post-Executed)
 
+This phase runs in `interactive` launch mode only. In `autonomous` mode, skip
+straight to recording `User Verification Result: n/a (autonomous)` plus the
+`Agent Visual Check:` line and finalize `Overall` — do not execute any step
+below, and in particular do not call the question tool in step 5.
+
 When `Overall` would otherwise be `PASS` (every `Executed` entry passed) and
-`--mode full` or `--mode pre-pr` is active and `--skip-user-check` was not
-supplied:
+the launch mode is `interactive` and `--mode full` or `--mode pre-pr` is
+active and `--skip-user-check` was not supplied:
 
 1. Compute the `User Verification` block:
    - `Status: required` if any changed surface is marked Required above.
@@ -206,23 +308,64 @@ supplied:
    - `Status: skipped(<reason>)` for `--mode quick`, `Changed surfaces:
      (none)`, docs-only changes, `--skip-user-check`, or any explicit
      skip rule above. The reason must be human-readable and specific.
-2. Generate the 4-step 導線 ("How to access the changed behavior") using the
+2. Resolve and print the **Verification Target Card** before any instructions:
+   - `Owner Issue/SPEC:` identifies the work item whose behavior is being
+     checked.
+   - `Work purpose:` distinguishes the concrete objective from other active
+     agents that may share the same Issue, branch, or commit.
+   - `Success Goal:` states what behavior was achieved and what observation
+     proves success without relying on prior conversation.
+   - `Requesting agent/session:` names the provider/agent and a stable session
+     identifier such as `GWT_SESSION_ID`.
+   - `Branch:`, `Absolute worktree:`, and `Commit:` identify the exact code.
+   - `Prepared instance ID:` names the exact runtime using its PID, window or
+     pane ID, port, or invocation label and ties it to the identified checkout.
+   - `URL or launch target:` names the reachable URL or exact non-URL target.
+   The full card, not any single field, is the identity. A bare URL, process
+   name, PID, or generic "this change" is insufficient when multiple agents or
+   instances may be running.
+3. Generate the 4-step 導線 ("How to access the changed behavior") using the
    project's build / launch conventions. The structure is fixed across all
    project types — **always exactly four labelled steps in this order**:
    1. **build** — the project's build command for the smallest target that
-      exercises the change.
+      exercises the change. When the target is already prepared, state the
+      exact command the agent already completed and its result.
    2. **launch** — how to start the running artifact (binary / server /
-      editor / interpreter / web page).
+      editor / interpreter / web page). For a prepared runtime, tell the user
+      how to focus that exact Prepared instance ID; never instruct them to
+      start another process or discover a different dynamic URL.
    3. **navigate** — how to reach the changed feature from the entry point.
    4. **observe** — what the user should look at, click, or interact with to
       confirm the change.
    See `references/user-verification-guide.md` for project-type-specific
    launch patterns (Rust CLI / WebView / Unity Editor / .NET WPF / Python
    service / generic TUI / long-running service).
-3. Produce a **Check Items** list with **three categories minimum**:
-   (1) expected happy-path behavior, (2) at least one edge case or failure
-   path, (3) at least one adjacent-feature regression sanity check.
-4. Ask the user via the platform's selection question tool
+4. Apply the **Manual Feasibility Gate** before producing **Check Items**:
+   - Every manual checkbox must be reachable in the prepared instance and use
+     the exact `Action → Expected` shape.
+   - Include all three categories: Expected, Edge, and Regression.
+   - Do not ask the user to manufacture remote failures, mutate unrelated
+     external state, switch to an unidentified instance, or infer which agent
+     owns the request.
+   - Move every unreachable boundary to **Automated-only Evidence** and name
+     the exact command and named test that covers it. The item must match a
+     `PASS` entry under `Executed`.
+   - When a real failure path is not reachable, use the nearest safe reachable
+     boundary for the Edge checkbox and report the destructive or external
+     failure path only under Automated-only Evidence.
+   - Before handoff, map every scoped acceptance boundary to either one
+     reachable checkbox or one valid Automated-only Evidence item. Stop with
+     `Overall: FAIL` if any boundary has neither form of evidence.
+
+   Use this exact minimum shape:
+
+   ```markdown
+   - [ ] Expected — Action: <concrete action> → Expected: <decidable result>
+   - [ ] Edge — Action: <reachable action> → Expected: <decidable result>
+   - [ ] Regression — Action: <adjacent action> → Expected: <unchanged result>
+   ```
+
+5. Ask the user via the platform's selection question tool
    (`AskUserQuestionTool` for Claude Code, `request_user_input` for Codex,
    the closest equivalent for other runtimes) to choose one of:
    - `Confirmed` — observed behavior matches expectations; record
@@ -234,7 +377,57 @@ supplied:
      skipped(<reason>)`.
 
 If no selection UI exists in the current runtime, fall back to plain-text
-prompting but keep the same three-option discipline.
+prompting but keep the same three-option discipline. An autonomous session is
+not a runtime without a selection UI — it is a runtime where asking parks the
+Issue, so it never reaches this step at all.
+
+## Heavy verification serialization (Issue #3868 AC-30 / Issue #3913)
+
+Heavy commands — `cargo test` (focused or full), `cargo clippy`,
+`cargo build`, coverage, headed Playwright, and `verify.run` — contend for
+host CPU with every other agent worktree. Serialize every one of them
+through JSON operation `verify.lease.acquire` (SPEC #3576); a raw `cargo`
+started without the lease is exactly the parallel run that saturates the
+host (Issue #3913). A contended acquire answers immediately with the
+current holder instead of queueing, so the wait loop is yours. A refusal
+also reserves your turn (Issue #4086): background index jobs defer to
+this worktree until a retry is granted or the reservation lapses, and the
+refusal names `holder_kind` (`verification` / `index` / `other`) plus
+`estimated_remaining_ms` (`remaining_batches` for an index holder), so you
+know whether to wait one batch or a whole verification run:
+
+1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
+   success run the matrix, then `verify.lease.release` with the lease id.
+2. On refusal, declare the wait once with JSON operation
+   `issue.monitor.wait` (`params.reason`: `waiting for verification lease`,
+   `params.resume_condition`: `verify.lease.acquire is granted`) so stuck
+   detection skips your Issue instead of charging an attempt (Issue #3844),
+   then wait 3 minutes and retry. Record the holder for humans with JSON
+   operation `workspace.update`, `current_focus` set to
+   `waiting for verification lease (attempt N/15, holder: <holder>)`, when
+   the wait starts and whenever the holder changes — that is state, not a
+   liveness signal, so do not run it just to look alive. Clear the
+   declaration (`issue.monitor.wait` with `params.clear:true`) the moment
+   the lease is granted.
+3. Stop after 15 attempts (about 45 minutes). Post `kind:"blocked"` to the
+   Board mentioning the PM with the holder from `verify.lease.status` and
+   the host-wide heavy process list, and wait for the PM's arbitration.
+   Never run the heavy matrix without the lease, and never go idle at the
+   prompt without the Board post — an idle agent with a stale
+   `last_activity_at` is terminated as stuck.
+
+`verify.run` admits itself (Issue #3913): a lease this worktree already
+holds is honored without waiting; otherwise it claims the lease
+in-process, then waits for `cargo` / `rustc` / `clippy-driver` / test
+binaries of other worktrees of the same repository to drain, bounded by
+`params.max_wait_secs` (default 300, hard cap 1500 — below the Issue
+Monitor's stuck timeout). While it waits, `verify.lease.status` lists it
+under `pending` and it posts one Board `status` entry. Its own wait is
+shorter than the Issue Monitor's stuck timeout, so it needs no
+declaration. A `deferred` answer means the budget ran out without a
+record: treat it as one refused attempt of the loop above and rerun
+`verify.run` — the rerun is a fresh tool call, and if the host stays busy
+the same `issue.monitor.wait` declaration covers the retries.
 
 ## Stop Conditions
 
@@ -297,7 +490,8 @@ exists, stop with `gwtd not found`.
 On `Overall: PASS`, the caller proceeds:
 
 - `gwt-build-spec` Phase 3 → Phase 4 (PR Flow via `gwt-manage-pr`), provided
-  `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
+  `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
+  skipped(<reason>)}`.
 - `gwt-manage-pr` → PR create / update, provided the same User Verification
   Result gate is satisfied.
 - Manual invocation → return the evidence bundle to the user.

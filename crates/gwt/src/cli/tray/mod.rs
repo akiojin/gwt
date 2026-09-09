@@ -15,22 +15,26 @@ use std::net::{IpAddr, Ipv4Addr};
 pub mod autostart;
 pub mod lock;
 pub mod menu;
+pub mod port;
 
 /// SPEC #2920 FR-004: launch the OS default browser for the given URL.
 /// Shared by the tray `Open` menu handler (main.rs event loop) and the
 /// `gwt open` CLI (Phase 6). The launcher is detached so callers do
 /// not block on the spawned process.
 pub fn open_browser_for_url(url: &str) -> std::io::Result<()> {
-    use std::process::Command;
     let child = if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).spawn()?
+        gwt_core::process::hidden_command("open").arg(url).spawn()?
     } else if cfg!(target_os = "windows") {
         // The empty "" before the URL is required by `start` so a URL
         // beginning with quoted text is not interpreted as a window
         // title.
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?
+        gwt_core::process::hidden_command("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()?
     } else {
-        Command::new("xdg-open").arg(url).spawn()?
+        gwt_core::process::hidden_command("xdg-open")
+            .arg(url)
+            .spawn()?
     };
     std::thread::spawn(move || {
         let mut child = child;
@@ -49,7 +53,7 @@ pub fn open_browser_for_url(url: &str) -> std::io::Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayArgs {
     pub bind: IpAddr,
-    pub port: u16,
+    pub port: Option<u16>,
     pub no_tray: bool,
     pub no_open: bool,
 }
@@ -58,7 +62,7 @@ impl Default for TrayArgs {
     fn default() -> Self {
         Self {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            port: 0,
+            port: None,
             no_tray: false,
             no_open: false,
         }
@@ -119,8 +123,8 @@ impl std::error::Error for TrayArgParseError {}
 /// Accepted flags:
 /// - `--bind <ip>`: parsed via `IpAddr::from_str`. Defaults to
 ///   `127.0.0.1` (matches the documented trust boundary).
-/// - `--port <n>`: parsed via `u16::from_str`. Defaults to `0`
-///   (ephemeral).
+/// - `--port <n>`: parsed via `u16::from_str`. Omission remains `None` so
+///   stable-port policy can distinguish it from explicit `--port 0`.
 /// - `--no-tray` / `--no-open`: recognised so the README hint does not
 ///   fail today, but their behaviour stays out of scope for this slice.
 ///
@@ -146,8 +150,10 @@ pub fn parse_tray_argv(argv: &[String]) -> Result<TrayArgs, TrayArgParseError> {
                 let value = iter
                     .next()
                     .ok_or_else(|| TrayArgParseError::MissingValue("--port".to_string()))?;
-                args.port = u16::from_str(value)
-                    .map_err(|_| TrayArgParseError::InvalidPort(value.clone()))?;
+                args.port = Some(
+                    u16::from_str(value)
+                        .map_err(|_| TrayArgParseError::InvalidPort(value.clone()))?,
+                );
             }
             "--no-tray" => args.no_tray = true,
             "--no-open" => args.no_open = true,
@@ -180,10 +186,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_args_default_binds_loopback_and_random_port() {
+    fn tray_args_default_binds_loopback_and_omits_explicit_port() {
         let args = TrayArgs::default();
         assert_eq!(args.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(args.port, 0);
+        assert_eq!(args.port, None);
         assert!(!args.no_tray);
         assert!(!args.no_open);
     }
@@ -215,7 +221,7 @@ mod tests {
         let args = parse_tray_argv(&argv(&["gwt", "--bind", "0.0.0.0", "--port", "60745"]))
             .expect("bind+port parses");
         assert_eq!(args.bind, "0.0.0.0".parse::<IpAddr>().unwrap());
-        assert_eq!(args.port, 60745);
+        assert_eq!(args.port, Some(60745));
         assert!(!args.no_tray);
         assert!(!args.no_open);
     }
@@ -225,7 +231,7 @@ mod tests {
         let args = parse_tray_argv(&argv(&["gwt", "--bind", "127.0.0.1", "--port", "8787"]))
             .expect("explicit loopback parses");
         assert_eq!(args.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(args.port, 8787);
+        assert_eq!(args.port, Some(8787));
     }
 
     #[test]
@@ -233,7 +239,7 @@ mod tests {
         let args =
             parse_tray_argv(&argv(&["gwt", "--bind", "::"])).expect("ipv6 unspecified parses");
         assert_eq!(args.bind, "::".parse::<IpAddr>().unwrap());
-        assert_eq!(args.port, 0);
+        assert_eq!(args.port, None);
     }
 
     #[test]
@@ -282,7 +288,7 @@ mod tests {
         assert!(args.no_tray);
         assert!(args.no_open);
         assert_eq!(args.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(args.port, 0);
+        assert_eq!(args.port, None);
     }
 
     #[test]
@@ -293,7 +299,7 @@ mod tests {
         // existing argv shape pinned by `front_door_route_keeps_gui_launch_for_empty_and_repo_path_argv`.
         let args = parse_tray_argv(&argv(&["gwt", "/some/path", "--port", "8787"]))
             .expect("positional + flags parse");
-        assert_eq!(args.port, 8787);
+        assert_eq!(args.port, Some(8787));
     }
 
     #[test]

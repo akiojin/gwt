@@ -131,50 +131,32 @@ pub fn run<E: CliEnv>(
     }
 }
 
-/// Moves a legacy `tasks/memory.md` (or, failing that, `tasks/lessons.md`)
-/// into the repo-local `.gwt/work/memory.md` location when the new file does
-/// not yet exist. Idempotent — returns `Ok(true)` only when a move happened.
+/// Imports legacy memory sources (repo-local `.gwt/work/memory.md`,
+/// `tasks/memory.md`, `tasks/lessons.md`) into the machine-local home
+/// work-notes file when it does not yet exist. Idempotent — returns
+/// `Ok(true)` only when an import happened.
 ///
-/// SPEC-2359 Phase W-12: project memory moved out of the untracked `tasks/`
-/// directory into the git-tracked `.gwt/work/` directory. This one-time
-/// migration preserves any existing memory without losing history.
+/// SPEC-3214 (FR-007): project memory moved out of the git-tracked
+/// repo-local `.gwt/work/` directory into the branch-independent home
+/// scratch (`~/.gwt/projects/<repo-hash>/work-notes/`).
 pub fn migrate_legacy_memory_file(repo_root: &Path) -> std::io::Result<bool> {
-    let memory_path = gwt_core::paths::gwt_repo_local_memory_path(repo_root);
-    if memory_path.exists() {
-        return Ok(false);
-    }
-    let tasks_dir = repo_root.join("tasks");
-    let legacy_memory = tasks_dir.join("memory.md");
-    let legacy_lessons = tasks_dir.join("lessons.md");
-    let source = if legacy_memory.exists() {
-        legacy_memory
-    } else if legacy_lessons.exists() {
-        legacy_lessons
-    } else {
-        return Ok(false);
-    };
-    if let Some(parent) = memory_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::rename(&source, &memory_path)?;
-    Ok(true)
+    crate::work_notes::migrate_memory_into_home(repo_root)
 }
 
 fn append_memory_entry(repo_root: &Path, add: &MemoryAddCommand) -> std::io::Result<PathBuf> {
-    migrate_legacy_memory_file(repo_root)?;
-    let path = gwt_core::paths::gwt_repo_local_memory_path(repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    ensure_memory_file(&path)?;
+    let path = gwt_core::paths::gwt_work_notes_memory_path(repo_root);
+    crate::work_notes::with_work_notes_lock(repo_root, || {
+        crate::work_notes::migrate_memory_into_home(repo_root)?;
+        ensure_memory_file(&path)?;
 
-    let date = add
-        .date
-        .clone()
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let entry = format_memory_entry(&date, add);
-    let mut file = OpenOptions::new().append(true).open(&path)?;
-    file.write_all(entry.as_bytes())?;
+        let date = add
+            .date
+            .clone()
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        let entry = format_memory_entry(&date, add);
+        let mut file = OpenOptions::new().append(true).open(&path)?;
+        file.write_all(entry.as_bytes())
+    })?;
     Ok(path)
 }
 

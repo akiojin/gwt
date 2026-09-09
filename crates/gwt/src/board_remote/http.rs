@@ -13,6 +13,27 @@ use reqwest::blocking::Client;
 use super::oauth::FormPoster;
 use super::slack::{HttpClient, HttpResponse};
 
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn request_timeout() -> std::result::Result<Duration, String> {
+    let Some(deadline) = gwt_core::operation_deadline::current() else {
+        return Ok(DEFAULT_REQUEST_TIMEOUT);
+    };
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err("operation deadline expired before remote Board request".to_string());
+    }
+    Ok(remaining.min(DEFAULT_REQUEST_TIMEOUT))
+}
+
+fn request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "remote Board request timed out".to_string()
+    } else {
+        error.to_string()
+    }
+}
+
 /// Blocking reqwest-backed implementation of the remote HTTP traits.
 pub struct ReqwestHttpClient {
     client: Client,
@@ -22,7 +43,7 @@ impl ReqwestHttpClient {
     /// Build a client with a sensible request timeout.
     pub fn new() -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { client }
@@ -50,16 +71,18 @@ impl HttpClient for ReqwestHttpClient {
         bearer: &str,
         query: &[(&str, &str)],
     ) -> std::result::Result<HttpResponse, String> {
+        let timeout = request_timeout()?;
         let response = self
             .client
             .get(url)
             .bearer_auth(bearer)
             .query(query)
+            .timeout(timeout)
             .send()
-            .map_err(|err| err.to_string())?;
+            .map_err(request_error)?;
         let status = response.status().as_u16();
         let retry_after = retry_after_seconds(&response);
-        let body = response.text().map_err(|err| err.to_string())?;
+        let body = response.text().map_err(request_error)?;
         Ok(HttpResponse {
             status,
             body,
@@ -73,16 +96,18 @@ impl HttpClient for ReqwestHttpClient {
         bearer: &str,
         params: &[(&str, &str)],
     ) -> std::result::Result<HttpResponse, String> {
+        let timeout = request_timeout()?;
         let response = self
             .client
             .post(url)
             .bearer_auth(bearer)
             .form(params)
+            .timeout(timeout)
             .send()
-            .map_err(|err| err.to_string())?;
+            .map_err(request_error)?;
         let status = response.status().as_u16();
         let retry_after = retry_after_seconds(&response);
-        let body = response.text().map_err(|err| err.to_string())?;
+        let body = response.text().map_err(request_error)?;
         Ok(HttpResponse {
             status,
             body,
@@ -96,17 +121,19 @@ impl HttpClient for ReqwestHttpClient {
         bearer: &str,
         body: &str,
     ) -> std::result::Result<HttpResponse, String> {
+        let timeout = request_timeout()?;
         let response = self
             .client
             .post(url)
             .bearer_auth(bearer)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string())
+            .timeout(timeout)
             .send()
-            .map_err(|err| err.to_string())?;
+            .map_err(request_error)?;
         let status = response.status().as_u16();
         let retry_after = retry_after_seconds(&response);
-        let body = response.text().map_err(|err| err.to_string())?;
+        let body = response.text().map_err(request_error)?;
         Ok(HttpResponse {
             status,
             body,
@@ -120,17 +147,19 @@ impl HttpClient for ReqwestHttpClient {
         bearer: &str,
         body: &str,
     ) -> std::result::Result<HttpResponse, String> {
+        let timeout = request_timeout()?;
         let response = self
             .client
             .patch(url)
             .bearer_auth(bearer)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string())
+            .timeout(timeout)
             .send()
-            .map_err(|err| err.to_string())?;
+            .map_err(request_error)?;
         let status = response.status().as_u16();
         let retry_after = retry_after_seconds(&response);
-        let body = response.text().map_err(|err| err.to_string())?;
+        let body = response.text().map_err(request_error)?;
         Ok(HttpResponse {
             status,
             body,
@@ -141,13 +170,15 @@ impl HttpClient for ReqwestHttpClient {
 
 impl FormPoster for ReqwestHttpClient {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> std::result::Result<String, String> {
+        let timeout = request_timeout()?;
         let response = self
             .client
             .post(url)
             .form(params)
+            .timeout(timeout)
             .send()
-            .map_err(|err| err.to_string())?;
-        response.text().map_err(|err| err.to_string())
+            .map_err(request_error)?;
+        response.text().map_err(request_error)
     }
 }
 
@@ -192,6 +223,25 @@ mod tests {
         fn join(mut self) {
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
+            }
+        }
+
+        fn start_delayed(response: String, delay: Duration) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handle = thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                thread::sleep(delay);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+            Self {
+                base: format!("http://127.0.0.1:{port}"),
+                handle: Some(handle),
             }
         }
     }
@@ -253,5 +303,28 @@ mod tests {
         assert!(HttpClient::post_form(&client, &dead, "t", &[("k", "v")]).is_err());
         assert!(client.post_json(&dead, "t", "{}").is_err());
         assert!(FormPoster::post_form(&client, &dead, &[("k", "v")]).is_err());
+    }
+
+    #[test]
+    fn scoped_operation_deadline_bounds_remote_board_requests() {
+        let server =
+            TestServer::start_delayed(http_response(&[], "TOO_LATE"), Duration::from_millis(400));
+        let client = ReqwestHttpClient::new();
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(40),
+        );
+
+        let error = match HttpClient::get(&client, &server.base, "tok", &[]) {
+            Ok(_) => panic!("remote Board request must honor the scoped deadline"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("timed out") || error.contains("deadline"),
+            "{error}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+        server.join();
     }
 }

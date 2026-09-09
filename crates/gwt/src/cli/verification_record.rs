@@ -1,0 +1,9204 @@
+//! Verification Run Records (SPEC-3248 P8b, T-110/T-111, FR-035/FR-036).
+//!
+//! Completion gates must consume **tool-generated** verification evidence,
+//! not agent prose. The `verify.run` JSON operation makes gwtd itself the
+//! trusted executor: it runs the given verification commands in the worktree,
+//! captures each exit code, and writes a [`VerificationRunRecord`] bound to
+//! the session, the linked owner (from the Execution Control Record when
+//! present), and a content-level worktree fingerprint (HEAD + `git diff
+//! HEAD` + untracked file contents, `.gwt/` bookkeeping excluded; a run
+//! during which the worktree changed is self-invalidated). `execution.complete` and the PR handoff
+//! operations then accept only a fresh record for the same
+//! session/owner/fingerprint: either every command passed, or every raw
+//! failure carries the typed owner/base/PR quarantine proof. Handwritten
+//! claims, stale runs, cross-session records, and untyped failures are
+//! rejected (FR-036).
+//!
+//! Scope notes (dependent follow-ups, phase contract T-263):
+//! - The authoritative copies live in the repo-scoped trusted store (P9b);
+//!   the worktree files are mirrors, direct edits are hook-blocked (P9a
+//!   T-120), and integrity hashes validate whichever copy loads (P9a).
+//!   Deriving the required matrix from changed surfaces (full T-130
+//!   Coverage Map) is still open; `verify.plan` records the declared one.
+//! - Non-git worktrees get a degenerate fingerprint (no freshness signal);
+//!   gwt executions always run in git worktrees.
+
+use std::{
+    fs,
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, Utc};
+use gwt_agent::session::ExecutionBindingIdentity;
+use gwt_github::{
+    client::{ApiError, FetchResult, IssueClient},
+    IssueNumber, SpecOpsError,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::CliEnv;
+use crate::cli::execution_state;
+
+/// Worktree-relative path of the latest verification run record's mirror
+/// (the authoritative copy lives in the repo-scoped trusted store, P9b).
+pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification-run.json";
+
+/// Cap on the per-command output tail echoed back through the envelope.
+const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationCommandResult {
+    pub command: String,
+    pub exit_code: i32,
+    /// Bounded stdout/stderr tail retained only when the command fails.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output_tail: String,
+}
+
+/// Plan-bound request to classify one exact Rust/libtest failure. The
+/// trusted runner supplies every measured field; callers may only name the
+/// test, its commands, and the durable owners that must be verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationQuarantineRequest {
+    pub failed_command: String,
+    pub test_identity: String,
+    pub baseline_command: String,
+    pub owner_issue: u64,
+    pub pr_number: u64,
+}
+
+impl VerificationQuarantineRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("failed_command", self.failed_command.as_str()),
+            ("test_identity", self.test_identity.as_str()),
+            ("baseline_command", self.baseline_command.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("verify quarantine {field} must not be empty"));
+            }
+        }
+        if self.owner_issue == 0 {
+            return Err("verify quarantine owner_issue must be greater than zero".to_string());
+        }
+        if self.pr_number == 0 {
+            return Err("verify quarantine pr_number must be greater than zero".to_string());
+        }
+        let failed_args = split_command_line(&self.failed_command)?;
+        if failed_args.first().map(String::as_str) != Some("cargo")
+            || failed_args.get(1).map(String::as_str) != Some("test")
+        {
+            return Err(
+                "verify quarantine failed_command must be a direct `cargo test` command"
+                    .to_string(),
+            );
+        }
+        let failed_separator = failed_args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(failed_args.len());
+        let selection = &failed_args[..failed_separator];
+        let mut packages = Vec::new();
+        let mut targets = Vec::new();
+        let mut index = 2;
+        while index < selection.len() {
+            let arg = selection[index].as_str();
+            match arg {
+                "-p" | "--package" => {
+                    let Some(value) = selection.get(index + 1) else {
+                        return Err(
+                            "verify quarantine package selector requires a value".to_string()
+                        );
+                    };
+                    packages.push(value.as_str());
+                    index += 2;
+                    continue;
+                }
+                "--lib" => targets.push("lib".to_string()),
+                "--bin" | "--test" | "--example" | "--bench" => {
+                    let Some(value) = selection.get(index + 1) else {
+                        return Err(
+                            "verify quarantine target selector requires a value".to_string()
+                        );
+                    };
+                    targets.push(format!("{arg}={value}"));
+                    index += 2;
+                    continue;
+                }
+                "--workspace" | "--all" | "--all-targets" | "--bins" | "--tests" | "--examples"
+                | "--benches" | "--doc" => {
+                    return Err(
+                        "verify quarantine failed_command must select one package and one test executable"
+                            .to_string(),
+                    );
+                }
+                _ => {
+                    if let Some(value) = arg.strip_prefix("--package=") {
+                        packages.push(value);
+                    } else if ["--bin=", "--test=", "--example=", "--bench="]
+                        .iter()
+                        .find_map(|prefix| arg.strip_prefix(prefix))
+                        .is_some_and(|value| {
+                            targets.push(arg.to_string());
+                            value.is_empty()
+                        })
+                    {
+                        return Err(
+                            "verify quarantine target selector requires a value".to_string()
+                        );
+                    }
+                }
+            }
+            index += 1;
+        }
+        if packages.len() != 1
+            || packages[0].is_empty()
+            || packages[0]
+                .chars()
+                .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+            || targets.len() != 1
+        {
+            return Err(
+                "verify quarantine failed_command must select one exact package and one test executable (`--lib`, `--bin`, `--test`, `--example`, or `--bench`)"
+                    .to_string(),
+            );
+        }
+        if failed_args
+            .iter()
+            .any(|arg| arg == "--manifest-path" || arg.starts_with("--manifest-path="))
+        {
+            return Err(
+                "verify quarantine does not allow --manifest-path because merge-base proof must run inside the isolated checkout"
+                    .to_string(),
+            );
+        }
+        let args = split_command_line(&self.baseline_command)?;
+        let separator = args.iter().position(|arg| arg == "--").ok_or_else(|| {
+            "verify quarantine baseline_command must include a libtest '--' separator".to_string()
+        })?;
+        if args.first().map(String::as_str) != Some("cargo")
+            || args.get(1).map(String::as_str) != Some("test")
+            || !args[..separator]
+                .iter()
+                .any(|arg| arg == self.test_identity.trim())
+            || !args[separator + 1..].iter().any(|arg| arg == "--exact")
+            || args.iter().any(|arg| arg == "--no-run")
+        {
+            return Err(
+                "verify quarantine baseline_command must run the exact test_identity with `cargo test ... -- --exact`"
+                    .to_string(),
+            );
+        }
+        let mut expected = failed_args;
+        let failed_separator = expected.iter().position(|arg| arg == "--");
+        let already_exact = failed_separator.is_some_and(|separator| {
+            expected[..separator]
+                .iter()
+                .any(|arg| arg == self.test_identity.trim())
+                && expected[separator + 1..].iter().any(|arg| arg == "--exact")
+        });
+        if !already_exact {
+            let insertion = failed_separator.unwrap_or(expected.len());
+            expected.insert(insertion, self.test_identity.trim().to_string());
+            if let Some(separator) = failed_separator {
+                if !expected[separator + 2..].iter().any(|arg| arg == "--exact") {
+                    expected.push("--exact".to_string());
+                }
+            } else {
+                expected.push("--".to_string());
+                expected.push("--exact".to_string());
+            }
+        }
+        if args != expected {
+            return Err(
+                "verify quarantine baseline_command must preserve the failed_command package, target, feature, and runner selection exactly"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrQuarantineReferenceKind {
+    Body,
+    Comment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrQuarantineReference {
+    pub kind: PrQuarantineReferenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<u64>,
+    pub marker: String,
+}
+
+/// Fully measured quarantine evidence retained alongside the raw non-zero
+/// command result. Its presence never rewrites `all_passed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypedQuarantinedFailure {
+    pub failed_command: String,
+    pub test_identity: String,
+    pub owner_issue: u64,
+    pub head_sha: String,
+    pub merge_base_sha: String,
+    pub baseline_command: String,
+    pub baseline_exit_code: i32,
+    pub baseline_result_line: String,
+    pub pr_number: u64,
+    pub pr_reference: PrQuarantineReference,
+}
+
+/// Reference from one exact failing command to the immutable Board decision
+/// that classified it for PR handoff. This never changes the command result
+/// or `all_passed`; non-PR gates continue to consume raw evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationAdjudicationRef {
+    pub board_entry_id: String,
+    pub command: String,
+    pub attached_at: DateTime<Utc>,
+}
+
+/// One tool-generated verification run (T-110).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationRunRecord {
+    pub record_id: String,
+    pub session_id: String,
+    /// Linked owner number copied from the Execution Control Record at run
+    /// time (`None` for unlinked worktrees).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    /// Exact generation/binding/head that produced this evidence. `None`
+    /// remains readable only for pre-generation legacy executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<ExecutionBindingIdentity>,
+    /// Worktree fingerprint at run time: HEAD + tracked changes (see
+    /// [`worktree_fingerprint`]). Completion recomputes and compares.
+    pub worktree_fingerprint: String,
+    pub commands: Vec<VerificationCommandResult>,
+    pub all_passed: bool,
+    /// Conditional dispositions for exact failures. Raw command exits and
+    /// `all_passed` remain authoritative and are never rewritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined_failures: Vec<TypedQuarantinedFailure>,
+    /// Integrity-covered Board references attached through
+    /// `verify.adjudicate` and consumed only by `pr.ready`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adjudications: Vec<VerificationAdjudicationRef>,
+    /// Timestamp captured before the verification commands start. Recovery
+    /// requires this to be later than the terminal block, so a run that was
+    /// merely committed after the block cannot be replayed as post-block
+    /// evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    /// T-130-lite: whether this run covered every command of the registered
+    /// verification plan (`verify.plan`) for the same session/owner.
+    #[serde(default)]
+    pub plan_covered: bool,
+    /// Planned commands the run did not execute (diagnostic for the gates).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planned_missing: Vec<String>,
+    /// Integrity hash of the exact verification-plan snapshot consumed by
+    /// this run. Replacing the plan invalidates the run even when both plans
+    /// happen to contain commands covered by the run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verification_plan_hash: String,
+    /// Whether the exact plan snapshot was derived from changed surfaces.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_derived: bool,
+    /// Integrity hash over the record content (SPEC-3248 P9a, T-119/T-122
+    /// core): sha256 of the canonical serialization with this field emptied.
+    /// Gates reject records whose stored hash does not match. Empty = legacy
+    /// pre-P9a record, accepted for one release cycle (see execution_state).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
+}
+
+/// Compute the integrity hash for a record (content with the hash emptied).
+#[must_use]
+pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
+    let mut canonical = record.clone();
+    canonical.content_hash = String::new();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// True when the stored integrity hash matches the content (or the record is
+/// a legacy pre-P9a record without one).
+#[must_use]
+pub fn integrity_ok(record: &VerificationRunRecord) -> bool {
+    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+}
+
+/// Worktree-relative path of the registered verification plan (SPEC-3248
+/// T-130-lite).
+pub const VERIFICATION_PLAN_STATE_RELATIVE: &str = ".gwt/skill-state/verification-plan.json";
+
+/// The declared verification matrix (T-130-lite): registered through
+/// `verify.plan` BEFORE running, so the planned-vs-ran divergence is
+/// machine-visible. Automatic derivation from changed surfaces / acceptance
+/// scenarios is the full T-130; here the plan is a first-class recorded
+/// contract that `verify.run` must cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationPlanRecord {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    /// Exact generation/binding/head for which this plan is authoritative.
+    /// Legacy plans remain readable with `None`, but cannot authorize a
+    /// generation-aware execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<ExecutionBindingIdentity>,
+    pub commands: Vec<String>,
+    /// Full T-130: the matrix was derived from changed surfaces instead of
+    /// hand-picked (`verify.plan` with `params.derive:true`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub derived: bool,
+    /// T-131 core Coverage Map: the surface classification the derived
+    /// matrix covers (e.g. `rust(gwt,gwt-core)`, `skills`, `docs(2)`).
+    /// Integrity-hash covered, so the coverage rationale is auditable and
+    /// tamper-evident; empty for hand-picked plans. Acceptance-scenario
+    /// (AS/FR) binding is T-131 full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<String>,
+    /// Exact repo-relative files that verification commands are expected to
+    /// generate. Only these paths are excluded from freshness fingerprints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_outputs: Vec<String>,
+    /// Exact typed quarantine requests registered before `verify.run`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantines: Vec<VerificationQuarantineRequest>,
+    /// Content-level worktree fingerprint at plan registration. Derived
+    /// matrices are valid only for this exact change set; a later surface
+    /// change requires deriving and registering a new plan.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub worktree_fingerprint: String,
+    pub created_at: DateTime<Utc>,
+    /// Integrity hash (P9a convention).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
+}
+
+/// Compute the integrity hash for a plan (content with the hash emptied).
+#[must_use]
+pub fn compute_plan_hash(plan: &VerificationPlanRecord) -> String {
+    let mut canonical = plan.clone();
+    canonical.content_hash = String::new();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// True when the plan's stored integrity hash matches (or is legacy-empty).
+#[must_use]
+pub fn plan_integrity_ok(plan: &VerificationPlanRecord) -> bool {
+    plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan)
+}
+
+/// Resolve the plan path for a worktree.
+#[must_use]
+pub fn plan_state_path(worktree: &Path) -> PathBuf {
+    worktree.join(VERIFICATION_PLAN_STATE_RELATIVE)
+}
+
+/// Load the registered plan. `Ok(None)` when missing.
+pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> {
+    // P9b: trusted copy authoritative; mirror-only plans are refused in
+    // managed worktrees (see `load` — same forgery window otherwise).
+    let contents = match crate::cli::trusted_store::read(worktree, "verification-plan.json")? {
+        Some(contents) => contents,
+        None if crate::cli::trusted_store::under_trusted_management(worktree) => return Ok(None),
+        None => match fs::read_to_string(plan_state_path(worktree)) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        },
+    };
+    let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    Ok(Some(plan))
+}
+
+/// Persist the plan atomically with a fresh integrity hash.
+///
+/// This low-level primitive remains available for internal evidence fixtures.
+/// Caller-facing `verify.plan` dispatch goes through
+/// `register_plan_for_caller`, which authenticates durable Session authority
+/// before invoking the unleased writer.
+pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let mut plan = plan.clone();
+        let (_, execution_binding) = current_execution_context(worktree)?;
+        plan.execution_binding = execution_binding;
+        plan.generated_outputs = validate_generated_outputs(worktree, &plan.generated_outputs)?;
+        if plan.worktree_fingerprint.is_empty() {
+            plan.worktree_fingerprint =
+                worktree_fingerprint_excluding(worktree, &plan.generated_outputs)?;
+        }
+        save_plan_unleased(worktree, &plan)
+    })
+}
+
+fn save_plan_unleased(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
+    let mut plan = plan.clone();
+    plan.content_hash = compute_plan_hash(&plan);
+    let serialized = serde_json::to_vec_pretty(&plan)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        "verification-plan.json",
+        &plan_state_path(worktree),
+        &serialized,
+    )
+}
+
+fn register_plan_for_caller(
+    worktree: &Path,
+    session_id: &str,
+    commands: Vec<String>,
+    generated_outputs: Vec<String>,
+    quarantines: Vec<VerificationQuarantineRequest>,
+    derived: bool,
+    authority: &VerificationCallerAuthority,
+) -> io::Result<VerificationPlanRecord> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
+        validate_quarantine_requests(&quarantines, &commands)?;
+        let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
+        revalidate_verification_caller_authority(worktree, session_id, authority)?;
+        register_plan_with_context_unleased(
+            worktree,
+            session_id,
+            commands,
+            PlanRegistrationContext {
+                surfaces: Vec::new(),
+                generated_outputs,
+                quarantines,
+                derived,
+                worktree_fingerprint: fingerprint,
+            },
+            authority,
+        )
+    })
+}
+
+struct PlanRegistrationContext {
+    surfaces: Vec<String>,
+    generated_outputs: Vec<String>,
+    quarantines: Vec<VerificationQuarantineRequest>,
+    derived: bool,
+    worktree_fingerprint: String,
+}
+
+fn register_plan_with_context_unleased(
+    worktree: &Path,
+    session_id: &str,
+    commands: Vec<String>,
+    context: PlanRegistrationContext,
+    authority: &VerificationCallerAuthority,
+) -> io::Result<VerificationPlanRecord> {
+    let mut plan = VerificationPlanRecord {
+        session_id: session_id.to_string(),
+        owner_number: authority.owner_number,
+        execution_binding: authority.execution_binding.clone(),
+        commands,
+        derived: context.derived,
+        surfaces: context.surfaces,
+        generated_outputs: context.generated_outputs,
+        quarantines: context.quarantines,
+        worktree_fingerprint: context.worktree_fingerprint,
+        created_at: Utc::now(),
+        content_hash: String::new(),
+    };
+    plan.content_hash = compute_plan_hash(&plan);
+    save_plan_unleased(worktree, &plan)?;
+    Ok(plan)
+}
+
+fn derive_and_register_plan_for_caller(
+    worktree: &Path,
+    session_id: &str,
+    generated_outputs: Vec<String>,
+    quarantines: Vec<VerificationQuarantineRequest>,
+    authority: &VerificationCallerAuthority,
+) -> Result<
+    (
+        crate::cli::verify_derivation::DerivedPlan,
+        VerificationPlanRecord,
+    ),
+    String,
+> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
+        let fingerprint_before =
+            worktree_fingerprint_excluding(worktree, &generated_outputs)?;
+        let derived = crate::cli::verify_derivation::derive(worktree)
+            .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+        validate_quarantine_requests(&quarantines, &derived.commands)?;
+        let fingerprint_after =
+            worktree_fingerprint_excluding(worktree, &generated_outputs)?;
+        if fingerprint_before != fingerprint_after {
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "the worktree changed while deriving the verification plan — retry verify.plan on a stable change set",
+            ));
+        }
+        revalidate_verification_caller_authority(worktree, session_id, authority)?;
+        let plan = register_plan_with_context_unleased(
+            worktree,
+            session_id,
+            derived.commands.clone(),
+            PlanRegistrationContext {
+                surfaces: derived.surfaces.clone(),
+                generated_outputs,
+                quarantines,
+                derived: true,
+                worktree_fingerprint: fingerprint_after,
+            },
+            authority,
+        )?;
+        Ok((derived, plan))
+    })
+    .map_err(|err| err.to_string())
+}
+
+/// Resolve the record path for a worktree.
+#[must_use]
+pub fn state_path(worktree: &Path) -> PathBuf {
+    worktree.join(VERIFICATION_RUN_STATE_RELATIVE)
+}
+
+/// Load the latest record. `Ok(None)` when missing; malformed JSON and I/O
+/// failures propagate.
+pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
+    // P9b: trusted copy authoritative. The mirror is a legacy fallback for
+    // unmanaged worktrees only — under trusted management every canonical
+    // `verify.run` wrote a trusted copy, so a mirror-only record is not
+    // evidence (T-174).
+    let contents = match crate::cli::trusted_store::read(worktree, "verification-run.json")? {
+        Some(contents) => contents,
+        None if crate::cli::trusted_store::under_trusted_management(worktree) => return Ok(None),
+        None => match fs::read_to_string(state_path(worktree)) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        },
+    };
+    let record = serde_json::from_str::<VerificationRunRecord>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    Ok(Some(record))
+}
+
+/// Persist the record atomically. The integrity hash is recomputed on every
+/// save (P9a).
+pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
+    let mut record = record.clone();
+    record.content_hash = compute_content_hash(&record);
+    let serialized = serde_json::to_vec_pretty(&record)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        "verification-run.json",
+        &state_path(worktree),
+        &serialized,
+    )
+}
+
+/// Compute the worktree fingerprint at **content level**: sha256 over
+/// `git rev-parse HEAD`, the full `git diff HEAD` content (staged and
+/// unstaged tracked changes), and every untracked file's path and bytes —
+/// all with `.gwt/` excluded (the coordination bookkeeping under `.gwt/`
+/// changes continuously and must not invalidate evidence). Status lines
+/// alone are not enough: an edit to an already-modified file leaves
+/// `git status --porcelain` byte-identical, which would let stale evidence
+/// pass as fresh (FR-036). Non-git worktrees return a degenerate constant.
+#[must_use]
+pub fn worktree_fingerprint(worktree: &Path) -> String {
+    worktree_fingerprint_excluding(worktree, &[]).unwrap_or_else(|_| "no-git".to_string())
+}
+
+fn validate_generated_outputs(worktree: &Path, outputs: &[String]) -> io::Result<Vec<String>> {
+    let root = dunce::canonicalize(worktree)?;
+    let mut normalized = Vec::with_capacity(outputs.len());
+    let mut seen = std::collections::HashSet::new();
+    for raw in outputs {
+        let path = Path::new(raw);
+        if raw.trim().is_empty()
+            || raw.chars().any(char::is_control)
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output must be a normalized repo-relative path: {raw}"),
+            ));
+        }
+        let value = path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if value == ".git"
+            || value.starts_with(".git/")
+            || value == ".gwt"
+            || value.starts_with(".gwt/")
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output targets protected state: {raw}"),
+            ));
+        }
+        if !seen.insert(value.clone()) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("duplicate generated output: {value}"),
+            ));
+        }
+        let candidate = root.join(&value);
+        let mut anchor = candidate.as_path();
+        while !anchor.exists() {
+            anchor = anchor.parent().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("generated output has no repository parent: {value}"),
+                )
+            })?;
+        }
+        let canonical_anchor = dunce::canonicalize(anchor)?;
+        if !canonical_anchor.starts_with(&root) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output escapes the repository through a symlink: {value}"),
+            ));
+        }
+        if candidate.exists() {
+            let canonical = dunce::canonicalize(&candidate)?;
+            if !canonical.starts_with(&root) || canonical.is_dir() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("generated output is not a repository file: {value}"),
+                ));
+            }
+        }
+        let tracked = gwt_core::process::hidden_command("git")
+            .args(["ls-files", "--error-unmatch", "--", &value])
+            .current_dir(&root)
+            .output()?;
+        if tracked.status.success() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output must not exclude a tracked repository file: {value}"),
+            ));
+        }
+        normalized.push(value);
+    }
+    normalized.sort();
+    Ok(normalized)
+}
+
+fn validate_quarantine_requests(
+    requests: &[VerificationQuarantineRequest],
+    commands: &[String],
+) -> io::Result<()> {
+    let mut identities = std::collections::HashSet::new();
+    for request in requests {
+        request
+            .validate()
+            .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?;
+        if !commands
+            .iter()
+            .any(|command| command == &request.failed_command)
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "verification quarantine failed_command must be one of the registered plan commands",
+            ));
+        }
+        if !identities.insert((
+            request.failed_command.as_str(),
+            request.test_identity.as_str(),
+        )) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "verification plan contains duplicate quarantine command/test identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn worktree_fingerprint_excluding(
+    worktree: &Path,
+    generated_outputs: &[String],
+) -> io::Result<String> {
+    let head = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree)
+        .output()?;
+    if !head.status.success() {
+        return Ok("no-git".to_string());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&head.stdout);
+    hasher.update(b"\n--diff--\n");
+    let mut diff_args = vec![
+        "diff".to_string(),
+        "HEAD".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        ":(exclude).gwt".to_string(),
+    ];
+    diff_args.extend(
+        generated_outputs
+            .iter()
+            .map(|path| format!(":(literal,exclude){path}")),
+    );
+    let diff = gwt_core::process::hidden_command("git")
+        .args(&diff_args)
+        .current_dir(worktree)
+        .output()?;
+    if diff.status.success() {
+        hasher.update(&diff.stdout);
+    }
+    hasher.update(b"\n--untracked--\n");
+    // `-uall` expands untracked directories to individual files so new files
+    // inside an already-untracked directory change the fingerprint too.
+    let mut status_args = vec![
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "-uall".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        ":(exclude).gwt".to_string(),
+    ];
+    status_args.extend(
+        generated_outputs
+            .iter()
+            .map(|path| format!(":(literal,exclude){path}")),
+    );
+    let untracked = gwt_core::process::hidden_command("git")
+        .args(&status_args)
+        .current_dir(worktree)
+        .output()?;
+    if untracked.status.success() {
+        let listing = String::from_utf8_lossy(&untracked.stdout);
+        for line in listing.lines() {
+            let Some(path) = line.strip_prefix("?? ") else {
+                continue;
+            };
+            let path = path.trim().trim_matches('"');
+            hasher.update(path.as_bytes());
+            hasher.update(b"\n");
+            if let Ok(bytes) = fs::read(worktree.join(path)) {
+                hasher.update(&bytes);
+            }
+            hasher.update(b"\n");
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Legacy tracked Work-event log kept as a read-only compatibility source.
+pub const WORK_EVENT_LOG_RELATIVE: &str = ".gwt/work/events.jsonl";
+/// Canonical immutable Work-event shard store whose delivery must settle
+/// before terminal mutations.
+pub const WORK_EVENT_STORE_RELATIVE: &str = ".gwt/work/events";
+
+const WORK_EVENT_SETTLEMENT_RECORD_FILE: &str = "work-event-settlement.json";
+const WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION: u64 = 1;
+const WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION: u64 = 2;
+const WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION: u64 = 3;
+pub(crate) const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 4;
+
+/// Independent dirty states reported for the exact tracked Work event path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventPathState {
+    Staged,
+    Unstaged,
+    Untracked,
+    Deleted,
+}
+
+/// Environment facts that prevent proving whether a dirty Work event path is
+/// currently agent-correctable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventSettlementEnvironment {
+    MissingUpstream,
+    GitStatusError,
+    RemoteReadbackError,
+}
+
+/// Fail-closed reasons for Work event delivery settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventSettlementBlocker {
+    PathDirty {
+        states: Vec<WorkEventPathState>,
+    },
+    PathDirtyInUnreachableEnvironment {
+        states: Vec<WorkEventPathState>,
+        environment: WorkEventSettlementEnvironment,
+    },
+    CommitNotPushed,
+    MissingUpstream,
+    RemoteDiverged,
+    GitStatusError,
+    RemoteReadbackError,
+    InvalidWorkOnlyCommit,
+}
+
+/// Current delivery status of the exact tracked Work event log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventSettlementStatus {
+    /// Write-ahead reservation created before the corresponding terminal
+    /// event can mutate any tracked or projected Work surface.
+    PendingMutation {
+        event_id: String,
+        work_id: String,
+        journal_entry_id: String,
+        event_session_id: String,
+    },
+    Settled {
+        event_commit: String,
+        upstream_ref: String,
+    },
+    Blocked(WorkEventSettlementBlocker),
+}
+
+/// Whether a settlement fact should clear, warn, or stop the current agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventSettlementSeverity {
+    Clear,
+    Warning,
+    Blocked,
+}
+
+impl WorkEventSettlementStatus {
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Self::Settled { .. })
+    }
+
+    /// Classify facts by whether the current agent can fix them.
+    #[must_use]
+    pub fn severity(&self) -> WorkEventSettlementSeverity {
+        match self {
+            Self::Settled { .. } => WorkEventSettlementSeverity::Clear,
+            Self::PendingMutation { .. } => WorkEventSettlementSeverity::Blocked,
+            Self::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream
+                | WorkEventSettlementBlocker::GitStatusError
+                | WorkEventSettlementBlocker::RemoteReadbackError
+                | WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment { .. },
+            ) => WorkEventSettlementSeverity::Warning,
+            Self::Blocked(_) => WorkEventSettlementSeverity::Blocked,
+        }
+    }
+}
+
+/// Machine-local record kept separately from verification evidence.
+///
+/// `obligation_open` is sticky while settlement is blocked. Calling
+/// [`save_work_event_settlement_record`] with `open_obligation = false` only
+/// refreshes the status; it cannot close an existing obligation until the
+/// evaluator observes a clean event path and remotely contained HEAD. The originating
+/// `session_id` is retained through that settled record for auditability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEventSettlementRecord {
+    pub schema_version: u64,
+    pub session_id: String,
+    /// Exact generation that owns this delivery obligation/receipt. Old
+    /// records deserialize as `None` and are audit-only once a ledger exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<ExecutionBindingIdentity>,
+    /// Exact immutable shard whose delivery owns a schema-v4 obligation.
+    /// Kept independently from `status` so dirty/push diagnostics cannot
+    /// discard the identity before the exact shard reaches HEAD/upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_delivery: Option<PendingWorkEventDelivery>,
+    pub obligation_open: bool,
+    pub status: WorkEventSettlementStatus,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingWorkEventDelivery {
+    event_id: String,
+    work_id: String,
+    event_session_id: String,
+    #[serde(default)]
+    journal_entry_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    request_fingerprint: String,
+}
+
+/// Load the machine-local Work event settlement record. No worktree mirror
+/// is consulted: this state is an execution obligation, not tracked source.
+pub fn load_work_event_settlement_record(
+    worktree: &Path,
+) -> io::Result<Option<WorkEventSettlementRecord>> {
+    let contents = crate::cli::trusted_store::read(worktree, WORK_EVENT_SETTLEMENT_RECORD_FILE)?;
+    decode_work_event_settlement_record(contents)
+}
+
+fn load_work_event_settlement_record_from_resolved_dir(
+    trusted_dir: &Path,
+) -> io::Result<Option<WorkEventSettlementRecord>> {
+    let contents = crate::cli::trusted_store::read_from_resolved_dir(
+        trusted_dir,
+        WORK_EVENT_SETTLEMENT_RECORD_FILE,
+    )?;
+    decode_work_event_settlement_record(contents)
+}
+
+fn decode_work_event_settlement_record(
+    contents: Option<String>,
+) -> io::Result<Option<WorkEventSettlementRecord>> {
+    let Some(contents) = contents else {
+        return Ok(None);
+    };
+    let record = serde_json::from_str::<WorkEventSettlementRecord>(&contents)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    if !matches!(
+        record.schema_version,
+        WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION
+            | WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION
+            | WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION
+            | WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+    ) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "unsupported Work event settlement schema version: {}",
+                record.schema_version
+            ),
+        ));
+    }
+    if record.schema_version == WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION
+        && matches!(
+            record.status,
+            WorkEventSettlementStatus::PendingMutation { .. }
+        )
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "legacy Work event settlement record cannot contain a pending mutation",
+        ));
+    }
+    Ok(Some(record))
+}
+
+fn required_work_event_settlement_trusted_dir(worktree: &Path) -> io::Result<PathBuf> {
+    crate::cli::trusted_store::trusted_dir_for_worktree(worktree).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "repo-scoped trusted store is unavailable for Work event settlement",
+        )
+    })
+}
+
+fn require_unchanged_work_event_settlement_trusted_dir(
+    worktree: &Path,
+    expected: &Path,
+) -> io::Result<()> {
+    let current = crate::cli::trusted_store::trusted_dir_for_worktree(worktree);
+    if current.as_deref() == Some(expected) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        ErrorKind::PermissionDenied,
+        "trusted store identity changed during Work event settlement; retry after repository identity stabilizes",
+    ))
+}
+
+/// Atomically reserve a terminal Work mutation before any tracked event or
+/// projection is written. This intentionally does not inspect Git: a clean,
+/// pushed worktree must still retain the obligation until the exact event
+/// generated by the locked transaction becomes observable.
+pub fn prepare_work_event_settlement_record(
+    worktree: &Path,
+    session_id: &str,
+    event: &gwt_core::workspace_projection::WorkEvent,
+    journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> io::Result<WorkEventSettlementRecord> {
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    let mut event = event.clone();
+    let mut journal_entry = journal_entry.clone();
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+        prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            worktree,
+            session_id,
+            &mut event,
+            &mut journal_entry,
+        )
+    })
+}
+
+/// Reserve a terminal Work mutation while the caller holds the worktree-global
+/// trusted-store lease. Compatibility continuations use this beneath the
+/// canonical global -> owner -> Session hierarchy so settlement preparation
+/// cannot invert the activation lock order.
+pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
+    trusted_dir: &Path,
+    worktree: &Path,
+    session_id: &str,
+    event: &mut gwt_core::workspace_projection::WorkEvent,
+    journal_entry: &mut gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> io::Result<WorkEventSettlementRecord> {
+    if event.kind != gwt_core::workspace_projection::WorkEventKind::Done
+        || event.id.trim().is_empty()
+        || event.work_item_id.trim().is_empty()
+        || event.agent_session_id.as_deref() != Some(session_id)
+        || journal_entry.id.trim().is_empty()
+        || journal_entry.agent_session_id.as_deref() != Some(session_id)
+        || journal_entry.status_category
+            != Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Work event settlement preparation requires a matching Session-bound Done event and journal entry",
+        ));
+    }
+
+    require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
+    let current_binding = current_execution_context(worktree)?.1;
+    let request_fingerprint = pending_delivery_request_fingerprint(event, journal_entry)?;
+    if let Some(record) = load_work_event_settlement_record_from_resolved_dir(trusted_dir)?
+        .filter(|record| record.obligation_open)
+        .filter(|record| !open_obligation_is_superseded(worktree, record))
+    {
+        if let Some(delivery) = pending_delivery_for_record(&record) {
+            let same_event_identity = delivery.event_id == event.id
+                && delivery.work_id == event.work_item_id
+                && delivery.event_session_id == session_id;
+            let semantic_retry = !delivery.request_fingerprint.is_empty()
+                && delivery.request_fingerprint == request_fingerprint;
+            let early_v4_identity_retry = delivery.request_fingerprint.is_empty()
+                && delivery.journal_entry_id == journal_entry.id;
+            if same_event_identity && (semantic_retry || early_v4_identity_retry) {
+                journal_entry.id = delivery.journal_entry_id;
+                return Ok(record);
+            }
+            let exact_shard =
+                gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &delivery.event_id);
+            let shard_missing = match fs::symlink_metadata(exact_shard) {
+                Err(error) if error.kind() == ErrorKind::NotFound => true,
+                Ok(_) => false,
+                Err(error) => return Err(error),
+            };
+            if shard_missing
+                && !delivery.request_fingerprint.is_empty()
+                && delivery.request_fingerprint == request_fingerprint
+            {
+                event.id = delivery.event_id;
+                journal_entry.id = delivery.journal_entry_id;
+                return Ok(record);
+            }
+        }
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "an earlier terminal Work event is still awaiting delivery",
+        ));
+    }
+    let record = WorkEventSettlementRecord {
+        schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        execution_binding: current_binding,
+        pending_delivery: Some(PendingWorkEventDelivery {
+            event_id: event.id.clone(),
+            work_id: event.work_item_id.clone(),
+            event_session_id: session_id.to_string(),
+            journal_entry_id: journal_entry.id.clone(),
+            request_fingerprint,
+        }),
+        obligation_open: true,
+        status: WorkEventSettlementStatus::PendingMutation {
+            event_id: event.id.clone(),
+            work_id: event.work_item_id.clone(),
+            journal_entry_id: journal_entry.id.clone(),
+            event_session_id: session_id.to_string(),
+        },
+        updated_at: Utc::now(),
+    };
+    require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
+    persist_work_event_settlement_record_to_resolved_dir(trusted_dir, &record)?;
+    Ok(record)
+}
+
+/// #4011: an open obligation left behind by a legacy or predecessor
+/// generation can never be retried by the current generation — its request
+/// fingerprint carries the predecessor Session — so it would pin the receipt
+/// forever. The current generation's own terminal update supersedes it; an
+/// undelivered predecessor shard still dirties the tracked store, so no
+/// delivery pressure is lost. An unreadable authority keeps the obligation.
+fn open_obligation_is_superseded(worktree: &Path, record: &WorkEventSettlementRecord) -> bool {
+    match work_event_receipt_authorizes_current_generation(worktree, record) {
+        Ok(authorized) => !authorized,
+        Err(error) => {
+            tracing::warn!(%error, "open Work event obligation authority is unreadable");
+            false
+        }
+    }
+}
+
+/// #4011 (AC-6): the pending shard is not on disk, so whatever Git state the
+/// record captured earlier is stale. The honest fact is the unpersisted
+/// terminal mutation itself. A record that already reports that mutation is
+/// left byte-identical, so legacy receipts keep their own journal identity.
+fn refresh_unpersisted_pending_record(
+    worktree: &Path,
+    trusted_dir: &Path,
+    record: &WorkEventSettlementRecord,
+    delivery: &PendingWorkEventDelivery,
+) -> io::Result<WorkEventSettlementRecord> {
+    if matches!(
+        &record.status,
+        WorkEventSettlementStatus::PendingMutation { event_id, .. } if *event_id == delivery.event_id
+    ) {
+        return Ok(record.clone());
+    }
+    let refreshed = WorkEventSettlementRecord {
+        status: WorkEventSettlementStatus::PendingMutation {
+            event_id: delivery.event_id.clone(),
+            work_id: delivery.work_id.clone(),
+            journal_entry_id: delivery.journal_entry_id.clone(),
+            event_session_id: delivery.event_session_id.clone(),
+        },
+        updated_at: Utc::now(),
+        ..record.clone()
+    };
+    require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
+    persist_work_event_settlement_record_to_resolved_dir(trusted_dir, &refreshed)?;
+    Ok(refreshed)
+}
+
+/// Evaluate and atomically persist the machine-local settlement status.
+/// Setting `open_obligation` records a new terminal-update obligation. A
+/// previous open obligation remains open across refreshes until the exact
+/// event path is clean and HEAD is confirmed on the configured upstream
+/// remote. Refreshes and duplicate opens do not replace the originating
+/// session provenance.
+pub fn save_work_event_settlement_record(
+    worktree: &Path,
+    session_id: &str,
+    open_obligation: bool,
+) -> io::Result<WorkEventSettlementRecord> {
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
+        let previous = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?;
+        if let Some(record) = previous.as_ref().filter(|record| record.obligation_open) {
+            if let Some(delivery) = pending_delivery_for_record(record) {
+                match pending_work_event_is_persisted(
+                    worktree,
+                    record.schema_version,
+                    &delivery.event_id,
+                    &delivery.work_id,
+                    &delivery.event_session_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return refresh_unpersisted_pending_record(
+                            worktree,
+                            &trusted_dir,
+                            record,
+                            &delivery,
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let pending_delivery = previous
+            .as_ref()
+            .filter(|record| {
+                record.obligation_open
+                    && record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+            })
+            .and_then(pending_delivery_for_record);
+        let exact_event_path = pending_delivery
+            .as_ref()
+            .map(|delivery| pending_work_event_shard_relative_path(worktree, &delivery.event_id))
+            .transpose()?;
+        let mut status =
+            evaluate_work_event_settlement_for_path(worktree, exact_event_path.as_deref());
+        if status.is_settled() {
+            if let Some(delivery) = pending_delivery.as_ref() {
+                if !pending_work_event_shard_matches_head(worktree, &delivery.event_id)? {
+                    status = WorkEventSettlementStatus::Blocked(
+                        WorkEventSettlementBlocker::CommitNotPushed,
+                    );
+                }
+            }
+        }
+        let current_binding = current_execution_context(worktree)?.1;
+        let (previous_open, record_session_id, execution_binding) = match previous {
+            Some(record) if record.obligation_open || !open_obligation => (
+                record.obligation_open,
+                record.session_id,
+                record.execution_binding,
+            ),
+            _ => (false, session_id.to_string(), current_binding),
+        };
+        let record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: record_session_id,
+            execution_binding,
+            pending_delivery: (!status.is_settled()).then_some(pending_delivery).flatten(),
+            obligation_open: !status.is_settled() && (open_obligation || previous_open),
+            status: status.clone(),
+            updated_at: Utc::now(),
+        };
+        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
+        persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
+        Ok(record)
+    })
+}
+
+fn pending_delivery_for_record(
+    record: &WorkEventSettlementRecord,
+) -> Option<PendingWorkEventDelivery> {
+    if record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION {
+        if let Some(delivery) = record.pending_delivery.as_ref() {
+            let mut delivery = delivery.clone();
+            if delivery.journal_entry_id.is_empty() {
+                if let WorkEventSettlementStatus::PendingMutation {
+                    journal_entry_id, ..
+                } = &record.status
+                {
+                    delivery.journal_entry_id = journal_entry_id.clone();
+                }
+            }
+            return Some(delivery);
+        }
+    }
+    {
+        let WorkEventSettlementStatus::PendingMutation {
+            event_id,
+            work_id,
+            event_session_id,
+            ..
+        } = &record.status
+        else {
+            return None;
+        };
+        Some(PendingWorkEventDelivery {
+            event_id: event_id.clone(),
+            work_id: work_id.clone(),
+            event_session_id: event_session_id.clone(),
+            journal_entry_id: String::new(),
+            request_fingerprint: String::new(),
+        })
+    }
+}
+
+fn pending_delivery_request_fingerprint(
+    event: &gwt_core::workspace_projection::WorkEvent,
+    journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> io::Result<String> {
+    let mut event = serde_json::to_value(event)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let mut journal = serde_json::to_value(journal_entry)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    for value in [&mut event, &mut journal] {
+        let object = value.as_object_mut().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "terminal Work delivery fingerprint expected an object",
+            )
+        })?;
+        object.remove("id");
+        object.remove("updated_at");
+    }
+    let bytes = serde_json::to_vec(&(event, journal))
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+pub(crate) fn persist_work_event_settlement_record(
+    worktree: &Path,
+    record: &WorkEventSettlementRecord,
+) -> io::Result<()> {
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, record)
+}
+
+fn persist_work_event_settlement_record_to_resolved_dir(
+    trusted_dir: &Path,
+    record: &WorkEventSettlementRecord,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    crate::cli::trusted_store::write_to_resolved_dir(
+        trusted_dir,
+        WORK_EVENT_SETTLEMENT_RECORD_FILE,
+        &bytes,
+    )
+}
+
+pub(crate) fn pending_shard_refresh_failure_must_block(record: &WorkEventSettlementRecord) -> bool {
+    record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+        && record.obligation_open
+        && pending_delivery_for_record(record).is_some()
+}
+
+pub(crate) fn pending_shard_refresh_failure_description() -> String {
+    "Work event settlement refused: the exact pending Work event shard could not be validated. Retry the terminal workspace.update to restore the canonical shard before retrying."
+        .to_string()
+}
+
+fn pending_work_event_is_persisted(
+    worktree: &Path,
+    receipt_schema_version: u64,
+    event_id: &str,
+    work_id: &str,
+    session_id: &str,
+) -> io::Result<bool> {
+    if receipt_schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION {
+        return pending_work_event_shard_is_persisted(worktree, event_id, work_id, session_id);
+    }
+    pending_legacy_work_event_is_persisted(worktree, event_id, work_id, session_id)
+}
+
+fn pending_work_event_shard_is_persisted(
+    worktree: &Path,
+    event_id: &str,
+    work_id: &str,
+    session_id: &str,
+) -> io::Result<bool> {
+    if !pending_work_event_store_ancestors_are_directories(worktree, event_id)? {
+        return Ok(false);
+    }
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard is not a regular file",
+        ));
+    }
+    let contents = fs::read(&path)?;
+    if contents.last() != Some(&b'\n')
+        || contents.iter().filter(|byte| **byte == b'\n').count() != 1
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard must contain exactly one newline-terminated event",
+        ));
+    }
+    let payload = &contents[..contents.len() - 1];
+    let decoded = gwt_core::workspace_projection::decode_workspace_work_event_line(payload)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+    let gwt_core::workspace_projection::DecodedWorkspaceWorkEvent::Known(event) = decoded else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard uses an unsupported event kind",
+        ));
+    };
+    if event.id != event_id
+        || event.work_item_id != work_id
+        || event.kind != gwt_core::workspace_projection::WorkEventKind::Done
+        || event.agent_session_id.as_deref() != Some(session_id)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event identity does not match the tracked shard",
+        ));
+    }
+    Ok(true)
+}
+
+fn pending_work_event_store_ancestors_are_directories(
+    worktree: &Path,
+    event_id: &str,
+) -> io::Result<bool> {
+    let root = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let exact = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let bucket = exact.parent().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard has no canonical digest bucket",
+        )
+    })?;
+    for path in [
+        root.join(".gwt"),
+        root.join(".gwt/work"),
+        root.join(WORK_EVENT_STORE_RELATIVE),
+        bucket.to_path_buf(),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "prepared Work event store ancestor `{}` must be a real directory",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn pending_work_event_shard_matches_head(worktree: &Path, event_id: &str) -> io::Result<bool> {
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let local = fs::read(&path)?;
+    let relative = pending_work_event_shard_relative_path(worktree, event_id)?;
+    let output = gwt_core::process::hidden_command("git")
+        .args(["show", &format!("HEAD:{relative}")])
+        .current_dir(worktree)
+        .output()?;
+    Ok(output.status.success() && output.stdout == local)
+}
+
+fn pending_work_event_shard_relative_path(worktree: &Path, event_id: &str) -> io::Result<String> {
+    let root = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let relative = path.strip_prefix(&root).map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard escapes the current worktree",
+        )
+    })?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    "prepared Work event shard path is not valid UTF-8",
+                )
+            }),
+            _ => Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "prepared Work event shard path is not canonical",
+            )),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let [gwt, work, events, bucket, file_name] = components.as_slice() else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard path has an unexpected shape",
+        ));
+    };
+    let Some(digest) = file_name.strip_suffix(".jsonl") else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard filename is not canonical",
+        ));
+    };
+    if (*gwt, *work, *events) != (".gwt", "work", "events")
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || bucket.len() != 2
+        || !bucket.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || *bucket != &digest[..2]
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard path is not canonical",
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn pending_legacy_work_event_is_persisted(
+    worktree: &Path,
+    event_id: &str,
+    work_id: &str,
+    session_id: &str,
+) -> io::Result<bool> {
+    let contents = match fs::read_to_string(worktree.join(WORK_EVENT_LOG_RELATIVE)) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "tracked Work event log has an incomplete tail",
+        ));
+    }
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("invalid tracked Work event at line {}: {error}", index + 1),
+            )
+        })?;
+        if value.get("id").and_then(serde_json::Value::as_str) != Some(event_id) {
+            continue;
+        }
+        let event = serde_json::from_value::<gwt_core::workspace_projection::WorkEvent>(value)
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+        if event.work_item_id != work_id
+            || event.kind != gwt_core::workspace_projection::WorkEventKind::Done
+            || event.agent_session_id.as_deref() != Some(session_id)
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "prepared Work event identity does not match the tracked event",
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Evaluate Work event delivery independently from verification freshness.
+/// Every Git error and unknown state is blocked; this function never treats
+/// a failed probe as evidence of settlement.
+#[must_use]
+pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementStatus {
+    evaluate_work_event_settlement_for_path(worktree, None)
+}
+
+fn evaluate_work_event_settlement_for_path(
+    worktree: &Path,
+    exact_event_path: Option<&str>,
+) -> WorkEventSettlementStatus {
+    let states = match work_event_path_states(worktree) {
+        Ok(states) => states,
+        Err(()) => {
+            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
+        }
+    };
+    if !states.is_empty() {
+        let environment = match configured_upstream(worktree) {
+            Ok((remote, merge_ref, _)) => fetch_upstream_tip(worktree, &remote, &merge_ref)
+                .err()
+                .map(|()| WorkEventSettlementEnvironment::RemoteReadbackError),
+            Err(UpstreamFailure::Missing) => Some(WorkEventSettlementEnvironment::MissingUpstream),
+            Err(UpstreamFailure::Git) => Some(WorkEventSettlementEnvironment::GitStatusError),
+        };
+        return WorkEventSettlementStatus::Blocked(match environment {
+            Some(environment) => WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+                states,
+                environment,
+            },
+            None => WorkEventSettlementBlocker::PathDirty { states },
+        });
+    }
+
+    let head_commit = match git_stdout(worktree, &["rev-parse", "HEAD"]) {
+        Ok(commit) if !commit.is_empty() => commit,
+        _ => {
+            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
+        }
+    };
+    let mut event_commit_args = vec!["rev-list", "-1", head_commit.as_str(), "--"];
+    if let Some(exact_event_path) = exact_event_path {
+        event_commit_args.push(exact_event_path);
+    } else {
+        event_commit_args.push(WORK_EVENT_LOG_RELATIVE);
+        event_commit_args.push(WORK_EVENT_STORE_RELATIVE);
+    }
+    let event_commit = match git_stdout(worktree, &event_commit_args) {
+        Ok(commit) if !commit.is_empty() => commit,
+        _ => {
+            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
+        }
+    };
+    match event_commit_has_non_bookkeeping_change(worktree, &event_commit) {
+        Ok(true) => {}
+        Ok(false) => {
+            let subject = match git_stdout(worktree, &["show", "-s", "--format=%s", &event_commit])
+            {
+                Ok(subject) => subject,
+                Err(()) => {
+                    return WorkEventSettlementStatus::Blocked(
+                        WorkEventSettlementBlocker::GitStatusError,
+                    );
+                }
+            };
+            if !subject.starts_with("chore(work):") {
+                return WorkEventSettlementStatus::Blocked(
+                    WorkEventSettlementBlocker::InvalidWorkOnlyCommit,
+                );
+            }
+        }
+        Err(()) => {
+            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
+        }
+    }
+
+    let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
+        Ok(upstream) => upstream,
+        Err(UpstreamFailure::Missing) => {
+            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream);
+        }
+        Err(UpstreamFailure::Git) => {
+            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
+        }
+    };
+    let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
+        Ok(remote_tip) => remote_tip,
+        Err(()) => {
+            return WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::RemoteReadbackError,
+            );
+        }
+    };
+    let head_on_remote = match git_is_ancestor(worktree, &head_commit, &remote_tip) {
+        Ok(value) => value,
+        Err(()) => {
+            return WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::RemoteReadbackError,
+            );
+        }
+    };
+    if head_on_remote {
+        return WorkEventSettlementStatus::Settled {
+            event_commit,
+            upstream_ref,
+        };
+    }
+    let remote_on_head = match git_is_ancestor(worktree, &remote_tip, &head_commit) {
+        Ok(value) => value,
+        Err(()) => {
+            return WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::RemoteReadbackError,
+            );
+        }
+    };
+    if remote_on_head {
+        WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed)
+    } else {
+        WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged)
+    }
+}
+
+/// Whether this worktree's canonical Work has already reached a terminal
+/// lifecycle, which makes a settlement receipt unmintable: the receipt is
+/// written only by a terminal `workspace.update`, that update resolves its
+/// target with `allow_terminal: false`, `workspace.ensure` hard-refuses a
+/// terminal canonical Work, and no operation reopens one.
+///
+/// An unreadable branch, Work id, or WorkItems projection answers `false` so an
+/// infrastructure failure keeps the ordinary receipt requirement rather than
+/// silently waiving it.
+fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
+    let branch = gwt_git::Repository::open(worktree)
+        .ok()
+        .and_then(|repository| repository.current_branch().ok().flatten());
+    let Some(work_id) = gwt_core::workspace_projection::canonical_work_id(
+        worktree,
+        branch.as_deref(),
+        Some(worktree),
+    ) else {
+        return false;
+    };
+    gwt_core::workspace_projection::load_workspace_work_items(worktree)
+        .ok()
+        .flatten()
+        .is_some_and(|items| {
+            items
+                .work_items
+                .iter()
+                .any(|item| item.id == work_id && item.is_terminal())
+        })
+}
+
+/// Return an actionable refusal when this worktree has entered the tracked
+/// Work-event lifecycle and its exact event log is not durably contained by
+/// the configured upstream. Repositories that have never materialized the
+/// event log (and have no trusted settlement receipt) remain outside this
+/// contract so legacy/unmanaged command surfaces continue to work.
+#[must_use]
+pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
+    let receipt = match load_work_event_settlement_record(worktree) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(%error, "work event settlement receipt is unreadable");
+            return None;
+        }
+    };
+    let current_binding = match current_execution_context(worktree) {
+        Ok((_, binding)) => binding,
+        Err(error) => {
+            tracing::warn!(%error, "work event settlement authority is unreadable");
+            return None;
+        }
+    };
+    let path_exists = [WORK_EVENT_LOG_RELATIVE, WORK_EVENT_STORE_RELATIVE]
+        .into_iter()
+        .try_fold(false, |exists, relative| {
+            match fs::symlink_metadata(worktree.join(relative)) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(exists),
+                Err(error) => Err(error),
+            }
+        });
+    let path_exists = match path_exists {
+        Ok(exists) => exists,
+        Err(error) => {
+            tracing::warn!(%error, "work event settlement path could not be inspected");
+            if receipt
+                .as_ref()
+                .is_some_and(pending_shard_refresh_failure_must_block)
+            {
+                return Some(pending_shard_refresh_failure_description());
+            }
+            return None;
+        }
+    };
+    let path_tracked = [WORK_EVENT_LOG_RELATIVE, WORK_EVENT_STORE_RELATIVE]
+        .into_iter()
+        .any(|relative| {
+            gwt_core::process::hidden_command("git")
+                .args(["ls-files", "--error-unmatch", "--", relative])
+                .current_dir(worktree)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        });
+    if receipt.is_none() && !path_exists && !path_tracked {
+        return None;
+    }
+    match receipt.as_ref() {
+        Some(record) => match work_event_receipt_authorizes_current_generation(worktree, record) {
+            Ok(true) => {}
+            // #4011: the receipt is minted only by a terminal `workspace.update`,
+            // and that update refuses a terminal canonical Work, so once the
+            // Work is terminal no generation can ever re-mint a stale receipt.
+            // Treat it like a missing one (#3459) and let the delivery
+            // evaluation below decide; it still fails closed on an undelivered
+            // event log.
+            Ok(false) if canonical_work_for_worktree_is_terminal(worktree) => {}
+            Ok(false) => {
+                return Some(stale_work_event_receipt_description(
+                    record,
+                    current_binding.as_ref(),
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "work event settlement receipt authority is unreadable");
+                return None;
+            }
+        },
+        // #3459: demanding the receipt is only honest while the terminal Work
+        // update that mints it is still reachable. A terminal canonical Work
+        // can never accept one — `workspace.update` resolves its target with
+        // `allow_terminal: false` and `workspace.ensure` refuses outright — so
+        // this branch would otherwise close completion for good. Fall through
+        // to the delivery evaluation below, which still fails closed on an
+        // undelivered event log.
+        None if current_binding.is_some() && !canonical_work_for_worktree_is_terminal(worktree) => {
+            return Some(
+                "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying."
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    let status = if let Some(receipt) = receipt {
+        match save_work_event_settlement_record(worktree, &receipt.session_id, false) {
+            Ok(refreshed) => refreshed.status,
+            Err(error) => {
+                tracing::warn!(%error, "work event settlement receipt could not be refreshed");
+                if pending_shard_refresh_failure_must_block(&receipt) {
+                    return Some(pending_shard_refresh_failure_description());
+                }
+                return None;
+            }
+        }
+    } else {
+        evaluate_work_event_settlement(worktree)
+    };
+    match status {
+        WorkEventSettlementStatus::PendingMutation {
+            event_id,
+            work_id,
+            journal_entry_id,
+            ..
+        } => Some(work_event_settlement_pending_description(
+            &event_id,
+            &work_id,
+            &journal_entry_id,
+        )),
+        WorkEventSettlementStatus::Settled { .. } => None,
+        WorkEventSettlementStatus::Blocked(_)
+            if status.severity() == WorkEventSettlementSeverity::Warning =>
+        {
+            None
+        }
+        WorkEventSettlementStatus::Blocked(blocker) => {
+            Some(work_event_settlement_blocker_description(&blocker))
+        }
+    }
+}
+
+/// Authenticate a Work settlement receipt against the authoritative current
+/// generation. A receipt may name the exact current binding or an authentic
+/// same-Session lifecycle prefix (for example, the Active head immediately
+/// before that generation settled as Completed). Generation successors,
+/// takeovers, foreign Sessions, and arbitrary heads remain unauthorized.
+pub(crate) fn work_event_receipt_authorizes_current_generation(
+    worktree: &Path,
+    receipt: &WorkEventSettlementRecord,
+) -> io::Result<bool> {
+    let Some(execution) = execution_state::load(worktree)? else {
+        return Ok(receipt.execution_binding.is_none());
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    match receipt.execution_binding.as_ref() {
+        Some(binding) => execution_state::execution_binding_authorizes_current_generation(
+            worktree,
+            owner,
+            &receipt.session_id,
+            binding,
+        ),
+        None => Ok(execution_state::current_execution_binding(worktree, owner)?.is_none()),
+    }
+}
+
+/// #4011: a stale-generation receipt on a live canonical Work is repairable
+/// only by this generation's own terminal update, never by committing or
+/// pushing what the predecessor left behind. Name both generations so the
+/// agent can tell which one the receipt came from.
+fn stale_work_event_receipt_description(
+    receipt: &WorkEventSettlementRecord,
+    current_binding: Option<&ExecutionBindingIdentity>,
+) -> String {
+    let receipt_generation = receipt
+        .execution_binding
+        .as_ref()
+        .map_or("legacy (unbound)", |binding| binding.generation_id.as_str());
+    let current_generation =
+        current_binding.map_or("unknown", |binding| binding.generation_id.as_str());
+    format!(
+        "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
+    )
+}
+
+pub(crate) fn work_event_settlement_pending_description(
+    event_id: &str,
+    work_id: &str,
+    journal_entry_id: &str,
+) -> String {
+    format!(
+        "Work event settlement refused: terminal event `{event_id}` for Work `{work_id}` (journal `{journal_entry_id}`) has not been persisted to its exact shard in `{WORK_EVENT_STORE_RELATIVE}/` (legacy receipts use `{WORK_EVENT_LOG_RELATIVE}`). Retry the terminal workspace.update so Host recovery can finish, then commit and push the event store before retrying."
+    )
+}
+
+pub(crate) fn work_event_settlement_blocker_description(
+    blocker: &WorkEventSettlementBlocker,
+) -> String {
+    let reason = match blocker {
+        WorkEventSettlementBlocker::PathDirty { states } => {
+            let states = states
+                .iter()
+                .map(|state| match state {
+                    WorkEventPathState::Staged => "staged",
+                    WorkEventPathState::Unstaged => "unstaged",
+                    WorkEventPathState::Untracked => "untracked",
+                    WorkEventPathState::Deleted => "deleted",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "the Work event store (`{WORK_EVENT_STORE_RELATIVE}/`, legacy `{WORK_EVENT_LOG_RELATIVE}`) is dirty ({states})"
+            )
+        }
+        WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+            states,
+            environment,
+        } => {
+            let states = states
+                .iter()
+                .map(|state| match state {
+                    WorkEventPathState::Staged => "staged",
+                    WorkEventPathState::Unstaged => "unstaged",
+                    WorkEventPathState::Untracked => "untracked",
+                    WorkEventPathState::Deleted => "deleted",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "the Work event store (`{WORK_EVENT_STORE_RELATIVE}/`, legacy `{WORK_EVENT_LOG_RELATIVE}`) is dirty ({states}), but remote reachability is unavailable ({environment:?})"
+            )
+        }
+        WorkEventSettlementBlocker::CommitNotPushed => {
+            "the current HEAD is not contained by its configured upstream".to_string()
+        }
+        WorkEventSettlementBlocker::MissingUpstream => {
+            "the current branch has no usable configured upstream".to_string()
+        }
+        WorkEventSettlementBlocker::RemoteDiverged => {
+            "the current HEAD and configured upstream have diverged".to_string()
+        }
+        WorkEventSettlementBlocker::GitStatusError => {
+            format!(
+                "Git could not prove the state of `{WORK_EVENT_STORE_RELATIVE}/` and legacy `{WORK_EVENT_LOG_RELATIVE}`"
+            )
+        }
+        WorkEventSettlementBlocker::RemoteReadbackError => {
+            "the configured upstream could not be fetched and read back".to_string()
+        }
+        WorkEventSettlementBlocker::InvalidWorkOnlyCommit =>
+            "the commit containing only `.gwt/` bookkeeping does not use the exact `chore(work):` subject prefix"
+                .to_string(),
+    };
+    format!(
+        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory."
+    )
+}
+
+fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
+    let output = gwt_core::process::hidden_command("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            WORK_EVENT_LOG_RELATIVE,
+            WORK_EVENT_STORE_RELATIVE,
+        ])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(|_| ())?;
+    let mut states = Vec::new();
+    for line in stdout.lines() {
+        let bytes = line.as_bytes();
+        if bytes.len() < 3 {
+            return Err(());
+        }
+        let (index, worktree_state) = (bytes[0], bytes[1]);
+        if index == b'?' && worktree_state == b'?' {
+            states.push(WorkEventPathState::Untracked);
+            continue;
+        }
+        if index == b'D' || worktree_state == b'D' {
+            states.push(WorkEventPathState::Deleted);
+        }
+        if index != b' ' && index != b'D' {
+            states.push(WorkEventPathState::Staged);
+        }
+        if worktree_state != b' ' && worktree_state != b'D' {
+            states.push(WorkEventPathState::Unstaged);
+        }
+    }
+    let ignored = gwt_core::process::hidden_command("git")
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            WORK_EVENT_STORE_RELATIVE,
+        ])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    if !ignored.status.success() {
+        return Err(());
+    }
+    if ignored
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .any(is_canonical_bucketed_work_event_shard)
+    {
+        states.push(WorkEventPathState::Untracked);
+    }
+    states.sort_unstable();
+    states.dedup();
+    Ok(states)
+}
+
+fn is_canonical_bucketed_work_event_shard(path: &[u8]) -> bool {
+    let mut components = path.split(|byte| *byte == b'/');
+    let Some(gwt) = components.next() else {
+        return false;
+    };
+    let Some(work) = components.next() else {
+        return false;
+    };
+    let Some(events) = components.next() else {
+        return false;
+    };
+    let Some(bucket) = components.next() else {
+        return false;
+    };
+    let Some(file_name) = components.next() else {
+        return false;
+    };
+    if components.next().is_some()
+        || (gwt, work, events) != (b".gwt", b"work", b"events")
+        || bucket.len() != 2
+        || !bucket
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
+    {
+        return false;
+    }
+    let Some(digest) = file_name.strip_suffix(b".jsonl") else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
+        && bucket == &digest[..2]
+}
+
+fn event_commit_has_non_bookkeeping_change(
+    worktree: &Path,
+    event_commit: &str,
+) -> Result<bool, ()> {
+    let output = gwt_core::process::hidden_command("git")
+        .args([
+            "show",
+            "--root",
+            "--first-parent",
+            "--format=",
+            "--name-only",
+            "-r",
+            "-z",
+            event_commit,
+        ])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    let mut saw_event_path = false;
+    let mut saw_non_bookkeeping = false;
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        if path == WORK_EVENT_LOG_RELATIVE.as_bytes()
+            || path
+                .strip_prefix(WORK_EVENT_STORE_RELATIVE.as_bytes())
+                .is_some_and(|suffix| suffix.first() == Some(&b'/'))
+        {
+            saw_event_path = true;
+        } else if !path.starts_with(b".gwt/") {
+            saw_non_bookkeeping = true;
+        }
+    }
+    if !saw_event_path {
+        return Err(());
+    }
+    Ok(saw_non_bookkeeping)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamFailure {
+    Missing,
+    Git,
+}
+
+fn configured_upstream(worktree: &Path) -> Result<(String, String, String), UpstreamFailure> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| UpstreamFailure::Git)?;
+    if !output.status.success() {
+        return match output.status.code() {
+            Some(1) => Err(UpstreamFailure::Missing),
+            _ => Err(UpstreamFailure::Git),
+        };
+    }
+    let branch = String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .map_err(|_| UpstreamFailure::Git)?;
+    if branch.is_empty() {
+        return Err(UpstreamFailure::Missing);
+    }
+    let remote_key = format!("branch.{branch}.remote");
+    let merge_key = format!("branch.{branch}.merge");
+    let remote = git_config_value(worktree, &remote_key)?;
+    let merge_ref = git_config_value(worktree, &merge_key)?;
+    if remote.is_empty() || remote == "." || !merge_ref.starts_with("refs/heads/") {
+        return Err(UpstreamFailure::Missing);
+    }
+    let branch_name = merge_ref
+        .strip_prefix("refs/heads/")
+        .ok_or(UpstreamFailure::Missing)?;
+    let upstream_ref = format!("refs/remotes/{remote}/{branch_name}");
+    Ok((remote, merge_ref, upstream_ref))
+}
+
+fn git_config_value(worktree: &Path, key: &str) -> Result<String, UpstreamFailure> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["config", "--get", key])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| UpstreamFailure::Git)?;
+    if !output.status.success() {
+        return match output.status.code() {
+            Some(1) => Err(UpstreamFailure::Missing),
+            _ => Err(UpstreamFailure::Git),
+        };
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .map_err(|_| UpstreamFailure::Git)
+}
+
+fn fetch_upstream_tip(worktree: &Path, remote: &str, merge_ref: &str) -> Result<String, ()> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["fetch", "--quiet", "--no-tags", remote, merge_ref])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    git_stdout(worktree, &["rev-parse", "FETCH_HEAD"])
+}
+
+fn git_stdout(worktree: &Path, args: &[&str]) -> Result<String, ()> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(args)
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .map_err(|_| ())
+}
+
+fn git_is_ancestor(worktree: &Path, ancestor: &str, descendant: &str) -> Result<bool, ()> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(()),
+    }
+}
+
+/// Minimal quote-aware command splitter: whitespace-separated arguments with
+/// double- and single-quote grouping. Deliberately supports no shell
+/// features (pipes, redirects, `&&`) — verification commands run as direct
+/// process invocations so the recorded command is exactly what executed.
+pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
+    let mut args: Vec<(String, bool)> = Vec::new();
+    let mut current = String::new();
+    let mut current_quoted = false;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut had_token = false;
+    for ch in command.chars() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                had_token = true;
+                current_quoted = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                had_token = true;
+                current_quoted = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if had_token {
+                    args.push((std::mem::take(&mut current), current_quoted));
+                    had_token = false;
+                    current_quoted = false;
+                }
+            }
+            c => {
+                current.push(c);
+                had_token = true;
+            }
+        }
+    }
+    if in_single || in_double {
+        return Err(format!("unbalanced quote in command: {command}"));
+    }
+    if had_token {
+        args.push((current, current_quoted));
+    }
+    if args.is_empty() {
+        return Err("empty command".to_string());
+    }
+    // Reject bare shell operators (there is no shell, so they would become
+    // literal arguments and silently change the command's meaning). Quoted
+    // occurrences are deliberate literals — `rg "&&" crates/` is fine.
+    for meta in ["&&", "||", "|", ";", ">", "<"] {
+        if args.iter().any(|(arg, quoted)| !quoted && arg == meta) {
+            return Err(format!(
+                "shell operator '{meta}' is not supported — run one plain command per entry"
+            ));
+        }
+    }
+    Ok(args.into_iter().map(|(arg, _)| arg).collect())
+}
+
+/// Execute one verification command in the worktree and return its exit code
+/// plus a bounded output tail (stdout + stderr interleaved by section). A
+/// spawn failure (missing binary, Windows `.cmd` shims that
+/// `std::process::Command` cannot launch, …) is recorded as a failed result
+/// (exit `-1`) instead of aborting the run — the record must be written even
+/// when commands fail, and the partial transcript must survive.
+/// Live GitHub opt-in must never cross the `verify.run` child boundary
+/// (SPEC #4093 FR-008, Issue #3850): a `cargo test` child that inherits it
+/// spends the real budget from every fixture-free test.
+const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
+
+fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
+    execute_command_with_isolation(worktree, command, false)
+}
+
+fn execute_command_with_isolation(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+) -> Result<(i32, String), String> {
+    let args = split_command_line(command)?;
+    let mut process = gwt_core::process::hidden_command(&args[0]);
+    process
+        .args(&args[1..])
+        .current_dir(worktree)
+        .env_remove(LIVE_GITHUB_OPT_IN_ENV);
+    if isolated_baseline {
+        gwt_core::process::scrub_git_env(&mut process);
+        process.env_remove("CARGO_TARGET_DIR");
+    }
+    let output = match process.output() {
+        Ok(output) => output,
+        Err(err) => {
+            let diagnostic = format!("failed to spawn '{command}': {err}");
+            let clipped = bounded_output_tail(diagnostic.as_bytes());
+            return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
+        }
+    };
+    let exit_code = output.status.code().unwrap_or(-1);
+    let mut tail = String::new();
+    for (label, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        if bytes.is_empty() {
+            continue;
+        }
+        let clipped = bounded_output_tail(bytes);
+        if !clipped.is_empty() {
+            tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
+        }
+    }
+    Ok((exit_code, tail))
+}
+
+fn git_command(worktree: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
+    let mut command = gwt_core::process::hidden_command("git");
+    command.args(args).current_dir(worktree);
+    gwt_core::process::scrub_git_env(&mut command);
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn current_head_sha(worktree: &Path) -> Result<String, String> {
+    git_command(
+        worktree,
+        &[
+            std::ffi::OsStr::new("rev-parse"),
+            std::ffi::OsStr::new("HEAD"),
+        ],
+    )
+}
+
+fn baseline_result_line(output: &str, test_identity: &str) -> Option<String> {
+    let expected = format!("test {test_identity} ... ok");
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| *line == expected)
+        .map(str::to_string)
+}
+
+fn measure_baseline(
+    worktree: &Path,
+    merge_base_sha: &str,
+    request: &VerificationQuarantineRequest,
+) -> Result<(i32, String), String> {
+    request.validate()?;
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let checkout = temp.path().join("baseline");
+    let clone_args = [
+        std::ffi::OsStr::new("clone"),
+        std::ffi::OsStr::new("--shared"),
+        std::ffi::OsStr::new("--no-checkout"),
+        std::ffi::OsStr::new("--quiet"),
+        worktree.as_os_str(),
+        checkout.as_os_str(),
+    ];
+    git_command(temp.path(), &clone_args)?;
+    git_command(
+        &checkout,
+        &[
+            std::ffi::OsStr::new("checkout"),
+            std::ffi::OsStr::new("--detach"),
+            std::ffi::OsStr::new("--quiet"),
+            std::ffi::OsStr::new(merge_base_sha),
+        ],
+    )?;
+    let (exit_code, output) =
+        execute_command_with_isolation(&checkout, &request.baseline_command, true)?;
+    if exit_code != 0 {
+        return Err(format!("baseline command exited {exit_code}"));
+    }
+    let result_line = baseline_result_line(&output, &request.test_identity).ok_or_else(|| {
+        format!(
+            "baseline command did not report exact PASS for {}",
+            request.test_identity
+        )
+    })?;
+    Ok((exit_code, result_line))
+}
+
+fn bounded_output_tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let stripped = gwt_core::process_console::strip_ansi(&text);
+    let control_safe: String = stripped
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .collect();
+    let redacted = gwt_core::process_console::redact_line(control_safe.trim_end());
+    if redacted.len() <= OUTPUT_TAIL_LIMIT {
+        return redacted;
+    }
+    // Snap the cut to a char boundary — runner output is frequently
+    // multibyte (Japanese cargo messages) and a raw byte slice would panic.
+    let mut start = redacted.len() - OUTPUT_TAIL_LIMIT;
+    while start < redacted.len() && !redacted.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...[truncated]\n{}", &redacted[start..])
+}
+
+fn persisted_failure_output(exit_code: i32, tail: &str) -> String {
+    if exit_code == 0 || tail.is_empty() {
+        return String::new();
+    }
+    tail.to_string()
+}
+
+#[derive(Debug, Clone)]
+struct PreparedQuarantineRequest {
+    request: VerificationQuarantineRequest,
+    pr_reference: PrQuarantineReference,
+}
+
+fn prepare_quarantine_requests<E: CliEnv>(
+    env: &mut E,
+    plan: Option<&VerificationPlanRecord>,
+) -> (Vec<PreparedQuarantineRequest>, String) {
+    let mut prepared = Vec::new();
+    let mut diagnostics = String::new();
+    let Some(plan) = plan else {
+        return (prepared, diagnostics);
+    };
+    for request in &plan.quarantines {
+        let owner_exists = match env.client().fetch(IssueNumber(request.owner_issue), None) {
+            Ok(FetchResult::Updated(snapshot)) => {
+                snapshot.number == IssueNumber(request.owner_issue)
+            }
+            Ok(FetchResult::NotModified) | Err(_) => false,
+        };
+        if !owner_exists {
+            diagnostics.push_str(&format!(
+                "quarantine: owner Issue #{} could not be verified; {} remains blocking\n",
+                request.owner_issue, request.test_identity
+            ));
+            continue;
+        }
+        let context = match env.fetch_pr_quarantine_context(request.pr_number) {
+            Ok(context) if context.number == request.pr_number => context,
+            Ok(_) | Err(_) => {
+                diagnostics.push_str(&format!(
+                    "quarantine: PR #{} context could not be verified; {} remains blocking\n",
+                    request.pr_number, request.test_identity
+                ));
+                continue;
+            }
+        };
+        let Some(pr_reference) =
+            find_pr_quarantine_reference(&context, &request.test_identity, request.owner_issue)
+        else {
+            diagnostics.push_str(&format!(
+                "quarantine: PR #{} lacks the exact typed marker for {}; failure remains blocking\n",
+                request.pr_number, request.test_identity
+            ));
+            continue;
+        };
+        prepared.push(PreparedQuarantineRequest {
+            request: request.clone(),
+            pr_reference,
+        });
+    }
+    (prepared, diagnostics)
+}
+
+/// Run the verification commands and persist the record (T-110). The record
+/// is written even when commands fail — a failing run is evidence too, it
+/// just never satisfies a completion gate.
+///
+/// This low-level primitive remains available for internal gate fixtures.
+/// Caller-facing `verify.run` dispatch goes through
+/// `run_verification_for_caller`, which authenticates durable Session
+/// authority before command dispatch and again before persistence.
+pub fn run_verification(
+    worktree: &Path,
+    session_id: &str,
+    commands: &[String],
+) -> Result<(VerificationRunRecord, String), String> {
+    run_verification_inner(worktree, session_id, commands, None, &[], "", || {})
+}
+
+fn run_verification_for_caller(
+    worktree: &Path,
+    session_id: &str,
+    commands: &[String],
+    authority: &VerificationCallerAuthority,
+    prepared_quarantines: &[PreparedQuarantineRequest],
+    quarantine_diagnostics: &str,
+) -> Result<(VerificationRunRecord, String), String> {
+    run_verification_inner(
+        worktree,
+        session_id,
+        commands,
+        Some(authority),
+        prepared_quarantines,
+        quarantine_diagnostics,
+        || {},
+    )
+}
+
+fn run_verification_inner<F>(
+    worktree: &Path,
+    session_id: &str,
+    commands: &[String],
+    authority: Option<&VerificationCallerAuthority>,
+    prepared_quarantines: &[PreparedQuarantineRequest],
+    quarantine_diagnostics: &str,
+    after_commands: F,
+) -> Result<(VerificationRunRecord, String), String>
+where
+    F: FnOnce(),
+{
+    // Snapshot owner, plan, and worktree together. Commands deliberately run
+    // outside the lease; the final commit reacquires it and rejects any
+    // interleaving writer by invalidating the evidence snapshot.
+    let (owner_number, execution_binding, plan_snapshot, fingerprint_before) =
+        crate::cli::trusted_store::with_write_lease(worktree, || {
+            let (owner_number, execution_binding) = if let Some(authority) = authority {
+                (authority.owner_number, authority.execution_binding.clone())
+            } else {
+                current_execution_context(worktree)?
+            };
+            let plan = load_plan(worktree)?;
+            let generated_outputs = plan
+                .as_ref()
+                .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
+                .transpose()?
+                .unwrap_or_default();
+            let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
+            if let Some(authority) = authority {
+                revalidate_verification_caller_authority(worktree, session_id, authority)?;
+            }
+            Ok((owner_number, execution_binding, plan, fingerprint))
+        })
+        .map_err(|err| {
+            if err.kind() == ErrorKind::PermissionDenied {
+                err.to_string()
+            } else {
+                format!("failed to snapshot verification state: {err}")
+            }
+        })?;
+    if commands.is_empty()
+        && !plan_snapshot
+            .as_ref()
+            .is_some_and(is_canonical_trivial_plan)
+    {
+        return Err(
+            "verify.run with no commands requires a canonical trivial derived plan".to_string(),
+        );
+    }
+    let started_at = Utc::now();
+    let mut results: Vec<VerificationCommandResult> = Vec::new();
+    let mut transcript = String::new();
+    transcript.push_str(quarantine_diagnostics);
+    if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
+        transcript.push_str(
+            "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
+        );
+    }
+    for command in commands {
+        transcript.push_str(&format!("$ {command}\n"));
+        let (exit_code, tail) = execute_command(worktree, command)?;
+        transcript.push_str(&tail);
+        transcript.push_str(&format!("exit: {exit_code}\n"));
+        results.push(VerificationCommandResult {
+            command: command.clone(),
+            exit_code,
+            output_tail: persisted_failure_output(exit_code, &tail),
+        });
+    }
+    after_commands();
+    let all_passed = results.iter().all(|result| result.exit_code == 0);
+    let mut quarantined_failures = Vec::new();
+    if !all_passed {
+        let head_sha = current_head_sha(worktree);
+        let merge_base_sha = crate::cli::verify_derivation::integration_merge_base(worktree)
+            .ok_or_else(|| "integration merge-base is unavailable".to_string());
+        for result in results.iter().filter(|result| result.exit_code != 0) {
+            let Some(inventory) = parse_libtest_failure_inventory(&result.output_tail) else {
+                transcript.push_str(&format!(
+                    "quarantine: '{}' has no single complete libtest failure inventory; failure remains blocking\n",
+                    result.command
+                ));
+                continue;
+            };
+            for test_identity in inventory {
+                let Some(prepared) = prepared_quarantines.iter().find(|prepared| {
+                    prepared.request.failed_command == result.command
+                        && prepared.request.test_identity == test_identity
+                        && plan_snapshot
+                            .as_ref()
+                            .is_some_and(|plan| plan.quarantines.contains(&prepared.request))
+                }) else {
+                    transcript.push_str(&format!(
+                        "quarantine: {test_identity} has no verified plan-bound owner/PR proof; failure remains blocking\n"
+                    ));
+                    continue;
+                };
+                let (head_sha, merge_base_sha) = match (&head_sha, &merge_base_sha) {
+                    (Ok(head), Ok(base)) => (head.clone(), base.clone()),
+                    (Err(error), _) | (_, Err(error)) => {
+                        transcript.push_str(&format!(
+                            "quarantine: {test_identity} baseline identity failed ({error}); failure remains blocking\n"
+                        ));
+                        continue;
+                    }
+                };
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request) {
+                    Ok((baseline_exit_code, baseline_result_line)) => {
+                        transcript.push_str(&format!(
+                            "quarantine: {test_identity} is typed non-blocking via owner #{} and PR #{}; merge-base {merge_base_sha} reported exact PASS\n",
+                            prepared.request.owner_issue, prepared.request.pr_number
+                        ));
+                        quarantined_failures.push(TypedQuarantinedFailure {
+                            failed_command: prepared.request.failed_command.clone(),
+                            test_identity: prepared.request.test_identity.clone(),
+                            owner_issue: prepared.request.owner_issue,
+                            head_sha,
+                            merge_base_sha,
+                            baseline_command: prepared.request.baseline_command.clone(),
+                            baseline_exit_code,
+                            baseline_result_line,
+                            pr_number: prepared.request.pr_number,
+                            pr_reference: prepared.pr_reference.clone(),
+                        });
+                    }
+                    Err(error) => transcript.push_str(&format!(
+                        "quarantine: {test_identity} merge-base proof failed ({error}); failure remains blocking\n"
+                    )),
+                }
+            }
+        }
+    }
+    // T-130: bind coverage to the exact pre-run plan snapshot. A missing,
+    // cross-session, tampered, or legacy-hashless plan remains unplanned.
+    let (plan_covered, planned_missing, verification_plan_hash, plan_derived) =
+        match plan_snapshot.as_ref() {
+            Some(plan)
+                if !plan.content_hash.is_empty()
+                    && plan_integrity_ok(plan)
+                    && plan.session_id == session_id
+                    && plan.owner_number == owner_number
+                    && plan.execution_binding == execution_binding =>
+            {
+                let ran: std::collections::HashSet<&str> =
+                    commands.iter().map(String::as_str).collect();
+                let missing: Vec<String> = plan
+                    .commands
+                    .iter()
+                    .filter(|planned| !ran.contains(planned.as_str()))
+                    .cloned()
+                    .collect();
+                (
+                    missing.is_empty() && plan.worktree_fingerprint == fingerprint_before,
+                    missing,
+                    plan.content_hash.clone(),
+                    plan.derived,
+                )
+            }
+            _ => (false, Vec::new(), String::new(), false),
+        };
+    let mut record = VerificationRunRecord {
+        record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
+        session_id: session_id.to_string(),
+        owner_number,
+        execution_binding: execution_binding.clone(),
+        worktree_fingerprint: fingerprint_before.clone(),
+        commands: results,
+        all_passed,
+        quarantined_failures,
+        adjudications: Vec::new(),
+        started_at: Some(started_at),
+        created_at: Utc::now(),
+        plan_covered,
+        planned_missing,
+        verification_plan_hash,
+        plan_derived,
+        content_hash: String::new(),
+    };
+
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        if let Some(authority) = authority {
+            revalidate_verification_caller_authority(worktree, session_id, authority)?;
+        }
+        let (current_owner, current_binding) = current_execution_context(worktree)?;
+        let current_plan = load_plan(worktree)?;
+        let fingerprint_after = worktree_fingerprint_excluding(
+            worktree,
+            plan_snapshot
+                .as_ref()
+                .map(|plan| plan.generated_outputs.as_slice())
+                .unwrap_or_default(),
+        )?;
+        if fingerprint_before != fingerprint_after {
+            transcript.push_str(
+                "warning: the worktree changed while verification ran — the record is invalidated; rerun `verify.run` on the final state\n",
+            );
+            record.worktree_fingerprint = "invalidated-by-concurrent-change".to_string();
+        }
+        if current_owner != owner_number {
+            transcript.push_str(
+                "warning: the execution owner changed while verification ran — the record is invalidated; rerun `verify.run` for the current owner\n",
+            );
+            record.plan_covered = false;
+        }
+        if current_binding != execution_binding {
+            transcript.push_str(
+                "warning: the execution generation changed while verification ran — the record is invalidated; rerun `verify.run` for the current generation\n",
+            );
+            record.plan_covered = false;
+        }
+        let same_plan = match (plan_snapshot.as_ref(), current_plan.as_ref()) {
+            (Some(before), Some(after)) => {
+                !before.content_hash.is_empty()
+                    && before.content_hash == after.content_hash
+                    && plan_integrity_ok(after)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_plan {
+            transcript.push_str(
+                "warning: the verification plan changed while verification ran — the record is invalidated; rerun `verify.run` against the current plan\n",
+            );
+            record.plan_covered = false;
+        }
+        if let Some(authority) = authority {
+            revalidate_verification_caller_authority(worktree, session_id, authority)?;
+        }
+        record.created_at = Utc::now();
+        record.content_hash = compute_content_hash(&record);
+        save(worktree, &record)
+    })
+    .map_err(|err| {
+        if err.kind() == ErrorKind::PermissionDenied {
+            err.to_string()
+        } else {
+            format!("failed to save verification record: {err}")
+        }
+    })?;
+
+    if !record.plan_covered {
+        transcript.push_str(
+            "note: this run does not cover a registered verification plan for this session — register the matrix with `verify.plan` first, then run it (T-130)\n",
+        );
+    }
+    Ok((record, transcript))
+}
+
+fn is_canonical_trivial_plan(plan: &VerificationPlanRecord) -> bool {
+    plan.derived
+        && plan.commands.is_empty()
+        && matches!(
+            plan.surfaces.as_slice(),
+            [surface]
+                if matches!(
+                    surface.as_str(),
+                    "trivial(ledger_only)"
+                        | "trivial(deletion_only)"
+                        | "trivial(integration_branch)"
+                        | "trivial(merge_base_unavailable)"
+                )
+        )
+}
+
+/// Evidence status consumed by completion and PR handoff gates (T-111/T-112).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceStatus {
+    /// A fresh, all-passing record for this session/owner/fingerprint.
+    Fresh,
+    /// Raw commands failed, but every libtest failure has complete typed
+    /// owner/base/PR quarantine evidence. Contextual gates must still
+    /// revalidate the current PR reference before mutating or settling.
+    FreshWithQuarantine,
+    MissingRecord,
+    WrongSession,
+    WrongOwner,
+    /// The record belongs to a legacy/predecessor execution generation.
+    WrongGeneration,
+    StaleFingerprint,
+    Failing,
+    Unreadable,
+    /// P9a (T-122): the stored integrity hash does not match the content —
+    /// the record was edited outside `verify.run`.
+    Tampered,
+    /// T-130-lite: the run did not cover the registered verification plan
+    /// (or no plan was registered before running).
+    PlanNotCovered,
+    /// The currently registered plan is not the exact immutable plan
+    /// snapshot consumed by the run.
+    PlanChanged,
+}
+
+impl EvidenceStatus {
+    /// Human guidance for the gate message.
+    #[must_use]
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::Fresh => "verification evidence is fresh",
+            Self::FreshWithQuarantine => {
+                "verification evidence is fresh with typed quarantined failures"
+            }
+            Self::MissingRecord => {
+                "no verification run record exists — run the verification matrix through JSON operation `verify.run` with `params.commands:[...]`"
+            }
+            Self::WrongSession => {
+                "the verification record belongs to another session — rerun `verify.run` from this session"
+            }
+            Self::WrongOwner => {
+                "the verification record was taken for a different owner — rerun `verify.run` after the current launch"
+            }
+            Self::WrongGeneration => {
+                "the verification record belongs to a legacy, predecessor, or superseded execution binding — register the plan and rerun `verify.run` from the current generation"
+            }
+            Self::StaleFingerprint => {
+                "the worktree changed after the last verification run (stale evidence) — rerun `verify.run`"
+            }
+            Self::Failing => {
+                "the last verification run has failing commands — fix the failures and rerun `verify.run`"
+            }
+            Self::Unreadable => {
+                "the verification record is unreadable — rerun `verify.run` to rewrite it"
+            }
+            Self::Tampered => {
+                "the verification record failed integrity validation (edited outside `verify.run`) — rerun `verify.run` to produce a genuine record"
+            }
+            Self::PlanNotCovered => {
+                "the last verification run does not cover a registered plan — declare the required matrix with `verify.plan` (params.commands), then run it in full through `verify.run`"
+            }
+            Self::PlanChanged => {
+                "the verification plan changed after the last run — rerun `verify.run` against the current plan"
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn is_delivery_acceptable(&self) -> bool {
+        matches!(self, Self::Fresh | Self::FreshWithQuarantine)
+    }
+}
+
+#[must_use]
+pub fn quarantine_marker(test_identity: &str, owner_issue: u64) -> String {
+    format!(
+        "gwt-verification-quarantine:v1 test={} owner=#{owner_issue}",
+        test_identity.trim()
+    )
+}
+
+fn line_is_quarantine_marker(line: &str, marker: &str) -> bool {
+    let line = line.trim();
+    line == marker
+        || line
+            .strip_prefix("<!--")
+            .and_then(|line| line.strip_suffix("-->"))
+            .is_some_and(|line| line.trim() == marker)
+}
+
+#[must_use]
+pub fn find_pr_quarantine_reference(
+    context: &crate::cli::pr::PrQuarantineContext,
+    test_identity: &str,
+    owner_issue: u64,
+) -> Option<PrQuarantineReference> {
+    let marker = quarantine_marker(test_identity, owner_issue);
+    if context
+        .body
+        .lines()
+        .any(|line| line_is_quarantine_marker(line, &marker))
+    {
+        return Some(PrQuarantineReference {
+            kind: PrQuarantineReferenceKind::Body,
+            comment_id: None,
+            marker,
+        });
+    }
+    context.comments.iter().find_map(|comment| {
+        comment
+            .body
+            .lines()
+            .any(|line| line_is_quarantine_marker(line, &marker))
+            .then(|| PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::Comment,
+                comment_id: Some(comment.id),
+                marker: marker.clone(),
+            })
+    })
+}
+
+pub(crate) fn validate_current_quarantine_references<E: CliEnv>(
+    env: &mut E,
+    record: &VerificationRunRecord,
+    expected_pr_number: Option<u64>,
+) -> Result<(), String> {
+    if record.quarantined_failures.is_empty() {
+        return Err("verification record has no typed quarantined failures".to_string());
+    }
+    let mut contexts = std::collections::HashMap::new();
+    for quarantine in &record.quarantined_failures {
+        if expected_pr_number.is_some_and(|number| number != quarantine.pr_number) {
+            return Err(format!(
+                "typed quarantine belongs to PR #{} instead of PR #{}",
+                quarantine.pr_number,
+                expected_pr_number.unwrap_or_default()
+            ));
+        }
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            contexts.entry(quarantine.pr_number)
+        {
+            let context = env
+                .fetch_pr_quarantine_context(quarantine.pr_number)
+                .map_err(|error| {
+                    format!(
+                        "could not read current quarantine evidence from PR #{}: {error}",
+                        quarantine.pr_number
+                    )
+                })?;
+            if context.number != quarantine.pr_number {
+                return Err(format!(
+                    "PR quarantine response #{} does not match requested #{}",
+                    context.number, quarantine.pr_number
+                ));
+            }
+            entry.insert(context);
+        }
+        let context = &contexts[&quarantine.pr_number];
+        let marker_exists = match quarantine.pr_reference.kind {
+            PrQuarantineReferenceKind::Body => context
+                .body
+                .lines()
+                .any(|line| line_is_quarantine_marker(line, &quarantine.pr_reference.marker)),
+            PrQuarantineReferenceKind::Comment => {
+                let Some(comment_id) = quarantine.pr_reference.comment_id else {
+                    return Err("typed PR comment reference has no durable comment id".to_string());
+                };
+                context.comments.iter().any(|comment| {
+                    comment.id == comment_id
+                        && comment.body.lines().any(|line| {
+                            line_is_quarantine_marker(line, &quarantine.pr_reference.marker)
+                        })
+                })
+            }
+        };
+        if !marker_exists {
+            return Err(format!(
+                "current PR #{} no longer contains the recorded quarantine marker for {}",
+                quarantine.pr_number, quarantine.test_identity
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_completion_evidence<E: CliEnv>(
+    env: &mut E,
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: u64,
+    completion: &crate::cli::execution_state::ExecutionCompletionEvidence,
+    expected_pr_number: Option<u64>,
+) -> Result<(), String> {
+    let record = validate_completion_evidence_snapshot(
+        worktree,
+        session_id,
+        expected_owner_number,
+        completion,
+    )?;
+    if completion.used_typed_quarantine {
+        validate_current_quarantine_references(env, &record, expected_pr_number)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_completion_evidence_snapshot(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: u64,
+    completion: &crate::cli::execution_state::ExecutionCompletionEvidence,
+) -> Result<VerificationRunRecord, String> {
+    if completion.verification_record_id.trim().is_empty()
+        || completion.verification_run_hash.trim().is_empty()
+        || completion.verification_plan_hash.trim().is_empty()
+    {
+        return Err("completion verification receipt is incomplete".to_string());
+    }
+    let record = load(worktree)
+        .map_err(|error| format!("completion verification record is unreadable: {error}"))?
+        .ok_or_else(|| "completion verification record is missing".to_string())?;
+    if record.record_id != completion.verification_record_id
+        || record.content_hash != completion.verification_run_hash
+        || record.verification_plan_hash != completion.verification_plan_hash
+    {
+        return Err(
+            "current verification record does not match the completion evidence receipt"
+                .to_string(),
+        );
+    }
+    let plan = load_plan(worktree)
+        .map_err(|error| format!("completion verification plan is unreadable: {error}"))?;
+    let status = evaluate_completion_evidence_snapshot(
+        worktree,
+        session_id,
+        expected_owner_number,
+        plan.as_ref(),
+        &record,
+    );
+    let expected = if completion.used_typed_quarantine {
+        EvidenceStatus::FreshWithQuarantine
+    } else {
+        EvidenceStatus::Fresh
+    };
+    if status != expected {
+        return Err(format!(
+            "completion verification receipt is no longer current: {}",
+            status.describe()
+        ));
+    }
+    Ok(record)
+}
+
+fn parse_libtest_failure_inventory(output: &str) -> Option<Vec<String>> {
+    if output.matches("test result: FAILED.").count() != 1 {
+        return None;
+    }
+    let summary_start = output.rfind("test result: FAILED.")?;
+    let summary = output[summary_start..].lines().next()?;
+    let failed_count = summary.split(';').find_map(|part| {
+        part.trim()
+            .strip_suffix(" failed")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+    })?;
+    let failures_start = output[..summary_start]
+        .rfind("\nfailures:\n")
+        .map(|index| index + "\nfailures:\n".len())
+        .or_else(|| {
+            output[..summary_start]
+                .strip_prefix("failures:\n")
+                .map(|_| 10)
+        })?;
+    let failures = output[failures_start..summary_start]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (failed_count > 0 && failures.len() == failed_count).then_some(failures)
+}
+
+fn typed_quarantines_cover_all_failures(
+    record: &VerificationRunRecord,
+    plan: Option<&VerificationPlanRecord>,
+) -> bool {
+    if record.quarantined_failures.is_empty() {
+        return false;
+    }
+    let Some(plan) = plan else {
+        return false;
+    };
+    let mut seen = std::collections::HashSet::new();
+    for quarantine in &record.quarantined_failures {
+        if quarantine.failed_command.trim().is_empty()
+            || quarantine.test_identity.trim().is_empty()
+            || quarantine.owner_issue == 0
+            || quarantine.head_sha.trim().is_empty()
+            || quarantine.merge_base_sha.trim().is_empty()
+            || quarantine.baseline_command.trim().is_empty()
+            || quarantine.baseline_exit_code != 0
+            || quarantine.baseline_result_line
+                != format!("test {} ... ok", quarantine.test_identity)
+            || quarantine.pr_number == 0
+            || quarantine.pr_reference.marker
+                != quarantine_marker(&quarantine.test_identity, quarantine.owner_issue)
+            || matches!(
+                quarantine.pr_reference.kind,
+                PrQuarantineReferenceKind::Comment
+            ) && quarantine.pr_reference.comment_id.is_none()
+            || matches!(
+                quarantine.pr_reference.kind,
+                PrQuarantineReferenceKind::Body
+            ) && quarantine.pr_reference.comment_id.is_some()
+            || !seen.insert((
+                quarantine.failed_command.as_str(),
+                quarantine.test_identity.as_str(),
+            ))
+        {
+            return false;
+        }
+        if !plan.quarantines.iter().any(|request| {
+            request.validate().is_ok()
+                && request.failed_command == quarantine.failed_command
+                && request.test_identity == quarantine.test_identity
+                && request.owner_issue == quarantine.owner_issue
+                && request.baseline_command == quarantine.baseline_command
+                && request.pr_number == quarantine.pr_number
+        }) {
+            return false;
+        }
+        if !record
+            .commands
+            .iter()
+            .any(|result| result.exit_code != 0 && result.command == quarantine.failed_command)
+        {
+            return false;
+        }
+    }
+
+    record.commands.iter().all(|result| {
+        let typed = record
+            .quarantined_failures
+            .iter()
+            .filter(|entry| entry.failed_command == result.command)
+            .map(|entry| entry.test_identity.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if result.exit_code == 0 {
+            return typed.is_empty();
+        }
+        let Some(inventory) = parse_libtest_failure_inventory(&result.output_tail) else {
+            return false;
+        };
+        inventory.len() == typed.len()
+            && inventory
+                .iter()
+                .all(|test_identity| typed.contains(test_identity.as_str()))
+    })
+}
+
+/// Evaluate one already-loaded plan/run snapshot. Callers that need an
+/// atomic decision (execution completion/recovery) load both records while
+/// holding the owner write lease and use this helper without reopening a
+/// TOCTOU window.
+#[must_use]
+pub fn evaluate_evidence_snapshot(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+    plan: Option<&VerificationPlanRecord>,
+    record: &VerificationRunRecord,
+) -> EvidenceStatus {
+    evaluate_evidence_snapshot_inner(
+        worktree,
+        session_id,
+        expected_owner_number,
+        plan,
+        record,
+        true,
+        false,
+    )
+}
+
+fn evaluate_completion_evidence_snapshot(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: u64,
+    plan: Option<&VerificationPlanRecord>,
+    record: &VerificationRunRecord,
+) -> EvidenceStatus {
+    evaluate_evidence_snapshot_inner(
+        worktree,
+        session_id,
+        Some(expected_owner_number),
+        plan,
+        record,
+        false,
+        false,
+    )
+}
+
+fn evaluate_evidence_snapshot_inner(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+    plan: Option<&VerificationPlanRecord>,
+    record: &VerificationRunRecord,
+    require_current_execution_binding: bool,
+    allow_failing_commands: bool,
+) -> EvidenceStatus {
+    if !record.quarantined_failures.is_empty() && record.content_hash.is_empty() {
+        return EvidenceStatus::Tampered;
+    }
+    if !integrity_ok(record) {
+        return EvidenceStatus::Tampered;
+    }
+    if record.session_id != session_id {
+        return EvidenceStatus::WrongSession;
+    }
+    if let Some(expected) = expected_owner_number {
+        if record.owner_number != Some(expected) {
+            return EvidenceStatus::WrongOwner;
+        }
+    }
+    if require_current_execution_binding {
+        let current_binding = match current_execution_context(worktree) {
+            Ok((_, binding)) => binding,
+            Err(_) => return EvidenceStatus::Unreadable,
+        };
+        if record.execution_binding != current_binding {
+            return EvidenceStatus::WrongGeneration;
+        }
+    }
+    let generated_outputs = plan
+        .filter(|plan| {
+            !record.verification_plan_hash.is_empty()
+                && plan.content_hash == record.verification_plan_hash
+                && plan_integrity_ok(plan)
+        })
+        .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
+        .transpose();
+    let Ok(generated_outputs) = generated_outputs else {
+        return EvidenceStatus::Tampered;
+    };
+    let current_fingerprint =
+        worktree_fingerprint_excluding(worktree, generated_outputs.as_deref().unwrap_or_default())
+            .unwrap_or_else(|_| "no-git".to_string());
+    if record.worktree_fingerprint != current_fingerprint {
+        return EvidenceStatus::StaleFingerprint;
+    }
+    let has_typed_quarantine = if record.all_passed {
+        if !record.quarantined_failures.is_empty() {
+            return EvidenceStatus::Failing;
+        }
+        false
+    } else if typed_quarantines_cover_all_failures(record, plan) {
+        true
+    } else if allow_failing_commands {
+        false
+    } else {
+        return EvidenceStatus::Failing;
+    };
+    if !record.verification_plan_hash.is_empty() {
+        let Some(plan) = plan else {
+            return EvidenceStatus::PlanChanged;
+        };
+        if plan.content_hash.is_empty()
+            || !plan_integrity_ok(plan)
+            || plan.session_id != session_id
+            || plan.owner_number != record.owner_number
+            || plan.execution_binding != record.execution_binding
+            || plan.worktree_fingerprint.is_empty()
+            || plan.worktree_fingerprint != record.worktree_fingerprint
+            || record.verification_plan_hash != plan.content_hash
+            || record.plan_derived != plan.derived
+        {
+            return EvidenceStatus::PlanChanged;
+        }
+    }
+    if !record.plan_covered {
+        return EvidenceStatus::PlanNotCovered;
+    }
+    if record.verification_plan_hash.is_empty() {
+        return EvidenceStatus::PlanChanged;
+    }
+    if has_typed_quarantine {
+        EvidenceStatus::FreshWithQuarantine
+    } else {
+        EvidenceStatus::Fresh
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerificationCallerAuthority {
+    owner_number: Option<u64>,
+    execution_binding: Option<ExecutionBindingIdentity>,
+    session_binding: Option<gwt_agent::SessionExecutionBinding>,
+}
+
+/// Render the `verify.*` entry refusal.
+///
+/// A window without execution authority cannot register a plan or a record,
+/// and saying only that leaves it with nothing to try — the window in Issue
+/// #4140 concluded it was completely stuck. The host verification queue is
+/// reachable without any execution authority, so the refusal names it.
+fn verification_entry_refusal(err: &io::Error) -> String {
+    if err.kind() == ErrorKind::PermissionDenied {
+        format!(
+            "{err}. This window cannot register a verification plan or record, but it can still \
+             take its turn in the host verification queue: `verify.lease.status` and \
+             `verify.lease.acquire` need no execution authority."
+        )
+    } else {
+        format!("failed to resolve verification authority: {err}")
+    }
+}
+
+fn verification_caller_authority_error() -> io::Error {
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        "verify.* requires current verification authority; relaunch or continue the owning Session before retrying",
+    )
+}
+
+fn snapshot_verification_caller_authority(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<VerificationCallerAuthority> {
+    let Some(execution) =
+        execution_state::load(worktree).map_err(|_| verification_caller_authority_error())?
+    else {
+        return Ok(VerificationCallerAuthority {
+            owner_number: None,
+            execution_binding: None,
+            session_binding: None,
+        });
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    let current_binding = execution_state::current_execution_binding(worktree, owner)
+        .map_err(|_| verification_caller_authority_error())?;
+    let Some(current_binding) = current_binding else {
+        return Ok(VerificationCallerAuthority {
+            owner_number: Some(execution.owner_number),
+            execution_binding: None,
+            session_binding: None,
+        });
+    };
+    let ledger = execution_state::load_generation_ledger(worktree, owner)
+        .map_err(|_| verification_caller_authority_error())?
+        .ok_or_else(verification_caller_authority_error)?;
+
+    if !execution_state::integrity_ok(&execution)
+        || !execution_state::generation_ledger_integrity_ok(&ledger)
+        || ledger.current_effective_status() != Some(execution.status)
+        || execution.primary_session_id != session_id
+        || !matches!(
+            execution.status,
+            execution_state::ExecutionControlStatus::Active
+                | execution_state::ExecutionControlStatus::Blocked
+        )
+    {
+        return Err(verification_caller_authority_error());
+    }
+    gwt_agent::validate_session_id_path_component(session_id)
+        .map_err(|_| verification_caller_authority_error())?;
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&session_path)
+        .map_err(|_| verification_caller_authority_error())?;
+    let session_binding = session
+        .execution_binding
+        .clone()
+        .ok_or_else(verification_caller_authority_error)?;
+    let canonical_worktree =
+        dunce::canonicalize(worktree).map_err(|_| verification_caller_authority_error())?;
+    let canonical_session_worktree = dunce::canonicalize(&session.worktree_path)
+        .map_err(|_| verification_caller_authority_error())?;
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(&canonical_worktree)
+        .map(|value| value.as_str().to_string())
+        .ok_or_else(verification_caller_authority_error)?;
+    if canonical_session_worktree != canonical_worktree
+        || session.id != session_id
+        || session.repo_hash.as_deref() != Some(repo_hash.as_str())
+        || session.linked_issue_number != Some(owner.number)
+        || session_binding.schema_version
+            != gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+        || session_binding.session_id != session_id
+        || session_binding.repo_hash != repo_hash
+        || session_binding.owner_kind != owner.kind.as_str()
+        || session_binding.owner_number != owner.number
+        || session_binding.capability_generation == 0
+    {
+        return Err(verification_caller_authority_error());
+    }
+    if !execution_state::execution_binding_authorizes_current_generation(
+        &canonical_worktree,
+        owner,
+        session_id,
+        &session_binding.identity,
+    )
+    .map_err(|_| verification_caller_authority_error())?
+    {
+        return Err(verification_caller_authority_error());
+    }
+
+    let mut structural_validation = session;
+    structural_validation.execution_binding = None;
+    structural_validation
+        .set_execution_binding(Some(session_binding.clone()))
+        .map_err(|_| verification_caller_authority_error())?;
+    if execution.status == execution_state::ExecutionControlStatus::Active
+        && !execution_state::current_active_execution_binding_matches(
+            &canonical_worktree,
+            owner,
+            session_id,
+            &current_binding,
+        )
+        .map_err(|_| verification_caller_authority_error())?
+    {
+        return Err(verification_caller_authority_error());
+    }
+
+    Ok(VerificationCallerAuthority {
+        owner_number: Some(owner.number),
+        execution_binding: Some(current_binding),
+        session_binding: Some(session_binding),
+    })
+}
+
+fn revalidate_verification_caller_authority(
+    worktree: &Path,
+    session_id: &str,
+    expected: &VerificationCallerAuthority,
+) -> io::Result<()> {
+    let current = snapshot_verification_caller_authority(worktree, session_id)?;
+    if &current != expected {
+        return Err(verification_caller_authority_error());
+    }
+    Ok(())
+}
+
+fn board_decision_field<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    body.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(label)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn validate_board_decision(
+    worktree: &Path,
+    entry_id: &str,
+    record_id: &str,
+    command: &str,
+) -> io::Result<gwt_core::coordination::BoardEntry> {
+    let entry = gwt_core::coordination::load_board_entry(worktree, entry_id)
+        .map_err(|err| io::Error::other(err.to_string()))?
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Board decision entry was not found"))?;
+    if entry.kind != gwt_core::coordination::BoardEntryKind::Decision {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board entry must have kind=decision",
+        ));
+    }
+    if board_decision_field(&entry.body, "Verification record:") != Some(record_id) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board decision does not name the exact verification record",
+        ));
+    }
+    if board_decision_field(&entry.body, "Failing command:") != Some(command) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board decision does not name the exact failing command",
+        ));
+    }
+    if board_decision_field(&entry.body, "Reason:").is_none() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board decision requires a non-empty Reason field",
+        ));
+    }
+    Ok(entry)
+}
+
+fn attach_board_decision_for_caller(
+    worktree: &Path,
+    session_id: &str,
+    record_id: &str,
+    command: &str,
+    board_entry_id: &str,
+    authority: &VerificationCallerAuthority,
+) -> io::Result<VerificationRunRecord> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        revalidate_verification_caller_authority(worktree, session_id, authority)?;
+        let mut record = load(worktree)?.ok_or_else(|| {
+            io::Error::new(ErrorKind::NotFound, "verification record was not found")
+        })?;
+        if !integrity_ok(&record) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "verification record failed integrity validation",
+            ));
+        }
+        if record.record_id != record_id {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "adjudication targets a stale verification record",
+            ));
+        }
+        if record.session_id != session_id
+            || record.owner_number != authority.owner_number
+            || record.execution_binding != authority.execution_binding
+        {
+            return Err(verification_caller_authority_error());
+        }
+        let matching = record
+            .commands
+            .iter()
+            .filter(|result| result.command == command)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 || matching[0].exit_code == 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "adjudication must target one exact failing command",
+            ));
+        }
+        validate_board_decision(worktree, board_entry_id, record_id, command)?;
+        if record.adjudications.iter().any(|reference| {
+            reference.board_entry_id == board_entry_id && reference.command == command
+        }) {
+            return Ok(record);
+        }
+        record.adjudications.push(VerificationAdjudicationRef {
+            board_entry_id: board_entry_id.to_string(),
+            command: command.to_string(),
+            attached_at: Utc::now(),
+        });
+        save(worktree, &record)?;
+        load(worktree)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "verification record disappeared after adjudication",
+            )
+        })
+    })
+}
+
+/// Authenticate the ambient caller against the exact durable Session for the
+/// current generation, when this worktree has generation authority.
+///
+/// Legacy flat ECRs and unmanaged worktrees intentionally remain outside this
+/// gate. Callers receive only a boolean-free success/error result so no
+/// Session or binding identity can leak into diagnostics.
+pub(crate) fn authenticate_current_generation_caller(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> io::Result<()> {
+    snapshot_current_generation_caller_binding(worktree, session_id).map(|_| ())
+}
+
+/// Capture the exact durable Session capability epoch authenticated for the
+/// current generation. PR mutations keep this snapshot across local payload
+/// reads and lease it again immediately around external dispatch.
+pub(crate) fn snapshot_current_generation_caller_binding(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    let (_, current_binding) =
+        current_execution_context(worktree).map_err(|_| verification_caller_authority_error())?;
+    if current_binding.is_none() {
+        return Ok(None);
+    }
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(verification_caller_authority_error)?;
+    let authority = snapshot_verification_caller_authority(worktree, session_id)?;
+    if authority.execution_binding != current_binding {
+        return Err(verification_caller_authority_error());
+    }
+    Ok(authority.session_binding)
+}
+
+/// Resolve the current linked owner and its exact generation identity from
+/// the authoritative ECR/ledger pair. A flat legacy ECR intentionally
+/// returns an owner with no binding.
+fn current_execution_context(
+    worktree: &Path,
+) -> io::Result<(Option<u64>, Option<ExecutionBindingIdentity>)> {
+    let Some(execution) = execution_state::load(worktree)? else {
+        return Ok((None, None));
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    let binding = execution_state::current_execution_binding(worktree, owner)?;
+    Ok((Some(execution.owner_number), binding))
+}
+
+/// Evaluate the latest record against the current session, the Execution
+/// Control Record's owner, and the current worktree fingerprint (FR-036).
+#[must_use]
+pub fn evaluate_evidence(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+) -> EvidenceStatus {
+    let record = match load(worktree) {
+        Ok(Some(record)) => record,
+        Ok(None) => return EvidenceStatus::MissingRecord,
+        Err(_) => return EvidenceStatus::Unreadable,
+    };
+    let plan = match load_plan(worktree) {
+        Ok(plan) => plan,
+        Err(_) => return EvidenceStatus::Unreadable,
+    };
+    evaluate_evidence_snapshot(
+        worktree,
+        session_id,
+        expected_owner_number,
+        plan.as_ref(),
+        &record,
+    )
+}
+
+/// Evaluate evidence for the exact `pr.ready` handoff. Raw verification
+/// remains failing. Fully typed quarantines are accepted without a Board
+/// reference (the PR path separately revalidates their exact PR marker);
+/// otherwise every failed command requires a readable exact decision entry.
+pub(crate) fn evaluate_pr_ready_evidence(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+) -> Result<Vec<VerificationAdjudicationRef>, EvidenceStatus> {
+    let record = match load(worktree) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Err(EvidenceStatus::MissingRecord),
+        Err(_) => return Err(EvidenceStatus::Unreadable),
+    };
+    let plan = load_plan(worktree).map_err(|_| EvidenceStatus::Unreadable)?;
+    let status = evaluate_evidence_snapshot_inner(
+        worktree,
+        session_id,
+        expected_owner_number,
+        plan.as_ref(),
+        &record,
+        true,
+        true,
+    );
+    if !matches!(
+        status,
+        EvidenceStatus::Fresh | EvidenceStatus::FreshWithQuarantine
+    ) {
+        return Err(status);
+    }
+    if record.all_passed || status == EvidenceStatus::FreshWithQuarantine {
+        return Ok(Vec::new());
+    }
+
+    for reference in &record.adjudications {
+        validate_board_decision(
+            worktree,
+            &reference.board_entry_id,
+            &record.record_id,
+            &reference.command,
+        )
+        .map_err(|_| EvidenceStatus::Failing)?;
+    }
+
+    let failed_commands = record
+        .commands
+        .iter()
+        .filter(|result| result.exit_code != 0)
+        .collect::<Vec<_>>();
+    if failed_commands.is_empty() {
+        return Err(EvidenceStatus::Failing);
+    }
+    failed_commands
+        .into_iter()
+        .map(|result| {
+            record
+                .adjudications
+                .iter()
+                .find(|reference| reference.command == result.command)
+                .cloned()
+                .ok_or(EvidenceStatus::Failing)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// CLI command surface (`verify.run`)
+// ---------------------------------------------------------------------------
+
+/// Commands of the `verify.*` JSON operation family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyCommand {
+    Run {
+        commands: Vec<String>,
+        /// Issue #3913: bound on the host admission wait (seconds).
+        max_wait_secs: Option<u64>,
+    },
+    /// Attach one existing Board decision to one exact failing command in the
+    /// latest canonical record. The Board remains the decision audit source;
+    /// this operation only records the reference consumed by `pr.ready`.
+    Adjudicate {
+        record_id: String,
+        command: String,
+        board_entry_id: String,
+    },
+    /// T-130-lite: register the required verification matrix before running.
+    /// Full T-130 core: `derive` classifies changed surfaces and derives the
+    /// matrix when no explicit commands are given.
+    Plan { commands: Vec<String>, derive: bool },
+    /// Explicit plan with an exact generated-file allowlist.
+    PlanWithOutputs {
+        commands: Vec<String>,
+        derive: bool,
+        generated_outputs: Vec<String>,
+        quarantines: Vec<VerificationQuarantineRequest>,
+    },
+}
+
+pub(super) fn run<E: CliEnv>(
+    env: &mut E,
+    command: VerifyCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SpecOpsError::from(ApiError::Unexpected(
+                "verify.* requires GWT_SESSION_ID to bind the record to the session".to_string(),
+            ))
+        })?;
+    let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let authority =
+        snapshot_verification_caller_authority(&worktree, &session_id).map_err(|err| {
+            SpecOpsError::from(ApiError::Unexpected(verification_entry_refusal(&err)))
+        })?;
+    let command = match command {
+        VerifyCommand::Plan { commands, derive } => VerifyCommand::PlanWithOutputs {
+            commands,
+            derive,
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+        },
+        other => other,
+    };
+    match command {
+        VerifyCommand::PlanWithOutputs {
+            commands,
+            derive,
+            generated_outputs,
+            quarantines,
+        } => {
+            let (commands, plan) = if derive {
+                if !commands.is_empty() {
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        "verify.plan takes either params.derive:true or explicit params.commands, not both"
+                            .to_string(),
+                    )));
+                }
+                let (derived_plan, plan) = derive_and_register_plan_for_caller(
+                    &worktree,
+                    &session_id,
+                    generated_outputs,
+                    quarantines,
+                    &authority,
+                )
+                .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+                out.push_str(&format!(
+                    "verify: derived matrix from changed surfaces [{}]\n",
+                    derived_plan.surfaces.join(", ")
+                ));
+                for command in &derived_plan.commands {
+                    out.push_str(&format!("  - {command}\n"));
+                }
+                (derived_plan.commands, plan)
+            } else {
+                if commands.is_empty() {
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        "verify.plan requires at least one command (or params.derive:true)"
+                            .to_string(),
+                    )));
+                }
+                let plan = register_plan_for_caller(
+                    &worktree,
+                    &session_id,
+                    commands.clone(),
+                    generated_outputs,
+                    quarantines,
+                    false,
+                    &authority,
+                )
+                .map_err(|err| {
+                    SpecOpsError::from(if err.kind() == ErrorKind::PermissionDenied {
+                        ApiError::Unexpected(err.to_string())
+                    } else {
+                        ApiError::Unexpected(crate::cli::trusted_store::store_health_error(
+                            "updating verification state",
+                            &err,
+                        ))
+                    })
+                })?;
+                (commands, plan)
+            };
+            out.push_str(&format!(
+                "verify: plan registered — {count} command(s) for session {session_id} (owner {owner}{derived_note})\n",
+                count = commands.len(),
+                owner = plan
+                    .owner_number
+                    .map(|n| format!("#{n}"))
+                    .unwrap_or_else(|| "none".to_string()),
+                derived_note = if plan.derived { ", derived" } else { "" },
+            ));
+            Ok(0)
+        }
+        VerifyCommand::Plan { .. } => unreachable!("normalized above"),
+        VerifyCommand::Adjudicate {
+            record_id,
+            command,
+            board_entry_id,
+        } => {
+            let record = attach_board_decision_for_caller(
+                &worktree,
+                &session_id,
+                &record_id,
+                &command,
+                &board_entry_id,
+                &authority,
+            )
+            .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?;
+            out.push_str(&format!(
+                "verify: adjudication attached — record {} command {:?} Board decision {}\n",
+                record.record_id, command, board_entry_id
+            ));
+            Ok(0)
+        }
+        VerifyCommand::Run {
+            commands,
+            max_wait_secs,
+        } => {
+            // Issue #3913: claim host admission (the SPEC #3576 lease plus a
+            // quiet host) before anything heavy starts. A budget overrun
+            // answers `deferred` without writing a record.
+            let max_wait =
+                crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
+            let admission =
+                crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
+            out.push_str(&admission.summary());
+            out.push('\n');
+            let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to load verification plan for quarantine preparation: {error}"
+                )))
+            })?;
+            let (prepared_quarantines, quarantine_diagnostics) =
+                prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            let run = run_verification_for_caller(
+                &worktree,
+                &session_id,
+                &commands,
+                &authority,
+                &prepared_quarantines,
+                &quarantine_diagnostics,
+            );
+            // Release the in-process lease before the (lease-free) evidence
+            // evaluation so the next claimant starts as soon as the commands
+            // are done.
+            drop(admission);
+            let (record, transcript) =
+                run.map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            // T-131 core: surface the coverage map of the plan this run
+            // covered, so the rationale travels with the evidence output.
+            if record.plan_covered {
+                if let Ok(Some(plan)) = load_plan(&worktree) {
+                    if !plan.surfaces.is_empty() {
+                        out.push_str(&format!(
+                            "verify: coverage map [{}]\n",
+                            plan.surfaces.join(", ")
+                        ));
+                    }
+                }
+            }
+            let evidence = evaluate_evidence(&worktree, &session_id, record.owner_number);
+            if evidence.is_delivery_acceptable() {
+                // P11: only an all-passing run that covers the registered
+                // plan settles implementation/verification obligations — a
+                // plan-less trivial run must not (vacuous-settlement fix).
+                crate::cli::action_obligation::settle_kinds_best_effort(
+                    &worktree,
+                    &session_id,
+                    &[
+                        crate::cli::action_obligation::ObligationKind::Verification,
+                        crate::cli::action_obligation::ObligationKind::Implementation,
+                    ],
+                    &format!("verify.run {}", record.record_id),
+                );
+            }
+            out.push_str(&transcript);
+            let command_outcome_accepted =
+                record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
+            out.push_str(&format!(
+                "verify: {status} — record {id} ({count} command(s), owner {owner})\n",
+                status = if record.all_passed {
+                    "PASS"
+                } else if evidence == EvidenceStatus::FreshWithQuarantine {
+                    "QUARANTINED"
+                } else {
+                    "FAIL"
+                },
+                id = record.record_id,
+                count = record.commands.len(),
+                owner = record
+                    .owner_number
+                    .map(|n| format!("#{n}"))
+                    .unwrap_or_else(|| "none".to_string()),
+            ));
+            Ok(if command_outcome_accepted { 0 } else { 1 })
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use gwt_core::test_support::ScopedEnvVar;
+
+    /// Register a plan for the commands, then run them (the standard
+    /// T-130-lite flow used everywhere Fresh evidence is needed).
+    fn plan_and_run(
+        worktree: &Path,
+        session: &str,
+        commands: &[String],
+    ) -> (VerificationRunRecord, String) {
+        let owner_number = crate::cli::execution_state::load(worktree)
+            .ok()
+            .flatten()
+            .map(|record| record.owner_number);
+        save_plan(
+            worktree,
+            &VerificationPlanRecord {
+                session_id: session.to_string(),
+                owner_number,
+                execution_binding: None,
+                commands: commands.to_vec(),
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        run_verification(worktree, session, commands).unwrap()
+    }
+
+    fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
+        VerificationRunRecord {
+            record_id: "vr-test".to_string(),
+            session_id: session.to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            worktree_fingerprint: fingerprint.to_string(),
+            commands: vec![VerificationCommandResult {
+                command: "git --version".to_string(),
+                exit_code: 0,
+                output_tail: String::new(),
+            }],
+            all_passed: true,
+            quarantined_failures: Vec::new(),
+            adjudications: Vec::new(),
+            started_at: Some(Utc::now()),
+            created_at: Utc::now(),
+            plan_covered: true,
+            planned_missing: Vec::new(),
+            verification_plan_hash: String::new(),
+            plan_derived: false,
+            content_hash: String::new(),
+        }
+    }
+
+    /// Issue #4140 AC-4: a window without execution authority is told both why
+    /// `verify.*` refused it and how it can still take its turn in the host
+    /// verification queue. Without that, the only observable outcome is a
+    /// permission error with no path forward, which is how the reported
+    /// window ended up with nothing left to try.
+    #[test]
+    fn verification_entry_refusal_points_at_the_authority_free_queue() {
+        let refused = verification_entry_refusal(&verification_caller_authority_error());
+        assert!(
+            refused.contains("verification authority"),
+            "the refusal must keep naming its cause: {refused}"
+        );
+        assert!(
+            refused.contains("verify.lease.acquire") && refused.contains("verify.lease.status"),
+            "the refusal must name the queue entry points that need no authority: {refused}"
+        );
+
+        let other = verification_entry_refusal(&io::Error::other("disk on fire"));
+        assert!(
+            other.contains("failed to resolve verification authority")
+                && other.contains("disk on fire"),
+            "a non-permission failure keeps its own diagnosis: {other}"
+        );
+        assert!(
+            !other.contains("verify.lease.acquire"),
+            "queue guidance belongs to the authority refusal only: {other}"
+        );
+    }
+
+    // T-131 core: the Coverage Map (derived surface classification) is
+    // persisted on the plan record, roundtrips, and is integrity-hash
+    // covered — editing it after registration is tamper-evident.
+    #[test]
+    fn plan_surfaces_roundtrip_and_are_hash_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-cov".to_string(),
+                owner_number: Some(3248),
+                execution_binding: None,
+                commands: vec!["cargo test -p gwt --lib".to_string()],
+                derived: true,
+                surfaces: vec!["rust(gwt)".to_string(), "docs(1)".to_string()],
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let loaded = load_plan(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            loaded.surfaces,
+            vec!["rust(gwt)".to_string(), "docs(1)".to_string()]
+        );
+        assert!(plan_integrity_ok(&loaded));
+
+        let mut tampered = loaded.clone();
+        tampered.surfaces = vec!["docs(1)".to_string()];
+        assert!(
+            !plan_integrity_ok(&tampered),
+            "coverage map edits must break the integrity hash"
+        );
+    }
+
+    #[test]
+    fn typed_quarantine_request_roundtrips_in_verification_plan() {
+        let mut value = serde_json::to_value(VerificationPlanRecord {
+            session_id: "sess-plan-quarantine".to_string(),
+            owner_number: Some(3841),
+            execution_binding: None,
+            commands: vec!["cargo test -p gwt --all-features --lib".to_string()],
+            derived: true,
+            surfaces: vec!["rust(gwt)".to_string()],
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+            worktree_fingerprint: "fingerprint".to_string(),
+            created_at: Utc::now(),
+            content_hash: String::new(),
+        })
+        .unwrap();
+        value["quarantines"] = serde_json::json!([{
+            "failed_command": "cargo test -p gwt --all-features --lib",
+            "test_identity": "app_runtime::tests::bounded_sync",
+            "baseline_command": "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact",
+            "owner_issue": 3755,
+            "pr_number": 3854
+        }]);
+
+        let plan: VerificationPlanRecord = serde_json::from_value(value).unwrap();
+        let roundtrip = serde_json::to_value(plan).unwrap();
+        assert_eq!(
+            roundtrip["quarantines"][0]["test_identity"],
+            serde_json::json!("app_runtime::tests::bounded_sync"),
+            "typed quarantine request was discarded from the plan"
+        );
+    }
+
+    // T-131 core: verify.plan derive:true persists the surface
+    // classification it derived from the change set.
+    #[test]
+    fn derived_registration_records_coverage_map() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let git = |args: &[&str]| {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        git(&["checkout", "-q", "-b", "work/coverage"]);
+        let src = dir.path().join("crates/gwt-core/src/lib.rs");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "pub fn x() {}").unwrap();
+        let report = dir.path().join("artifacts/report.json");
+        fs::create_dir_all(report.parent().unwrap()).unwrap();
+        fs::write(&report, "{}").unwrap();
+
+        let authority = snapshot_verification_caller_authority(dir.path(), "sess-cov").unwrap();
+        let (derived, plan) = derive_and_register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            vec!["artifacts/report.json".to_string()],
+            Vec::new(),
+            &authority,
+        )
+        .unwrap();
+        assert!(!derived.surfaces.is_empty());
+        assert_eq!(plan.surfaces, derived.surfaces);
+        assert_eq!(
+            plan.generated_outputs,
+            vec!["artifacts/report.json".to_string()]
+        );
+        assert!(plan.derived);
+        let loaded = load_plan(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.surfaces, derived.surfaces);
+        assert!(plan_integrity_ok(&loaded));
+    }
+
+    // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
+    // worktree mirror — for both the run record and the registered plan.
+    #[test]
+    fn trusted_copies_override_worktree_mirror_edits() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let mut failing = passing_record("sess-1", "fp-1");
+        failing.all_passed = false;
+        save(dir.path(), &failing).unwrap();
+        // Forge an all-passing mirror with a valid integrity hash.
+        let mut forged = passing_record("sess-1", "fp-1");
+        forged.content_hash = compute_content_hash(&forged);
+        let serialized = serde_json::to_vec_pretty(&forged).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert!(!load(dir.path()).unwrap().unwrap().all_passed);
+
+        let plan = VerificationPlanRecord {
+            session_id: "sess-1".to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            commands: vec!["cargo test -p gwt --lib".to_string()],
+            derived: false,
+            worktree_fingerprint: String::new(),
+            surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+            created_at: Utc::now(),
+            content_hash: String::new(),
+        };
+        save_plan(dir.path(), &plan).unwrap();
+        // Forge a trivial (empty-matrix) plan in the mirror.
+        let mut forged_plan = plan.clone();
+        forged_plan.commands = vec!["git --version".to_string()];
+        forged_plan.content_hash = compute_plan_hash(&forged_plan);
+        let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
+        gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(
+            load_plan(dir.path()).unwrap().unwrap().commands,
+            vec!["cargo test -p gwt --lib".to_string()]
+        );
+    }
+
+    // P9b: mirror-only records/plans (pre-P9b) still load as legacy fallback.
+    #[test]
+    fn mirror_only_records_load_as_legacy_fallback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let mut legacy = passing_record("sess-legacy", "fp-legacy");
+        legacy.content_hash = compute_content_hash(&legacy);
+        let serialized = serde_json::to_vec_pretty(&legacy).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(load(dir.path()).unwrap().unwrap().session_id, "sess-legacy");
+    }
+
+    // P9b: in a managed worktree (trusted ECR exists from launch) a
+    // mirror-only record or plan is NOT evidence — before the first real
+    // `verify.run` the mirror must not become authoritative by default.
+    #[test]
+    fn managed_worktree_refuses_mirror_only_records() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        // Launch materialization writes the trusted ECR copy.
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            3248,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+
+        // Forge an all-passing mirror-only run record with a valid hash.
+        let mut forged = passing_record("sess-1", "fp-1");
+        forged.content_hash = compute_content_hash(&forged);
+        let serialized = serde_json::to_vec_pretty(&forged).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), None);
+
+        // Same for a forged trivial plan.
+        let mut forged_plan = VerificationPlanRecord {
+            session_id: "sess-1".to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            commands: vec!["git --version".to_string()],
+            derived: false,
+            worktree_fingerprint: String::new(),
+            surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+            created_at: Utc::now(),
+            content_hash: String::new(),
+        };
+        forged_plan.content_hash = compute_plan_hash(&forged_plan);
+        let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
+        gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(load_plan(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn split_command_line_handles_quotes_and_rejects_shell_operators() {
+        assert_eq!(
+            split_command_line("cargo test -p gwt --lib").unwrap(),
+            vec!["cargo", "test", "-p", "gwt", "--lib"]
+        );
+        assert_eq!(
+            split_command_line(r#"git commit -m "two words""#).unwrap(),
+            vec!["git", "commit", "-m", "two words"]
+        );
+        assert_eq!(
+            split_command_line("echo 'single quoted arg'").unwrap(),
+            vec!["echo", "single quoted arg"]
+        );
+        assert!(split_command_line("cargo test && cargo fmt").is_err());
+        assert!(split_command_line("cargo test | tail").is_err());
+        assert!(split_command_line("").is_err());
+        assert!(split_command_line("echo \"unbalanced").is_err());
+        // Quoted operator literals are deliberate arguments, not shell syntax.
+        assert_eq!(
+            split_command_line(r#"rg "&&" crates/"#).unwrap(),
+            vec!["rg", "&&", "crates/"]
+        );
+        assert_eq!(
+            split_command_line("grep ';' config.toml").unwrap(),
+            vec!["grep", ";", "config.toml"]
+        );
+    }
+
+    #[test]
+    fn legacy_command_result_without_output_tail_remains_compatible() {
+        let legacy = r#"{"command":"git --version","exit_code":0}"#;
+        let result: VerificationCommandResult = serde_json::from_str(legacy).unwrap();
+
+        assert!(result.output_tail.is_empty());
+        assert_eq!(serde_json::to_string(&result).unwrap(), legacy);
+    }
+
+    #[test]
+    fn legacy_record_content_hash_remains_valid_without_output_tail() {
+        #[derive(Serialize)]
+        struct LegacyCommandResult<'a> {
+            command: &'a str,
+            exit_code: i32,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyVerificationRunRecord<'a> {
+            record_id: &'a str,
+            session_id: &'a str,
+            owner_number: u64,
+            worktree_fingerprint: &'a str,
+            commands: Vec<LegacyCommandResult<'a>>,
+            all_passed: bool,
+            created_at: DateTime<Utc>,
+            plan_covered: bool,
+        }
+
+        let legacy = LegacyVerificationRunRecord {
+            record_id: "vrr-legacy",
+            session_id: "sess-legacy",
+            owner_number: 3248,
+            worktree_fingerprint: "abc",
+            commands: vec![LegacyCommandResult {
+                command: "git --version",
+                exit_code: 0,
+            }],
+            all_passed: true,
+            created_at: DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            plan_covered: true,
+        };
+        let serialized = serde_json::to_vec(&legacy).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&serialized));
+        let mut value = serde_json::to_value(&legacy).unwrap();
+        value["content_hash"] = serde_json::Value::String(hash.clone());
+
+        let loaded: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(integrity_ok(&loaded));
+        assert_eq!(compute_content_hash(&loaded), hash);
+        assert!(loaded.commands[0].output_tail.is_empty());
+    }
+
+    #[test]
+    fn successful_commands_omit_output_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-success", &["git --version".to_string()]).unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert!(record.commands[0].output_tail.is_empty());
+        let serialized = serde_json::to_value(&record.commands[0]).unwrap();
+        assert!(serialized.get("output_tail").is_none(), "{serialized}");
+    }
+
+    #[test]
+    fn failed_output_is_sanitized_before_persistence() {
+        let sanitized = bounded_output_tail(
+            b"\x1b[31mAuthorization: Bearer ghp_abcdef0123456789abcdef\x1b[0m\n",
+        );
+        let output = persisted_failure_output(1, &sanitized);
+
+        assert!(!output.contains('\u{1b}'), "{output:?}");
+        assert!(!output.contains("ghp_abcdef0123456789abcdef"), "{output}");
+        assert!(output.contains(gwt_core::process_console::REDACTED));
+        assert!(persisted_failure_output(0, "failure-looking success output").is_empty());
+    }
+
+    #[test]
+    fn bounded_output_tail_sanitizes_before_clipping() {
+        let input = format!(
+            "{}\u{1b}[31mghp_abcdef0123456789abcdef\u{1b}[0m\0\u{7}\u{8}visible",
+            "https://a@example.test ".repeat(2_000)
+        );
+
+        let output = bounded_output_tail(input.as_bytes());
+
+        assert!(output.contains("...[truncated]"), "{output}");
+        assert!(
+            output.len() <= OUTPUT_TAIL_LIMIT + 32,
+            "sanitized output exceeded the stream tail budget: {} bytes",
+            output.len()
+        );
+        assert!(!output.contains("https://a@"), "{output}");
+        assert!(!output.contains("ghp_abcdef0123456789abcdef"), "{output}");
+        assert!(
+            output
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn failed_cargo_test_output_is_bounded_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "verification-failure-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn named_failure_for_verification_record() {
+        eprintln!("{}", "診断".repeat(10_000));
+        panic!("intentional verification fixture failure");
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-failure", &["cargo test".to_string()]).unwrap();
+
+        assert!(!record.all_passed, "{transcript}");
+        let persisted = load(dir.path()).unwrap().unwrap();
+        let output_tail = &persisted.commands[0].output_tail;
+        assert!(
+            output_tail.contains("tests::named_failure_for_verification_record"),
+            "{output_tail}"
+        );
+        assert!(output_tail.contains("...[truncated]"), "{output_tail}");
+        assert!(
+            output_tail.len() <= OUTPUT_TAIL_LIMIT * 2 + 128,
+            "persisted output exceeded the stdout+stderr tail budget: {} bytes",
+            output_tail.len()
+        );
+    }
+
+    // Spawn failures are recorded as failed results, never dropped runs.
+    #[test]
+    fn spawn_failure_is_recorded_as_failed_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-1",
+            &[
+                "git --version".to_string(),
+                "definitely-not-a-real-binary-xyz --flag".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(!record.all_passed);
+        assert_eq!(record.commands.len(), 2);
+        assert_eq!(record.commands[1].exit_code, -1);
+        assert!(transcript.contains("spawn error"), "{transcript}");
+        assert!(load(dir.path()).unwrap().is_some(), "record must persist");
+    }
+
+    #[test]
+    fn spawn_failure_output_is_bounded_and_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "ghp_abcdef0123456789abcdef";
+        let command = format!(
+            "definitely-not-real-{}-{secret}\u{7}",
+            "x".repeat(OUTPUT_TAIL_LIMIT * 2)
+        );
+
+        let (record, _) = run_verification(dir.path(), "sess-spawn", &[command]).unwrap();
+
+        assert_eq!(record.commands[0].exit_code, -1);
+        let output_tail = &record.commands[0].output_tail;
+        assert!(
+            output_tail.len() <= OUTPUT_TAIL_LIMIT + 64,
+            "spawn output exceeded the tail budget: {} bytes",
+            output_tail.len()
+        );
+        assert!(!output_tail.contains(secret), "{output_tail}");
+        assert!(
+            output_tail
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')),
+            "{output_tail:?}"
+        );
+    }
+
+    #[test]
+    fn record_roundtrips_and_missing_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load(dir.path()).unwrap(), None);
+        let record = VerificationRunRecord {
+            record_id: "vrr-test".to_string(),
+            session_id: "sess-1".to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            worktree_fingerprint: "abc".to_string(),
+            commands: vec![VerificationCommandResult {
+                command: "git --version".to_string(),
+                exit_code: 0,
+                output_tail: String::new(),
+            }],
+            all_passed: true,
+            quarantined_failures: Vec::new(),
+            adjudications: Vec::new(),
+            started_at: Some(Utc::now()),
+            created_at: Utc::now(),
+            plan_covered: true,
+            planned_missing: Vec::new(),
+            verification_plan_hash: String::new(),
+            plan_derived: false,
+            content_hash: String::new(),
+        };
+        save(dir.path(), &record).unwrap();
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&loaded));
+        assert!(!loaded.content_hash.is_empty());
+        let mut normalized = loaded.clone();
+        normalized.content_hash = String::new();
+        assert_eq!(normalized, record);
+    }
+
+    // T-110: verify.run executes real commands, records exit codes, and the
+    /// SPEC #4093 AC-11 (Issue #3850): the live GitHub opt-in set in the
+    /// operator's shell must not reach the `cargo test` child, whose fixtures
+    /// rely on the gh guard failing closed. The child re-enters this test
+    /// binary and checks its own environment.
+    #[test]
+    fn verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once() {
+        const CHILD_PROBE: &str = "GWT_VERIFY_LIVE_GH_CHILD_PROBE";
+        const TEST_NAME: &str =
+            "cli::verification_record::tests::verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once";
+
+        if std::env::var_os(CHILD_PROBE).is_some() {
+            assert!(
+                std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
+                "verify.run must not expose its live GitHub opt-in to a test child"
+            );
+            return;
+        }
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let current_exe = std::env::current_exe().unwrap();
+        let command = format!(
+            r#""{}" --exact {TEST_NAME} --nocapture"#,
+            current_exe.display()
+        );
+        let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
+        let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+
+        let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(
+            transcript.matches("GWT_ALLOW_REAL_GH").count(),
+            1,
+            "one warning names the ignored opt-in: {transcript}"
+        );
+        assert_eq!(
+            std::env::var_os("GWT_ALLOW_REAL_GH").as_deref(),
+            Some("1".as_ref()),
+            "the operator's own environment is left alone"
+        );
+    }
+
+    // record is written even when a command fails.
+    #[test]
+    fn run_verification_records_pass_and_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(record.commands[0].exit_code, 0);
+        assert_eq!(record.session_id, "sess-1");
+
+        let (record, _) = run_verification(
+            dir.path(),
+            "sess-1",
+            &[
+                "git --version".to_string(),
+                "git definitely-not-a-subcommand".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(!record.all_passed);
+        assert_eq!(record.commands.len(), 2);
+        assert_ne!(record.commands[1].exit_code, 0);
+        // Latest record persisted.
+        assert!(!load(dir.path()).unwrap().unwrap().all_passed);
+    }
+
+    // Issue #3841 / SPEC #3248 FR-036/FR-053: typed quarantine evidence is
+    // part of the integrity-protected Run Record. Unknown JSON fields being
+    // silently dropped would turn the policy into handwritten prose.
+    #[test]
+    fn typed_quarantined_failure_roundtrips_without_rewriting_raw_failure() {
+        let mut value = serde_json::to_value(passing_record("sess-quarantine", "fingerprint"))
+            .expect("serialize fixture");
+        value["commands"][0]["exit_code"] = serde_json::json!(1);
+        value["commands"][0]["output_tail"] =
+            serde_json::json!("failures:\n    app_runtime::tests::bounded_sync\n\ntest result: FAILED. 0 passed; 1 failed");
+        value["all_passed"] = serde_json::json!(false);
+        value["quarantined_failures"] = serde_json::json!([{
+            "failed_command": "git --version",
+            "test_identity": "app_runtime::tests::bounded_sync",
+            "owner_issue": 3755,
+            "head_sha": "head-sha",
+            "merge_base_sha": "base-sha",
+            "baseline_command": "cargo test -p gwt app_runtime::tests::bounded_sync -- --exact",
+            "baseline_exit_code": 0,
+            "baseline_result_line": "test app_runtime::tests::bounded_sync ... ok",
+            "pr_number": 3854,
+            "pr_reference": {
+                "kind": "comment",
+                "comment_id": 99,
+                "marker": "gwt-verification-quarantine:v1 test=app_runtime::tests::bounded_sync owner=#3755"
+            }
+        }]);
+
+        let record: VerificationRunRecord =
+            serde_json::from_value(value).expect("typed record must deserialize");
+        let roundtrip = serde_json::to_value(record).expect("typed record must serialize");
+        assert_eq!(roundtrip["all_passed"], serde_json::json!(false));
+        assert_eq!(roundtrip["commands"][0]["exit_code"], serde_json::json!(1));
+        assert_eq!(
+            roundtrip["quarantined_failures"][0]["owner_issue"],
+            serde_json::json!(3755),
+            "typed quarantine evidence was discarded from the run record"
+        );
+    }
+
+    #[test]
+    fn adjudication_attaches_exact_board_decision_without_changing_raw_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let command = "git definitely-not-a-subcommand".to_string();
+        let (record, _) = plan_and_run(
+            dir.path(),
+            "sess-adjudicate",
+            std::slice::from_ref(&command),
+        );
+        assert!(!record.all_passed);
+
+        let decision = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            format!(
+                "Verification record: {}\nFailing command: {command}\nReason: unrelated known failure",
+                record.record_id
+            ),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let decision_id = decision.id.clone();
+
+        let wrong_kind = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Status,
+            decision.body.clone(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let wrong_kind_id = wrong_kind.id.clone();
+        gwt_core::coordination::post_entry(dir.path(), wrong_kind).unwrap();
+        let error = run_verify_cli_as(
+            dir.path(),
+            "sess-adjudicate",
+            VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command: command.clone(),
+                board_entry_id: wrong_kind_id,
+            },
+        )
+        .expect_err("non-decision Board entry must fail closed");
+        assert!(error.to_string().contains("kind=decision"), "{error}");
+
+        gwt_core::coordination::post_entry(dir.path(), decision).unwrap();
+
+        let (code, output) = run_verify_cli_as(
+            dir.path(),
+            "sess-adjudicate",
+            VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command: command.clone(),
+                board_entry_id: decision_id.clone(),
+            },
+        )
+        .expect("attach Board decision");
+        assert_eq!(code, 0, "{output}");
+
+        let attached = load(dir.path()).unwrap().unwrap();
+        assert!(
+            !attached.all_passed,
+            "raw verification result must stay failing"
+        );
+        assert!(integrity_ok(&attached));
+        assert_eq!(
+            attached.adjudications,
+            vec![VerificationAdjudicationRef {
+                board_entry_id: decision_id,
+                command,
+                attached_at: attached.adjudications[0].attached_at,
+            }]
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-adjudicate", None),
+            EvidenceStatus::Failing,
+            "completion/recovery evidence must ignore PR-only adjudication"
+        );
+    }
+
+    // FR-198: canonical plan writes and the final verification-record commit
+    // share the owner write lease with execution transitions. Contention is
+    // an explicit retry, never last-writer-wins.
+    #[test]
+    fn verification_writers_refuse_with_retry_while_owner_lease_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&worktree, || {
+                acquired_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+                Ok(())
+            })
+            .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+
+        let plan_result = save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        );
+        let run_result = run_verification(dir.path(), "sess-1", &["git --version".to_string()]);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let plan_error = plan_result.expect_err("plan writer must contend on owner lease");
+        assert!(plan_error.to_string().contains("retry"), "{plan_error}");
+        let run_error = run_result.expect_err("run commit must contend on owner lease");
+        assert!(run_error.contains("retry"), "{run_error}");
+    }
+
+    // T-111/FR-036: evidence evaluation rejects missing, cross-session,
+    // wrong-owner, and failing records; accepts a fresh matching one.
+    #[test]
+    fn evaluate_evidence_covers_rejection_matrix() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::MissingRecord
+        );
+
+        let (_, _) = plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "other", None),
+            EvidenceStatus::WrongSession
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", Some(3248)),
+            EvidenceStatus::WrongOwner,
+            "record without owner must not satisfy an owned execution"
+        );
+
+        // Failing run never satisfies.
+        run_verification(
+            dir.path(),
+            "sess-1",
+            &["git definitely-not-a-subcommand".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Failing
+        );
+    }
+
+    // Issue #3841: raw command failure remains visible, while a completely
+    // typed owner/base/PR disposition receives its own delivery status.
+    #[test]
+    fn typed_quarantine_is_distinct_from_raw_pass_and_plain_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let test_identity = "app_runtime::tests::bounded_sync";
+        let command = "cargo test -p definitely-missing-package --lib".to_string();
+        let baseline_command = format!("{command} {test_identity} -- --exact");
+        let (mut record, _) = plan_and_run(
+            dir.path(),
+            "sess-quarantine",
+            std::slice::from_ref(&command),
+        );
+        assert!(!record.all_passed);
+        record.commands[0].output_tail =
+            format!("failures:\n    {test_identity}\n\ntest result: FAILED. 0 passed; 1 failed");
+        record.quarantined_failures = vec![TypedQuarantinedFailure {
+            failed_command: command.clone(),
+            test_identity: test_identity.to_string(),
+            owner_issue: 3755,
+            head_sha: "head-sha".to_string(),
+            merge_base_sha: "base-sha".to_string(),
+            baseline_command: baseline_command.clone(),
+            baseline_exit_code: 0,
+            baseline_result_line:
+                "test app_runtime::tests::bounded_sync ... ok".to_string(),
+            pr_number: 3854,
+            pr_reference: PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::Comment,
+                comment_id: Some(99),
+                marker: "gwt-verification-quarantine:v1 test=app_runtime::tests::bounded_sync owner=#3755"
+                    .to_string(),
+            },
+        }];
+        let mut plan = load_plan(dir.path()).unwrap().unwrap();
+        plan.quarantines = vec![VerificationQuarantineRequest {
+            failed_command: command,
+            test_identity: test_identity.to_string(),
+            baseline_command,
+            owner_issue: 3755,
+            pr_number: 3854,
+        }];
+        save_plan(dir.path(), &plan).unwrap();
+        record.verification_plan_hash = load_plan(dir.path()).unwrap().unwrap().content_hash;
+        record.content_hash.clear();
+        save(dir.path(), &record).unwrap();
+
+        let status = evaluate_evidence(dir.path(), "sess-quarantine", None);
+        assert_eq!(
+            status.describe(),
+            "verification evidence is fresh with typed quarantined failures",
+            "typed quarantine must not be collapsed into raw PASS or plain failure: {status:?}"
+        );
+
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        let mut hashless = load(dir.path()).unwrap().unwrap();
+        hashless.content_hash.clear();
+        assert_eq!(
+            evaluate_evidence_snapshot(dir.path(), "sess-quarantine", None, Some(&plan), &hashless,),
+            EvidenceStatus::Tampered,
+            "typed quarantine must never inherit the legacy hashless compatibility path"
+        );
+    }
+
+    #[test]
+    fn pr_quarantine_reference_requires_exact_body_or_durable_comment_marker() {
+        let marker = quarantine_marker("app_runtime::tests::bounded_sync", 3755);
+        let body = crate::cli::pr::PrQuarantineContext {
+            number: 3854,
+            body: format!("## Verification\n<!-- {marker} -->"),
+            comments: Vec::new(),
+        };
+        assert_eq!(
+            find_pr_quarantine_reference(&body, "app_runtime::tests::bounded_sync", 3755),
+            Some(PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::Body,
+                comment_id: None,
+                marker: marker.clone(),
+            })
+        );
+
+        let comment = crate::cli::pr::PrQuarantineContext {
+            number: 3854,
+            body: String::new(),
+            comments: vec![crate::cli::pr::PrQuarantineComment {
+                id: 99,
+                body: marker.clone(),
+            }],
+        };
+        assert!(matches!(
+            find_pr_quarantine_reference(&comment, "app_runtime::tests::bounded_sync", 3755),
+            Some(PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::Comment,
+                comment_id: Some(99),
+                ..
+            })
+        ));
+
+        let prose = crate::cli::pr::PrQuarantineContext {
+            number: 3854,
+            body: format!("Quarantine {marker} because PM approved it."),
+            comments: Vec::new(),
+        };
+        assert_eq!(
+            find_pr_quarantine_reference(&prose, "app_runtime::tests::bounded_sync", 3755),
+            None,
+            "free-form prose must not satisfy the machine marker contract"
+        );
+    }
+
+    #[test]
+    fn current_pr_validation_requires_the_recorded_durable_reference() {
+        let marker = quarantine_marker("app_runtime::tests::bounded_sync", 3755);
+        let mut record = passing_record("sess", "fingerprint");
+        record.all_passed = false;
+        record.quarantined_failures = vec![TypedQuarantinedFailure {
+            failed_command: "cargo test -p gwt --all-features --lib".to_string(),
+            test_identity: "app_runtime::tests::bounded_sync".to_string(),
+            owner_issue: 3755,
+            head_sha: "head".to_string(),
+            merge_base_sha: "base".to_string(),
+            baseline_command:
+                "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact"
+                    .to_string(),
+            baseline_exit_code: 0,
+            baseline_result_line: "test app_runtime::tests::bounded_sync ... ok".to_string(),
+            pr_number: 3854,
+            pr_reference: PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::Comment,
+                comment_id: Some(99),
+                marker: marker.clone(),
+            },
+        }];
+        let mut env = crate::cli::TestEnv::new(std::path::PathBuf::from("."));
+        env.pr_quarantine_contexts.insert(
+            3854,
+            crate::cli::pr::PrQuarantineContext {
+                number: 3854,
+                body: marker.clone(),
+                comments: vec![crate::cli::pr::PrQuarantineComment {
+                    id: 99,
+                    body: marker.clone(),
+                }],
+            },
+        );
+        assert!(validate_current_quarantine_references(&mut env, &record, Some(3854)).is_ok());
+
+        env.pr_quarantine_contexts.get_mut(&3854).unwrap().comments[0]
+            .body
+            .clear();
+        assert!(
+            validate_current_quarantine_references(&mut env, &record, Some(3854)).is_err(),
+            "a new body marker must not replace the recorded durable comment reference"
+        );
+        assert!(validate_current_quarantine_references(&mut env, &record, Some(9999)).is_err());
+    }
+
+    #[test]
+    fn quarantine_preparation_requires_owner_issue_and_exact_pr_marker() {
+        let request = VerificationQuarantineRequest {
+            failed_command: "cargo test -p gwt --all-features --lib".to_string(),
+            test_identity: "app_runtime::tests::bounded_sync".to_string(),
+            baseline_command:
+                "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact"
+                    .to_string(),
+            owner_issue: 3755,
+            pr_number: 3854,
+        };
+        let plan = VerificationPlanRecord {
+            session_id: "sess".to_string(),
+            owner_number: Some(3841),
+            execution_binding: None,
+            commands: vec![request.failed_command.clone()],
+            derived: true,
+            surfaces: vec!["rust(gwt)".to_string()],
+            generated_outputs: Vec::new(),
+            quarantines: vec![request.clone()],
+            worktree_fingerprint: "fingerprint".to_string(),
+            created_at: Utc::now(),
+            content_hash: "hash".to_string(),
+        };
+        let mut env = crate::cli::TestEnv::new(std::path::PathBuf::from("."));
+        env.pr_quarantine_contexts.insert(
+            3854,
+            crate::cli::pr::PrQuarantineContext {
+                number: 3854,
+                body: quarantine_marker(&request.test_identity, request.owner_issue),
+                comments: Vec::new(),
+            },
+        );
+        let (missing_owner, diagnostics) = prepare_quarantine_requests(&mut env, Some(&plan));
+        assert!(missing_owner.is_empty());
+        assert!(diagnostics.contains("owner Issue #3755"));
+
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: IssueNumber(3755),
+            title: "Flaky bounded sync".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: gwt_github::IssueState::Closed,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        let (prepared, diagnostics) = prepare_quarantine_requests(&mut env, Some(&plan));
+        assert_eq!(prepared.len(), 1, "{diagnostics}");
+        assert_eq!(prepared[0].request, request);
+    }
+
+    #[test]
+    fn baseline_command_requires_an_exact_libtest_execution() {
+        let request = |baseline_command: &str| VerificationQuarantineRequest {
+            failed_command: "cargo test -p gwt --all-features --lib".to_string(),
+            test_identity: "app_runtime::tests::bounded_sync".to_string(),
+            baseline_command: baseline_command.to_string(),
+            owner_issue: 3755,
+            pr_number: 3854,
+        };
+
+        assert!(request(
+            "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact"
+        )
+        .validate()
+        .is_ok());
+        assert!(
+            request("cargo test -p other app_runtime::tests::bounded_sync -- --exact")
+                .validate()
+                .is_err()
+        );
+        assert!(request(
+            "cargo test --manifest-path /tmp/other/Cargo.toml app_runtime::tests::bounded_sync -- --exact"
+        )
+        .validate()
+        .is_err());
+        let external_manifest = VerificationQuarantineRequest {
+            failed_command:
+                "cargo test --manifest-path /tmp/other/Cargo.toml --all-features".to_string(),
+            test_identity: "app_runtime::tests::bounded_sync".to_string(),
+            baseline_command: "cargo test --manifest-path /tmp/other/Cargo.toml --all-features app_runtime::tests::bounded_sync -- --exact".to_string(),
+            owner_issue: 3755,
+            pr_number: 3854,
+        };
+        assert!(external_manifest.validate().is_err());
+        let broad_target = VerificationQuarantineRequest {
+            failed_command: "cargo test -p gwt --all-features".to_string(),
+            test_identity: "app_runtime::tests::bounded_sync".to_string(),
+            baseline_command:
+                "cargo test -p gwt --all-features app_runtime::tests::bounded_sync -- --exact"
+                    .to_string(),
+            owner_issue: 3755,
+            pr_number: 3854,
+        };
+        assert!(broad_target.validate().is_err());
+        let mixed_doc_target = VerificationQuarantineRequest {
+            failed_command: "cargo test -p gwt --lib --doc".to_string(),
+            test_identity: "app_runtime::tests::bounded_sync".to_string(),
+            baseline_command:
+                "cargo test -p gwt --lib --doc app_runtime::tests::bounded_sync -- --exact"
+                    .to_string(),
+            owner_issue: 3755,
+            pr_number: 3854,
+        };
+        assert!(mixed_doc_target.validate().is_err());
+        assert!(request(
+            "cargo test -p gwt prefix-app_runtime::tests::bounded_sync-suffix -- --exact"
+        )
+        .validate()
+        .is_err());
+        assert!(
+            request("cargo test -p gwt app_runtime::tests::bounded_sync")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            request("cargo test -p gwt app_runtime::tests::bounded_sync -- --exact --no-run")
+                .validate()
+                .is_err()
+        );
+        assert!(parse_libtest_failure_inventory(
+            "failures:\n    first\n\ntest result: FAILED. 0 passed; 1 failed\n\nfailures:\n    second\n\ntest result: FAILED. 0 passed; 1 failed"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn typed_quarantine_runner_measures_exact_pass_at_merge_base() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("quarantine repository");
+        let git = |args: &[&str]| {
+            let mut command = gwt_core::process::hidden_command("git");
+            command.args(args).current_dir(dir.path());
+            gwt_core::process::scrub_git_env(&mut command);
+            assert!(command.status().expect("run git").success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='quarantine-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join(".gitignore"), "/target\nCargo.lock\n").unwrap();
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "#[cfg(test)] mod tests { #[test] fn flake() { assert!(true); } }\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = current_head_sha(dir.path()).unwrap();
+        git(&["update-ref", "refs/remotes/origin/develop", &base]);
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "#[cfg(test)] mod tests { #[test] fn flake() { assert!(false); } }\n",
+        )
+        .unwrap();
+
+        let failed_command =
+            "cargo test -p quarantine-fixture --lib tests::flake -- --exact".to_string();
+        let request = VerificationQuarantineRequest {
+            failed_command: failed_command.clone(),
+            test_identity: "tests::flake".to_string(),
+            baseline_command: failed_command.clone(),
+            owner_issue: 3755,
+            pr_number: 3854,
+        };
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-quarantine-runner".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec![failed_command.clone()],
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: vec![request.clone()],
+                worktree_fingerprint: worktree_fingerprint(dir.path()),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let prepared = PreparedQuarantineRequest {
+            request,
+            pr_reference: PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::Comment,
+                comment_id: Some(99),
+                marker: quarantine_marker("tests::flake", 3755),
+            },
+        };
+
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "sess-quarantine-runner",
+            &[failed_command],
+            None,
+            &[prepared],
+            "",
+            || {},
+        )
+        .unwrap();
+
+        assert!(!record.all_passed, "raw failure must remain visible");
+        assert_eq!(record.quarantined_failures.len(), 1, "{transcript}");
+        assert_eq!(record.quarantined_failures[0].merge_base_sha, base);
+        assert_eq!(
+            record.quarantined_failures[0].baseline_result_line,
+            "test tests::flake ... ok"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-quarantine-runner", None),
+            EvidenceStatus::FreshWithQuarantine
+        );
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-quarantine-runner");
+        let marker = quarantine_marker("tests::flake", 3755);
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        env.prs.insert(
+            3854,
+            gwt_git::PrStatus {
+                number: 3854,
+                title: "typed quarantine".to_string(),
+                state: gwt_git::pr_status::PrState::Open,
+                url: "https://example.invalid/pull/3854".to_string(),
+                created_at: None,
+                ci_status: "SUCCESS".to_string(),
+                mergeable: "MERGEABLE".to_string(),
+                merge_state_status: "CLEAN".to_string(),
+                review_status: "APPROVED".to_string(),
+            },
+        );
+        env.pr_quarantine_contexts.insert(
+            3854,
+            crate::cli::pr::PrQuarantineContext {
+                number: 3854,
+                body: marker.clone(),
+                comments: Vec::new(),
+            },
+        );
+        let mut out = String::new();
+        assert_eq!(
+            crate::cli::pr::run(
+                &mut env,
+                crate::cli::PrCommand::Ready { number: 3854 },
+                &mut out,
+            )
+            .unwrap(),
+            2,
+            "the body marker must not replace the recorded comment: {out}"
+        );
+        assert!(env.pr_ready_call_log.is_empty());
+
+        env.pr_quarantine_contexts.get_mut(&3854).unwrap().comments =
+            vec![crate::cli::pr::PrQuarantineComment {
+                id: 99,
+                body: marker,
+            }];
+        out.clear();
+        assert_eq!(
+            crate::cli::pr::run(
+                &mut env,
+                crate::cli::PrCommand::Ready { number: 3854 },
+                &mut out,
+            )
+            .unwrap(),
+            0,
+            "current exact marker should authorize ready: {out}"
+        );
+        assert_eq!(env.pr_ready_call_log, vec![3854]);
+    }
+
+    // Owner binding comes from the Execution Control Record at run time.
+    #[test]
+    fn run_verification_binds_owner_from_execution_record() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            3248,
+            "sess-1",
+            "launch",
+            false,
+        )
+        .unwrap();
+        let (record, _) = plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
+        assert_eq!(record.owner_number, Some(3248));
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", Some(3248)),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    // Freshness: a tracked-file change after the run invalidates evidence,
+    // while .gwt/ bookkeeping churn does not.
+    #[test]
+    fn fingerprint_staleness_tracks_source_changes_not_gwt_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = |args: &[&str]| {
+            let status = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        init(&["init", "-q"]);
+        init(&["config", "user.email", "t@example.com"]);
+        init(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("src.txt"), "v1").unwrap();
+        init(&["add", "."]);
+        init(&["commit", "-qm", "init"]);
+
+        plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+
+        // .gwt bookkeeping churn does not invalidate evidence.
+        std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        std::fs::write(dir.path().join(".gwt/events.jsonl"), "{}").unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+
+        // A tracked source change does.
+        std::fs::write(dir.path().join("src.txt"), "v2").unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::StaleFingerprint
+        );
+
+        // Content-level staleness (FR-036): re-verify on the dirty state,
+        // then edit the SAME already-dirty file again — porcelain output is
+        // unchanged but the content differs, so evidence must go stale.
+        plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+        std::fs::write(dir.path().join("src.txt"), "v3-same-status-new-content").unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::StaleFingerprint,
+            "edits to already-dirty files must invalidate evidence"
+        );
+
+        // Same for a new file inside an already-untracked directory.
+        std::fs::create_dir_all(dir.path().join("newdir")).unwrap();
+        std::fs::write(dir.path().join("newdir/a.txt"), "a").unwrap();
+        plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+        std::fs::write(dir.path().join("newdir/b.txt"), "b").unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::StaleFingerprint,
+            "new files inside untracked directories must invalidate evidence"
+        );
+    }
+
+    #[test]
+    fn declared_generated_output_keeps_evidence_fresh_but_source_mutation_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("src.txt"), "v1").unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-generated".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: vec!["artifacts/report.json".to_string()],
+                quarantines: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "sess-generated",
+            &commands,
+            None,
+            &[],
+            "",
+            || {
+                fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+                fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
+            },
+        )
+        .unwrap();
+        assert!(record.plan_covered, "{transcript}");
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-generated", None),
+            EvidenceStatus::Fresh
+        );
+
+        fs::write(dir.path().join("src.txt"), "v2").unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-generated", None),
+            EvidenceStatus::StaleFingerprint
+        );
+    }
+
+    #[test]
+    fn generated_output_validation_rejects_unsafe_or_duplicate_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_generated_outputs(dir.path(), &["/tmp/out".to_string()]).is_err());
+        assert!(validate_generated_outputs(dir.path(), &["../out".to_string()]).is_err());
+        assert!(validate_generated_outputs(
+            dir.path(),
+            &["out.json".to_string(), "out.json".to_string()]
+        )
+        .is_err());
+
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+            assert!(
+                validate_generated_outputs(dir.path(), &["escape/report.json".to_string()])
+                    .is_err()
+            );
+        }
+
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "t@example.com"].as_slice(),
+            ["config", "user.name", "t"].as_slice(),
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("tracked-report.json"), "{}").unwrap();
+        for args in [
+            ["add", "tracked-report.json"].as_slice(),
+            ["commit", "-qm", "init"].as_slice(),
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let error = validate_generated_outputs(dir.path(), &["tracked-report.json".to_string()])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("tracked repository file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn mixed_generated_and_source_mutation_invalidates_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("src.txt"), "v1").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-qm", "init"]] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-mixed".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: vec!["report.json".to_string()],
+                quarantines: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, _) =
+            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], "", || {
+                fs::write(dir.path().join("report.json"), "{}").unwrap();
+                fs::write(dir.path().join("src.txt"), "v2").unwrap();
+            })
+            .unwrap();
+        assert_eq!(
+            record.worktree_fingerprint,
+            "invalidated-by-concurrent-change"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-mixed", None),
+            EvidenceStatus::StaleFingerprint
+        );
+    }
+
+    // T-130-lite: evidence requires a registered plan and a covering run.
+    #[test]
+    fn plan_coverage_gates_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // No plan registered — a passing run is still not Fresh.
+        run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanNotCovered
+        );
+
+        // Plan with two commands; running only one is not covered.
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert!(!record.plan_covered, "{transcript}");
+        assert_eq!(record.planned_missing, vec!["git --exec-path"]);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanNotCovered
+        );
+
+        // Running the full plan (superset allowed) is covered and Fresh.
+        let (record, _) = run_verification(
+            dir.path(),
+            "sess-1",
+            &[
+                "git --version".to_string(),
+                "git --exec-path".to_string(),
+                "git --html-path".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+
+        // Another session's plan does not count for this session's run.
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-other".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, _) =
+            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert!(!record.plan_covered);
+    }
+
+    // FR-195 / AS-177: Fresh evidence is bound to the exact plan snapshot
+    // used by the run. Re-registering any plan invalidates the old run.
+    #[test]
+    fn evidence_rejects_plan_replacement_after_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
+        assert!(run.plan_covered);
+        assert!(run.plan_derived);
+        assert!(!run.verification_plan_hash.is_empty());
+        assert!(run
+            .started_at
+            .is_some_and(|started| started <= run.created_at));
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --exec-path".to_string()],
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanChanged
+        );
+    }
+
+    // FR-195: a derived matrix belongs to the exact change set from which it
+    // was derived. Adding a new surface after plan registration must not let
+    // the old matrix bind itself to the newer run fingerprint.
+    #[test]
+    fn derived_plan_rejects_worktree_drift_before_run() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        fs::write(dir.path().join("new-rust-surface.rs"), "fn added() {}\n").unwrap();
+
+        let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
+        assert!(
+            !run.plan_covered,
+            "a drifted derived plan must be invalidated"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanChanged
+        );
+    }
+
+    // verify.run command surface: session binding is required.
+    #[test]
+    fn verify_run_op_requires_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let err = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+            }),
+        )
+        .expect_err("missing GWT_SESSION_ID must fail");
+        assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
+    }
+
+    #[test]
+    fn derived_trivial_plan_allows_empty_run_and_fresh_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-trivial".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: Vec::new(),
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: vec!["trivial(ledger_only)".to_string()],
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(dir.path(), "sess-trivial", &[]).unwrap();
+
+        assert!(record.commands.is_empty());
+        assert!(record.all_passed);
+        assert!(record.plan_covered, "{transcript}");
+        assert!(record.plan_derived);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-trivial", None),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn empty_run_without_canonical_trivial_plan_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_verification(dir.path(), "sess-trivial", &[]).unwrap_err();
+        assert!(error.contains("trivial derived plan"), "{error}");
+    }
+
+    // P11 review fix: only a plan-covering all-passing run settles
+    // implementation/verification obligations — a plan-less trivial run
+    // must not (vacuous-settlement guard).
+    #[test]
+    fn verify_run_settles_obligations_only_when_plan_covered() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
+            .unwrap();
+
+        // Plan-less run: passes, but does not cover any registered plan.
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob"),
+            vec![crate::cli::action_obligation::ObligationKind::Implementation],
+            "plan-less run must not settle obligations"
+        );
+
+        // Registered plan + covering run settles.
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-ob".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob").is_empty(),
+            "plan-covering run must settle implementation obligations"
+        );
+    }
+
+    const WORK_EVENTS_PATH: &str = ".gwt/work/events.jsonl";
+    const WORK_EVENT_SHARDS_PATH: &str = ".gwt/work/events";
+
+    pub(crate) struct WorkEventGitFixture {
+        _root: tempfile::TempDir,
+        pub(crate) repo: PathBuf,
+        remote: PathBuf,
+    }
+
+    impl WorkEventGitFixture {
+        pub(crate) fn tracked() -> Self {
+            Self::new(true)
+        }
+
+        fn tracked_shards() -> Self {
+            let fixture = Self::new(false);
+            fixture.write_event_shard(
+                "base",
+                br#"{"id":"base"}
+"#,
+            );
+            fixture.stage_event_shards();
+            fixture.commit("chore(work): seed immutable Work event store");
+            fixture.push();
+            fixture
+        }
+
+        fn without_tracked_event_log() -> Self {
+            Self::new(false)
+        }
+
+        fn new(track_event_log: bool) -> Self {
+            let root = tempfile::tempdir().expect("git fixture root");
+            let repo = root.path().join("repo");
+            let remote = root.path().join("upstream.git");
+            fs::create_dir_all(&repo).expect("create fixture repository");
+
+            let bare = gwt_core::process::hidden_command("git")
+                .args(["init", "--bare", "-q"])
+                .arg(&remote)
+                .output()
+                .expect("initialize bare upstream");
+            assert!(
+                bare.status.success(),
+                "initialize bare upstream: {}",
+                String::from_utf8_lossy(&bare.stderr)
+            );
+            let init = gwt_core::process::hidden_command("git")
+                .args(["init", "-q", "-b", "main"])
+                .arg(&repo)
+                .output()
+                .expect("initialize fixture repository");
+            assert!(
+                init.status.success(),
+                "initialize fixture repository: {}",
+                String::from_utf8_lossy(&init.stderr)
+            );
+
+            let fixture = Self {
+                _root: root,
+                repo,
+                remote,
+            };
+            fixture.git_ok(&["config", "user.email", "settlement@example.com"]);
+            fixture.git_ok(&["config", "user.name", "Settlement Test"]);
+            fixture.git_ok(&["config", "commit.gpgsign", "false"]);
+            fixture.git_ok(&[
+                "remote",
+                "add",
+                "origin",
+                fixture.remote.to_str().expect("UTF-8 remote path"),
+            ]);
+            fs::write(fixture.repo.join("src.txt"), "initial source\n")
+                .expect("write initial source");
+            if track_event_log {
+                fixture.write_event_log("base");
+            }
+            fixture.git_ok(&["add", "--all"]);
+            fixture.git_ok(&["commit", "-qm", "feat: initial source and Work event"]);
+            fixture.git_ok(&["push", "-qu", "origin", "main"]);
+            fixture
+        }
+
+        fn git_output(&self, args: &[&str]) -> std::process::Output {
+            gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&self.repo)
+                .output()
+                .unwrap_or_else(|error| panic!("spawn git {args:?}: {error}"))
+        }
+
+        fn git_ok(&self, args: &[&str]) {
+            let output = self.git_output(args);
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn git_stdout(&self, args: &[&str]) -> String {
+            let output = self.git_output(args);
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 git output")
+                .trim()
+                .to_string()
+        }
+
+        fn event_path(&self) -> PathBuf {
+            self.repo.join(WORK_EVENTS_PATH)
+        }
+
+        fn write_event_log(&self, marker: &str) {
+            let path = self.event_path();
+            fs::create_dir_all(path.parent().expect("event parent"))
+                .expect("create Work event directory");
+            fs::write(path, format!(r#"{{"id":"{marker}"}}"#) + "\n")
+                .expect("write Work event log");
+        }
+
+        pub(crate) fn append_event(&self, marker: &str) {
+            let path = self.event_path();
+            let mut contents = fs::read_to_string(&path).unwrap_or_default();
+            contents.push_str(&format!(r#"{{"id":"{marker}"}}"#));
+            contents.push('\n');
+            fs::create_dir_all(path.parent().expect("event parent"))
+                .expect("create Work event directory");
+            fs::write(path, contents).expect("append Work event");
+        }
+
+        fn append_typed_event(&self, event: &gwt_core::workspace_projection::WorkEvent) {
+            let path = self.event_path();
+            let mut contents = fs::read_to_string(&path).unwrap_or_default();
+            contents.push_str(&serde_json::to_string(event).expect("serialize Work event"));
+            contents.push('\n');
+            fs::create_dir_all(path.parent().expect("event parent"))
+                .expect("create Work event directory");
+            fs::write(path, contents).expect("append typed Work event");
+        }
+
+        fn event_shard_path(&self, event_id: &str) -> PathBuf {
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&self.repo, event_id)
+        }
+
+        fn write_event_shard(&self, event_id: &str, contents: &[u8]) {
+            let path = self.event_shard_path(event_id);
+            fs::create_dir_all(path.parent().expect("event shard parent"))
+                .expect("create Work event shard directory");
+            fs::write(path, contents).expect("write Work event shard");
+        }
+
+        fn append_typed_event_shard(&self, event: &gwt_core::workspace_projection::WorkEvent) {
+            let mut bytes = serde_json::to_vec(event).expect("serialize Work event shard");
+            bytes.push(b'\n');
+            self.write_event_shard(&event.id, &bytes);
+        }
+
+        pub(crate) fn stage_events(&self) {
+            self.git_ok(&["add", "--", WORK_EVENTS_PATH]);
+        }
+
+        fn stage_event_shards(&self) {
+            self.git_ok(&["add", "--", WORK_EVENT_SHARDS_PATH]);
+        }
+
+        pub(crate) fn commit(&self, subject: &str) {
+            self.git_ok(&["commit", "-qm", subject]);
+        }
+
+        pub(crate) fn push(&self) {
+            self.git_ok(&["push", "-q", "origin", "main"]);
+        }
+
+        fn latest_event_commit(&self) -> String {
+            self.git_stdout(&[
+                "rev-list",
+                "-1",
+                "HEAD",
+                "--",
+                WORK_EVENTS_PATH,
+                WORK_EVENT_SHARDS_PATH,
+            ])
+        }
+
+        fn upstream_ref(&self) -> String {
+            self.git_stdout(&["rev-parse", "--symbolic-full-name", "@{upstream}"])
+        }
+
+        fn settled_status(&self) -> WorkEventSettlementStatus {
+            WorkEventSettlementStatus::Settled {
+                event_commit: self.latest_event_commit(),
+                upstream_ref: self.upstream_ref(),
+            }
+        }
+
+        fn advance_remote_from_peer(&self) {
+            let peer = self._root.path().join("peer");
+            let clone = gwt_core::process::hidden_command("git")
+                .args(["clone", "-q", "--branch", "main"])
+                .arg(&self.remote)
+                .arg(&peer)
+                .output()
+                .expect("clone peer fixture");
+            assert!(
+                clone.status.success(),
+                "clone peer fixture: {}",
+                String::from_utf8_lossy(&clone.stderr)
+            );
+            for args in [
+                ["config", "user.email", "peer@example.com"].as_slice(),
+                ["config", "user.name", "Settlement Peer"].as_slice(),
+                ["config", "commit.gpgsign", "false"].as_slice(),
+            ] {
+                let output = gwt_core::process::hidden_command("git")
+                    .args(args)
+                    .current_dir(&peer)
+                    .output()
+                    .expect("configure peer fixture");
+                assert!(output.status.success(), "configure peer: {args:?}");
+            }
+            fs::write(peer.join("peer.txt"), "remote source change\n").expect("write peer source");
+            for args in [
+                ["add", "peer.txt"].as_slice(),
+                ["commit", "-qm", "fix: advance remote source"].as_slice(),
+                ["push", "-q", "origin", "main"].as_slice(),
+            ] {
+                let output = gwt_core::process::hidden_command("git")
+                    .args(args)
+                    .current_dir(&peer)
+                    .output()
+                    .expect("advance peer fixture");
+                assert!(
+                    output.status.success(),
+                    "peer git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+
+    fn generation_scoped_owner() -> crate::cli::execution_state::ExecutionOwnerKey {
+        crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 2359,
+        }
+    }
+
+    fn generation_scoped_successor_request(
+        operation_id: &str,
+        session_id: &str,
+    ) -> crate::cli::execution_state::SuccessorRequest {
+        crate::cli::execution_state::SuccessorRequest {
+            operation_id: operation_id.to_string(),
+            principal_id: format!("principal-{operation_id}"),
+            work_id: None,
+            source: "continue-work".to_string(),
+            session_binding_id: format!("binding-{operation_id}"),
+            initial_session_id: session_id.to_string(),
+            entrypoint: "continue-work".to_string(),
+            requested_at: Utc::now(),
+        }
+    }
+
+    fn initialize_generation_scoped_execution(
+        worktree: &Path,
+        session_id: &str,
+    ) -> gwt_agent::session::ExecutionBindingIdentity {
+        let owner = generation_scoped_owner();
+        crate::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize legacy Active execution");
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("import Active execution generation");
+        crate::cli::execution_state::current_execution_binding(worktree, owner)
+            .expect("load current execution binding")
+            .expect("execution generation binding exists")
+    }
+
+    fn persist_generation_scoped_session(
+        worktree: &Path,
+        session_id: &str,
+        identity: gwt_agent::ExecutionBindingIdentity,
+        capability_generation: u64,
+    ) -> gwt_agent::SessionExecutionBinding {
+        let owner = generation_scoped_owner();
+        let branch = gwt_git::Repository::open(worktree)
+            .expect("open generation fixture repository")
+            .current_branch()
+            .expect("read generation fixture branch")
+            .expect("generation fixture has a branch");
+        let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.project_state_root = Some(worktree.to_path_buf());
+        session.linked_issue_number = Some(owner.number);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            repo_hash: session
+                .repo_hash
+                .clone()
+                .expect("generation fixture repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity,
+            capability_generation,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind generation-scoped Session");
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("persist generation-scoped Session");
+        binding
+    }
+
+    fn advance_generation_scoped_session_binding(
+        session_id: &str,
+        identity: gwt_agent::ExecutionBindingIdentity,
+    ) -> gwt_agent::SessionExecutionBinding {
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut session = gwt_agent::Session::load(&path).expect("load generation-scoped Session");
+        let mut binding = session
+            .execution_binding
+            .clone()
+            .expect("Session carries execution binding");
+        binding.identity = identity;
+        binding.capability_generation += 1;
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("advance generation-scoped Session binding");
+        session
+            .save(&sessions_dir)
+            .expect("persist advanced generation-scoped Session binding");
+        binding
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct VerificationArtifactBytes {
+        trusted_plan: Option<Vec<u8>>,
+        trusted_run: Option<Vec<u8>>,
+        mirror_plan: Option<Vec<u8>>,
+        mirror_run: Option<Vec<u8>>,
+    }
+
+    fn verification_artifact_bytes(worktree: &Path) -> VerificationArtifactBytes {
+        fn read_optional(path: &Path) -> Option<Vec<u8>> {
+            match fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == ErrorKind::NotFound => None,
+                Err(error) => panic!("read verification artifact {}: {error}", path.display()),
+            }
+        }
+
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree);
+        VerificationArtifactBytes {
+            trusted_plan: trusted
+                .as_ref()
+                .and_then(|dir| read_optional(&dir.join("verification-plan.json"))),
+            trusted_run: trusted
+                .as_ref()
+                .and_then(|dir| read_optional(&dir.join("verification-run.json"))),
+            mirror_plan: read_optional(&plan_state_path(worktree)),
+            mirror_run: read_optional(&state_path(worktree)),
+        }
+    }
+
+    fn assert_verification_authority_denial(
+        error: &gwt_github::SpecOpsError,
+        reflected_secret: &str,
+    ) {
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("current verification authority"),
+            "denial must be actionable: {diagnostic}"
+        );
+        assert!(
+            !diagnostic.contains(reflected_secret),
+            "denial must not reflect caller authority: {diagnostic}"
+        );
+    }
+
+    fn run_verify_cli_as(
+        worktree: &Path,
+        session_id: &str,
+        command: VerifyCommand,
+    ) -> Result<(i32, String), gwt_github::SpecOpsError> {
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+        crate::cli::run_collect(&mut env, crate::cli::CliCommand::Verify(command))
+    }
+
+    #[test]
+    fn generation_scoped_verify_plan_rejects_foreign_session_before_current_identity_stamp() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("generation-scoped caller authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let current =
+            initialize_generation_scoped_execution(dir.path(), "session-current-authority");
+        persist_generation_scoped_session(
+            dir.path(),
+            "session-current-authority",
+            current.clone(),
+            1,
+        );
+        persist_generation_scoped_session(
+            dir.path(),
+            "session-foreign-authority-secret",
+            current,
+            1,
+        );
+
+        let artifacts_before = verification_artifact_bytes(dir.path());
+        let error = run_verify_cli_as(
+            dir.path(),
+            "session-foreign-authority-secret",
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect_err("foreign Session must not stamp the current generation identity");
+        assert_verification_authority_denial(&error, "session-foreign-authority-secret");
+        assert!(
+            load_plan(dir.path())
+                .expect("inspect rejected plan")
+                .is_none(),
+            "foreign authority must be rejected before plan persistence"
+        );
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            artifacts_before,
+            "foreign authority denial must not mutate verification evidence"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_verify_run_rejects_foreign_session_before_command_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("generation-scoped run authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let current =
+            initialize_generation_scoped_execution(dir.path(), "session-current-run-authority");
+        persist_generation_scoped_session(
+            dir.path(),
+            "session-current-run-authority",
+            current.clone(),
+            1,
+        );
+        persist_generation_scoped_session(
+            dir.path(),
+            "session-foreign-run-authority-secret",
+            current,
+            1,
+        );
+
+        let marker = dir.path().join("foreign-command-ran");
+        let artifacts_before = verification_artifact_bytes(dir.path());
+        let error = run_verify_cli_as(
+            dir.path(),
+            "session-foreign-run-authority-secret",
+            VerifyCommand::Run {
+                commands: vec![format!("touch {}", marker.display())],
+                max_wait_secs: None,
+            },
+        )
+        .expect_err("foreign Session must be rejected before command dispatch");
+
+        assert_verification_authority_denial(&error, "session-foreign-run-authority-secret");
+        assert!(
+            !marker.exists(),
+            "foreign verification command must never be dispatched"
+        );
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            artifacts_before,
+            "foreign run denial must not mutate verification evidence"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_verify_rejects_missing_malformed_and_stale_durable_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("invalid durable Session repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-invalid-authority-secret";
+        let current = initialize_generation_scoped_execution(dir.path(), session_id);
+
+        let missing_before = verification_artifact_bytes(dir.path());
+        let missing_error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect_err("missing durable Session must fail closed");
+        assert_verification_authority_denial(&missing_error, session_id);
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            missing_before,
+            "missing Session denial must be zero-write"
+        );
+
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        fs::create_dir_all(&sessions_dir).expect("create Session directory");
+        fs::write(
+            sessions_dir.join(format!("{session_id}.toml")),
+            "this is not valid = [toml",
+        )
+        .expect("persist malformed Session");
+        let malformed_before = verification_artifact_bytes(dir.path());
+        let malformed_error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect_err("malformed durable Session must fail closed");
+        assert_verification_authority_denial(&malformed_error, session_id);
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            malformed_before,
+            "malformed Session denial must be zero-write"
+        );
+
+        let mut stale_identity = current;
+        stale_identity.ledger_head_hash = "stale-ledger-head-secret".to_string();
+        persist_generation_scoped_session(dir.path(), session_id, stale_identity, 1);
+        let stale_before = verification_artifact_bytes(dir.path());
+        let stale_error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect_err("stale durable Session binding must fail closed");
+        assert_verification_authority_denial(&stale_error, "stale-ledger-head-secret");
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            stale_before,
+            "stale Session denial must be zero-write"
+        );
+    }
+
+    #[test]
+    fn completed_generation_rejects_exact_terminal_session_without_writes_or_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("completed generation repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+        let session_id = "session-completed-authority-secret";
+
+        let active = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, active, 1);
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle completed generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let terminal = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
+            .expect("load completed generation binding")
+            .expect("completed generation binding exists");
+        advance_generation_scoped_session_binding(session_id, terminal);
+
+        let artifacts_before = verification_artifact_bytes(dir.path());
+        let plan_error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect_err("Completed generation must not register evidence");
+        assert_verification_authority_denial(&plan_error, session_id);
+
+        let marker = dir.path().join("completed-command-ran");
+        let run_error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Run {
+                commands: vec![format!("touch {}", marker.display())],
+                max_wait_secs: None,
+            },
+        )
+        .expect_err("Completed generation must not dispatch verification commands");
+        assert_verification_authority_denial(&run_error, session_id);
+        assert!(
+            !marker.exists(),
+            "Completed generation must be rejected before command dispatch"
+        );
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            artifacts_before,
+            "terminal authority denial must not mutate verification evidence"
+        );
+    }
+
+    #[test]
+    fn blocked_generation_accepts_exact_same_session_for_recovery_evidence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("blocked generation recovery repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+        let session_id = "session-blocked-recovery-authority";
+
+        let active = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, active, 1);
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "verification evidence required".to_string(),
+                    missing_verification: Some("verify.run".to_string()),
+                },
+            )
+            .expect("settle blocked generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let blocked = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
+            .expect("load blocked generation binding")
+            .expect("blocked generation binding exists");
+        let commands = vec!["git --version".to_string()];
+
+        let (plan_code, _) = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: commands.clone(),
+                derive: false,
+            },
+        )
+        .expect("exact Blocked owner Session may register recovery plan");
+        assert_eq!(plan_code, 0);
+        let (run_code, _) = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Run {
+                commands: commands.clone(),
+                max_wait_secs: None,
+            },
+        )
+        .expect("exact Blocked owner Session may produce recovery evidence");
+        assert_eq!(run_code, 0);
+
+        let plan = load_plan(dir.path())
+            .expect("load Blocked recovery plan")
+            .expect("Blocked recovery plan exists");
+        let record = load(dir.path())
+            .expect("load Blocked recovery run")
+            .expect("Blocked recovery run exists");
+        assert_eq!(plan.execution_binding.as_ref(), Some(&blocked));
+        assert_eq!(record.execution_binding.as_ref(), Some(&blocked));
+        assert_eq!(
+            evaluate_evidence(dir.path(), session_id, Some(owner.number)),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn ledgerless_execution_preserves_legacy_verify_cli_compatibility() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("ledgerless compatibility repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+        let session_id = "session-ledgerless-legacy";
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize ledgerless legacy execution");
+        let commands = vec!["git --version".to_string()];
+
+        assert_eq!(
+            run_verify_cli_as(
+                dir.path(),
+                session_id,
+                VerifyCommand::Plan {
+                    commands: commands.clone(),
+                    derive: false,
+                },
+            )
+            .expect("ledgerless verify.plan remains compatible")
+            .0,
+            0
+        );
+        assert_eq!(
+            run_verify_cli_as(
+                dir.path(),
+                session_id,
+                VerifyCommand::Run {
+                    commands: commands.clone(),
+                    max_wait_secs: None,
+                },
+            )
+            .expect("ledgerless verify.run remains compatible")
+            .0,
+            0
+        );
+        let plan = load_plan(dir.path())
+            .expect("load legacy plan")
+            .expect("legacy plan exists");
+        let record = load(dir.path())
+            .expect("load legacy run")
+            .expect("legacy run exists");
+        assert_eq!(plan.owner_number, Some(owner.number));
+        assert_eq!(record.owner_number, Some(owner.number));
+        assert_eq!(plan.execution_binding, None);
+        assert_eq!(record.execution_binding, None);
+    }
+
+    #[test]
+    fn verify_plan_rejects_capability_rotation_after_dispatch_before_commit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("verify.plan capability race repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-plan-capability-race";
+        let current = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, current.clone(), 1);
+        let artifacts_before = verification_artifact_bytes(dir.path());
+        let session_for_hook = session_id.to_string();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            advance_generation_scoped_session_binding(&session_for_hook, current);
+        });
+
+        let error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect_err("capability rotation before plan commit must fail closed");
+        assert_verification_authority_denial(&error, session_id);
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            artifacts_before,
+            "capability race must leave plan/run evidence byte-equivalent"
+        );
+    }
+
+    #[test]
+    fn verify_run_rejects_capability_rotation_before_command_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("verify.run dispatch race repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-run-dispatch-capability-race";
+        let current = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, current.clone(), 1);
+        run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect("register plan before dispatch race");
+        let artifacts_before = verification_artifact_bytes(dir.path());
+        let marker = dir.path().join("capability-race-command-ran");
+        let session_for_hook = session_id.to_string();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            advance_generation_scoped_session_binding(&session_for_hook, current);
+        });
+
+        let error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Run {
+                commands: vec![format!("touch {}", marker.display())],
+                max_wait_secs: None,
+            },
+        )
+        .expect_err("capability rotation before dispatch must fail closed");
+        assert_verification_authority_denial(&error, session_id);
+        assert!(
+            !marker.exists(),
+            "revoked capability must be rejected before command dispatch"
+        );
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            artifacts_before,
+            "dispatch denial must leave verification evidence byte-equivalent"
+        );
+    }
+
+    #[test]
+    fn verify_run_rejects_capability_rotation_after_commands_before_commit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("verify.run capability race repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-run-capability-race";
+        let current = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, current.clone(), 1);
+        let commands = vec!["git --version".to_string()];
+        run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: commands.clone(),
+                derive: false,
+            },
+        )
+        .expect("register plan before run race");
+        let authority = snapshot_verification_caller_authority(dir.path(), session_id)
+            .expect("snapshot verification caller before run");
+        let artifacts_before = verification_artifact_bytes(dir.path());
+        let session_for_hook = session_id.to_string();
+
+        let error = run_verification_inner(
+            dir.path(),
+            session_id,
+            &commands,
+            Some(&authority),
+            &[],
+            "",
+            move || {
+                advance_generation_scoped_session_binding(&session_for_hook, current);
+            },
+        )
+        .expect_err("capability rotation before run commit must fail closed");
+        assert!(
+            error.contains("current verification authority"),
+            "run commit denial must be actionable: {error}"
+        );
+        assert!(
+            !error.contains(session_id),
+            "run commit denial must not reflect caller identity: {error}"
+        );
+        assert_eq!(
+            verification_artifact_bytes(dir.path()),
+            artifacts_before,
+            "capability race must leave plan/run evidence byte-equivalent"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_verification_plan_and_run_bind_exact_execution_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("generation-scoped verification repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let expected = initialize_generation_scoped_execution(dir.path(), "session-generation-a");
+        let commands = vec!["git --version".to_string()];
+        let (run, _) = plan_and_run(dir.path(), "session-generation-a", &commands);
+        let plan = load_plan(dir.path())
+            .expect("load generation-scoped plan")
+            .expect("generation-scoped plan exists");
+
+        assert_eq!(plan.execution_binding.as_ref(), Some(&expected));
+        assert_eq!(run.execution_binding.as_ref(), Some(&expected));
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-generation-a", Some(2359)),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn generation_scoped_successor_rejects_predecessor_verification_evidence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+
+        let predecessor = initialize_generation_scoped_execution(dir.path(), "session-predecessor");
+        let commands = vec!["git --version".to_string()];
+        let (run, _) = plan_and_run(dir.path(), "session-predecessor", &commands);
+        assert_eq!(run.execution_binding.as_ref(), Some(&predecessor));
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                "session-predecessor",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle predecessor generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let request =
+            generation_scoped_successor_request("successor-verification", "session-successor");
+        crate::cli::execution_state::prepare_successor(dir.path(), owner, &request)
+            .expect("prepare successor generation");
+        crate::cli::execution_state::activate_successor(dir.path(), owner, &request)
+            .expect("activate successor generation");
+        let successor = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
+            .expect("load successor binding")
+            .expect("successor binding exists");
+        assert_ne!(successor, predecessor);
+
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-predecessor", Some(2359)),
+            EvidenceStatus::WrongGeneration,
+            "same owner/session/fingerprint predecessor evidence must not satisfy the successor"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_legacy_evidence_becomes_audit_only_after_ledger_import() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("legacy evidence repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "session-legacy-evidence",
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize legacy execution");
+        let commands = vec!["git --version".to_string()];
+        let (legacy_run, _) = plan_and_run(dir.path(), "session-legacy-evidence", &commands);
+        assert!(
+            legacy_run.execution_binding.is_none(),
+            "pre-ledger evidence remains readable as legacy audit history"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-legacy-evidence", Some(2359)),
+            EvidenceStatus::Fresh
+        );
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                "session-legacy-evidence",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle legacy execution"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        crate::cli::execution_state::ensure_generation_ledger(
+            dir.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Unknown,
+        )
+        .expect("import verified legacy terminal generation");
+
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-legacy-evidence", Some(2359)),
+            EvidenceStatus::WrongGeneration,
+            "legacy unbound evidence must not authorize a generation-aware completion gate"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_accepts_completed_lifecycle_prefix() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let session_id = "session-settlement-completed";
+
+        let active = initialize_generation_scoped_execution(&fixture.repo, session_id);
+        let receipt = save_work_event_settlement_record(&fixture.repo, session_id, true)
+            .expect("persist Active-head Work settlement receipt");
+        assert!(receipt.status.is_settled());
+        assert_eq!(receipt.execution_binding.as_ref(), Some(&active));
+
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle the receipt-owning generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let completed =
+            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+                .expect("load Completed binding")
+                .expect("Completed binding exists");
+        assert_eq!(completed.generation_id, active.generation_id);
+        assert_eq!(completed.binding_id, active.binding_id);
+        assert_ne!(completed.ledger_head_hash, active.ledger_head_hash);
+
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "an authentic same-Session lifecycle prefix must authorize Completed PR handoff",
+        );
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_rejects_foreign_or_tampered_receipt_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-settlement-owner";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        let mut receipt = save_work_event_settlement_record(&fixture.repo, session_id, true)
+            .expect("persist owning Session Work settlement receipt");
+        assert!(receipt.status.is_settled());
+        receipt.session_id = "session-settlement-foreign".to_string();
+        persist_work_event_settlement_record(&fixture.repo, &receipt)
+            .expect("persist foreign-provenance receipt fixture");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a foreign receipt Session must fail closed");
+        assert!(refusal.contains("generation"), "{refusal}");
+
+        receipt.session_id = session_id.to_string();
+        receipt
+            .execution_binding
+            .as_mut()
+            .expect("receipt is generation-bound")
+            .ledger_head_hash = "arbitrary-ledger-head".to_string();
+        persist_work_event_settlement_record(&fixture.repo, &receipt)
+            .expect("persist arbitrary-head receipt fixture");
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("an arbitrary same-generation receipt head must fail closed");
+        assert!(refusal.contains("generation"), "{refusal}");
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_rejects_takeover_suffix() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let session_id = "session-settlement-before-takeover";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        let receipt = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("persist pre-takeover Work settlement receipt");
+        assert!(receipt.status.is_settled());
+        let request = crate::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: "operation-settlement-takeover".to_string(),
+            principal_id: "principal-settlement-takeover".to_string(),
+            work_id: Some("work-settlement-takeover".to_string()),
+            source: Some("continue-work:handoff".to_string()),
+            from_session_id: session_id.to_string(),
+            to_session_id: "session-settlement-after-takeover".to_string(),
+            reason: "verified stale owner".to_string(),
+            requested_at: Utc::now(),
+        };
+        crate::cli::execution_state::prepare_generation_takeover(&fixture.repo, owner, &request)
+            .expect("prepare same-generation takeover");
+        crate::cli::execution_state::activate_generation_takeover(&fixture.repo, owner, &request)
+            .expect("activate same-generation takeover");
+
+        assert_eq!(
+            crate::cli::execution_state::diagnose(&fixture.repo, None)
+                .work_event_receipt_matches_current_generation,
+            Some(false),
+            "a takeover is not a same-Session lifecycle descendant",
+        );
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a pre-takeover receipt must not authorize the new owner");
+        assert!(refusal.contains("generation"), "{refusal}");
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_rejects_predecessor_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+
+        initialize_generation_scoped_execution(&fixture.repo, "session-settlement-predecessor");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                "session-settlement-predecessor",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle predecessor before its delivery receipt"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let predecessor =
+            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+                .expect("load terminal predecessor binding")
+                .expect("terminal predecessor binding exists");
+        let receipt = save_work_event_settlement_record(
+            &fixture.repo,
+            "session-settlement-predecessor",
+            true,
+        )
+        .expect("persist predecessor Work settlement");
+        assert!(receipt.status.is_settled());
+        assert_eq!(receipt.execution_binding.as_ref(), Some(&predecessor));
+
+        let request =
+            generation_scoped_successor_request("successor-settlement", "session-settlement-next");
+        crate::cli::execution_state::prepare_successor(&fixture.repo, owner, &request)
+            .expect("prepare settlement successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate settlement successor");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("predecessor settlement must not authorize successor completion");
+        assert!(
+            refusal.contains("generation") && refusal.contains("predecessor"),
+            "generation mismatch must be actionable without leaking secrets: {refusal}"
+        );
+        // #4011: a live canonical Work can still receive this generation's own
+        // terminal update, so the refusal must name that exact step instead of
+        // a generic "settle and push" that the agent cannot map to an operation.
+        assert!(
+            refusal.contains("workspace.update") && refusal.contains("current generation"),
+            "a live Work refusal must name the terminal workspace.update the current generation still owes: {refusal}"
+        );
+    }
+
+    // #4011: the receipt is generation-bound, but once the canonical Work is
+    // terminal no later generation can mint its own — `workspace.update`
+    // refuses terminal targets. A predecessor receipt therefore has to behave
+    // like a missing one (#3459): the delivered event log is the only fact left
+    // to check, while the status projection keeps the generation gap visible.
+    #[test]
+    fn terminal_canonical_work_with_predecessor_receipt_does_not_refuse_delivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "session-predecessor-terminal-work";
+
+        let predecessor =
+            initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        seed_canonical_work(&fixture, predecessor_session, true);
+        fixture.stage_events();
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): deliver the terminalized Work events");
+        fixture.push();
+        let receipt = save_work_event_settlement_record(&fixture.repo, predecessor_session, true)
+            .expect("persist the predecessor generation's settled receipt");
+        assert!(receipt.status.is_settled());
+        assert!(!receipt.obligation_open);
+        assert_eq!(receipt.execution_binding.as_ref(), Some(&predecessor));
+
+        // Relaunch: the Active predecessor is continued by a fresh generation,
+        // exactly the SPEC #3885 Phase 2b shape (no open obligation, clean and
+        // pushed branch, receipt left behind by the predecessor).
+        let mut request = generation_scoped_successor_request(
+            "successor-terminal-work",
+            "session-successor-terminal-work",
+        );
+        request.source = "execution-continue".to_string();
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare continuation successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate continuation successor");
+
+        let status = crate::cli::execution_state::diagnose(&fixture.repo, None);
+        assert_eq!(
+            status.work_event_receipt_generation_id.as_deref(),
+            Some(predecessor.generation_id.as_str())
+        );
+        assert_ne!(
+            status.generation_id.as_deref(),
+            Some(predecessor.generation_id.as_str()),
+            "the status projection must expose which generation is current"
+        );
+        assert_eq!(
+            status.work_event_receipt_matches_current_generation,
+            Some(false),
+            "the status projection must keep the generation gap observable"
+        );
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "a terminal canonical Work can never re-mint the receipt, so a predecessor              receipt must not refuse a delivered event log",
+        );
+    }
+
+    #[test]
+    fn terminal_canonical_work_with_predecessor_receipt_still_refuses_undelivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "session-predecessor-undelivered";
+
+        initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        let receipt = save_work_event_settlement_record(&fixture.repo, predecessor_session, true)
+            .expect("persist the predecessor generation's receipt");
+        assert!(receipt.status.is_settled());
+        seed_canonical_work(&fixture, predecessor_session, true);
+
+        let mut request = generation_scoped_successor_request(
+            "successor-undelivered",
+            "session-successor-undelivered",
+        );
+        request.source = "execution-continue".to_string();
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare continuation successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate continuation successor");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("undelivered Work events must still fail closed behind a predecessor receipt");
+        assert!(
+            refusal.contains("dirty") && refusal.contains("push"),
+            "the refusal must name the delivery step the agent can still perform: {refusal}"
+        );
+    }
+
+    /// Drive this worktree's canonical Work to the requested lifecycle so the
+    /// missing-receipt tests can distinguish "the terminal update is still
+    /// reachable" from "it can never happen again".
+    fn seed_canonical_work(fixture: &WorkEventGitFixture, session_id: &str, terminal: bool) {
+        let work_id = gwt_core::workspace_projection::canonical_work_id(
+            &fixture.repo,
+            Some("main"),
+            Some(fixture.repo.as_path()),
+        )
+        .expect("canonical Work id");
+        let now = Utc::now();
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            &work_id,
+            now,
+        );
+        start.title = Some("Settlement escape".to_string());
+        start.agent_session_id = Some(session_id.to_string());
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start)
+            .expect("record the live canonical Work");
+        if terminal {
+            // `build.abort` terminalizes through Discard, which never mints a
+            // settlement receipt.
+            let mut discard = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Discard,
+                &work_id,
+                now + chrono::Duration::seconds(1),
+            );
+            discard.agent_session_id = Some(session_id.to_string());
+            gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, discard)
+                .expect("terminalize the canonical Work");
+        }
+        assert_eq!(
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
+                .expect("load seeded WorkItems")
+                .expect("seeded WorkItems")
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .expect("seeded canonical Work")
+                .is_terminal(),
+            terminal,
+        );
+    }
+
+    // #3459: the settlement receipt is minted only by a terminal
+    // `workspace.update`, and `workspace.update` resolves its target with
+    // `allow_terminal: false`. Once the canonical Work is terminal the demanded
+    // receipt can never exist, so refusing on its absence closes completion for
+    // good. The delivered tracked event log is the only fact still worth
+    // checking there.
+    #[test]
+    fn terminal_canonical_work_without_a_receipt_does_not_refuse_delivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-terminal-work-escape";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        seed_canonical_work(&fixture, session_id, true);
+        // W-33b: `record_workspace_work_event` writes immutable shards, so the
+        // delivery this test performs has to stage the shard store as well as
+        // the frozen legacy monolith.
+        fixture.stage_events();
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): deliver the terminalized Work events");
+        fixture.push();
+
+        assert!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("read settlement receipt")
+                .is_none(),
+            "the fixture must model a generation that never minted a receipt"
+        );
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "a terminal canonical Work can never mint the demanded receipt, so its \
+             absence must not refuse a delivered event log",
+        );
+    }
+
+    #[test]
+    fn terminal_canonical_work_without_a_receipt_still_refuses_undelivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-terminal-work-undelivered";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        seed_canonical_work(&fixture, session_id, true);
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("undelivered Work events must still fail closed");
+        assert!(
+            refusal.contains("dirty") && refusal.contains("push"),
+            "the refusal must name the delivery step the agent can still perform: {refusal}"
+        );
+    }
+
+    #[test]
+    fn live_canonical_work_without_a_receipt_still_requires_its_terminal_update() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-live-work-still-gated";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        seed_canonical_work(&fixture, session_id, false);
+        // W-33b: the seeded events land in immutable shards, not the frozen
+        // legacy monolith, so both paths belong in this delivery commit.
+        fixture.stage_events();
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): deliver the live Work events");
+        fixture.push();
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a reachable terminal Work update must stay required");
+        assert!(
+            refusal.contains("terminal Work update"),
+            "a live canonical Work keeps the ordinary instruction: {refusal}"
+        );
+    }
+
+    fn assert_path_dirty(fixture: &WorkEventGitFixture, states: Vec<WorkEventPathState>) {
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty { states })
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
+    }
+
+    #[test]
+    fn work_event_settlement_rejects_every_exact_path_dirty_state() {
+        let staged = WorkEventGitFixture::tracked();
+        staged.append_event("staged");
+        staged.stage_events();
+        assert_path_dirty(&staged, vec![WorkEventPathState::Staged]);
+
+        let unstaged = WorkEventGitFixture::tracked();
+        unstaged.append_event("unstaged");
+        assert_path_dirty(&unstaged, vec![WorkEventPathState::Unstaged]);
+
+        let untracked = WorkEventGitFixture::without_tracked_event_log();
+        untracked.write_event_log("untracked");
+        assert_path_dirty(&untracked, vec![WorkEventPathState::Untracked]);
+
+        let deleted = WorkEventGitFixture::tracked();
+        fs::remove_file(deleted.event_path()).expect("delete tracked Work event log");
+        assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn work_event_settlement_sorts_and_deduplicates_multiple_path_states() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("staged-version");
+        fixture.stage_events();
+        fixture.append_event("unstaged-version");
+
+        assert_path_dirty(
+            &fixture,
+            vec![WorkEventPathState::Staged, WorkEventPathState::Unstaged],
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_rejects_dirty_immutable_event_shards() {
+        let untracked = WorkEventGitFixture::tracked_shards();
+        untracked.write_event_shard("untracked-shard", b"{}\n");
+        assert_path_dirty(&untracked, vec![WorkEventPathState::Untracked]);
+
+        let staged = WorkEventGitFixture::tracked_shards();
+        staged.write_event_shard("staged-shard", b"{}\n");
+        staged.stage_event_shards();
+        assert_path_dirty(&staged, vec![WorkEventPathState::Staged]);
+
+        let deleted = WorkEventGitFixture::tracked_shards();
+        fs::remove_file(deleted.event_shard_path("base")).expect("delete tracked Work event shard");
+        assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn work_event_settlement_refusal_detects_deleted_shard_only_store_without_a_receipt() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::remove_dir_all(fixture.repo.join(WORK_EVENT_SHARDS_PATH))
+            .expect("delete the tracked shard-only store");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo);
+
+        assert!(
+            refusal.is_some_and(|reason| reason.contains("dirty")),
+            "tracked shards must keep settlement in scope when the legacy monolith and store directory are both absent"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_rejects_commit_that_has_not_reached_upstream() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("committed-not-pushed");
+        fixture.stage_events();
+        fixture.commit("chore(work): commit final Work event");
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
+    }
+
+    #[test]
+    fn work_event_settlement_requires_head_containment_after_event_commit() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("pushed-event");
+        fixture.stage_events();
+        fixture.commit("chore(work): push final Work event");
+        fixture.push();
+
+        fs::write(fixture.repo.join("src.txt"), "local source after event\n")
+            .expect("write source-only local change");
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after final Work event");
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed),
+            "a pushed event commit cannot settle a later unpushed HEAD"
+        );
+
+        fixture.advance_remote_from_peer();
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged),
+            "remote divergence after the event receipt must also block settlement"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_accepts_clean_commit_after_remote_readback() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("committed-and-pushed");
+        fixture.stage_events();
+        fixture.commit("chore(work): deliver final Work event");
+        fixture.push();
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_uses_latest_immutable_shard_commit_for_provenance_and_push() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fixture.write_event_shard("committed-shard", b"{}\n");
+        fs::write(
+            fixture.repo.join("src.txt"),
+            "source delivered with shard\n",
+        )
+        .expect("write source change");
+        fixture.git_ok(&["add", "--", WORK_EVENT_SHARDS_PATH, "src.txt"]);
+        fixture.commit("fix: deliver source with immutable Work event");
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed),
+            "the latest shard commit must remain blocked before its HEAD reaches upstream"
+        );
+
+        fixture.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status(),
+            "the pushed shard commit must become the settlement provenance"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_applies_work_only_commit_policy_to_immutable_shards() {
+        let valid = WorkEventGitFixture::tracked_shards();
+        valid.write_event_shard("valid-work-only-shard", b"{}\n");
+        valid.stage_event_shards();
+        valid.commit("chore(work): deliver immutable Work event");
+        valid.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&valid.repo),
+            valid.settled_status()
+        );
+
+        let invalid = WorkEventGitFixture::tracked_shards();
+        invalid.write_event_shard("invalid-work-only-shard", b"{}\n");
+        invalid.stage_event_shards();
+        invalid.commit("fix: misclassify immutable Work event bookkeeping");
+        invalid.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&invalid.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit)
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_rejects_missing_configured_upstream() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.git_ok(&["branch", "--unset-upstream"]);
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+
+        let detached = WorkEventGitFixture::tracked();
+        detached.git_ok(&["checkout", "--detach", "-q"]);
+        let status = evaluate_work_event_settlement(&detached.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+    }
+
+    #[test]
+    fn work_event_settlement_distinguishes_remote_divergence_from_unpushed_commit() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("local-divergent-event");
+        fs::write(fixture.repo.join("src.txt"), "local divergent source\n")
+            .expect("write local divergent source");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: local source and Work event");
+        fixture.advance_remote_from_peer();
+        fixture.git_ok(&["fetch", "-q", "origin", "main"]);
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
+    }
+
+    #[test]
+    fn work_event_settlement_fails_closed_when_git_status_is_unreadable() {
+        let fixture = WorkEventGitFixture::tracked();
+        fs::write(fixture.repo.join(".git/index"), b"corrupt-index")
+            .expect("corrupt fixture index");
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+    }
+
+    #[test]
+    fn work_event_settlement_fails_closed_when_remote_readback_fails() {
+        let fixture = WorkEventGitFixture::tracked();
+        let missing_remote = fixture._root.path().join("missing-upstream.git");
+        fixture.git_ok(&[
+            "remote",
+            "set-url",
+            "origin",
+            missing_remote.to_str().expect("UTF-8 missing remote path"),
+        ]);
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteReadbackError)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+    }
+
+    #[test]
+    fn dirty_work_event_is_warning_while_remote_is_unreachable() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("offline-dirty-event");
+        let missing_remote = fixture._root.path().join("missing-upstream.git");
+        fixture.git_ok(&[
+            "remote",
+            "set-url",
+            "origin",
+            missing_remote.to_str().expect("UTF-8 missing remote path"),
+        ]);
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+                    states: vec![WorkEventPathState::Unstaged],
+                    environment: WorkEventSettlementEnvironment::RemoteReadbackError,
+                }
+            )
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_none(),
+            "an offline environment must not turn a dirty fact into an unreachable Stop block"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_commit_policy_distinguishes_source_and_bookkeeping_only_changes() {
+        let with_source = WorkEventGitFixture::tracked();
+        with_source.append_event("with-source");
+        fs::write(with_source.repo.join("src.txt"), "implemented behavior\n")
+            .expect("write changed source");
+        with_source.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        with_source.commit("fix: implement behavior with Work event");
+        with_source.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&with_source.repo),
+            with_source.settled_status(),
+            "a normal commit may carry the Work event when it also contains a source change"
+        );
+
+        let work_only_chore = WorkEventGitFixture::tracked();
+        work_only_chore.append_event("work-only-chore");
+        work_only_chore.stage_events();
+        work_only_chore.commit("chore(work): repair final Work event");
+        work_only_chore.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&work_only_chore.repo),
+            work_only_chore.settled_status(),
+            "an exact chore(work): prefix is the explicit no-source exception"
+        );
+
+        let invalid_work_only = WorkEventGitFixture::tracked();
+        invalid_work_only.append_event("work-only-invalid");
+        invalid_work_only.stage_events();
+        invalid_work_only.commit("fix: claim source delivery without source");
+        invalid_work_only.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&invalid_work_only.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit),
+            "an event-only commit without exact chore(work): prefix must fail closed"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_accepts_pushed_merge_commit_with_event_and_source_changes() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.git_ok(&["checkout", "-qb", "settlement-feature"]);
+        fixture.append_event("feature-terminal-event");
+        fs::write(fixture.repo.join("src.txt"), "feature source delivery\n")
+            .expect("write feature source change");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: implement feature with Work event");
+
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.append_event("main-side-event");
+        fixture.stage_events();
+        fixture.commit("chore(work): record concurrent main Work event");
+
+        let merge = fixture.git_output(&["merge", "--no-ff", "--no-commit", "settlement-feature"]);
+        assert!(
+            !merge.status.success(),
+            "the fixture must require an explicit event-log merge resolution"
+        );
+        fs::write(
+            fixture.event_path(),
+            concat!(
+                "{\"id\":\"base\"}\n",
+                "{\"id\":\"main-side-event\"}\n",
+                "{\"id\":\"feature-terminal-event\"}\n",
+                "{\"id\":\"merge-resolution-event\"}\n",
+            ),
+        )
+        .expect("resolve merged Work event log");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: merge source and Work event delivery");
+        let merge_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            fixture.latest_event_commit(),
+            merge_commit,
+            "the path-limited event commit must be the merge itself"
+        );
+        fixture.push();
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status(),
+            "a pushed merge carrying both source and the Work event must satisfy commit policy"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_rejects_bookkeeping_only_merge_when_other_parent_contains_source() {
+        let fixture = WorkEventGitFixture::tracked();
+
+        fixture.git_ok(&["checkout", "-qb", "settlement-topic"]);
+        fixture.append_event("topic-terminal-event");
+        fixture.stage_events();
+        fixture.commit("chore(work): record topic Work event");
+
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.append_event("main-side-event");
+        fs::write(fixture.repo.join("src.txt"), "main source delivery\n")
+            .expect("write main-side source change");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: advance main source and Work event");
+
+        let merge = fixture.git_output(&["merge", "--no-ff", "--no-commit", "settlement-topic"]);
+        assert!(
+            !merge.status.success(),
+            "the fixture must require an explicit event-log merge resolution"
+        );
+        fs::write(
+            fixture.event_path(),
+            concat!(
+                "{\"id\":\"base\"}\n",
+                "{\"id\":\"main-side-event\"}\n",
+                "{\"id\":\"topic-terminal-event\"}\n",
+                "{\"id\":\"merge-resolution-event\"}\n",
+            ),
+        )
+        .expect("resolve merged Work event log");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH]);
+        fixture.commit("fix: merge Work event delivery");
+        assert_eq!(
+            fixture.latest_event_commit(),
+            fixture.git_stdout(&["rev-parse", "HEAD"]),
+            "the path-limited event commit must be the merge itself"
+        );
+        fixture.push();
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit),
+            "source inherited from another parent must not satisfy the merge commit policy"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_checks_only_the_exact_tracked_event_path_for_dirtiness() {
+        let fixture = WorkEventGitFixture::tracked();
+        fs::write(
+            fixture.repo.join("unrelated-source.txt"),
+            "untracked source\n",
+        )
+        .expect("write unrelated dirty path");
+        fs::write(fixture.repo.join(".gwt/work/other.json"), "{}\n")
+            .expect("write unrelated bookkeeping path");
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status(),
+            "unrelated dirtiness must not be misreported as exact Work event path dirtiness"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_record_is_mirrorless_and_sticky_until_settled() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("pending-terminal-update");
+        let fingerprint_before = worktree_fingerprint(&fixture.repo);
+
+        let opened = save_work_event_settlement_record(&fixture.repo, "session-a", true)
+            .expect("persist open settlement obligation");
+        assert!(opened.obligation_open);
+        assert_eq!(
+            opened.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+                states: vec![WorkEventPathState::Unstaged],
+            })
+        );
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("read settlement record")
+                .expect("settlement record exists"),
+            opened
+        );
+        assert_eq!(
+            worktree_fingerprint(&fixture.repo),
+            fingerprint_before,
+            "machine-local settlement state must not alter verification freshness"
+        );
+
+        let duplicate_open = save_work_event_settlement_record(&fixture.repo, "session-b", true)
+            .expect("record duplicate settlement obligation");
+        assert!(duplicate_open.obligation_open);
+        assert_eq!(
+            duplicate_open.session_id, "session-a",
+            "a duplicate open must preserve the originating session provenance"
+        );
+
+        let refreshed = save_work_event_settlement_record(&fixture.repo, "session-c", false)
+            .expect("refresh blocked settlement obligation");
+        assert!(
+            refreshed.obligation_open,
+            "an existing obligation cannot auto-close while settlement is blocked"
+        );
+        assert_eq!(
+            refreshed.session_id, "session-a",
+            "a foreign-session refresh must not replace the originating session provenance"
+        );
+
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+            .expect("fixture has a repo-scoped trusted store");
+        assert!(trusted_dir
+            .join(WORK_EVENT_SETTLEMENT_RECORD_FILE)
+            .is_file());
+        assert!(
+            !fixture
+                .repo
+                .join(".gwt/skill-state")
+                .join(WORK_EVENT_SETTLEMENT_RECORD_FILE)
+                .exists(),
+            "settlement obligations must never be mirrored into the worktree"
+        );
+
+        fixture.stage_events();
+        fixture.commit("chore(work): settle terminal update");
+        fixture.push();
+        let settled = save_work_event_settlement_record(&fixture.repo, "session-d", false)
+            .expect("persist settled status");
+        assert!(!settled.obligation_open);
+        assert_eq!(
+            settled.session_id, "session-a",
+            "the settled receipt must retain the obligation's originating session"
+        );
+        assert_eq!(settled.status, fixture.settled_status());
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("read settled record")
+                .expect("settled record exists"),
+            settled
+        );
+
+        let foreign_refresh = save_work_event_settlement_record(&fixture.repo, "session-e", false)
+            .expect("refresh settled receipt from another session");
+        assert!(!foreign_refresh.obligation_open);
+        assert_eq!(
+            foreign_refresh.session_id, "session-a",
+            "ordinary refreshes must retain the settled generation's author provenance"
+        );
+
+        fixture.append_event("next-terminal-update");
+        let next_generation = save_work_event_settlement_record(&fixture.repo, "session-e", true)
+            .expect("open the next settlement generation");
+        assert!(next_generation.obligation_open);
+        assert_eq!(
+            next_generation.session_id, "session-e",
+            "an explicit new obligation must establish a new author generation"
+        );
+        assert_eq!(
+            next_generation.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+                states: vec![WorkEventPathState::Unstaged],
+            })
+        );
+
+        let duplicate_next_generation =
+            save_work_event_settlement_record(&fixture.repo, "session-f", true)
+                .expect("record duplicate obligation in the next generation");
+        assert_eq!(
+            duplicate_next_generation.session_id, "session-e",
+            "duplicate opens must preserve the current generation's author provenance"
+        );
+    }
+
+    #[test]
+    fn legacy_pending_work_event_settlement_accepts_the_exact_event_from_the_monolith() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-pending-terminal",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-pending-terminal".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-pending-terminal".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-pending-terminal".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-pending-terminal",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare write-ahead settlement receipt");
+        let mut legacy_prepared = prepared.clone();
+        legacy_prepared.schema_version = WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION;
+        persist_work_event_settlement_record(&fixture.repo, &legacy_prepared)
+            .expect("downgrade the fixture to the pre-shard receipt schema");
+        assert!(prepared.obligation_open);
+        assert_eq!(
+            prepared.status,
+            WorkEventSettlementStatus::PendingMutation {
+                event_id: event.id.clone(),
+                work_id: event.work_item_id.clone(),
+                journal_entry_id: journal_entry.id.clone(),
+                event_session_id: "session-pending-terminal".to_string(),
+            }
+        );
+
+        let pre_persist_refresh =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-terminal", false)
+                .expect("refresh before event persistence");
+        assert_eq!(pre_persist_refresh.status, prepared.status);
+        assert!(pre_persist_refresh.obligation_open);
+        assert!(
+            work_event_settlement_refusal(&fixture.repo)
+                .is_some_and(|message| message.contains("not been persisted")),
+            "Stop refresh must fail closed while the prepared event is absent"
+        );
+
+        fixture.append_typed_event(&event);
+        assert!(
+            work_event_settlement_refusal(&fixture.repo)
+                .is_some_and(|message| message.contains("dirty")),
+            "the pending receipt must transition to ordinary path settlement without a post-write refresh"
+        );
+
+        fixture.stage_events();
+        fixture.commit("chore(work): settle prepared terminal event");
+        fixture.push();
+        assert_eq!(work_event_settlement_refusal(&fixture.repo), None);
+        let settled = load_work_event_settlement_record(&fixture.repo)
+            .expect("load settled receipt")
+            .expect("settlement receipt exists");
+        assert!(!settled.obligation_open);
+        assert!(matches!(
+            settled.status,
+            WorkEventSettlementStatus::Settled { .. }
+        ));
+    }
+
+    #[test]
+    fn pending_work_event_settlement_requires_the_exact_valid_immutable_shard() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-pending-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-pending-shard".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-pending-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-pending-shard".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-pending-shard",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare shard settlement receipt");
+
+        fixture.append_typed_event(&event);
+        let legacy_only =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh with only a legacy copy");
+        assert_eq!(
+            legacy_only.status, prepared.status,
+            "a new receipt must not accept a legacy append in place of its exact shard"
+        );
+        assert!(
+            work_event_settlement_refusal(&fixture.repo)
+                .is_some_and(|message| message.contains("exact shard")),
+            "a missing exact shard must keep terminal gates closed"
+        );
+
+        fixture.append_typed_event_shard(&event);
+        let persisted =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh after exact shard persistence");
+        assert_eq!(
+            persisted.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+                states: vec![WorkEventPathState::Untracked],
+            }),
+            "a validated exact shard must advance to ordinary delivery settlement"
+        );
+
+        fs::remove_file(fixture.event_path()).expect("remove rejected legacy-only copy");
+        fs::remove_file(fixture.event_shard_path(&event.id))
+            .expect("remove the validated but uncommitted exact shard");
+        let removed =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh after deleting the validated exact shard");
+        assert!(
+            removed.obligation_open && !removed.status.is_settled(),
+            "local validation must not discard exact delivery identity before commit/push"
+        );
+        fixture.append_typed_event_shard(&event);
+
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): settle prepared immutable Work event");
+        fixture.push();
+        let final_refresh =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh after the exact shard reaches upstream");
+        assert!(final_refresh.status.is_settled(), "{final_refresh:?}");
+        assert_eq!(work_event_settlement_refusal(&fixture.repo), None);
+    }
+
+    #[test]
+    fn pending_work_event_shard_relative_path_keeps_the_canonical_bucket() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let event_id = "event-with-a-bucketed-settlement-path";
+        let digest = format!("{:x}", Sha256::digest(event_id.as_bytes()));
+
+        let relative = pending_work_event_shard_relative_path(&fixture.repo, event_id)
+            .expect("derive canonical relative path");
+
+        assert_eq!(
+            relative,
+            format!(".gwt/work/events/{}/{}.jsonl", &digest[..2], digest)
+        );
+        assert!(
+            !relative.contains('\\'),
+            "Git path must use slash separators"
+        );
+    }
+
+    #[test]
+    fn pending_work_event_settlement_requires_every_exact_ignored_shard() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::write(fixture.repo.join(".gitignore"), ".gwt/\n").expect("ignore managed root");
+        fixture.git_ok(&["add", ".gitignore"]);
+        fixture.commit("chore: ignore managed project state");
+        fixture.push();
+
+        let updated_at = Utc::now();
+        let session_id = "session-ignored-shard";
+        let mut prior_event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-ignored-shard",
+            updated_at,
+        );
+        prior_event.agent_session_id = Some(session_id.to_string());
+        fixture.append_typed_event_shard(&prior_event);
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-ignored-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-ignored-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(session_id.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(&fixture.repo, session_id, &event, &journal)
+            .expect("prepare ignored-shard settlement receipt");
+        fixture.append_typed_event_shard(&event);
+
+        let ordinary_add = fixture.git_output(&["add", "--", WORK_EVENT_SHARDS_PATH]);
+        assert!(
+            !ordinary_add.status.success(),
+            "ordinary add must not override a target repository's broad ignore"
+        );
+        let relative = pending_work_event_shard_relative_path(&fixture.repo, &event.id)
+            .expect("exact ignored shard path");
+        let tracked = fixture.git_output(&["ls-files", "--error-unmatch", "--", &relative]);
+        assert!(
+            !tracked.status.success(),
+            "ordinary add must not stage ignored shard"
+        );
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_some(),
+            "an ignored, undelivered shard must keep terminal settlement blocked"
+        );
+
+        fixture.git_ok(&["add", "-f", "--", &relative]);
+        fixture.commit("chore(work): deliver exact ignored Work event shard");
+        fixture.push();
+
+        let incomplete = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("refresh force-added exact shard");
+        assert_eq!(
+            incomplete.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+                states: vec![WorkEventPathState::Untracked],
+            }),
+            "an earlier ignored immutable event must keep delivery open"
+        );
+
+        let prior_relative = pending_work_event_shard_relative_path(&fixture.repo, &prior_event.id)
+            .expect("prior exact ignored shard path");
+        fixture.git_ok(&["add", "-f", "--", &prior_relative]);
+        fixture.commit("chore(work): deliver prior ignored Work event shard");
+        fixture.push();
+
+        let settled = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("refresh after every exact ignored shard is delivered");
+        assert!(settled.status.is_settled(), "{settled:?}");
+    }
+
+    #[test]
+    fn pending_work_event_settlement_applies_provenance_to_the_exact_shard_commit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-exact-provenance",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-exact-provenance".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-exact-provenance".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-exact-provenance".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-exact-provenance",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare exact provenance receipt");
+        fixture.append_typed_event_shard(&event);
+        fixture.stage_event_shards();
+        fixture.commit("fix: invalid bookkeeping provenance for exact shard");
+        fixture.push();
+        fixture.write_event_shard("later-valid-shard", b"{}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): later unrelated Work event");
+        fixture.push();
+
+        let refreshed =
+            save_work_event_settlement_record(&fixture.repo, "session-exact-provenance", false)
+                .expect("refresh exact provenance receipt");
+
+        assert_eq!(
+            refreshed.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit),
+            "a later valid shard commit must not substitute for the exact shard's provenance"
+        );
+        assert!(refreshed.obligation_open);
+    }
+
+    // #4011: a predecessor generation's undelivered terminal event must not pin
+    // the receipt forever. The current generation's own terminal update
+    // supersedes it; an undelivered predecessor shard still dirties the store,
+    // so no delivery pressure is lost.
+    #[test]
+    fn prepare_work_event_settlement_supersedes_a_predecessor_generation_obligation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "session-predecessor-open";
+        let successor_session = "session-successor-open";
+
+        let predecessor =
+            initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        let updated_at = Utc::now();
+        let mut first = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-superseded-obligation",
+            updated_at,
+        );
+        first.agent_session_id = Some(predecessor_session.to_string());
+        let first_journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-predecessor-open".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(predecessor_session.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            predecessor_session,
+            &first,
+            &first_journal,
+        )
+        .expect("prepare the predecessor generation's terminal update");
+        assert_eq!(prepared.execution_binding.as_ref(), Some(&predecessor));
+        assert!(prepared.obligation_open);
+
+        let mut request =
+            generation_scoped_successor_request("successor-open-obligation", successor_session);
+        request.source = "execution-continue".to_string();
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare continuation successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate continuation successor");
+        let current = crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+            .expect("load successor binding")
+            .expect("successor binding exists");
+        assert_ne!(current.generation_id, predecessor.generation_id);
+
+        let mut second = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-superseded-obligation",
+            updated_at,
+        );
+        second.agent_session_id = Some(successor_session.to_string());
+        let mut second_journal = first_journal.clone();
+        second_journal.id = "journal-successor-open".to_string();
+        second_journal.agent_session_id = Some(successor_session.to_string());
+
+        let superseded = prepare_work_event_settlement_record(
+            &fixture.repo,
+            successor_session,
+            &second,
+            &second_journal,
+        )
+        .expect(
+            "the current generation's own terminal update must supersede a predecessor obligation",
+        );
+        assert_eq!(superseded.execution_binding.as_ref(), Some(&current));
+        assert_eq!(superseded.session_id, successor_session);
+        assert!(superseded.obligation_open);
+        assert!(
+            matches!(
+                &superseded.status,
+                WorkEventSettlementStatus::PendingMutation { event_id, .. } if *event_id == second.id
+            ),
+            "{:?}",
+            superseded.status
+        );
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload superseding receipt")
+                .expect("superseding receipt exists"),
+            superseded
+        );
+    }
+
+    // #4011 (AC-6): when the pending shard is gone, a refresh must not keep
+    // reporting the Git state it saw earlier. The honest fact on a clean
+    // worktree is that the terminal event has not been persisted yet.
+    #[test]
+    fn refresh_reports_pending_mutation_when_the_pending_shard_is_missing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let session_id = "session-shard-lost";
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-shard-lost",
+            updated_at,
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-shard-lost".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(session_id.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared =
+            prepare_work_event_settlement_record(&fixture.repo, session_id, &event, &journal)
+                .expect("prepare the terminal update");
+
+        // A previous refresh observed the store while it was dirty; the shard
+        // has since vanished (fresh materialization) and the worktree is clean.
+        let mut stale = prepared.clone();
+        stale.status = WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+            states: vec![WorkEventPathState::Unstaged],
+        });
+        persist_work_event_settlement_record(&fixture.repo, &stale)
+            .expect("persist the stale settlement view");
+
+        let refreshed = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("refresh the settlement view");
+        assert!(refreshed.obligation_open);
+        assert!(
+            matches!(
+                &refreshed.status,
+                WorkEventSettlementStatus::PendingMutation { event_id, .. } if *event_id == event.id
+            ),
+            "a clean worktree must not keep reporting path_dirty: {:?}",
+            refreshed.status
+        );
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("an unpersisted terminal event still fails closed");
+        assert!(
+            !refusal.contains("dirty") && refusal.contains("has not been persisted"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn prepare_work_event_settlement_preserves_an_existing_open_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut first = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-first-pending",
+            updated_at,
+        );
+        first.agent_session_id = Some("session-first-pending".to_string());
+        let first_journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-first-pending".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-first-pending".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-first-pending",
+            &first,
+            &first_journal,
+        )
+        .expect("prepare first identity");
+        let mut second = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-second-pending",
+            updated_at,
+        );
+        second.agent_session_id = Some("session-second-pending".to_string());
+        let mut second_journal = first_journal.clone();
+        second_journal.id = "journal-second-pending".to_string();
+        second_journal.agent_session_id = Some("session-second-pending".to_string());
+
+        let error = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-second-pending",
+            &second,
+            &second_journal,
+        )
+        .expect_err("a second event must not overwrite an undelivered receipt");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload existing receipt")
+                .expect("existing receipt remains"),
+            prepared
+        );
+    }
+
+    #[test]
+    fn prepare_work_event_settlement_requires_semantic_match_for_same_identity_retry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-same-identity-retry",
+            updated_at,
+        );
+        event.summary = Some("original terminal summary".to_string());
+        event.agent_session_id = Some("session-same-identity-retry".to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-same-identity-retry".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("original terminal summary".to_string()),
+            progress_summary: None,
+            agent_session_id: Some("session-same-identity-retry".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-same-identity-retry",
+            &event,
+            &journal,
+        )
+        .expect("prepare same-identity receipt");
+        let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+            .expect("settlement trusted dir");
+        let receipt_path = trusted_dir.join(WORK_EVENT_SETTLEMENT_RECORD_FILE);
+        let receipt_before = fs::read(&receipt_path).expect("read prepared receipt");
+
+        let identical = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-same-identity-retry",
+            &event,
+            &journal,
+        )
+        .expect("an identical retry must be idempotent");
+        assert_eq!(identical, prepared);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after identical retry"),
+            receipt_before,
+            "an identical retry must not rewrite its durable receipt"
+        );
+
+        let mut same_event = event.clone();
+        let mut regenerated_journal = journal.clone();
+        regenerated_journal.id = "journal-regenerated-for-same-event".to_string();
+        let recovered = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-same-identity-retry",
+            &mut same_event,
+            &mut regenerated_journal,
+        )
+        .expect("same semantic retry must recover the durable journal identity");
+        assert_eq!(recovered, prepared);
+        assert_eq!(same_event.id, event.id);
+        assert_eq!(regenerated_journal.id, journal.id);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after journal identity recovery"),
+            receipt_before,
+            "journal identity recovery must not rewrite its durable receipt"
+        );
+
+        let mut divergent_event = event.clone();
+        divergent_event.summary = Some("divergent terminal summary".to_string());
+        let mut divergent_journal = journal.clone();
+        divergent_journal.summary = Some("divergent terminal summary".to_string());
+        let error = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-same-identity-retry",
+            &divergent_event,
+            &divergent_journal,
+        )
+        .expect_err("the same ids must not authorize a semantically different retry");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after divergent retry"),
+            receipt_before,
+            "a divergent retry must leave the original receipt byte-exact"
+        );
+    }
+
+    #[test]
+    fn prepare_work_event_settlement_reuses_durable_identity_for_the_same_request_retry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut first = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-retry-pending",
+            updated_at,
+        );
+        first.agent_session_id = Some("session-retry-pending".to_string());
+        let first_journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-retry-pending-a".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-retry-pending".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-retry-pending",
+            &first,
+            &first_journal,
+        )
+        .expect("prepare first durable identity");
+
+        let retry_at = updated_at + chrono::TimeDelta::seconds(1);
+        let mut retry = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-retry-pending",
+            retry_at,
+        );
+        retry.agent_session_id = Some("session-retry-pending".to_string());
+        let retry_generated_id = retry.id.clone();
+        let mut retry_journal = first_journal.clone();
+        retry_journal.id = "journal-retry-pending-b".to_string();
+        retry_journal.updated_at = retry_at;
+        let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+            .expect("settlement trusted dir");
+
+        let recovered = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-retry-pending",
+            &mut retry,
+            &mut retry_journal,
+        )
+        .expect("same terminal request retry must recover the first identity");
+
+        assert_eq!(recovered, prepared);
+        assert_ne!(retry_generated_id, first.id);
+        assert_eq!(retry.id, first.id);
+        assert_eq!(retry_journal.id, first_journal.id);
+    }
+
+    #[test]
+    fn pending_work_event_settlement_rejects_malformed_or_mismatched_exact_shards() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-invalid-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-invalid-shard".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-invalid-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-invalid-shard".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-invalid-shard",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare invalid-shard settlement receipt");
+
+        fixture.write_event_shard(&event.id, b"{\"id\":\"truncated\"}");
+        assert!(
+            work_event_settlement_refusal(&fixture.repo)
+                .is_some_and(|message| message.contains("could not be validated")),
+            "Stop/terminal gates must refuse an invalid exact shard rather than fail open"
+        );
+        let malformed =
+            save_work_event_settlement_record(&fixture.repo, "session-invalid-shard", false)
+                .expect_err("an incomplete shard must fail closed");
+        assert_eq!(malformed.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload receipt after malformed shard")
+                .expect("receipt remains present"),
+            prepared,
+            "invalid shard validation must not mutate the pending receipt"
+        );
+
+        let mut mismatched = event.clone();
+        mismatched.id = "different-event-id".to_string();
+        let mut mismatched_bytes =
+            serde_json::to_vec(&mismatched).expect("serialize mismatched event");
+        mismatched_bytes.push(b'\n');
+        fixture.write_event_shard(&event.id, &mismatched_bytes);
+        let mismatch =
+            save_work_event_settlement_record(&fixture.repo, "session-invalid-shard", false)
+                .expect_err("a shard whose event id disagrees with its path must fail closed");
+        assert_eq!(mismatch.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload receipt after mismatched shard")
+                .expect("receipt remains present"),
+            prepared,
+            "mismatched shard validation must not mutate the pending receipt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_work_event_settlement_rejects_symlinked_store_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        for index in 0..4 {
+            let fixture = WorkEventGitFixture::tracked_shards();
+            let session_id = format!("session-symlinked-store-{index}");
+            let updated_at = Utc::now();
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Done,
+                format!("work-symlinked-store-{index}"),
+                updated_at,
+            );
+            event.agent_session_id = Some(session_id.clone());
+            let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+                id: format!("journal-symlinked-store-{index}"),
+                project_root: fixture.repo.clone(),
+                title: None,
+                status_category: Some(
+                    gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+                ),
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                progress_summary: None,
+                agent_session_id: Some(session_id.clone()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+                updated_at,
+            };
+            prepare_work_event_settlement_record(&fixture.repo, &session_id, &event, &journal)
+                .expect("prepare symlinked-store receipt");
+            let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+                .expect("settlement trusted dir");
+            let receipt_path = trusted_dir.join(WORK_EVENT_SETTLEMENT_RECORD_FILE);
+            let receipt_before = fs::read(&receipt_path).expect("read prepared receipt");
+
+            let exact_path =
+                gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &event.id);
+            let resolved_repo = gwt_core::paths::resolve_current_worktree_root(&fixture.repo);
+            let (ancestor, ancestor_path) = match index {
+                0 => (".gwt", resolved_repo.join(".gwt")),
+                1 => (".gwt/work", resolved_repo.join(".gwt/work")),
+                2 => (
+                    WORK_EVENT_STORE_RELATIVE,
+                    resolved_repo.join(WORK_EVENT_STORE_RELATIVE),
+                ),
+                _ => (
+                    "canonical digest bucket",
+                    exact_path
+                        .parent()
+                        .expect("exact shard bucket")
+                        .to_path_buf(),
+                ),
+            };
+            let descendant = exact_path
+                .strip_prefix(&ancestor_path)
+                .expect("exact shard descends from canonical ancestor");
+            let external = tempfile::tempdir().expect("external event store");
+            let external_shard = external.path().join(descendant);
+            fs::create_dir_all(external_shard.parent().expect("external shard parent"))
+                .expect("create external shard parent");
+            let mut bytes = serde_json::to_vec(&event).expect("serialize external exact shard");
+            bytes.push(b'\n');
+            fs::write(&external_shard, bytes).expect("write external exact shard");
+            // The digest bucket of an event that was never written does not
+            // exist yet, so only the ancestors the fixture materialized can be
+            // removed before the symlink takes their place.
+            match fs::remove_dir_all(&ancestor_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir_all(ancestor_path.parent().expect("canonical ancestor parent"))
+                        .expect("create canonical ancestor parent");
+                }
+                Err(error) => panic!("remove canonical ancestor {ancestor}: {error}"),
+            }
+            symlink(external.path(), &ancestor_path).expect("symlink canonical ancestor");
+
+            let error = save_work_event_settlement_record(&fixture.repo, &session_id, false)
+                .expect_err("a symlinked canonical ancestor must fail closed");
+
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{ancestor}");
+            assert_eq!(
+                fs::read(&receipt_path).expect("read receipt after rejected symlink"),
+                receipt_before,
+                "rejecting symlinked ancestor {ancestor} must preserve receipt bytes"
+            );
+            let retained = load_work_event_settlement_record(&fixture.repo)
+                .expect("reload retained receipt")
+                .expect("retained receipt exists");
+            assert!(
+                pending_shard_refresh_failure_must_block(&retained),
+                "Stop must remain blocked for symlinked ancestor {ancestor}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_work_event_settlement_refuses_when_the_exact_shard_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-unreadable-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-unreadable-shard".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-unreadable-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-unreadable-shard".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-unreadable-shard",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare unreadable shard settlement receipt");
+        fixture.append_typed_event_shard(&event);
+        let shard_dir = fixture
+            .event_shard_path(&event.id)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::set_permissions(&shard_dir, fs::Permissions::from_mode(0o000))
+            .expect("make exact shard unreadable");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo);
+
+        fs::set_permissions(&shard_dir, fs::Permissions::from_mode(0o700))
+            .expect("restore shard directory permissions");
+        assert!(
+            refusal.is_some_and(|message| message.contains("could not be validated")),
+            "an unreadable exact shard must keep terminal settlement closed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_work_event_settlement_refuses_when_the_event_store_is_uninspectable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-uninspectable-store",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-uninspectable-store".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-uninspectable-store".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-uninspectable-store".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-uninspectable-store",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare uninspectable store settlement receipt");
+        let work_dir = fixture.repo.join(".gwt/work");
+        fs::set_permissions(&work_dir, fs::Permissions::from_mode(0o000))
+            .expect("make Work store uninspectable");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo);
+
+        fs::set_permissions(&work_dir, fs::Permissions::from_mode(0o700))
+            .expect("restore Work store permissions");
+        assert!(
+            refusal.is_some_and(|message| message.contains("could not be validated")),
+            "an uninspectable Work event store must keep terminal settlement closed"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_reader_accepts_v1_v2_v3_and_refreshes_to_v4() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let legacy = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION,
+            session_id: "session-legacy".to_string(),
+            execution_binding: None,
+            pending_delivery: None,
+            obligation_open: false,
+            status: fixture.settled_status(),
+            updated_at: Utc::now(),
+        };
+        persist_work_event_settlement_record(&fixture.repo, &legacy)
+            .expect("seed v1 settlement receipt");
+
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("load v1 receipt")
+                .expect("v1 receipt exists"),
+            legacy
+        );
+        let mut pre_generation = legacy.clone();
+        pre_generation.schema_version = WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION;
+        persist_work_event_settlement_record(&fixture.repo, &pre_generation)
+            .expect("seed v2 settlement receipt");
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("load v2 receipt")
+                .expect("v2 receipt exists"),
+            pre_generation
+        );
+        let mut generation_scoped = legacy.clone();
+        generation_scoped.schema_version = WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION;
+        persist_work_event_settlement_record(&fixture.repo, &generation_scoped)
+            .expect("seed v3 settlement receipt");
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("load v3 receipt")
+                .expect("v3 receipt exists"),
+            generation_scoped
+        );
+        let refreshed = save_work_event_settlement_record(&fixture.repo, "session-legacy", false)
+            .expect("refresh v3 receipt");
+        assert_eq!(
+            refreshed.schema_version,
+            WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+        );
+        assert_eq!(refreshed.status, fixture.settled_status());
+    }
+
+    #[test]
+    fn work_event_settlement_reader_accepts_early_v4_pending_delivery_shape() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-early-v4",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-early-v4".to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-early-v4".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-early-v4".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-early-v4",
+            &event,
+            &journal,
+        )
+        .expect("prepare v4 receipt");
+        let mut value = serde_json::to_value(&prepared).expect("serialize v4 receipt");
+        let pending = value
+            .get_mut("pending_delivery")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("pending delivery object");
+        pending.remove("journal_entry_id");
+        pending.remove("request_fingerprint");
+        let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+            .expect("trusted settlement dir");
+        let early_v4_bytes = serde_json::to_vec_pretty(&value).expect("serialize early v4 fixture");
+        let receipt_path = trusted_dir.join(WORK_EVENT_SETTLEMENT_RECORD_FILE);
+        gwt_github::cache::write_atomic(&receipt_path, &early_v4_bytes)
+            .expect("write early v4 fixture");
+
+        let loaded = load_work_event_settlement_record(&fixture.repo)
+            .expect("read early v4 receipt")
+            .expect("early v4 receipt exists");
+
+        assert_eq!(loaded.schema_version, WORK_EVENT_SETTLEMENT_SCHEMA_VERSION);
+        let delivery = pending_delivery_for_record(&loaded).expect("recover pending delivery");
+        assert_eq!(delivery.event_id, event.id);
+        assert_eq!(delivery.journal_entry_id, journal.id);
+
+        let mut exact_event = event.clone();
+        let mut exact_journal = journal.clone();
+        let retried = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-early-v4",
+            &mut exact_event,
+            &mut exact_journal,
+        )
+        .expect("early v4 may retry only with every durable id unchanged");
+        assert_eq!(retried, loaded);
+        assert_eq!(exact_event.id, event.id);
+        assert_eq!(exact_journal.id, journal.id);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after exact early v4 retry"),
+            early_v4_bytes,
+            "an exact early v4 retry must not rewrite its receipt"
+        );
+
+        let mut same_event = event.clone();
+        let mut regenerated_journal = journal.clone();
+        regenerated_journal.id = "journal-early-v4-regenerated".to_string();
+        let error = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-early-v4",
+            &mut same_event,
+            &mut regenerated_journal,
+        )
+        .expect_err("early v4 cannot prove a retry with a regenerated journal id");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(regenerated_journal.id, "journal-early-v4-regenerated");
+
+        let mut divergent_event = event.clone();
+        divergent_event.id = "event-early-v4-divergent".to_string();
+        divergent_event.summary = Some("divergent terminal request".to_string());
+        let mut divergent_journal = journal.clone();
+        divergent_journal.id = "journal-early-v4-divergent".to_string();
+        divergent_journal.summary = Some("divergent terminal request".to_string());
+        let error = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-early-v4",
+            &mut divergent_event,
+            &mut divergent_journal,
+        )
+        .expect_err("early v4 cannot prove a semantically different request");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after rejected early v4 retries"),
+            early_v4_bytes,
+            "rejected early v4 retries must leave the receipt byte-exact"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_record_refuses_worktree_mirror_fallback() {
+        let repo = tempfile::tempdir().expect("repository without trusted-store identity");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .output()
+            .expect("initialize repository without origin");
+        assert!(init.status.success());
+
+        let error = save_work_event_settlement_record(repo.path(), "session-a", true)
+            .expect_err("mirrorless state must not claim persistence without a trusted store");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert!(
+            !repo.path().join(".gwt/skill-state").exists(),
+            "the mirrorless API must not fall back to worktree state"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_persistence_fails_closed_if_trusted_dir_disappears() {
+        let repo = tempfile::tempdir().expect("repository without trusted-store identity");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .output()
+            .expect("initialize repository without origin");
+        assert!(init.status.success());
+        assert!(
+            crate::cli::trusted_store::trusted_dir_for_worktree(repo.path()).is_none(),
+            "fixture must model identity disappearing after the outer guard"
+        );
+        let record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: "session-required-trusted-write".to_string(),
+            execution_binding: None,
+            pending_delivery: None,
+            obligation_open: true,
+            status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
+            updated_at: Utc::now(),
+        };
+
+        let error = persist_work_event_settlement_record(repo.path(), &record)
+            .expect_err("settlement persistence must never silently no-op");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert!(
+            !repo.path().join(".gwt/skill-state").exists(),
+            "required settlement persistence must not create a mirror fallback"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_fails_closed_when_trusted_dir_changes_after_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = tempfile::tempdir().expect("repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+
+        let trusted_a = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+            .expect("initial trusted directory");
+        let initial_record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: "session-from-leased-directory".to_string(),
+            execution_binding: None,
+            pending_delivery: None,
+            obligation_open: false,
+            status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
+            updated_at: Utc::now(),
+        };
+        let initial_bytes =
+            serde_json::to_vec_pretty(&initial_record).expect("serialize initial settlement");
+        gwt_github::cache::write_atomic(
+            &trusted_a.join(WORK_EVENT_SETTLEMENT_RECORD_FILE),
+            &initial_bytes,
+        )
+        .expect("seed settlement beneath the directory that will be leased");
+        let repo_for_hook = repo.path().to_path_buf();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            let output = gwt_core::process::hidden_command("git")
+                .args([
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.com/t/changed-trusted-store.git",
+                ])
+                .current_dir(&repo_for_hook)
+                .output()
+                .expect("change repository identity after lease acquisition");
+            assert!(output.status.success());
+        });
+
+        let error =
+            save_work_event_settlement_record(repo.path(), "session-stable-trusted-dir", false)
+                .expect_err("trusted-store identity drift must fail closed");
+
+        let trusted_b = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+            .expect("changed trusted directory");
+        assert_ne!(
+            trusted_a, trusted_b,
+            "fixture must change the resolved trusted directory"
+        );
+        let persisted_a = fs::read_to_string(trusted_a.join(WORK_EVENT_SETTLEMENT_RECORD_FILE))
+            .expect("read settlement from leased directory");
+        assert_eq!(
+            persisted_a,
+            String::from_utf8(initial_bytes).expect("initial settlement UTF-8"),
+            "fail-closed drift handling must leave the leased directory byte-equivalent"
+        );
+        assert!(
+            error.to_string().contains("trusted store identity changed"),
+            "drift rejection must be actionable: {error}"
+        );
+        assert!(
+            !trusted_b.join(WORK_EVENT_SETTLEMENT_RECORD_FILE).exists(),
+            "a resolver change must not redirect persistence to an unlocked directory"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_fails_closed_when_trusted_dir_disappears_after_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = tempfile::tempdir().expect("repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+            .expect("initial trusted directory");
+        let initial_record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: "session-before-identity-loss".to_string(),
+            execution_binding: None,
+            pending_delivery: None,
+            obligation_open: false,
+            status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
+            updated_at: Utc::now(),
+        };
+        let initial_bytes =
+            serde_json::to_vec_pretty(&initial_record).expect("serialize initial settlement");
+        gwt_github::cache::write_atomic(
+            &trusted.join(WORK_EVENT_SETTLEMENT_RECORD_FILE),
+            &initial_bytes,
+        )
+        .expect("seed settlement beneath the directory that will be leased");
+        let repo_for_hook = repo.path().to_path_buf();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            let output = gwt_core::process::hidden_command("git")
+                .args(["remote", "remove", "origin"])
+                .current_dir(&repo_for_hook)
+                .output()
+                .expect("remove repository identity after lease acquisition");
+            assert!(output.status.success());
+        });
+
+        let error =
+            save_work_event_settlement_record(repo.path(), "session-after-identity-loss", false)
+                .expect_err("trusted-store identity loss must fail closed");
+
+        assert!(
+            crate::cli::trusted_store::trusted_dir_for_worktree(repo.path()).is_none(),
+            "fixture must remove the trusted-store identity"
+        );
+        assert!(
+            error.to_string().contains("trusted store identity changed"),
+            "identity-loss rejection must be actionable: {error}"
+        );
+        assert_eq!(
+            fs::read(trusted.join(WORK_EVENT_SETTLEMENT_RECORD_FILE))
+                .expect("read unchanged settlement"),
+            initial_bytes,
+            "identity loss must leave the leased directory byte-equivalent"
+        );
+    }
+}

@@ -144,10 +144,21 @@ Ready for review only when all of the following are true:
 - no known blockers remain for the PR scope
 - rollback / follow-up boundaries are explained in the PR body when relevant
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
-- `User Verification Result` is `confirmed`, `n/a`, or
-  `skipped(<reason>)`
+- `User Verification Result` is `confirmed`, `n/a`, `n/a (autonomous)`, or
+  `skipped(<reason>)`. `n/a (autonomous)` is what an unattended gwt Issue
+  Monitor launch records: the user-verification handoff is waived for that
+  launch mode, and any UI surface is carried by `Agent Visual Check: pass`
+  instead. Never rewrite it as `confirmed` — the user confirmed nothing.
 - every PR body checklist item is checked or explicitly marked N/A with
   a reason
+
+In gwt-managed execution worktrees the canonical operations enforce part of
+this mechanically (SPEC-3248 P8b): non-draft `pr.create` and `pr.ready`
+refuse when the session's Execution Control Record is terminally blocked, or
+active without a fresh all-passing Verification Run Record (written by JSON
+operation `verify.run`). Run the pre-PR matrix through `verify.run` so the
+evidence exists before the Ready handoff; Draft PR creation stays available
+mid-work.
 
 `gwt-verify` is a project-agnostic Generic Verification Contract: it
 autodetects the host project's test runners (Cargo.toml / package.json /
@@ -255,6 +266,7 @@ Detailed logic in `references/check-flow.md`.
 - Reviews: `pr.reviews`
 - Unresolved threads: `pr.review_threads`
 - Actions logs: `actions.logs` / `actions.job_logs`
+- Actions re-run: `actions.rerun` (`run_id` + `failed_only`, or `job_id`)
 
 ### Output Contract
 
@@ -417,9 +429,12 @@ Deliver applies a stricter gate than Create/Fix because auto-merge removes the
 last human checkpoint:
 
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
-- `User Verification Result` is `confirmed` or `n/a` (not `pending`,
-  `rejected(<reason>)`, or `skipped(<reason>)` — a skip is enough to *create* a
-  PR but not to merge unattended)
+- `User Verification Result` is `confirmed`, `n/a`, or `n/a (autonomous)` (not
+  `pending`, `rejected(<reason>)`, or `skipped(<reason>)` — a skip is enough to
+  *create* a PR but not to merge unattended). `n/a (autonomous)` qualifies
+  because the waiver is a property of the launch mode rather than a deferred
+  check, but it still requires `Agent Visual Check: pass` when a UI surface is
+  in scope.
 - the PR is a releaseable slice with no known blockers, and is not a Draft
 
 If verification is `pending`, do **not** run `gh pr merge --auto`. Stop and

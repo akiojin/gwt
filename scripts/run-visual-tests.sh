@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLAYWRIGHT_VERSION="${GWT_PLAYWRIGHT_VERSION:-1.49.1}"
+# Single source for the pinned version: the browsers installed by
+# scripts/install-playwright-browsers.sh must be the revision this
+# @playwright/test build expects, and the CI cache is keyed off the same file.
+PLAYWRIGHT_VERSION="${GWT_PLAYWRIGHT_VERSION:-$(tr -d '[:space:]' <"${ROOT}/scripts/playwright-version.txt")}"
 PLAYWRIGHT_DEPS_DIR="${GWT_PLAYWRIGHT_DEPS_DIR:-${TMPDIR:-/tmp}/gwt-playwright-${PLAYWRIGHT_VERSION}}"
 PLAYWRIGHT_NODE_MODULES="${PLAYWRIGHT_DEPS_DIR}/node_modules"
 PLAYWRIGHT_RESOLVER="${PLAYWRIGHT_DEPS_DIR}/resolve-playwright.cjs"

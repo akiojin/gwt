@@ -159,20 +159,15 @@ fn repository_name_from_url(url: &str) -> Result<String> {
         .split(['?', '#'])
         .next()
         .unwrap_or(trimmed)
-        .trim_end_matches('/');
+        .trim_end_matches(['/', '\\']);
     let path_part = if let Some((_prefix, rest)) = without_query.split_once("://") {
-        rest.rsplit_once('/')
-            .map(|(_parent, name)| name)
-            .unwrap_or(rest)
+        last_path_segment(rest)
     } else if let Some((_prefix, rest)) = without_query.rsplit_once(':') {
-        rest.rsplit_once('/')
-            .map(|(_parent, name)| name)
-            .unwrap_or(rest)
+        // Also covers Windows drive letters (`C:\dir\repo.git`), where the
+        // remainder is a backslash-separated local path (Issue #3041).
+        last_path_segment(rest)
     } else {
-        without_query
-            .rsplit_once('/')
-            .map(|(_parent, name)| name)
-            .unwrap_or(without_query)
+        last_path_segment(without_query)
     };
 
     let repo_name = path_part.trim_end_matches(".git").trim();
@@ -188,6 +183,12 @@ fn repository_name_from_url(url: &str) -> Result<String> {
         )));
     }
     Ok(repo_name.to_string())
+}
+
+/// Last segment of a path that may use either `/` or `\` as its separator, so
+/// remote URLs and local Windows paths share one derivation rule.
+fn last_path_segment(value: &str) -> &str {
+    value.rsplit(['/', '\\']).next().unwrap_or(value)
 }
 
 /// Clone a GitHub repository directly into gwt's Nested Bare+Worktree layout.
@@ -753,6 +754,40 @@ mod tests {
         assert_eq!(target.repo_name, "gwt");
         assert_eq!(target.workspace_home, parent.join("gwt"));
         assert_eq!(target.bare_repo_path, parent.join("gwt").join("gwt.git"));
+    }
+
+    #[test]
+    fn repository_name_from_url_accepts_local_paths() {
+        for (url, expected) in [
+            // Windows drive-letter paths (Issue #3041): a bare `:` after the
+            // drive letter must not be mistaken for the scp-like host separator.
+            (r"C:\Users\me\Temp\.tmpABC\sample.git", "sample"),
+            (r"C:\Users\me\projects\sample", "sample"),
+            (r"C:\Users\me\projects\sample.git\", "sample"),
+            (r"c:/Users/me/projects/sample.git", "sample"),
+            // UNC paths.
+            (r"\\server\share\sample.git", "sample"),
+            // POSIX paths and file:// URLs.
+            ("/home/me/projects/sample.git", "sample"),
+            ("file:///home/me/projects/sample.git", "sample"),
+            ("file:///C:/projects/sample.git", "sample"),
+        ] {
+            assert_eq!(
+                repository_name_from_url(url).unwrap_or_else(|error| panic!("{url}: {error}")),
+                expected,
+                "unexpected repository name for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_name_from_url_rejects_paths_without_a_usable_name() {
+        for url in ["", "   ", "C:", r"C:\", r"C:\projects\.git", "/home/me/.."] {
+            assert!(
+                repository_name_from_url(url).is_err(),
+                "expected {url:?} to be rejected"
+            );
+        }
     }
 
     // ---- install_develop_protection tests ----

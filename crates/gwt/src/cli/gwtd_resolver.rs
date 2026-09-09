@@ -42,13 +42,22 @@ pub fn resolve_gwtd_path_with(inputs: GwtdResolutionInputs<'_>) -> Option<PathBu
         .or_else(|| first_existing(development_fallbacks, &is_file))
 }
 
+/// Path of the `gwtd` companion binary that ships next to `current_exe`.
+///
+/// Returns `current_exe` unchanged when it already is `gwtd`.
+pub fn gwtd_companion_path(current_exe: &Path) -> PathBuf {
+    if is_named_gwtd_binary(current_exe) {
+        current_exe.to_path_buf()
+    } else {
+        current_exe.with_file_name(gwtd_exe_name_for(current_exe))
+    }
+}
+
 pub fn default_installed_candidates(current_exe: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(current_exe) = current_exe {
-        if is_named_gwtd_binary(current_exe) {
-            candidates.push(current_exe.to_path_buf());
-        } else if is_named_gwt_binary(current_exe) {
-            candidates.push(current_exe.with_file_name(gwtd_exe_name_for(current_exe)));
+        if is_named_gwtd_binary(current_exe) || is_named_gwt_binary(current_exe) {
+            candidates.push(gwtd_companion_path(current_exe));
         }
     }
 

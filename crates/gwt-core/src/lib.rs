@@ -4,18 +4,29 @@
 //! execution helpers. No business logic lives here — domain crates
 //! (gwt-git, gwt-agent, etc.) build on top of these primitives.
 
+pub mod board_escalation;
 pub mod board_remote_roots;
 pub mod config;
 pub mod coordination;
 pub mod daemon;
+pub mod daemon_pipe_name;
 pub mod error;
+pub mod error_ledger;
+pub mod fd_limit;
+pub mod github_budget;
+pub mod github_quota;
 pub mod index;
+pub mod index_coordinator;
 pub mod logging;
 pub mod migration;
+#[cfg(windows)]
+pub mod named_pipe;
+pub mod operation_deadline;
 pub mod paths;
 pub mod process;
 pub mod process_console;
 pub mod process_executor;
+pub mod process_tree;
 mod release_contract;
 pub mod release_notes;
 pub mod repo_hash;
@@ -30,7 +41,7 @@ pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;
 
-pub use error::{GwtError, Result};
+pub use error::{GwtError, JsonDecodeKind, Result};
 
 #[cfg(test)]
 mod canonical_naming_tests {

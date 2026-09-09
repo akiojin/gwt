@@ -11,7 +11,7 @@
 //!
 //! The Workspace Start Work materialization path that consumes this state is
 //! exercised by `crates/gwt-git/src/worktree.rs` unit tests and the
-//! `app_runtime::tests::open_start_work_refuses_while_migration_pending`
+//! `app_runtime::tests::open_existing_branch_refuses_while_migration_pending`
 //! guard test; this E2E focuses on the migration executor itself.
 
 use std::path::Path;

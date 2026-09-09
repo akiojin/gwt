@@ -4,6 +4,7 @@ use gwt::{
     list_branch_entries, list_branch_entries_with_active_sessions, BranchCleanupAvailability,
     BranchCleanupBlockedReason, BranchCleanupRisk, BranchScope,
 };
+use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
 #[test]
@@ -759,7 +760,7 @@ fn init_repo(repo: &std::path::Path) {
 }
 
 fn run_git(repo: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args(args)
         .current_dir(repo)
         .output()

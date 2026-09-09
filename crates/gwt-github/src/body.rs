@@ -103,7 +103,8 @@ impl SpecBody {
                 }
                 SectionLocation::Comments(ids) => {
                     // Concatenate content from each referenced comment in order.
-                    let mut chunks: Vec<(u32, String)> = Vec::new();
+                    let mut chunks: Vec<(Option<crate::sections::SectionPart>, String)> =
+                        Vec::new();
                     for &cid in ids {
                         let comment =
                             comment_map
@@ -123,9 +124,13 @@ impl SpecBody {
                                         cid, name.0
                                     ))
                                 })?;
-                        let index = matching.part.as_ref().map(|p| p.index).unwrap_or(1);
-                        chunks.push((index, matching.content));
+                        chunks.push((matching.part, matching.content));
                     }
+                    validate_split_chunks(name, &chunks)?;
+                    let mut chunks: Vec<(u32, String)> = chunks
+                        .into_iter()
+                        .map(|(part, content)| (part.map(|p| p.index).unwrap_or(1), content))
+                        .collect();
                     chunks.sort_by_key(|(i, _)| *i);
                     let joined = chunks
                         .into_iter()
@@ -163,6 +168,65 @@ impl fmt::Display for SpecMeta {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Fail-closed validation for sections split across comments (SPEC-3248 P7C
+/// / #3284). A section whose chunks carry `part=N/M` markers must be
+/// structurally complete: every chunk marked, one consistent total, exactly
+/// the indices `1..=total` present once each, and exactly `total` referenced
+/// comments. Unmarked multi-comment sections (the legacy layout) are joined
+/// without part validation, preserving backward compatibility.
+fn validate_split_chunks(
+    name: &SectionName,
+    chunks: &[(Option<crate::sections::SectionPart>, String)],
+) -> Result<(), ParseError> {
+    let marked = chunks.iter().filter(|(p, _)| p.is_some()).count();
+    if marked == 0 {
+        return Ok(());
+    }
+    if marked != chunks.len() {
+        return Err(ParseError::BrokenIndex(format!(
+            "section '{}' mixes part-marked and unmarked comments",
+            name.0
+        )));
+    }
+    let total = chunks[0].0.as_ref().map(|p| p.total).unwrap_or(0);
+    if total == 0 {
+        return Err(ParseError::BrokenIndex(format!(
+            "section '{}' declares a zero part total",
+            name.0
+        )));
+    }
+    for (part, _) in chunks {
+        let part = part.as_ref().expect("all chunks marked");
+        if part.total != total {
+            return Err(ParseError::BrokenIndex(format!(
+                "section '{}' has inconsistent part totals ({} vs {})",
+                name.0, part.total, total
+            )));
+        }
+    }
+    if chunks.len() != total as usize {
+        return Err(ParseError::IncompleteParts {
+            section: name.0.clone(),
+            expected: total,
+            found: chunks.len() as u32,
+        });
+    }
+    let mut seen: Vec<u32> = chunks
+        .iter()
+        .map(|(p, _)| p.as_ref().expect("all chunks marked").index)
+        .collect();
+    seen.sort_unstable();
+    let expected: Vec<u32> = (1..=total).collect();
+    if seen != expected {
+        return Err(ParseError::IncompleteParts {
+            section: name.0.clone(),
+            expected: total,
+            found: seen.iter().collect::<std::collections::BTreeSet<_>>().len() as u32,
+        });
+    }
+    Ok(())
+}
 
 fn parse_header(body: &str) -> Result<SpecMeta, ParseError> {
     let re = Regex::new(r"<!--\s*gwt-spec\s+id=(?P<id>\S+)\s+version=(?P<version>\d+)\s*-->")

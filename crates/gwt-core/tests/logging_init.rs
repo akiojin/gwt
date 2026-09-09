@@ -15,6 +15,11 @@ use gwt_core::process_console::ProcessKind;
 fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
     // SAFETY: `init` installs a global subscriber, so this test must
     // be the only one in this crate binary that calls it.
+    // The launch environment may carry a target-specific RUST_LOG (for
+    // example `gwt_input_trace=debug`). This test exercises the explicit
+    // LoggingConfig default, so isolate this single-test process from that
+    // ambient override without depending on the `test-support` feature.
+    std::env::remove_var("RUST_LOG");
     let dir = tempfile::tempdir().expect("tempdir");
     let config = LoggingConfig {
         log_dir: dir.path().to_path_buf(),

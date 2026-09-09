@@ -9,7 +9,8 @@ use std::{
 
 use crate::{
     session::{
-        GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
+        GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
+        GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
         GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::LaunchRuntimeTarget,
@@ -18,11 +19,15 @@ use crate::{
 const GWT_PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 const GWT_REPO_HASH_ENV: &str = "GWT_REPO_HASH";
 const GWT_WORKTREE_HASH_ENV: &str = "GWT_WORKTREE_HASH";
+const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
+    CODEX_THREAD_ID_ENV,
     GWT_BIN_PATH_ENV,
+    GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
     GWT_HOOK_FORWARD_URL_ENV,
+    GWT_PANE_WS_URL_ENV,
     GWT_PROJECT_ROOT_ENV,
     GWT_REPO_HASH_ENV,
     GWT_SESSION_ID_ENV,
@@ -32,7 +37,16 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
 
 /// Return the current host process environment with GUI-launch PATH gaps filled.
 pub fn host_process_env() -> HashMap<String, String> {
-    hydrate_host_base_env(std::env::vars())
+    hydrate_host_base_env(process_env_lossy())
+}
+
+fn process_env_lossy() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().map(|(key, value)| {
+        (
+            key.to_string_lossy().into_owned(),
+            value.to_string_lossy().into_owned(),
+        )
+    })
 }
 
 /// Fill common GUI-launch PATH gaps in a host base environment.
@@ -76,17 +90,39 @@ where
 /// Idempotent: re-running on an already-hydrated PATH yields the same value
 /// because `push_unique_path` deduplicates entries. No-op on Windows.
 ///
-/// Reads the current process env via `vars_os` (not `vars`) so a single
-/// non-Unicode environment variable does not panic startup. Skips writing to
-/// `std::env` if the computed PATH is empty so we never blank a usable PATH.
+/// Reads the current process env via `vars_os` (not `vars`) and lossily
+/// decodes non-Unicode entries so a single value does not panic startup. Skips
+/// writing to `std::env` if the computed PATH is empty so we never blank a
+/// usable PATH.
 pub fn apply_host_path_hydration_to_std_env() {
     if cfg!(windows) {
         return;
     }
-    let before = std::env::var("PATH").unwrap_or_default();
+    apply_host_path_hydration(process_env_lossy(), |hydrated| {
+        std::env::set_var("PATH", hydrated);
+    });
+}
+
+fn apply_host_path_hydration<I, F>(base_env: I, mut apply_path: F)
+where
+    I: IntoIterator<Item = (String, String)>,
+    F: FnMut(&str),
+{
+    if cfg!(windows) {
+        return;
+    }
+    let base_env = base_env.into_iter().collect::<Vec<_>>();
+    let before = base_env
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("PATH").then_some(value.clone()))
+        .unwrap_or_default();
     let before_count = std::env::split_paths(&before).count();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let Some(hydrated) = current_process_hydrated_path() else {
+    let home = base_env
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("HOME").then_some(value.clone()))
+        .unwrap_or_default();
+    let Some(hydrated) = compute_hydrated_path(base_env).filter(|hydrated| !hydrated.is_empty())
+    else {
         tracing::info!(
             target: "gwt::launch::startup",
             stage = "path_hydration",
@@ -101,7 +137,7 @@ pub fn apply_host_path_hydration_to_std_env() {
     };
     let after_count = std::env::split_paths(&hydrated).count();
     let added = after_count.saturating_sub(before_count);
-    std::env::set_var("PATH", &hydrated);
+    apply_path(&hydrated);
     tracing::info!(
         target: "gwt::launch::startup",
         stage = "path_hydration",
@@ -114,22 +150,6 @@ pub fn apply_host_path_hydration_to_std_env() {
         home = %home,
         "host PATH hydration applied"
     );
-}
-
-/// Compute the hydrated PATH from the running process env.
-///
-/// Returns `None` when the hydrated PATH is empty so `apply_host_path_hydration_to_std_env`
-/// never overwrites a usable `std::env::PATH` with a blank value (which would
-/// disable command lookup for subsequent `Command::new(...)` calls).
-fn current_process_hydrated_path() -> Option<String> {
-    let base_env: Vec<(String, String)> = std::env::vars_os()
-        .filter_map(|(key, value)| {
-            let key = key.into_string().ok()?;
-            let value = value.into_string().ok()?;
-            Some((key, value))
-        })
-        .collect();
-    compute_hydrated_path(base_env).filter(|hydrated| !hydrated.is_empty())
 }
 
 /// Effective environment assembled from the active profile and launch context.
@@ -159,12 +179,16 @@ impl LaunchEnvironment {
         I: IntoIterator<Item = (String, String)>,
     {
         let mut env: HashMap<String, String> = base_env.into_iter().collect();
+        let remove_env = inherited_launch_scope_remove_env();
         normalize_windows_path_key(&mut env);
+        for key in &remove_env {
+            remove_env_key(&mut env, key);
+        }
         apply_required_terminal_defaults(&mut env);
         Self {
             base_env: env,
             profile_env: HashMap::new(),
-            remove_env: inherited_terminal_color_suppressor_remove_env(),
+            remove_env,
             override_env: HashMap::new(),
         }
     }
@@ -201,13 +225,13 @@ impl LaunchEnvironment {
             return Err(format!("active profile not found: {active_name}"));
         };
 
-        let inherited_remove_env = inherited_terminal_color_suppressor_remove_env();
+        let inherited_remove_env = inherited_launch_scope_remove_env();
         let profile_remove_env = normalized_remove_env(&profile.disabled_env);
         let remove_env = merged_remove_env(&inherited_remove_env, &profile_remove_env);
         let mut base_env: HashMap<String, String> = base_env.into_iter().collect();
         normalize_windows_path_key(&mut base_env);
         for key in &remove_env {
-            base_env.remove(key);
+            remove_env_key(&mut base_env, key);
         }
         apply_required_terminal_defaults(&mut base_env);
 
@@ -284,7 +308,7 @@ impl LaunchEnvironment {
 
         let mut merged_env = self.base_env.clone();
         for key in &merged_remove_env {
-            merged_env.remove(key);
+            remove_env_key(&mut merged_env, key);
         }
         merged_env.extend(self.profile_env.clone());
         merged_env.extend(explicit_env);
@@ -308,7 +332,7 @@ impl LaunchEnvironment {
 
 fn apply_required_terminal_defaults(env: &mut HashMap<String, String>) {
     for key in INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS {
-        env.remove(*key);
+        remove_env_key(env, key);
     }
     let replace_term = env
         .get("TERM")
@@ -333,10 +357,28 @@ fn inherited_terminal_color_suppressor_remove_env() -> Vec<String> {
         .collect()
 }
 
+fn inherited_launch_scope_remove_env() -> Vec<String> {
+    merged_remove_env(
+        &inherited_terminal_color_suppressor_remove_env(),
+        &INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
     for key in INHERITED_LAUNCH_ENV_KEYS {
-        env.remove(*key);
+        remove_env_key(env, key);
     }
+}
+
+fn remove_env_key(env: &mut HashMap<String, String>, key: &str) {
+    #[cfg(windows)]
+    env.retain(|candidate, _| !candidate.eq_ignore_ascii_case(key));
+
+    #[cfg(not(windows))]
+    env.remove(key);
 }
 
 #[cfg(windows)]
@@ -391,7 +433,7 @@ fn hydrate_host_path(env: &mut HashMap<String, String>) {
 
 #[cfg(target_os = "macos")]
 fn macos_path_helper_path(current_path: Option<&str>) -> Option<String> {
-    let mut command = std::process::Command::new("/usr/libexec/path_helper");
+    let mut command = gwt_core::process::hidden_command("/usr/libexec/path_helper");
     command.arg("-s");
     if let Some(path) = current_path {
         command.env("PATH", path);
@@ -460,6 +502,161 @@ mod tests {
 
     use super::*;
 
+    /// Issue #3895: `PATH` is process-global and libtest runs tests on
+    /// parallel threads, so a test that swaps `PATH` (even while holding
+    /// `env_lock`) races every concurrent test that spawns `sh` / `git` /
+    /// `docker` by name and fails them with `No such file or directory`.
+    /// Tests must inject `PATH` into the probe or child environment instead
+    /// (`AgentDetector::detect_by_command_in_env`,
+    /// `detect_claude_version_raw_in_env`, the launch `host_path` seams, or
+    /// `ProcessPlanRequest::env`). This scan covers every test region in the
+    /// crate; the only sanctioned process-wide write is the pre-thread PATH
+    /// hydration in production code, which lives outside any test region.
+    #[test]
+    fn agent_tests_never_mutate_the_process_path() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        for (file, test_only) in rust_sources(&manifest_dir.join("src"))
+            .into_iter()
+            .map(|file| (file, false))
+            .chain(
+                rust_sources(&manifest_dir.join("tests"))
+                    .into_iter()
+                    .map(|file| (file, true)),
+            )
+        {
+            let source = std::fs::read_to_string(&file).expect("read gwt-agent source");
+            let (skipped_lines, region) = if test_only {
+                (0, source.as_str())
+            } else {
+                match test_region(&source) {
+                    Some(region) => region,
+                    None => continue,
+                }
+            };
+            for (line, pattern) in process_path_mutations(region) {
+                offenders.push(format!(
+                    "{}:{} ({pattern})",
+                    file.strip_prefix(manifest_dir).unwrap_or(&file).display(),
+                    skipped_lines + line
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "tests must not mutate the process-global PATH; inject it into the probe \
+             environment instead (Issue #3895):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn rust_sources(dir: &std::path::Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let path = entry.expect("read dir entry").path();
+            if path.is_dir() {
+                files.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// The source from the first `#[cfg(test` / `#[cfg(all(test` marker on,
+    /// with the number of lines skipped before it.
+    fn test_region(source: &str) -> Option<(usize, &str)> {
+        let start = ["#[cfg(test", "#[cfg(all(test"]
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min()?;
+        Some((source[..start].lines().count(), &source[start..]))
+    }
+
+    /// `(1-based line, pattern)` for every process-global PATH write in
+    /// `region`. Whitespace is ignored so rustfmt line breaks cannot hide a
+    /// call, and matching is ASCII-case-insensitive because Windows resolves
+    /// `Path` / `path` to the same variable; a hit is attributed to the line
+    /// the call starts on.
+    fn process_path_mutations(region: &str) -> Vec<(usize, &'static str)> {
+        const PATTERNS: [&str; 4] = [
+            concat!("std::env::set_var(", "\"PATH\""),
+            concat!("std::env::remove_var(", "\"PATH\""),
+            concat!("ScopedEnvVar::set(", "\"PATH\""),
+            concat!("ScopedEnvVar::unset(", "\"PATH\""),
+        ];
+        let compact = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        };
+        let lines: Vec<&str> = region.lines().collect();
+        let mut hits = Vec::new();
+        for index in 0..lines.len() {
+            let first = compact(lines[index]);
+            let window = compact(&lines[index..(index + 4).min(lines.len())].join(""));
+            for pattern in PATTERNS {
+                if window
+                    .find(&pattern.to_ascii_lowercase())
+                    .is_some_and(|position| position < first.len())
+                {
+                    hits.push((index + 1, pattern));
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn process_path_mutation_scan_ignores_case_and_line_breaks() {
+        let region = concat!(
+            "let _a = ScopedEnvVar::set(\n",
+            "    \"Path\",\n",
+            "    temp.path(),\n",
+            ");\n",
+            "std::env::remove_var(\"path\");\n",
+            "let _ok = ScopedEnvVar::set(\"HOME\", temp.path());\n",
+        );
+
+        let hits = process_path_mutations(region);
+
+        assert_eq!(
+            hits,
+            vec![
+                (1, concat!("ScopedEnvVar::set(", "\"PATH\"")),
+                (5, concat!("std::env::remove_var(", "\"PATH\"")),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_process_env_lossily_decodes_non_unicode_entries() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let invalid_value = std::ffi::OsString::from_vec(vec![b'f', b'o', 0x80, b'o']);
+        let expected_value = invalid_value.to_string_lossy().into_owned();
+        let _env = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_NON_UTF8_PROCESS_ENV",
+            &invalid_value,
+        );
+
+        let env = host_process_env();
+
+        assert_eq!(
+            env.get("GWT_TEST_NON_UTF8_PROCESS_ENV"),
+            Some(&expected_value)
+        );
+    }
+
     fn write_profile_config(profile: Profile) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -483,6 +680,14 @@ mod tests {
         profile
     }
 
+    fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
+        let additional = additional
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>();
+        merged_remove_env(&inherited_launch_scope_remove_env(), &additional)
+    }
+
     #[test]
     fn merges_active_profile_over_host_base() {
         let (_dir, config_path) = write_profile_config(dev_profile());
@@ -503,10 +708,7 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(!env.contains_key("SECRET"));
-        assert_eq!(
-            remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["SECRET"]));
     }
 
     #[test]
@@ -532,10 +734,7 @@ mod tests {
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(!env.contains_key("HOST_ONLY"));
         assert!(!env.contains_key("SECRET"));
-        assert_eq!(
-            remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["SECRET"]));
     }
 
     #[test]
@@ -574,11 +773,7 @@ mod tests {
         assert!(!env_vars.contains_key("SECRET"));
         assert_eq!(
             remove_env,
-            vec![
-                "EXPLICIT_REMOVE".to_string(),
-                "NO_COLOR".to_string(),
-                "SECRET".to_string()
-            ]
+            expected_launch_remove_env(&["EXPLICIT_REMOVE", "SECRET"])
         );
     }
 
@@ -677,14 +872,7 @@ mod tests {
             Some("/profile/bin")
         );
         assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
-        assert_eq!(
-            remove_env,
-            vec![
-                "NO_COLOR".to_string(),
-                "PATH".to_string(),
-                "SECRET".to_string()
-            ]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["PATH", "SECRET"]));
     }
 
     #[test]
@@ -696,7 +884,7 @@ mod tests {
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
-        assert_eq!(remove_env, vec!["NO_COLOR".to_string()]);
+        assert_eq!(remove_env, expected_launch_remove_env(&[]));
     }
 
     #[cfg(windows)]
@@ -746,8 +934,8 @@ mod tests {
         );
         assert_eq!(
             remove_env,
-            vec!["NO_COLOR".to_string()],
-            "NO_COLOR must be removed from inherited process env, not only omitted from explicit env_vars"
+            expected_launch_remove_env(&[]),
+            "NO_COLOR and parent launch scope must be removed from the inherited process env"
         );
     }
 
@@ -771,7 +959,7 @@ mod tests {
         assert_eq!(env.get("NO_COLOR").map(String::as_str), Some("1"));
         assert_eq!(
             remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()],
+            expected_launch_remove_env(&["SECRET"]),
             "profile NO_COLOR is explicit env and should be re-applied after inherited env removal"
         );
     }
@@ -849,6 +1037,10 @@ mod tests {
                 GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
                 "secret-token".to_string(),
             ),
+            (
+                GWT_PANE_WS_URL_ENV.to_string(),
+                "ws://127.0.0.1:45123/ws".to_string(),
+            ),
             (GWT_PROJECT_ROOT_ENV.to_string(), "/old/project".to_string()),
         ]);
 
@@ -861,7 +1053,75 @@ mod tests {
         assert!(!env.contains_key(GWT_SESSION_ID_ENV));
         assert!(!env.contains_key(GWT_SESSION_RUNTIME_PATH_ENV));
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
+        assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_base_env_drops_inherited_launch_scoped_env_case_insensitively() {
+        let env = hydrate_host_base_env(
+            INHERITED_LAUNCH_ENV_KEYS
+                .iter()
+                .map(|key| (key.to_ascii_lowercase(), format!("parent-{key}"))),
+        );
+
+        for key in INHERITED_LAUNCH_ENV_KEYS {
+            assert!(
+                !env.keys().any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "parent launch-scoped value must be removed regardless of Windows env-key casing: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_environment_removes_parent_launch_scope_from_the_spawn_contract() {
+        let base_env = INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .map(|key| ((*key).to_string(), format!("parent-{key}")))
+            .collect::<Vec<_>>();
+
+        let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
+
+        for key in INHERITED_LAUNCH_ENV_KEYS {
+            assert!(
+                !env.contains_key(*key),
+                "parent launch-scoped value must not remain in explicit env: {key}"
+            );
+            assert!(
+                remove_env.iter().any(|candidate| candidate == key),
+                "parent launch-scoped value must be removed from inherited child env: {key}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launch_environment_removes_parent_scope_and_no_color_case_insensitively() {
+        let base_env = INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .map(|key| (key.to_ascii_lowercase(), format!("parent-{key}")))
+            .chain(std::iter::once(("no_color".to_string(), "1".to_string())))
+            .collect::<Vec<_>>();
+
+        let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
+
+        for key in INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .copied()
+            .chain(INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS.iter().copied())
+        {
+            assert!(
+                !env.keys().any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "inherited value must be absent from the explicit spawn env regardless of Windows env-key casing: {key}"
+            );
+            assert!(
+                remove_env
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "spawn contract must remove the inherited Windows env key: {key}"
+            );
+        }
     }
 
     #[cfg(not(windows))]
@@ -951,15 +1211,7 @@ mod tests {
 
     #[test]
     fn apply_host_path_hydration_to_std_env_does_not_panic() {
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("PATH");
-        apply_host_path_hydration_to_std_env();
-        match original {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
+        apply_host_path_hydration(process_env_lossy(), |_| {});
     }
 
     #[cfg(target_os = "linux")]
@@ -976,99 +1228,24 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn apply_host_path_hydration_to_std_env_does_not_blank_path_when_no_inputs_on_linux() {
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_path = std::env::var_os("PATH");
-        let original_home = std::env::var_os("HOME");
-        std::env::remove_var("PATH");
-        std::env::remove_var("HOME");
-
-        apply_host_path_hydration_to_std_env();
-
-        if let Some(value) = std::env::var_os("PATH") {
-            assert!(
-                !value.is_empty(),
-                "apply_host_path_hydration_to_std_env must not write an empty PATH"
-            );
-        }
-
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+        let mut applied = false;
+        apply_host_path_hydration(Vec::<(String, String)>::new(), |_| applied = true);
+        assert!(!applied, "empty hydration must not write PATH");
     }
 
     #[cfg(not(windows))]
     #[test]
     fn apply_host_path_hydration_to_std_env_preserves_existing_path_entries() {
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-        apply_host_path_hydration_to_std_env();
-        let after = std::env::var("PATH").unwrap_or_default();
+        let mut after = String::new();
+        apply_host_path_hydration(
+            vec![(
+                "PATH".to_string(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            )],
+            |hydrated| after = hydrated.to_string(),
+        );
         let entries = std::env::split_paths(&after).collect::<Vec<_>>();
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
         assert!(entries.contains(&PathBuf::from("/bin")));
-
-        match original {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-    }
-
-    fn path_env_test_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn apply_host_path_hydration_to_std_env_emits_info_event_with_path_summary() {
-        use crate::test_capture::{CaptureLayer, CapturedEvents};
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", "/usr/bin:/bin");
-
-        let events = CapturedEvents::new();
-        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
-        tracing::subscriber::with_default(subscriber, || {
-            apply_host_path_hydration_to_std_env();
-        });
-
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-
-        let captured = events.snapshot();
-        let info_events: Vec<_> = captured
-            .iter()
-            .filter(|event| event.level == tracing::Level::INFO)
-            .filter(|event| event.target == "gwt::launch::startup")
-            .collect();
-        assert!(
-            !info_events.is_empty(),
-            "expected at least one INFO event with target gwt::launch::startup; captured = {:?}",
-            captured
-        );
-        let event = info_events[0];
-        assert_eq!(
-            event.fields.get("stage").map(String::as_str),
-            Some("path_hydration")
-        );
-        assert!(event.fields.contains_key("path_before"));
-        assert!(event.fields.contains_key("path_entry_count_before"));
     }
 }

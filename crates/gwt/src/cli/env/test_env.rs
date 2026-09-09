@@ -11,7 +11,10 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{client::fake::FakeIssueClient, IssueClient, IssueNumber, IssueSnapshot};
+use gwt_github::{
+    client::{fake::FakeIssueClient, IssueClient},
+    IssueNumber, IssueSnapshot,
+};
 
 use super::{CliEnv, InternalCommandCall, InternalCommandOutput};
 
@@ -39,9 +42,11 @@ pub struct TestEnv {
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
+    pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
     pub prs: HashMap<u64, PrStatus>,
+    pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
     pub pr_comments: Vec<(u64, String)>,
     pub pr_create_call_log: Vec<PrCreateCall>,
@@ -50,6 +55,13 @@ pub struct TestEnv {
     pub pr_review_threads: HashMap<u64, Vec<PrReviewThread>>,
     pub pr_checks: HashMap<u64, PrChecksSummary>,
     pub pr_current_call_count: usize,
+    pub pr_list: Vec<gwt_git::PrInventoryItem>,
+    pub pr_list_call_count: usize,
+    pub pr_list_options: Option<gwt_git::PrInventoryOptions>,
+    pub pr_unlanded_branches: Vec<gwt_git::UnlandedBranch>,
+    /// Issue #3891: the `gh api rate_limit` payload `github.budget` reads.
+    pub github_rate_limit_payload: Option<String>,
+    pub github_rate_limit_probe_count: usize,
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
@@ -61,6 +73,10 @@ pub struct TestEnv {
     pub run_log_call_log: Vec<u64>,
     pub job_logs: HashMap<u64, String>,
     pub job_log_call_log: Vec<u64>,
+    /// Issue #3515: every `actions.rerun` target the command layer requested.
+    pub rerun_call_log: Vec<crate::cli::ActionsRerunTarget>,
+    /// Issue #3515: when set, `rerun_actions` refuses with this message.
+    pub rerun_rejection: Option<String>,
     pub internal_command_call_log: Vec<InternalCommandCall>,
 }
 
@@ -77,9 +93,11 @@ impl TestEnv {
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
             linked_prs: HashMap::new(),
+            linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
             prs: HashMap::new(),
+            pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
             pr_comments: Vec::new(),
             pr_create_call_log: Vec::new(),
@@ -88,6 +106,12 @@ impl TestEnv {
             pr_review_threads: HashMap::new(),
             pr_checks: HashMap::new(),
             pr_current_call_count: 0,
+            pr_list: Vec::new(),
+            pr_list_call_count: 0,
+            pr_list_options: None,
+            pr_unlanded_branches: Vec::new(),
+            github_rate_limit_payload: None,
+            github_rate_limit_probe_count: 0,
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
@@ -99,12 +123,18 @@ impl TestEnv {
             run_log_call_log: Vec::new(),
             job_logs: HashMap::new(),
             job_log_call_log: Vec::new(),
+            rerun_call_log: Vec::new(),
+            rerun_rejection: None,
             internal_command_call_log: Vec::new(),
         }
     }
 
     pub fn seed_linked_prs(&mut self, number: u64, linked_prs: Vec<LinkedPrSummary>) {
         self.linked_prs.insert(number, linked_prs);
+    }
+
+    pub fn seed_linked_pr_error(&mut self, number: u64, message: impl Into<String>) {
+        self.linked_pr_errors.insert(number, message.into());
     }
 
     pub fn linked_pr_calls(&self) -> Vec<u64> {
@@ -121,6 +151,10 @@ impl TestEnv {
 
     pub fn seed_pr(&mut self, number: u64, pr: PrStatus) {
         self.prs.insert(number, pr);
+    }
+
+    pub fn seed_pr_inventory(&mut self, items: Vec<gwt_git::PrInventoryItem>) {
+        self.pr_list = items;
     }
 
     pub fn seed_created_pr(&mut self, pr: PrStatus) {
@@ -141,6 +175,11 @@ impl TestEnv {
 
     pub fn seed_run_log(&mut self, run_id: u64, log: impl Into<String>) {
         self.run_logs.insert(run_id, log.into());
+    }
+
+    /// Issue #3515: make the next `actions.rerun` fail the repository guard.
+    pub fn seed_rerun_rejection(&mut self, message: impl Into<String>) {
+        self.rerun_rejection = Some(message.into());
     }
 
     pub fn seed_job_log(&mut self, job_id: u64, log: impl Into<String>) {
@@ -196,6 +235,9 @@ impl CliEnv for TestEnv {
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
         self.linked_pr_call_log.push(number.0);
+        if let Some(message) = self.linked_pr_errors.get(&number.0) {
+            return Err(io::Error::other(message.clone()));
+        }
         Ok(self.linked_prs.get(&number.0).cloned().unwrap_or_default())
     }
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
@@ -247,6 +289,42 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.pr_quarantine_contexts
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no PR quarantine context: {number}"),
+                )
+            })
+    }
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        self.pr_list_call_count += 1;
+        self.pr_list_options = Some(options.clone());
+        Ok(gwt_git::PrInventoryRead {
+            items: self.pr_list.clone(),
+            source: "github",
+            fetched_at: None,
+            cache_age_secs: Some(0),
+            throttled: None,
+            github_calls: 1,
+            unlanded_branches: self.pr_unlanded_branches.clone(),
+        })
+    }
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        self.github_rate_limit_probe_count += 1;
+        self.github_rate_limit_payload.clone().ok_or_else(|| {
+            io::Error::other("gh api rate_limit: no payload seeded in TestEnv".to_string())
+        })
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);
@@ -311,6 +389,13 @@ impl CliEnv for TestEnv {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no job log: {job_id}")))
+    }
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        self.rerun_call_log.push(target.clone());
+        if let Some(message) = self.rerun_rejection.clone() {
+            return Err(io::Error::other(message));
+        }
+        Ok(format!("rerun requested for {target:?}"))
     }
     fn run_internal_command(
         &mut self,

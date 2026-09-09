@@ -17,6 +17,7 @@ The chunker must handle both shapes without raising.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,7 +68,44 @@ class LoadMemoryDocumentsTests(unittest.TestCase):
         self.assertEqual(len(memory), 3)
         # manifest has exactly one entry (the single source file)
         self.assertEqual(len(manifest), 1)
-        self.assertEqual(manifest[0]["path"], ".gwt/work/memory.md")
+        self.assertEqual(manifest[0]["path"], str(root / ".gwt" / "work" / "memory.md"))
+
+    def test_home_work_notes_file_wins_over_repo_local(self):
+        # SPEC-3214 (FR-007): the machine-local home work-notes file is the
+        # canonical source; the repo-local file is only a fallback.
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        with tempfile.TemporaryDirectory() as home:
+            notes_dir = Path(home) / ".gwt" / "projects" / "hash1234" / "work-notes"
+            notes_dir.mkdir(parents=True, exist_ok=True)
+            home_memory = "# Memory\n\n## 2026-07-03 — home-only entry\n\nhome body.\n"
+            (notes_dir / "memory.md").write_text(home_memory, encoding="utf-8")
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                memory, manifest = runner._load_memory_documents(str(root), "hash1234")
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+        self.assertEqual(len(memory), 1)
+        self.assertEqual(memory[0]["title"], "home-only entry")
+        self.assertEqual(manifest[0]["path"], str(notes_dir / "memory.md"))
+
+    def test_repo_local_fallback_when_home_file_missing(self):
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        with tempfile.TemporaryDirectory() as home:
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                memory, manifest = runner._load_memory_documents(str(root), "hash1234")
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+        self.assertEqual(len(memory), 3)
+        self.assertEqual(manifest[0]["path"], str(root / ".gwt" / "work" / "memory.md"))
 
     def test_extracts_date_from_dated_sections(self):
         root = self._write_memory_file(SAMPLE_MEMORY)
@@ -129,19 +167,27 @@ class BuildMemoryRecordsTests(unittest.TestCase):
 
 class ActionIndexMemoryTests(unittest.TestCase):
     def test_full_mode_writes_manifest_and_chunks(self):
-        with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
+        with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir, tempfile.TemporaryDirectory() as home:
             root = Path(wt)
             work_dir = root / ".gwt" / "work"
             work_dir.mkdir(parents=True, exist_ok=True)
             (work_dir / "memory.md").write_text(SAMPLE_MEMORY, encoding="utf-8")
 
-            result = runner.action_index_memory_v2(
-                project_root=str(root),
-                repo_hash="abc1234567890def",
-                worktree_hash=None,
-                mode="full",
-                db_root=Path(db_root_dir),
-            )
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                result = runner.action_index_memory_v2(
+                    project_root=str(root),
+                    repo_hash="abc1234567890def",
+                    worktree_hash=None,
+                    mode="full",
+                    db_root=Path(db_root_dir),
+                )
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
             self.assertTrue(result.get("ok"), result)
             self.assertEqual(result["scope"], "memory")
             self.assertGreaterEqual(result["indexed"], 3)
@@ -154,7 +200,7 @@ class ActionIndexMemoryTests(unittest.TestCase):
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
             entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["path"], ".gwt/work/memory.md")
+            self.assertEqual(entries[0]["path"], str(work_dir / "memory.md"))
 
     def test_missing_memory_file_returns_indexed_zero(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:

@@ -20,8 +20,8 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
-    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardProvider,
-    CoordinationSnapshot, LocalProvider,
+    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
+    BoardProvider, CoordinationSnapshot, LocalProvider,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
 use gwt_core::{GwtError, Result};
@@ -440,6 +440,12 @@ pub fn provider() -> Box<dyn BoardProvider> {
 /// Append a Board entry through the active provider.
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
     provider_for(worktree_root).post_entry(worktree_root, entry)
+}
+
+/// Append a Board entry while distinguishing a committed post from a failed
+/// snapshot refresh.
+pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
+    provider_for(worktree_root).post_entry_outcome(worktree_root, entry)
 }
 
 /// Load the hot projection snapshot through the active provider.

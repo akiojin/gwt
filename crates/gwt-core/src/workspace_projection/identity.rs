@@ -144,7 +144,12 @@ mod tests {
             board_refs: Vec::new(),
             related_work_item_ids: Vec::new(),
             events: Vec::new(),
+            legacy_metadata_snapshot: None,
+            legacy_metadata_authoritative: false,
+            legacy_metadata_snapshot_at: None,
+            duplicate_event_containers: Default::default(),
             discarded: false,
+            discarded_at: None,
         };
         let mut item_b = item_a.clone();
         item_b.id = "work-session-bbbb".to_string();

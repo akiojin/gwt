@@ -16,6 +16,22 @@ fn parse_tray_argv_matches_default_with_no_flags() {
 }
 
 #[test]
+fn parse_tray_argv_distinguishes_omitted_port_from_explicit_zero() {
+    let omitted = parse_tray_argv(&[String::from("gwt")]).expect("empty argv parses");
+    let explicit_zero = parse_tray_argv(&[
+        String::from("gwt"),
+        String::from("--port"),
+        String::from("0"),
+    ])
+    .expect("explicit ephemeral port parses");
+
+    assert_ne!(
+        omitted.port, explicit_zero.port,
+        "omitted --port must remain distinguishable from explicit --port 0"
+    );
+}
+
+#[test]
 fn parse_tray_argv_restores_external_bind_and_fixed_port() {
     // Exact shape a VPN-reachable remote host should be able to run after
     // SPEC #2920 Phase 4 partial lands. The browser URL emitted to stderr
@@ -27,7 +43,7 @@ fn parse_tray_argv_restores_external_bind_and_fixed_port() {
         .collect();
     let args = parse_tray_argv(&argv).expect("external bind parses");
     assert_eq!(args.bind, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-    assert_eq!(args.port, 60745);
+    assert_eq!(args.port, Some(60745));
 }
 
 #[test]

@@ -1,14 +1,18 @@
 //! Utility functions for gwt filesystem paths.
 
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use crate::{
     error::Result,
-    repo_hash::{compute_path_hash, detect_repo_hash, RepoHash},
+    repo_hash::{
+        compute_path_hash, detect_repo_hash, resolve_repo_identity, RepoHash,
+        RepoIdentityCandidate, RepoIdentityResolution, RepoIdentitySource,
+    },
 };
 
 /// Return the gwt home directory (`~/.gwt/`).
@@ -174,15 +178,229 @@ pub fn gwt_project_dir(repo_hash: &RepoHash) -> PathBuf {
     gwt_projects_dir().join(repo_hash.as_str())
 }
 
+/// How a [`ProjectScope`] hash was derived.
+///
+/// Issue #3466: an unresolvable repository identity falls back to a path hash,
+/// which scopes the project store to *where* it was opened instead of *which*
+/// repository it is. Reporting the source lets callers surface that split
+/// instead of discovering it as two divergent stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectScopeSource {
+    /// Resolved from a repository identity (origin URL).
+    Repository(RepoIdentitySource),
+    /// No repository identity was resolvable; the hash is a path hash and the
+    /// store is therefore not shared with any other view of this project.
+    PathFallback,
+    /// Several direct-child bare repositories name different origins. No
+    /// candidate is selected; the isolated path hash prevents cross-repository
+    /// writes while retaining every candidate for an explicit diagnostic.
+    AmbiguousNestedBareRepositories(Vec<RepoIdentityCandidate>),
+}
+
+impl ProjectScopeSource {
+    /// The stable wire name for this source.
+    ///
+    /// Single point of truth so the CLI, the daemon, and any future reporter
+    /// cannot drift into three spellings of the same condition.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Repository(RepoIdentitySource::Origin) => "origin",
+            Self::Repository(RepoIdentitySource::NestedBareRepository(_)) => {
+                "nested_bare_repository"
+            }
+            Self::PathFallback => "path_fallback",
+            Self::AmbiguousNestedBareRepositories(_) => "ambiguous_nested_bare_repositories",
+        }
+    }
+
+    /// Whether the hash came from a repository identity rather than a path.
+    ///
+    /// `false` means the store is isolated to the path it was opened at: no
+    /// other view of the same repository — and no running gwt that opened it
+    /// by a different path — shares it.
+    pub fn identity_resolved(&self) -> bool {
+        matches!(self, Self::Repository(_))
+    }
+}
+
+/// The project store scope for a path: its hash plus how the hash was derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectScope {
+    pub hash: RepoHash,
+    pub source: ProjectScopeSource,
+}
+
+/// Resolve the project store scope for a repository, worktree, or layout root.
+///
+/// A path-hash fallback is reported once per path so the condition that split
+/// the store in #3466 is visible in `~/.gwt/logs/` rather than only in its
+/// consequences.
+pub fn resolve_project_scope(repo_path: &Path) -> ProjectScope {
+    match resolve_repo_identity(repo_path) {
+        RepoIdentityResolution::Resolved(identity) => ProjectScope {
+            hash: identity.hash,
+            source: ProjectScopeSource::Repository(identity.source),
+        },
+        RepoIdentityResolution::NotFound => {
+            let hash = compute_path_hash(repo_path);
+            warn_path_fallback_once(repo_path, &hash, None);
+            ProjectScope {
+                hash,
+                source: ProjectScopeSource::PathFallback,
+            }
+        }
+        RepoIdentityResolution::Ambiguous(candidates) => {
+            let hash = compute_path_hash(repo_path);
+            warn_path_fallback_once(repo_path, &hash, Some(&candidates));
+            ProjectScope {
+                hash,
+                source: ProjectScopeSource::AmbiguousNestedBareRepositories(candidates),
+            }
+        }
+    }
+}
+
+/// A diagnostic already reported by [`warn_path_fallback_once`]. Including the
+/// resolution state prevents an earlier plain fallback from hiding a later
+/// ambiguity (and its candidate paths/origins) at the same project root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectScopeWarningKey {
+    project_root: PathBuf,
+    resolution: ProjectScopeWarningResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProjectScopeWarningResolution {
+    NotFound,
+    Ambiguous(Vec<(PathBuf, String)>),
+}
+
+static REPORTED_PATH_FALLBACKS: OnceLock<Mutex<HashSet<ProjectScopeWarningKey>>> = OnceLock::new();
+
+fn project_scope_warning_key(
+    repo_path: &Path,
+    ambiguous_candidates: Option<&[RepoIdentityCandidate]>,
+) -> ProjectScopeWarningKey {
+    let project_root = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let resolution = match ambiguous_candidates {
+        None => ProjectScopeWarningResolution::NotFound,
+        Some(candidates) => {
+            let mut fingerprints: Vec<_> = candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        dunce::canonicalize(&candidate.path)
+                            .unwrap_or_else(|_| candidate.path.clone()),
+                        candidate.normalized_origin.clone(),
+                    )
+                })
+                .collect();
+            fingerprints.sort();
+            ProjectScopeWarningResolution::Ambiguous(fingerprints)
+        }
+    };
+    ProjectScopeWarningKey {
+        project_root,
+        resolution,
+    }
+}
+
+fn warn_path_fallback_once(
+    repo_path: &Path,
+    hash: &RepoHash,
+    ambiguous_candidates: Option<&[RepoIdentityCandidate]>,
+) {
+    let reported = REPORTED_PATH_FALLBACKS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut reported = reported
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !reported.insert(project_scope_warning_key(repo_path, ambiguous_candidates)) {
+        return;
+    }
+    if let Some(candidates) = ambiguous_candidates {
+        tracing::warn!(
+            target: "gwt::paths",
+            project_root = %repo_path.display(),
+            project_hash = %hash,
+            candidates = ?candidates,
+            "multiple direct-child bare repositories have distinct origins; no repository \
+             identity was selected and project state is isolated to this path (#3466)."
+        );
+        return;
+    }
+    tracing::warn!(
+        target: "gwt::paths",
+        project_root = %repo_path.display(),
+        project_hash = %hash,
+        "no repository identity resolved; project state is scoped to this path. \
+         A second view of the same repository will use a different store (#3466)."
+    );
+}
+
 /// Return the project scope hash for a repository path.
 pub fn project_scope_hash(repo_path: &Path) -> RepoHash {
-    detect_repo_hash(repo_path).unwrap_or_else(|| compute_path_hash(repo_path))
+    resolve_project_scope(repo_path).hash
 }
 
 /// Return the project data directory for a repository path.
 pub fn gwt_project_dir_for_repo_path(repo_path: &Path) -> PathBuf {
     let repo_hash = project_scope_hash(repo_path);
     gwt_project_dir(&repo_hash)
+}
+
+/// The project store an operation acts on, recorded so its caller can prove
+/// where the operation landed.
+///
+/// Issue #3606: `issue.monitor.*` answered `ok: true` — with a successful
+/// readback — after writing into a path-fallback store that no running gwt
+/// reads. Success proved the operation ran; it never proved *which* store it
+/// ran against, and the only way to tell them apart was comparing mtimes under
+/// `~/.gwt/projects/`. Naming the store alongside the result makes the landing
+/// checkable by the caller instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationProjectStore {
+    /// The project root as resolved, not as typed.
+    pub project_root: PathBuf,
+    pub scope: ProjectScope,
+    /// `~/.gwt/projects/<hash>` — the directory the caller can inspect.
+    pub store_path: PathBuf,
+}
+
+static OPERATION_PROJECT_STORE: OnceLock<Mutex<Option<OperationProjectStore>>> = OnceLock::new();
+
+fn operation_project_store_cell() -> &'static Mutex<Option<OperationProjectStore>> {
+    OPERATION_PROJECT_STORE.get_or_init(|| Mutex::new(None))
+}
+
+/// Resolve `project_root`'s store scope and record it as the store this
+/// operation acts on.
+///
+/// The first recording wins. A `gwtd` process runs exactly one operation, and
+/// the choke point that resolves the operation's own `project_root` param runs
+/// before any incidental resolution further down, so first-wins keeps the
+/// reported store the one the caller asked about.
+pub fn record_operation_project_store(project_root: &Path) {
+    let scope = resolve_project_scope(project_root);
+    let record = OperationProjectStore {
+        project_root: dunce::canonicalize(project_root)
+            .unwrap_or_else(|_| project_root.to_path_buf()),
+        store_path: gwt_project_dir(&scope.hash),
+        scope,
+    };
+    let mut cell = operation_project_store_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cell.is_none() {
+        *cell = Some(record);
+    }
+}
+
+/// The project store recorded for this operation, if one was recorded.
+pub fn operation_project_store() -> Option<OperationProjectStore> {
+    operation_project_store_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Return the Project State current projection path for a repository hash.
@@ -308,6 +526,19 @@ pub fn gwt_workspace_work_events_intake_state_path_for_repo_path(repo_path: &Pat
 /// non-repository directory), the input path is returned unchanged so the
 /// caller still gets a deterministic, non-failing repo-local location.
 pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
+    // Issue #3629 AC-1/AC-2: the workspace-home layout (a directory holding
+    // child bare repos and worktrees, itself not a git work tree) is gwt's
+    // standard project layout, and asking git first burned a guaranteed
+    // exit-128 subprocess on every call. Resolve by filesystem inspection
+    // when git discovery cannot possibly succeed.
+    if !git_repository_discovery_possible(repo_path) {
+        return first_child_bare_repository(repo_path)
+            .map(|bare| {
+                let bare = std::fs::canonicalize(&bare).unwrap_or(bare);
+                normalize_windows_child_process_path(&bare)
+            })
+            .unwrap_or_else(|| repo_path.to_path_buf());
+    }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         Some(repo_path),
@@ -340,6 +571,24 @@ pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
     normalize_windows_child_process_path(&common_dir)
 }
 
+/// Whether git repository discovery could possibly succeed for `path` —
+/// without spawning git.
+///
+/// Git resolves a repository from a path by (a) honoring an explicit
+/// `GIT_DIR` override, (b) treating a directory that itself looks like a git
+/// directory (`HEAD` + `objects` + `refs`) as the repository, or (c) walking
+/// the ancestry for a `.git` entry (directory or linked-worktree file). When
+/// none of those hold, every `git rev-parse` is a guaranteed exit-128 spawn
+/// (Issue #3629 AC-1): callers should resolve the workspace-home layout by
+/// filesystem inspection instead.
+pub fn git_repository_discovery_possible(path: &Path) -> bool {
+    std::env::var_os("GIT_DIR").is_some()
+        || (path.join("HEAD").exists()
+            && path.join("objects").exists()
+            && path.join("refs").exists())
+        || path.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 /// Return the first child bare repository directory under `repo_path`, if any.
 ///
 /// A bare repository is identified by the presence of `HEAD`, `objects`, and
@@ -368,6 +617,11 @@ fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
 /// worktree, the only place a git-tracked file can actually live. Falls back to
 /// `repo_path` when git cannot resolve a toplevel (non-repository directory).
 pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
+    // Issue #3629 AC-1/AC-2: see `resolve_main_worktree_root` — never spawn a
+    // git subprocess that is guaranteed to fail with exit 128.
+    if !git_repository_discovery_possible(repo_path) {
+        return repo_path.to_path_buf();
+    }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
         Some(repo_path),
@@ -411,6 +665,35 @@ pub fn gwt_repo_local_work_events_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("events.jsonl")
 }
 
+/// Return the repo-local immutable Work event shard directory
+/// (`<repo_root>/.gwt/work/events/`).
+///
+/// The legacy sibling `events.jsonl` remains a read-only compatibility
+/// source. New tracked events are stored below this directory so independent
+/// branches add different paths and merge with Git's default driver.
+pub fn gwt_repo_local_work_events_dir(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("events")
+}
+
+/// Return the deterministic shard path for the exact Work event identity.
+///
+/// Hashing the complete identifier, rather than embedding it in the path,
+/// supports arbitrary legacy-compatible IDs without permitting path escape.
+pub fn gwt_repo_local_work_event_shard_path(repo_root: &Path, event_id: &str) -> PathBuf {
+    gwt_work_event_shard_path(&gwt_repo_local_work_events_dir(repo_root), event_id)
+}
+
+/// Return the deterministic shard path below an already-resolved canonical
+/// Work event store directory.
+pub fn gwt_work_event_shard_path(events_dir: &Path, event_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let digest = format!("{:x}", Sha256::digest(event_id.as_bytes()));
+    events_dir
+        .join(&digest[..2])
+        .join(format!("{digest}.jsonl"))
+}
+
 /// Return the repo-local project memory path
 /// (`<repo_root>/.gwt/work/memory.md`).
 ///
@@ -432,6 +715,62 @@ pub fn gwt_repo_local_memory_path(repo_root: &Path) -> PathBuf {
 /// share one canonical file.
 pub fn gwt_repo_local_discussions_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("discussions.md")
+}
+
+/// Return the machine-local work-notes directory for a repository
+/// (`~/.gwt/projects/<repo-hash>/work-notes/`).
+///
+/// SPEC-3214 (FR-007): project memory and discussion notes are machine-local
+/// scratch, stored branch-independently in the home project dir (the same
+/// placement convention as Board / Work state) and shared by every worktree
+/// of the repository. Durable team-shared outcomes belong to GitHub
+/// (Issue / `gwt-spec` Issue), not to these files.
+pub fn gwt_work_notes_dir(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("work-notes")
+}
+
+/// Return the machine-local project memory path
+/// (`~/.gwt/projects/<repo-hash>/work-notes/memory.md`). See
+/// [`gwt_work_notes_dir`].
+pub fn gwt_work_notes_memory_path(repo_path: &Path) -> PathBuf {
+    gwt_work_notes_dir(repo_path).join("memory.md")
+}
+
+/// Return the machine-local discussion log path
+/// (`~/.gwt/projects/<repo-hash>/work-notes/discussions.md`). See
+/// [`gwt_work_notes_dir`].
+pub fn gwt_work_notes_discussions_path(repo_path: &Path) -> PathBuf {
+    gwt_work_notes_dir(repo_path).join("discussions.md")
+}
+
+/// Resolve the project memory path for READS: the machine-local home file
+/// when present, otherwise the legacy git-tracked repo-local file
+/// (`<repo_root>/.gwt/work/memory.md`) as a fallback, otherwise the (not yet
+/// created) home path. Writers always target the home path.
+pub fn resolve_work_notes_memory_read_path(repo_path: &Path) -> PathBuf {
+    resolve_work_notes_read_path(
+        gwt_work_notes_memory_path(repo_path),
+        gwt_repo_local_memory_path(repo_path),
+    )
+}
+
+/// Resolve the discussion log path for READS with the same home-first /
+/// repo-local-fallback order as [`resolve_work_notes_memory_read_path`].
+pub fn resolve_work_notes_discussions_read_path(repo_path: &Path) -> PathBuf {
+    resolve_work_notes_read_path(
+        gwt_work_notes_discussions_path(repo_path),
+        gwt_repo_local_discussions_path(repo_path),
+    )
+}
+
+fn resolve_work_notes_read_path(home_path: PathBuf, repo_local_path: PathBuf) -> PathBuf {
+    if home_path.exists() {
+        return home_path;
+    }
+    if repo_local_path.exists() {
+        return repo_local_path;
+    }
+    home_path
 }
 
 /// Return the repo-local remote-Board root-thread mapping path
@@ -475,6 +814,11 @@ pub fn gwt_session_state_path() -> PathBuf {
 /// Return the legacy logs root (`~/.gwt/logs/`).
 pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
+}
+
+/// Return the host-wide error ledger directory (`~/.gwt/logs/errors/`).
+pub fn gwt_error_ledger_dir() -> PathBuf {
+    gwt_logs_dir().join("errors")
 }
 
 /// Return the legacy coordination root (`~/.gwt/coordination/`).
@@ -792,6 +1136,109 @@ mod tests {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
+    /// Issue #3629 AC-1/AC-2: the nested-bare workspace-home layout (gwt's
+    /// standard project layout) must resolve by filesystem inspection alone.
+    /// Asking git first burned a doomed exit-128 subprocess on every call —
+    /// thousands per minute under the periodic Work scans.
+    #[test]
+    fn resolve_main_worktree_root_resolves_nested_bare_layout_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(bare.join("objects")).expect("objects");
+        std::fs::create_dir_all(bare.join("refs")).expect("refs");
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_main_worktree_root(tmp.path());
+
+        assert_eq!(
+            resolved,
+            normalize_windows_child_process_path(
+                &std::fs::canonicalize(&bare).expect("canonical bare")
+            )
+        );
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "nested-bare layout resolution must not spawn git (Issue #3629)"
+        );
+    }
+
+    /// Issue #3629 AC-1/AC-2: same contract for the current-worktree resolver —
+    /// a layout root has no working tree, so the answer is the input path and
+    /// git has nothing to add.
+    #[test]
+    fn resolve_current_worktree_root_returns_layout_root_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(bare.join("objects")).expect("objects");
+        std::fs::create_dir_all(bare.join("refs")).expect("refs");
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_current_worktree_root(tmp.path());
+
+        assert_eq!(resolved, tmp.path());
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "layout-root resolution must not spawn git (Issue #3629)"
+        );
+    }
+
+    /// A plain directory with no `.git` anywhere up its ancestry and no child
+    /// bare repository cannot be a repository; git would only confirm that
+    /// with an exit-128 spawn.
+    #[test]
+    fn resolve_main_worktree_root_returns_plain_non_repo_dir_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("plain dir");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_main_worktree_root(&plain);
+
+        assert_eq!(resolved, plain);
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "non-repo resolution must not spawn git (Issue #3629)"
+        );
+    }
+
+    #[test]
+    fn project_scope_warning_key_changes_when_path_resolution_becomes_ambiguous() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("layout");
+        std::fs::create_dir_all(&root).expect("layout root");
+        let fallback = project_scope_warning_key(&root, None);
+        let ambiguous = project_scope_warning_key(
+            &root,
+            Some(&[
+                RepoIdentityCandidate {
+                    path: root.join("a.git"),
+                    normalized_origin: "github.com/example/a".to_string(),
+                    hash: compute_repo_hash("github.com/example/a"),
+                },
+                RepoIdentityCandidate {
+                    path: root.join("b.git"),
+                    normalized_origin: "github.com/example/b".to_string(),
+                    hash: compute_repo_hash("github.com/example/b"),
+                },
+            ]),
+        );
+
+        assert_ne!(
+            fallback, ambiguous,
+            "a later ambiguity must emit its candidate diagnostics"
+        );
+        assert_eq!(
+            fallback,
+            project_scope_warning_key(&root.join("."), None),
+            "equivalent path spellings must still deduplicate one diagnostic"
+        );
+    }
+
     #[test]
     fn gwt_logs_dir_is_under_home() {
         let _guard = env_lock()
@@ -799,6 +1246,15 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_logs_dir();
         assert!(p.ends_with(gwt_home_suffix(&["logs"])));
+    }
+
+    #[test]
+    fn gwt_error_ledger_dir_is_under_logs() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let p = gwt_error_ledger_dir();
+        assert!(p.ends_with(gwt_home_suffix(&["logs", "errors"])));
     }
 
     #[test]
@@ -1012,6 +1468,31 @@ mod tests {
     }
 
     #[test]
+    fn gwt_repo_local_work_event_shard_path_hashes_the_exact_compatible_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let shard = gwt_repo_local_work_event_shard_path(&repo, "../../legacy:event?ID");
+
+        assert_eq!(
+            comparable_path(&shard),
+            comparable_path(
+                &resolve_main_worktree_root(&repo)
+                    .join(".gwt")
+                    .join("work")
+                    .join("events")
+                    .join("76")
+                    .join("768f7de390c732dd9558b3ccfa251ee9b5f5e6e51ed898a005accdabc48a1caf.jsonl")
+            )
+        );
+        assert_eq!(
+            shard.parent(),
+            Some(gwt_repo_local_work_events_dir(&repo).join("76").as_path())
+        );
+    }
+
+    #[test]
     fn gwt_repo_local_memory_path_joins_repo_local_work_dir() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
@@ -1038,6 +1519,134 @@ mod tests {
         assert_eq!(
             comparable_path(&discussions),
             comparable_path(&root.join(".gwt").join("work").join("discussions.md"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SPEC-3214 Phase 4 (T-030 / FR-007) — machine-local work-notes scratch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gwt_work_notes_paths_live_under_home_project_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let notes_dir = gwt_work_notes_dir(&repo);
+        assert_eq!(
+            notes_dir,
+            gwt_project_dir_for_repo_path(&repo).join("work-notes"),
+            "work-notes must live in the branch-independent home project dir"
+        );
+        assert!(
+            notes_dir.starts_with(gwt_home()),
+            "work-notes must be machine-local (under ~/.gwt), got {}",
+            notes_dir.display()
+        );
+        assert_eq!(
+            gwt_work_notes_memory_path(&repo),
+            notes_dir.join("memory.md")
+        );
+        assert_eq!(
+            gwt_work_notes_discussions_path(&repo),
+            notes_dir.join("discussions.md")
+        );
+        // The legacy repo-local helpers stay distinct: they resolve into the
+        // working tree and remain read-fallback sources only.
+        assert_ne!(
+            comparable_path(&gwt_work_notes_memory_path(&repo)),
+            comparable_path(&gwt_repo_local_memory_path(&repo))
+        );
+    }
+
+    #[test]
+    fn work_notes_paths_are_shared_across_worktrees_of_the_same_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Without a thread-local home override these lookups fall through to
+        // the process-wide HOME / USERPROFILE variables, which sibling tests
+        // set and restore while this one runs. The two path calls could then
+        // straddle another test's guard and resolve against different homes.
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(home.path());
+        let repo = tmp.path().join("gwt");
+        init_git_repo(&repo);
+        git_commit_allow_empty(&repo, "initial commit");
+        let mut remote = crate::process::hidden_command("git");
+        remote
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/gwt-notes-sharing.git",
+            ])
+            .current_dir(&repo);
+        crate::process::scrub_git_env(&mut remote);
+        assert!(remote.output().expect("git remote add").status.success());
+
+        let linked = tmp.path().join("develop");
+        let mut cmd = crate::process::hidden_command("git");
+        cmd.args(["worktree", "add", "-b", "develop", linked.to_str().unwrap()])
+            .current_dir(&repo);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git worktree add -b");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // SPEC-3214 acceptance scenario 3: notes must be readable from any
+        // worktree of the same repository without a git merge, so the home
+        // path is keyed by the repo hash (origin URL), not the worktree.
+        assert_eq!(
+            gwt_work_notes_memory_path(&repo),
+            gwt_work_notes_memory_path(&linked)
+        );
+        assert_eq!(
+            gwt_work_notes_discussions_path(&repo),
+            gwt_work_notes_discussions_path(&linked)
+        );
+    }
+
+    #[test]
+    fn resolve_work_notes_read_paths_prefer_home_then_repo_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(dir.path());
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        // Neither file exists → the canonical home path (a fresh writer
+        // target) is returned.
+        assert_eq!(
+            resolve_work_notes_memory_read_path(&repo),
+            gwt_work_notes_memory_path(&repo)
+        );
+
+        // Only the legacy repo-local file exists → fall back to it for reads.
+        let repo_local = gwt_repo_local_memory_path(&repo);
+        std::fs::create_dir_all(repo_local.parent().unwrap()).unwrap();
+        std::fs::write(&repo_local, "# Memory\n").unwrap();
+        assert_eq!(
+            comparable_path(&resolve_work_notes_memory_read_path(&repo)),
+            comparable_path(&repo_local)
+        );
+
+        // Home file exists → home wins even when the repo-local file remains.
+        let home_path = gwt_work_notes_memory_path(&repo);
+        std::fs::create_dir_all(home_path.parent().unwrap()).unwrap();
+        std::fs::write(&home_path, "# Memory\n").unwrap();
+        assert_eq!(resolve_work_notes_memory_read_path(&repo), home_path);
+
+        // Discussions follow the same resolution order.
+        assert_eq!(
+            resolve_work_notes_discussions_read_path(&repo),
+            gwt_work_notes_discussions_path(&repo)
+        );
+        let repo_local_discussions = gwt_repo_local_discussions_path(&repo);
+        std::fs::write(&repo_local_discussions, "# Discussions\n").unwrap();
+        assert_eq!(
+            comparable_path(&resolve_work_notes_discussions_read_path(&repo)),
+            comparable_path(&repo_local_discussions)
         );
     }
 

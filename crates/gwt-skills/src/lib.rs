@@ -3,14 +3,14 @@
 pub mod assets;
 pub mod codex_home;
 pub mod codex_hook_trust;
+pub mod codex_managed_config;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
-pub mod lane;
+pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
-pub mod session_kind;
 pub mod settings_local;
 pub mod validate;
 
@@ -22,37 +22,38 @@ pub use codex_home::{
 pub use codex_hook_trust::{
     collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
     register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
-    CodexHookTrustEntry, CodexHookTrustReport,
+    CodexHookTrustEntry, CodexHookTrustExpectation, CodexHookTrustReport,
+};
+pub use codex_managed_config::{
+    ensure_codex_context_management_experimental_mode, CodexManagedConfigOutcome,
+    CodexManagedConfigReport, CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
     generate_coordination_guidance_for_codex,
 };
 pub use distribute::{
-    apply_reduced_skill_set, distribute_to_worktree, distribute_to_worktree_for_targets,
-    prune_stale_gwt_assets, prune_stale_gwt_assets_for_targets, DistributeReport,
-    ManagedAssetTarget, CURATION_EXCLUDED_SKILLS,
+    distribute_to_worktree, distribute_to_worktree_for_targets,
+    distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
+    prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
+    TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
-pub use lane::{
-    lane_file_path, read_lane_profile, resolve_lane_for_worktree, write_lane_file, GuidanceVariant,
-    LanePolicyFlags, LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE,
-    LANE_FILE_RELATIVE, LANE_FILE_VERSION,
-};
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
-    hermes_is_configured_global, hermes_provider_choices, hermes_provider_choices_global,
-    hermes_source_home, opencode_is_configured, opencode_is_configured_global,
+    hermes_is_configured_global, hermes_launch_choices, hermes_launch_choices_global,
+    hermes_provider_choices, hermes_source_home, opencode_is_configured,
+    opencode_is_configured_global, HermesLaunchChoices,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use session_kind::{SessionKind, GWT_SESSION_KIND_ENV};
 pub use settings_local::{
-    generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
-    managed_hook_config_has_user_content, CodexHookDiscoveryMode,
+    build_output_owner_root, codex_hooks_paths_for_codex_discovery, generate_codex_hooks,
+    generate_codex_hooks_for_mode, generate_settings_local, managed_hook_config_has_user_content,
+    managed_hook_config_is_git_tracked, CodexHookDiscoveryMode, CANONICAL_HOOK_BIN,
 };
 
 #[cfg(test)]
@@ -60,6 +61,7 @@ mod tests {
     use std::path::PathBuf;
 
     use fs2::FileExt;
+    use gwt_core::process::hidden_command;
 
     use super::*;
 
@@ -543,6 +545,10 @@ mod tests {
             "missing gwt-plan-spec skill dir"
         );
         assert!(
+            dirs.contains(&"gwt-execute"),
+            "missing gwt-execute skill dir"
+        );
+        assert!(
             dirs.contains(&"gwt-build-spec"),
             "missing gwt-build-spec skill dir"
         );
@@ -602,6 +608,10 @@ mod tests {
         assert!(
             files.contains(&"gwt-plan-spec.md"),
             "missing gwt-plan-spec.md command"
+        );
+        assert!(
+            files.contains(&"gwt-execute.md"),
+            "missing gwt-execute.md command"
         );
         assert!(
             files.contains(&"gwt-build-spec.md"),
@@ -714,6 +724,59 @@ mod tests {
         }
     }
 
+    // SPEC #3245 FR-006 / AC-3: the registration template produces
+    // autonomous-eligible Issues by default — a mandatory `- [ ] AC-N:`
+    // checkbox structure plus the `auto-merge` label applied by default with
+    // an explicit opt-out. The `issue.create` operation itself stays neutral
+    // (labels optional, no unconditional default).
+    #[test]
+    fn registration_template_defaults_to_autonomous_eligible_issues() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-register-issue/SKILL.md",
+            ".codex/skills/gwt-register-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("## Acceptance Criteria"),
+                "expected a mandatory Acceptance Criteria section in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("- [ ] AC-1:"),
+                "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
+            );
+            // Issue #3930 AC-1: the readiness format is spelled out where
+            // Issues are authored — every heading the classifier scans, the
+            // one it does not, and the un-prefixed checkbox fallback.
+            for phrase in [
+                "`## Acceptance Criteria`, `## 受け入れ基準`,\n    `## 受け入れ条件`",
+                "`## 成功基準` is not scanned",
+                "numbered by position",
+                "Do not mix the two styles",
+                "body or comment",
+            ] {
+                assert!(
+                    issue_skill.contains(phrase),
+                    "expected the readiness format note {phrase:?} in: {relative}"
+                );
+            }
+            assert!(
+                issue_skill.contains("\"labels\":[\"auto-merge\"]"),
+                "expected the auto-merge label applied by default at issue.create: {relative}"
+            );
+            assert!(
+                issue_skill.contains("opt-out") || issue_skill.contains("opt out"),
+                "expected an explicit auto-merge opt-out path: {relative}"
+            );
+            assert!(
+                issue_skill.contains("Issue Monitor"),
+                "expected the Issue Monitor eligibility alignment note: {relative}"
+            );
+        }
+    }
+
     #[test]
     fn local_github_issue_workflows_use_canonical_gwt_surfaces() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -754,6 +817,22 @@ mod tests {
                     && issue_skill.contains("before creating anything"),
                 "expected duplicate-search-first guidance in {relative}"
             );
+            for required in [
+                "design-required tag",
+                "gwt-spec",
+                "issue.spec.create",
+                "issue.spec.edit",
+                "roundtrip",
+            ] {
+                assert!(
+                    issue_skill.contains(required),
+                    "expected unified registration guidance in {relative}: {required}"
+                );
+            }
+            assert!(
+                !issue_skill.contains("This skill does not create SPEC owners itself."),
+                "gwt-register-issue must own design-required registration instead of delegating creation away: {relative}"
+            );
             assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"
@@ -761,6 +840,19 @@ mod tests {
             assert!(
                 !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
                 "unexpected retired gwt-issue dependency in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-register-spec/SKILL.md",
+            ".codex/skills/gwt-register-spec/SKILL.md",
+        ] {
+            let register_spec = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                register_spec.contains("Transition alias")
+                    && register_spec.contains("gwt-register-issue"),
+                "expected gwt-register-spec to route through gwt-register-issue: {relative}"
             );
         }
 
@@ -796,6 +888,12 @@ mod tests {
                 issue_skill.contains("gwt-build-spec") && issue_skill.contains("gwt-discussion"),
                 "expected visible build/discussion handoff guidance in {relative}"
             );
+            for required in ["push-only", "not completion", "gwt-manage-pr", "PR URL"] {
+                assert!(
+                    issue_skill.contains(required),
+                    "{relative} must prevent push-only false completion claims: {required}"
+                );
+            }
             assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"
@@ -803,6 +901,105 @@ mod tests {
             assert!(
                 !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
                 "unexpected retired gwt-issue dependency in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+        ] {
+            let execute_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "design-gated mode",
+                "direct mode",
+                "standalone mode",
+                "gwt-plan-spec",
+                "gwt-verify --mode full",
+                "gwt-manage-pr",
+                "User Verification Result",
+                "current user's language",
+                "execution.reopen",
+                "temporary question",
+                "params.derive:true",
+                "execution.repair",
+                "execution.status",
+                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
+                // the host-wide lease, and verify.run's own admission is
+                // documented where the loop is defined.
+                "verify.lease.acquire",
+                "verify.lease.release",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
+            ] {
+                assert!(
+                    execute_skill.contains(required),
+                    "expected gwt-execute guidance in {relative}: {required}"
+                );
+            }
+            assert!(
+                !execute_skill.contains("adopt is also the repair path"),
+                "{relative} must not direct integrity-failed records to adopt"
+            );
+        }
+
+        // Issue #3913 AC-2: the verification skill's serialization section
+        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let verify_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "## Heavy verification serialization",
+                "`cargo test`",
+                "`cargo clippy`",
+                "verify.lease.acquire",
+                "issue.monitor.wait",
+                "max_wait_secs",
+                "deferred",
+            ] {
+                assert!(
+                    verify_skill.contains(required),
+                    "expected gwt-verify serialization guidance in {relative}: {required}"
+                );
+            }
+        }
+
+        let execute_command =
+            std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-execute.md"))
+                .unwrap_or_else(|err| panic!("failed to read gwt-execute command: {err}"));
+        assert!(
+            execute_command.contains("/gwt:gwt-execute")
+                && execute_command.contains(".claude/skills/gwt-execute/SKILL.md"),
+            "expected gwt-execute command wrapper to load the canonical execute skill"
+        );
+
+        for relative in [
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let alias_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                alias_skill.contains("Transition alias") && alias_skill.contains("gwt-execute"),
+                "expected legacy execute skill to route through gwt-execute: {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/commands/gwt-build-spec.md",
+            ".claude/commands/gwt-fix-issue.md",
+        ] {
+            let alias_command = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                alias_command.contains("/gwt:gwt-execute"),
+                "expected legacy execute command to point users at gwt-execute: {relative}"
             );
         }
 
@@ -834,6 +1031,7 @@ mod tests {
             );
             assert!(
                 discussion_skill.contains("### Discussion TODO")
+                    && discussion_skill.contains("work-notes/discussions.md")
                     && discussion_skill.contains(".gwt/work/discussions.md")
                     && discussion_skill.contains("legacy `.gwt/discussion.md`"),
                 "expected discussion skill to define canonical Discussion TODO state in {relative}"
@@ -972,7 +1170,8 @@ mod tests {
                 "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
             );
             assert!(
-                discussion_command.contains(".gwt/work/discussions.md")
+                discussion_command.contains("work-notes/discussions.md")
+                    && discussion_command.contains(".gwt/work/discussions.md")
                     && discussion_command.contains("legacy `.gwt/discussion.md`")
                     && discussion_command.contains("Resume discussion")
                     && discussion_command.contains("Park proposal")
@@ -1244,6 +1443,19 @@ mod tests {
             !release_command.contains("gh issue comment"),
             "unexpected direct gh issue comment guidance"
         );
+        assert!(
+            release_command.contains("\"operation\":\"workflow.bypass\"")
+                && release_command.contains("\"mode\":\"release\"")
+                && release_command.contains("\"mode\":\"off\""),
+            "expected release command to arm and disarm the workflow.bypass owner-guard exemption (Issue #3267)"
+        );
+        let codex_release_skill = include_str!("../../../.codex/skills/release/SKILL.md");
+        assert!(
+            codex_release_skill.contains("workflow.bypass")
+                && codex_release_skill.contains("\"mode\":\"release\"")
+                && codex_release_skill.contains("\"mode\":\"off\""),
+            "expected codex release skill to mirror the workflow.bypass arm/disarm steps (Issue #3267)"
+        );
 
         let pr_command = include_str!("../../../.claude/commands/gwt-manage-pr.md");
         assert!(
@@ -1275,6 +1487,33 @@ mod tests {
             assert!(
                 !inspect_issue_script.contains("Fetch issue metadata via gh issue view."),
                 "unexpected direct gh issue view docstring in {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let claude =
+            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
+                .expect("read Claude gwt-execute skill");
+        let codex =
+            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-execute/SKILL.md"))
+                .expect("read Codex gwt-execute skill");
+
+        assert_eq!(
+            claude, codex,
+            "Claude and Codex gwt-execute guidance must stay byte-identical"
+        );
+        for (relative, guidance) in [
+            (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
+            (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
+        ] {
+            assert!(
+                guidance.contains(
+                    "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
+                ),
+                "{relative} must require scoped abort-before-blocked order"
             );
         }
     }
@@ -1324,12 +1563,16 @@ mod tests {
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
         assert!(
-            agents.contains("gwt-register-issue / gwt-fix-issue"),
-            "expected AGENTS workflow to start from the current issue entrypoints"
+            agents.contains("gwt-register-issue"),
+            "expected AGENTS workflow to start from the registration entrypoint"
         );
         assert!(
-            agents.contains("gwt-discussion → gwt-plan-spec → gwt-build-spec → gwt-manage-pr"),
-            "expected AGENTS workflow to document the current planning/build chain"
+            agents.contains("gwt-discussion → gwt-plan-spec → gwt-execute → gwt-manage-pr"),
+            "expected AGENTS workflow to document the current planning/execute chain"
+        );
+        assert!(
+            agents.contains("gwt-execute #N"),
+            "expected AGENTS workflow to document unified Issue execution"
         );
         assert!(
             agents.contains("gwt-arch-review"),
@@ -1413,6 +1656,14 @@ mod tests {
                     && content.contains("\"operation\":\"pane.list\"")
                     && content.contains("\"operation\":\"pane.read\"")
                     && content.contains("\"operation\":\"pane.close\"")
+                    && content.contains("\"operation\":\"issue.monitor.status\"")
+                    && content.contains("\"operation\":\"issue.monitor.priority.move\"")
+                    && content.contains("\"operation\":\"issue.monitor.priority.set\"")
+                    && content.contains("\"operation\":\"issue.monitor.config.set\"")
+                    && content.contains("enabled=true")
+                    && content.contains("autonomous_mode=true")
+                    && content.contains("including the registered PM")
+                    && content.contains("next scan")
                     && content.contains("params.targets")
                     && content.contains("handoff")
                     && content.contains("request"),
@@ -1428,6 +1679,11 @@ mod tests {
                     && !content.contains("broadcast <message>"),
                 "unexpected bare pane or direct communication contract in {relative}"
             );
+            assert!(
+                !content.contains("one exception is the project's resident PM")
+                    && !content.contains("caller_is_registered_pm"),
+                "obsolete PM ON exception remains in {relative}"
+            );
         }
 
         let command = std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-agent.md"))
@@ -1436,10 +1692,34 @@ mod tests {
             command.contains("Board")
                 && command.contains("\"operation\":\"board.post\"")
                 && command.contains("`pane.list`, `pane.read`, or `pane.close`")
+                && command.contains("issue.monitor.status")
+                && command.contains("issue.monitor.priority.move")
+                && command.contains("issue.monitor.priority.set")
+                && command.contains("issue.monitor.config.set")
                 && !command.contains("[message]")
                 && !command.contains("sending"),
             "expected gwt-agent command to route pane operations through JSON and communication through Board"
         );
+
+        for relative in ["README.md", "README.ja.md"] {
+            let readme = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for operation in [
+                "issue.monitor.status",
+                "issue.monitor.priority.move",
+                "issue.monitor.priority.set",
+                "issue.monitor.config.set",
+            ] {
+                assert!(
+                    readme.contains(operation),
+                    "expected {relative} to document {operation}"
+                );
+            }
+            assert!(
+                readme.contains("next scan"),
+                "expected {relative} to document eventual consistency"
+            );
+        }
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
@@ -1544,6 +1824,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn planning_and_verification_guidance_require_complete_blocking_gate_evidence() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
+        let required = [
+            "agent-reachable recovery operation",
+            "diagnostic visibility",
+            "positive test",
+            "false-positive negative test",
+        ];
+
+        for skill in ["gwt-plan-spec", "gwt-verify"] {
+            let source_relative = format!(".claude/skills/{skill}/SKILL.md");
+            let generated_relative = format!(".codex/skills/{skill}/SKILL.md");
+            let source = std::fs::read_to_string(workspace_root.join(&source_relative))
+                .unwrap_or_else(|err| panic!("failed to read {source_relative}: {err}"));
+            let generated = std::fs::read_to_string(workspace_root.join(&generated_relative))
+                .unwrap_or_else(|err| panic!("failed to read {generated_relative}: {err}"));
+            let materialized_claude = std::fs::read_to_string(
+                materialized.path().join(&source_relative),
+            )
+            .unwrap_or_else(|err| panic!("failed to read materialized {source_relative}: {err}"));
+            let materialized_codex =
+                std::fs::read_to_string(materialized.path().join(&generated_relative))
+                    .unwrap_or_else(|err| {
+                        panic!("failed to read materialized {generated_relative}: {err}")
+                    });
+
+            for phrase in required {
+                assert!(
+                    source.contains(phrase),
+                    "{source_relative} must require blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    generated.contains(phrase),
+                    "{generated_relative} must materialize blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    materialized_claude.contains(phrase),
+                    "materialized {source_relative} must require blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    materialized_codex.contains(phrase),
+                    "materialized {generated_relative} must require blocking-gate evidence: {phrase}"
+                );
+            }
+            assert_eq!(
+                generated, source,
+                "{generated_relative} drifted from canonical {source_relative}"
+            );
+            assert_eq!(
+                materialized_claude, source,
+                "materialized {source_relative} drifted from canonical source"
+            );
+            assert_eq!(
+                materialized_codex, source,
+                "materialized {generated_relative} drifted from canonical source"
+            );
+        }
+    }
+
     // ── Integration: full distribution pipeline ──
 
     #[test]
@@ -1615,7 +1957,7 @@ mod tests {
     }
 
     fn init_git_repo(path: &std::path::Path) {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .arg("init")
             .arg(path)
             .output()
@@ -1624,7 +1966,7 @@ mod tests {
     }
 
     fn git_resolved_exclude_path(worktree: &std::path::Path) -> PathBuf {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .args(["rev-parse", "--git-path", "info/exclude"])
             .current_dir(worktree)
             .output()
@@ -1991,6 +2333,90 @@ mod tests {
                     && content.contains("rejected")
                     && content.contains("pending"),
                 "{relative} must enumerate User Verification Result states (pending/confirmed/rejected)"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A1/AC-A3/AC-A4 and AC-2: an autonomous (Issue Monitor)
+    /// launch must never wait for a human to look at a screen, and the agent's
+    /// own headed browser-check must be recorded as its own evidence line
+    /// instead of being laundered into the user's verification result. Manual
+    /// launches keep the existing handoff.
+    #[test]
+    fn gwt_verify_waives_user_verification_for_autonomous_launches() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                // Launch mode is detected from the launcher's own environment,
+                // not from the agent's judgement.
+                "GWT_AUTONOMOUS_EXECUTION",
+                "Launch mode",
+                // The recorded value for an autonomous run.
+                "n/a (autonomous)",
+                // The automated substitute that carries the GUI quality bar.
+                "Agent Visual Check",
+                "dark",
+                "light",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document the autonomous verification waiver: {required}"
+                );
+            }
+            assert!(
+                content.contains("agent's own")
+                    || content.contains("never a User Verification Result"),
+                "{relative} must separate the agent's own browser-check from the user's result"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A1: the callers that gate delivery must accept the
+    /// autonomous value, otherwise the waiver stops at gwt-verify.
+    #[test]
+    fn delivery_gates_accept_the_autonomous_user_verification_value() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+            ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-build-spec/references/completion-gate.md",
+            ".codex/skills/gwt-build-spec/references/completion-gate.md",
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("n/a (autonomous)"),
+                "{relative} must accept `User Verification Result: n/a (autonomous)` (Issue #4001 AC-A1)"
+            );
+        }
+    }
+
+    /// Issue #4001 AC-A5: the repository's own Ready PR rules must agree with
+    /// the distributed skills, or agents get contradictory instructions.
+    #[test]
+    fn agents_md_waives_user_verification_for_autonomous_launches() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in ["n/a (autonomous)", "Agent Visual Check", "自動実行"] {
+            assert!(
+                agents.contains(required),
+                "AGENTS.md must document the autonomous verification waiver: {required}"
             );
         }
     }

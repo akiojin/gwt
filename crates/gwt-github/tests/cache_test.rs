@@ -1,10 +1,15 @@
 //! Contract tests for the `cache` module (SPEC-12 tdd.md Layer 6).
 
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::{Arc, Barrier},
+    time::Duration,
+};
 
 use gwt_github::{
     body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
-    cache::{Cache, CacheEntry},
+    cache::{Cache, CacheEntry, ValidatedCacheEntry},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
 };
@@ -157,6 +162,229 @@ fn red_56_subsequent_write_replaces_body() {
         let name = entry.file_name().into_string().unwrap();
         assert!(!name.ends_with(".tmp"), "stray tmp file found: {}", name);
     }
+}
+
+#[test]
+fn issue_snapshot_write_invalidates_existing_validation_sidecar() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v1", "t1"));
+    cache.write_snapshot(&first).unwrap();
+    let receipt = tmp.path().join("42/issue-validation.json");
+    fs::write(
+        &receipt,
+        r#"{"version":1,"generation":"old","validated_at":"now"}"#,
+    )
+    .unwrap();
+
+    let second = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v2", "t2"));
+    cache.write_snapshot(&second).unwrap();
+
+    assert!(
+        !receipt.exists(),
+        "ordinary cache writes must invalidate full-validation proof"
+    );
+}
+
+#[test]
+fn matching_validation_receipt_marks_snapshot_fresh() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap());
+
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Fresh(entry) => assert_eq!(entry.entry.snapshot, snapshot),
+        other => panic!("expected fresh validated entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn validation_receipt_is_bound_to_the_snapshot_contents() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap());
+
+    let mut replacement = snapshot.clone();
+    replacement.body = "concurrent replacement".to_string();
+    cache.write_snapshot(&replacement).unwrap();
+
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Unvalidated(entry) => {
+            assert_eq!(entry.entry.snapshot.body, "concurrent replacement")
+        }
+        other => panic!("mismatched receipt must be unvalidated, got {other:?}"),
+    }
+}
+
+#[test]
+fn failed_snapshot_write_leaves_validation_receipt_absent() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v1", "t1"));
+    cache.write_snapshot(&first).unwrap();
+    assert!(cache.renew_validation_receipt_if_current(&first).unwrap());
+    let receipt = cache.validation_receipt_path(first.number);
+
+    fs::remove_file(tmp.path().join("42/body.md")).unwrap();
+    fs::create_dir(tmp.path().join("42/body.md")).unwrap();
+    let second = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v2", "t2"));
+
+    assert!(cache.write_snapshot(&second).is_err());
+    assert!(
+        !receipt.exists(),
+        "failed or partial writes must never retain validation proof"
+    );
+}
+
+#[test]
+fn identical_snapshot_commits_rotate_generation_and_invalidate_receipt() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    let first = cache.current_generation(snapshot.number).unwrap().unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&first))
+        .unwrap());
+
+    cache.write_snapshot(&snapshot).unwrap();
+    let second = cache.current_generation(snapshot.number).unwrap().unwrap();
+
+    assert_ne!(first, second, "every cache commit needs an ABA-safe UUID");
+    assert!(!cache.validation_receipt_path(snapshot.number).exists());
+}
+
+#[test]
+fn stale_generation_cannot_overwrite_a_newer_cache_commit() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("first", "tasks"));
+    cache.write_snapshot(&first).unwrap();
+    let stale_generation = cache.current_generation(first.number).unwrap().unwrap();
+
+    let newer = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("newer", "tasks"));
+    cache.write_snapshot(&newer).unwrap();
+    let delayed = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("delayed", "tasks"));
+
+    assert!(cache
+        .write_snapshot_if_generation(&delayed, Some(&stale_generation))
+        .unwrap()
+        .is_none());
+    assert_eq!(cache.load_entry(first.number).unwrap().snapshot, newer);
+}
+
+#[test]
+fn simultaneous_generation_cas_allows_exactly_one_writer() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let initial = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("initial", "tasks"));
+    cache.write_snapshot(&initial).unwrap();
+    let generation = cache.current_generation(initial.number).unwrap().unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let handles: Vec<_> = ["writer-a", "writer-b"]
+        .into_iter()
+        .map(|body| {
+            let cache = cache.clone();
+            let generation = generation.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body(body, "tasks"));
+                barrier.wait();
+                cache
+                    .write_snapshot_if_generation(&snapshot, Some(&generation))
+                    .unwrap()
+            })
+        })
+        .collect();
+    barrier.wait();
+    let committed = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .filter(Option::is_some)
+        .count();
+
+    assert_eq!(committed, 1, "generation CAS must select one writer");
+}
+
+#[test]
+fn validation_publication_rejects_a_changed_generation() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("first", "tasks"));
+    cache.write_snapshot(&first).unwrap();
+    let stale_generation = cache.current_generation(first.number).unwrap().unwrap();
+    let newer = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("newer", "tasks"));
+    cache.write_snapshot(&newer).unwrap();
+
+    assert!(!cache
+        .renew_validation_receipt_if_generation(&first, Some(&stale_generation))
+        .unwrap());
+    assert!(!cache.validation_receipt_path(first.number).exists());
+}
+
+#[test]
+fn validation_publication_rejects_mixed_files_with_the_old_generation() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let expected = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("expected", "tasks"));
+    cache.write_snapshot(&expected).unwrap();
+    let generation = cache.current_generation(expected.number).unwrap().unwrap();
+
+    // Model a failed multi-file writer: body.md changed, but meta.json never
+    // published a new generation. A NotModified probe must keep using the
+    // pre-probe snapshot instead of reloading and blessing these mixed files.
+    fs::write(tmp.path().join("42/body.md"), "partial writer body").unwrap();
+
+    assert!(!cache
+        .renew_validation_receipt_if_generation(&expected, Some(&generation))
+        .unwrap());
+    assert!(!cache.validation_receipt_path(expected.number).exists());
+}
+
+#[test]
+fn malformed_legacy_meta_can_be_replaced_by_an_unconditional_fetch() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("repaired", "tasks"));
+    fs::create_dir_all(tmp.path().join("42")).unwrap();
+    fs::write(tmp.path().join("42/meta.json"), "{malformed").unwrap();
+    fs::write(tmp.path().join("42/body.md"), "stale partial body").unwrap();
+
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Missing { generation: None } => {}
+        other => panic!("malformed metadata must route to self-repair, got {other:?}"),
+    }
+    let committed = cache
+        .write_snapshot_if_generation(&snapshot, None)
+        .unwrap()
+        .expect("unconditional fetch should replace malformed legacy cache");
+    assert_eq!(
+        cache.load_entry(snapshot.number).unwrap().snapshot,
+        snapshot
+    );
+    assert_eq!(
+        cache.current_generation(snapshot.number).unwrap(),
+        Some(committed)
+    );
 }
 
 // RED-57: write_snapshot with body containing comments also writes comments/*.md
@@ -367,6 +595,29 @@ fn apply_phase_change_overwrites_labels_and_persists_to_meta() {
         .expect("meta.json should preserve the labels array");
     let label_strings: Vec<&str> = labels.iter().filter_map(|v| v.as_str()).collect();
     assert_eq!(label_strings, vec!["gwt-spec", "phase/implementation"]);
+}
+
+#[test]
+fn apply_phase_change_invalidates_existing_validation_sidecar() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let body = mk_body_with_spec_and_tasks_in_body("spec", "tasks");
+    cache.write_snapshot(&mk_snapshot(7, body)).unwrap();
+    let receipt = tmp.path().join("7/issue-validation.json");
+    fs::write(
+        &receipt,
+        r#"{"version":1,"generation":"old","validated_at":"now"}"#,
+    )
+    .unwrap();
+
+    cache
+        .apply_phase_change(IssueNumber(7), vec!["phase/done".to_string()])
+        .unwrap();
+
+    assert!(
+        !receipt.exists(),
+        "label-only cache writes must invalidate full-validation proof"
+    );
 }
 
 #[test]

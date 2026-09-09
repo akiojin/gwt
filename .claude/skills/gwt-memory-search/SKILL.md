@@ -1,18 +1,20 @@
 ---
 name: gwt-memory-search
-description: "Semantic search over the project's memory log at `.gwt/work/memory.md` using vector embeddings. Use when looking for past post-mortem fixes, prior re-occurrence prevention notes, or before starting work that resembles an earlier failure. Use when user says 'search memory', 'find related memory', 'check past failures', 'has this been hit before', '過去 memory を引いて', '同じ失敗があるか確認して'."
+description: "Semantic search over the project's machine-local work-notes memory log using vector embeddings. Use when looking for past post-mortem fixes, prior re-occurrence prevention notes, or before starting work that resembles an earlier failure. Use when user says 'search memory', 'find related memory', 'check past failures', 'has this been hit before', '過去 memory を引いて', '同じ失敗があるか確認して'."
 ---
 
 # Memory Search
 
 gwt maintains a vector search index over post-mortem memory entries kept in
-`.gwt/work/memory.md` using ChromaDB embeddings (model:
+the machine-local work-notes memory log
+(`~/.gwt/projects/<repo-hash>/work-notes/memory.md`, with the repo-local
+`.gwt/work/memory.md` as a read fallback) using ChromaDB embeddings (model:
 `intfloat/multilingual-e5-base`). Each H2 section (`## YYYY-MM-DD — title` plus
 the canonical `### 事象 / 原因 / 再発防止策` subsections) is chunked and
 embedded. The index is repo-scoped and stored at
 `~/.gwt/index/<repo-hash>/memory/`, shared across worktrees. Memory is the
 only canonical record of post-mortem learning for this project. Use JSON
-operation `memory.add` for new entries; direct edits to `.gwt/work/memory.md`
+operation `memory.add` for new entries; direct edits to the memory log
 are only for unusual bulk cleanup.
 
 ## gwtd resolution
@@ -38,7 +40,7 @@ Minimum workflow:
 1. Run `search` JSON envelopes with `params.scopes:["memory"]` and 2-3
    semantic queries derived from the request.
 2. Pick the most relevant past memory if one exists.
-3. Read the matching section in `.gwt/work/memory.md` before deciding the
+3. Read the matching section in the work-notes memory log before deciding the
    approach. Reuse the existing prevention strategy when applicable.
 
 ## Memory search command
@@ -54,7 +56,7 @@ JSON
 ```
 
 If the memory index does not yet exist, the search builds it inline from
-`<project_root>/.gwt/work/memory.md` before returning results (the first call
+the work-notes memory log before returning results (the first call
 may take longer).
 
 To force a full re-index (normally handled by the project watcher or the
@@ -76,7 +78,7 @@ JSON
 
 When a memory spans multiple chunks (long body or paragraph-split), only the
 best-scoring chunk per `(date, title)` pair is surfaced. Use the
-`target.heading` field to locate the exact section in `.gwt/work/memory.md`.
+`target.heading` field to locate the exact section in the memory log.
 
 ## When to use
 

@@ -1,5 +1,13 @@
 //! Process execution helpers.
 
+mod windows_resolver;
+
+pub use windows_resolver::{
+    resolve_process_plan, resolve_process_plan_for_platform, ProcessPlanRequest, ProcessPlatform,
+    ProcessResolveFailure, ProcessResolveFailureKind, ResolvedProcessPlan,
+    WINDOWS_CMD_WRAPPER_EXPRESSION_ENV,
+};
+
 use std::{
     ffi::OsStr,
     process::{Command, Output},
@@ -57,7 +65,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static GIT_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn next_git_spawn_id() -> u64 {
+    note_thread_git_spawn();
     GIT_SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    static THREAD_GIT_SPAWN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one git subprocess spawned by the current thread.
+///
+/// Issue #3629 AC-7: the per-thread counter is the regression seam for "this
+/// operation must not spawn git" assertions — unlike the global spawn-id
+/// counter it is immune to concurrently running tests.
+pub(crate) fn note_thread_git_spawn() {
+    THREAD_GIT_SPAWN_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+/// Number of git subprocesses the current thread has spawned through the
+/// logged wrappers ([`run_git_logged`], [`run_git_logged_with_stdin`], and the
+/// `process_console` git spawns driven from this thread).
+pub fn thread_git_spawn_count() -> u64 {
+    THREAD_GIT_SPAWN_COUNT.with(std::cell::Cell::get)
 }
 
 /// Spawn `git` with `args` in `current_dir`, capture stdout / stderr,
@@ -325,9 +354,65 @@ pub fn command_exists(cmd: &str) -> bool {
 /// Create a non-interactive command that does not create an extra console
 /// window when spawned from the Windows GUI front door.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    // The one sanctioned raw constructor; every other call site must go
+    // through this helper (enforced via clippy.toml disallowed-methods).
+    #[allow(clippy::disallowed_methods)]
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
     command
+}
+
+/// Resolve a process request with the current platform rules and build a
+/// hidden `std::process::Command` from the resulting spawn plan.
+pub fn resolved_command(
+    request: ProcessPlanRequest,
+) -> std::result::Result<Command, ProcessResolveFailure> {
+    let plan = resolve_process_plan(request)?;
+    let mut command = hidden_command(&plan.program);
+    apply_resolved_std_plan(&mut command, &plan);
+    Ok(command)
+}
+
+/// Resolve a process request with the current platform rules and build a
+/// hidden `tokio::process::Command` from the same spawn plan used by the
+/// synchronous adapter.
+pub fn resolved_tokio_command(
+    request: ProcessPlanRequest,
+) -> std::result::Result<tokio::process::Command, ProcessResolveFailure> {
+    let plan = resolve_process_plan(request)?;
+    #[allow(clippy::disallowed_methods)]
+    let mut command = tokio::process::Command::new(&plan.program);
+    configure_hidden_tokio_command(&mut command);
+    apply_resolved_tokio_plan(&mut command, &plan);
+    Ok(command)
+}
+
+fn apply_resolved_std_plan(command: &mut Command, plan: &ResolvedProcessPlan) {
+    if !plan.inherit_env {
+        command.env_clear();
+    }
+    for key in &plan.remove_env {
+        command.env_remove(key);
+    }
+    command.envs(plan.env.iter().cloned());
+    command.args(&plan.args);
+    if let Some(cwd) = &plan.cwd {
+        command.current_dir(cwd);
+    }
+}
+
+fn apply_resolved_tokio_plan(command: &mut tokio::process::Command, plan: &ResolvedProcessPlan) {
+    if !plan.inherit_env {
+        command.env_clear();
+    }
+    for key in &plan.remove_env {
+        command.env_remove(key);
+    }
+    command.envs(plan.env.iter().cloned());
+    command.args(&plan.args);
+    if let Some(cwd) = &plan.cwd {
+        command.current_dir(cwd);
+    }
 }
 
 /// Apply platform-specific non-interactive process flags.
@@ -337,6 +422,7 @@ pub fn configure_hidden_command(command: &mut Command) -> &mut Command {
     {
         use std::os::windows::process::CommandExt;
 
+        disinherit_std_handles();
         command.creation_flags(flags);
     }
     #[cfg(not(windows))]
@@ -344,6 +430,66 @@ pub fn configure_hidden_command(command: &mut Command) -> &mut Command {
         let _ = flags;
     }
     command
+}
+
+/// Apply platform-specific non-interactive process flags to a Tokio command.
+///
+/// Same contract as [`configure_hidden_command`], for the async spawn path
+/// (`process_console::spawn_logged` and friends).
+pub fn configure_hidden_tokio_command(
+    command: &mut tokio::process::Command,
+) -> &mut tokio::process::Command {
+    let flags = hidden_creation_flags();
+    #[cfg(windows)]
+    {
+        disinherit_std_handles();
+        command.creation_flags(flags);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = flags;
+    }
+    command
+}
+
+/// Issue #4105: keep this process's standard handles out of its children.
+///
+/// The standard library always calls `CreateProcess` with
+/// `bInheritHandles = TRUE`, so every inheritable handle in this process is
+/// copied into each child — including the stdout / stderr pipe a shell, a
+/// test harness, or Claude Code handed us — even when the child's own stdio
+/// is redirected to NUL. A detached child (the `verify.lease.hold` holder,
+/// the runtime daemon) then keeps the pipe's write end open, and whoever
+/// reads our output to EOF waits for that child instead of for us. Clearing
+/// `HANDLE_FLAG_INHERIT` on our own standard handles closes the leak;
+/// `Stdio::inherit` keeps working because the standard library duplicates
+/// the handle as inheritable for that one spawn. Unix needs nothing: every
+/// descriptor is `CLOEXEC` there.
+///
+/// Best effort: a standard handle that is absent (GUI subsystem) or refuses
+/// the flag change is simply left alone.
+#[cfg(windows)]
+fn disinherit_std_handles() {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows::Win32::Foundation::{
+        SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+    };
+
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for raw in handles {
+        let handle = HANDLE(raw);
+        if handle.is_invalid() {
+            continue;
+        }
+        // SAFETY: `handle` is one of this process's live standard handles;
+        // changing its inherit flag does not affect its use in this process.
+        let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+    }
 }
 
 #[cfg(windows)]
@@ -497,6 +643,70 @@ mod tests {
             assert_eq!(hidden_creation_flags(), 0x08000000);
         } else {
             assert_eq!(hidden_creation_flags(), 0);
+        }
+    }
+
+    /// Regression test for Issue #3293: a child spawned through
+    /// `hidden_command` must run under CREATE_NO_WINDOW, i.e. its console
+    /// has no window (`GetConsoleWindow()` returns NULL in the child).
+    #[cfg(windows)]
+    #[test]
+    fn hidden_command_child_has_no_console_window() {
+        let script = "Add-Type -Namespace W -Name K -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; [W.K]::GetConsoleWindow().ToInt64()";
+        let output = hidden_command("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .expect("spawn powershell");
+        assert!(
+            output.status.success(),
+            "powershell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let handle: i64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("numeric console window handle");
+        assert_eq!(
+            handle, 0,
+            "child console window handle must be NULL under CREATE_NO_WINDOW"
+        );
+    }
+
+    /// Regression test for Issue #4105: building a command through
+    /// `hidden_command` must leave this process's standard handles
+    /// non-inheritable, otherwise every child — including detached ones whose
+    /// own stdio is redirected to NUL — receives a copy of our stdout / stderr
+    /// pipe and keeps it open past our exit.
+    #[cfg(windows)]
+    #[test]
+    fn hidden_command_leaves_std_handles_non_inheritable() {
+        use std::os::windows::io::AsRawHandle;
+
+        use windows::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+        let _ = hidden_command("cmd");
+        let handles = [
+            ("stdin", std::io::stdin().as_raw_handle()),
+            ("stdout", std::io::stdout().as_raw_handle()),
+            ("stderr", std::io::stderr().as_raw_handle()),
+        ];
+        for (name, raw) in handles {
+            let handle = HANDLE(raw);
+            if handle.is_invalid() {
+                continue;
+            }
+            let mut flags = 0u32;
+            // SAFETY: `handle` is a live standard handle of this process and
+            // `flags` outlives the call.
+            let queried = unsafe { GetHandleInformation(handle, &mut flags) };
+            if queried.is_err() {
+                continue;
+            }
+            assert_eq!(
+                flags & HANDLE_FLAG_INHERIT.0,
+                0,
+                "{name} must not be inheritable after hidden_command"
+            );
         }
     }
 

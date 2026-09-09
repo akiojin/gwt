@@ -64,6 +64,12 @@ import {
 } from "/project-switcher.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
 import { groupProjectWindowList } from "/window-list-model.js";
+import {
+  applyWindowWorktreeData,
+  shouldShowWindowWorktreeBadge,
+  windowWorktreeBadgeView,
+  windowWorktreeForm,
+} from "/window-worktree-form.js";
 
 export function createProjectShellSurface({
   send,
@@ -228,6 +234,8 @@ export function createProjectShellSurface({
           appendRenderKeyPart(parts, entry?.agent_id || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, entry?.agent_color || "");
+          appendRenderKeyPart(parts, "worktree_form");
+          appendRenderKeyPart(parts, windowWorktreeForm(entry));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, entry?.status || "");
           appendRenderKeyPart(parts, "runtime_state");
@@ -542,6 +550,7 @@ export function createProjectShellSurface({
         if (entry.agent_color) {
           row.dataset.agentColor = entry.agent_color;
         }
+        applyWindowWorktreeData(row, entry);
         const geometryLabel = windowGeometryLabel(entry);
         const runtimeState = runtimeStateForWindow(entry);
         const runtimeLabel = windowRuntimeLabel(runtimeState);
@@ -554,6 +563,10 @@ export function createProjectShellSurface({
         const roleBadgeLabel = windowRoleBadgeLabel(entry);
         const roleBadge = roleBadgeLabel
           ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
+          : "";
+        const worktreeBadgeView = windowWorktreeBadgeView(entry);
+        const worktreeBadge = shouldShowWindowWorktreeBadge(entry)
+          ? `<span class="window-worktree-badge window-list-worktree" role="img" data-worktree-form="${escapeHtml(worktreeBadgeView.form)}" data-worktree-label="${escapeHtml(worktreeBadgeView.label)}" data-worktree-symbol="${escapeHtml(worktreeBadgeView.symbol)}" aria-label="${escapeHtml(worktreeBadgeView.ariaLabel)}" title="${escapeHtml(worktreeBadgeView.title)}">${escapeHtml(worktreeBadgeView.shortLabel)}</span>`
           : "";
         // FR-045 (anshin): surface the agent's live activity detail
         // (dynamic_title_detail) as a glanceable line when it differs from the
@@ -570,6 +583,7 @@ export function createProjectShellSurface({
             <div class="window-list-title">${escapeHtml(displayTitle)}</div>
             ${activityLine}
             <div class="window-list-meta">
+              ${worktreeBadge}
               ${roleBadge}
               <span class="window-list-geometry">${geometryLabel}</span>
             </div>

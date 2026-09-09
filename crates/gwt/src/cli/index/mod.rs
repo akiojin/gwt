@@ -138,15 +138,44 @@ fn run_rebuild<E: CliEnv>(
     let log_dir = audit_log_dir(&context);
     for action in rebuild_actions(scope) {
         let _ = audit_rebuild_start(&log_dir, &context, action.label);
-        let output = run_runner_rebuild(&context, action)?;
-        let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
-        let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
-        if output.status.success() {
-            out.push_str(&format!("{}: ok\n", action.label));
-        } else {
-            ok = false;
-            out.push_str(&format!("{}: error\n", action.label));
-            out.push_str(&format_runner_failure(&output));
+        let coordinator_worktree = action
+            .needs_worktree_hash
+            .then(|| context.worktree_hash.clone());
+        // Manual rebuilds coordinate host-wide like every other index build
+        // (SPEC #1939 Phase 70 FR-379/FR-383): at most one heavy runner tree,
+        // manual priority above background repair.
+        let run = crate::index_worker::run_coordinated_index_job(
+            context.repo_hash.as_str(),
+            action.label,
+            coordinator_worktree.as_deref(),
+            gwt_core::index_coordinator::JobPriority::ManualRebuild,
+            || {
+                let output = run_runner_rebuild(&context, action, "interactive")
+                    .map_err(|err| err.to_string())?;
+                let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
+                let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
+                if !output.status.success() {
+                    return Err(format_runner_failure(&output));
+                }
+                // PR #3301 review: interactive QoS never yields today, but a
+                // yielded payload must still resume instead of being
+                // recorded as a completed build.
+                if crate::index_worker::runner_payload_yielded(&output.stdout) {
+                    return Ok(crate::index_worker::BuildStep::Yielded);
+                }
+                Ok(crate::index_worker::BuildStep::Done(()))
+            },
+        );
+        match run {
+            Ok(_) => out.push_str(&format!("{}: ok\n", action.label)),
+            Err(error) => {
+                ok = false;
+                out.push_str(&format!("{}: error\n", action.label));
+                out.push_str(&error);
+                if !error.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
         }
     }
 
@@ -507,5 +536,75 @@ not json
         assert!(content.contains("\"scope\":\"files-docs\""), "{content}");
         assert!(!content.contains("not json"), "{content}");
         assert!(!dir.path().join("index.log").exists());
+    }
+
+    /// Phase 70 T-IDX-401 (Issue #3264): manual rebuild coordinates through
+    /// the host-wide coordinator and reports per-action results.
+    #[cfg(unix)]
+    #[test]
+    fn run_rebuild_coordinates_and_reports_per_action_result() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        run_git_at(tmp.path(), &["init", repo.to_str().unwrap()]);
+        run_git_at(&repo, &["config", "user.email", "test@example.com"]);
+        run_git_at(&repo, &["config", "user.name", "Test User"]);
+        run_git_at(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            ],
+        );
+        std::fs::write(repo.join("README.md"), "# repo\n").expect("readme");
+        run_git_at(&repo, &["add", "README.md"]);
+        run_git_at(&repo, &["commit", "-m", "init"]);
+
+        let log = tmp.path().join("runner-log.txt");
+        let python = gwt_core::runtime::project_index_python_path();
+        std::fs::create_dir_all(python.parent().expect("venv dir")).expect("create venv dir");
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\nprintf '{{\"ok\": true}}\\n'\n",
+                log.display()
+            ),
+        )
+        .expect("fake python");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake python");
+
+        let mut env = crate::cli::env::TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = repo.clone();
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IndexCommand::Rebuild {
+                scope: IndexScope::Issues,
+            },
+            &mut out,
+        )
+        .expect("rebuild runs");
+        assert_eq!(code, 0, "rebuild must succeed: {out}");
+        assert!(out.contains("issues: ok"), "{out}");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(calls.contains("--action index-issues"), "{calls}");
+        assert!(
+            calls.contains("--qos interactive"),
+            "manual rebuild runs at interactive QoS: {calls}"
+        );
     }
 }

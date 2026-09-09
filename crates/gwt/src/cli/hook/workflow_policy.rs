@@ -1,93 +1,46 @@
 //! `gwtd hook workflow-policy` — hook-driven workflow gating.
 //!
-//! v1 keeps the policy deliberately narrow:
+//! The policy is deliberately narrow:
 //!
 //! - reuse the existing consolidated Bash safety policy first
 //! - block worktree escape, branch-switching, and direct GitHub workflow CLI
 //!   commands before they reach the tool runtime
-//! - keep read-only exploration, transport operations, verification, and
-//!   explicit low-risk bookkeeping non-blocking
-//! - block mutating implementation work until an owner Issue/SPEC is linked
-//! - block implementation-state changes when a linked SPEC owner is known but
-//!   its plan/tasks sections are not ready
+//! - block direct edits of trusted execution/evidence state files
+//! - require the Agent Workspace identity (title) before work starts
+//! - hold a pending gwt-discussion Goal Start until it is handled
+//!
+//! Owner/SPEC linkage and lane membership never gate tool calls: the owner
+//! guard and the intake lane code-edit guard were removed by SPEC #3245
+//! (FR-002 / FR-009) after their default-deny classification kept
+//! false-positive-blocking legitimate ownerless work. SPEC-first / TDD
+//! discipline is carried by skills and guidance, not by this hook.
 
-use std::{collections::HashMap, io::Read, path::Path};
+use std::{io::Read, path::Path};
 
-use gwt_agent::{
-    session::{Session, GWT_SESSION_ID_ENV},
-    types::WorkflowBypass,
-};
-use gwt_core::{
-    paths::{gwt_cache_dir, gwt_sessions_dir},
-    workspace_projection::load_workspace_projection,
-};
-use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
-use serde::Deserialize;
+use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
+use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
 
 use crate::discussion_resume::PendingDiscussionGoal;
 
-use super::{block_bash_policy, HookError, HookEvent, HookOutput};
+use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutput};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkflowOwner {
-    Unknown,
-    Issue(u64),
-    Spec(u64),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowContext {
-    pub owner: WorkflowOwner,
-    pub has_plan: bool,
-    pub has_tasks: bool,
-    pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
     pub pending_discussion_goal: Option<PendingDiscussionGoal>,
+    /// Issue #3984: this session is an independent-review dispatch window
+    /// (`suppress_execution_control`, no Workspace Work, no Execution Control
+    /// Record). Its contract is the inverse of a producing session's: publish
+    /// the verdict, touch nothing the implementer produced.
+    pub review_dispatch_session: bool,
 }
 
 impl WorkflowContext {
+    /// A context with nothing pending. The name survives from the removed
+    /// owner-resolution era so the extensive hook test corpus keeps reading
+    /// naturally; it is exactly `Self::default()`.
     pub fn unknown() -> Self {
-        Self {
-            owner: WorkflowOwner::Unknown,
-            has_plan: false,
-            has_tasks: false,
-            bypass: None,
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
-    }
-
-    pub fn plain_issue(issue_number: u64) -> Self {
-        Self {
-            owner: WorkflowOwner::Issue(issue_number),
-            has_plan: false,
-            has_tasks: false,
-            bypass: None,
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
-    }
-
-    pub fn spec_issue(issue_number: u64, has_plan: bool, has_tasks: bool) -> Self {
-        Self {
-            owner: WorkflowOwner::Spec(issue_number),
-            has_plan,
-            has_tasks,
-            bypass: None,
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
-    }
-
-    pub fn with_bypass(bypass: WorkflowBypass) -> Self {
-        Self {
-            owner: WorkflowOwner::Unknown,
-            has_plan: false,
-            has_tasks: false,
-            bypass: Some(bypass),
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
+        Self::default()
     }
 
     pub fn with_title_summary_missing(mut self, missing: bool) -> Self {
@@ -99,11 +52,11 @@ impl WorkflowContext {
         self.pending_discussion_goal = pending;
         self
     }
-}
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct IssueBranchLinkStore {
-    branches: HashMap<String, u64>,
+    pub fn with_review_dispatch_session(mut self, review_dispatch_session: bool) -> Self {
+        self.review_dispatch_session = review_dispatch_session;
+        self
+    }
 }
 
 pub fn evaluate_with_context(
@@ -111,15 +64,27 @@ pub fn evaluate_with_context(
     worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
-    let safety = block_bash_policy::evaluate(event, worktree_root)?;
+    effect_classifier::observe_event(event, worktree_root);
+    let safety = block_bash_policy::evaluate_without_observation(event, worktree_root)?;
     if safety != HookOutput::Silent {
         return Ok(safety);
     }
-    let lane_code_edit = evaluate_lane_code_edit_guard(event, worktree_root)?;
-    if lane_code_edit != HookOutput::Silent {
-        return Ok(lane_code_edit);
+    let trusted_state = evaluate_trusted_state_write_guard(event)?;
+    if trusted_state != HookOutput::Silent {
+        return Ok(trusted_state);
     }
-    let title_summary = evaluate_title_summary_guard(event, context.title_summary_missing)?;
+    let review_dispatch = evaluate_review_dispatch_guard(event, context.review_dispatch_session)?;
+    if review_dispatch != HookOutput::Silent {
+        return Ok(review_dispatch);
+    }
+    // Issue #3984 (AC-1/AC-4): a review dispatch window owns no Workspace Work,
+    // so `workspace.update` can never succeed there. Demanding the title first
+    // would deny every non-read-only command — including the verdict publish
+    // that is the window's entire job — for the whole life of the session.
+    let title_summary = evaluate_title_summary_guard(
+        event,
+        context.title_summary_missing && !context.review_dispatch_session,
+    )?;
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
     }
@@ -128,21 +93,21 @@ pub fn evaluate_with_context(
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
     }
-    let owner = evaluate_owner_guard(event, worktree_root, context)?;
-    if owner != HookOutput::Silent {
-        return Ok(owner);
-    }
     Ok(HookOutput::Silent)
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
-    let context = resolve_workflow_context(worktree_root)
-        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
-        .with_pending_discussion_goal(
-            crate::discussion_resume::load_pending_goal(worktree_root)
-                .ok()
-                .flatten(),
-        );
+    let context =
+        WorkflowContext::default()
+            .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
+            .with_pending_discussion_goal(
+                crate::discussion_resume::load_pending_goal(worktree_root)
+                    .ok()
+                    .flatten(),
+            )
+            .with_review_dispatch_session(
+                crate::issue_monitor_review::review_dispatch_session_active(),
+            );
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -160,51 +125,6 @@ pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
     evaluate(&event, &root)
 }
 
-fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
-    let session = load_session_from_env();
-    let bypass = session.as_ref().and_then(|s| s.workflow_bypass);
-
-    let Some(issue_number) = session
-        .as_ref()
-        .and_then(|session| session.linked_issue_number)
-        .or_else(|| resolve_issue_from_linkage_store(worktree_root, session.as_ref()))
-    else {
-        let mut ctx = WorkflowContext::unknown();
-        ctx.bypass = bypass;
-        return ctx;
-    };
-
-    let Some(cache_root) = crate::issue_cache::issue_cache_root_for_repo_path(worktree_root) else {
-        let mut ctx = WorkflowContext::plain_issue(issue_number);
-        ctx.bypass = bypass;
-        return ctx;
-    };
-    let cache = Cache::new(cache_root);
-    let Some(entry) = cache.load_entry(IssueNumber(issue_number)) else {
-        let mut ctx = WorkflowContext::plain_issue(issue_number);
-        ctx.bypass = bypass;
-        return ctx;
-    };
-    if !entry
-        .snapshot
-        .labels
-        .iter()
-        .any(|label| label == "gwt-spec")
-    {
-        let mut ctx = WorkflowContext::plain_issue(issue_number);
-        ctx.bypass = bypass;
-        return ctx;
-    }
-
-    let mut ctx = WorkflowContext::spec_issue(
-        issue_number,
-        has_nonempty_section(&entry.spec_body, "plan"),
-        has_nonempty_section(&entry.spec_body, "tasks"),
-    );
-    ctx.bypass = bypass;
-    ctx
-}
-
 fn load_session_from_env() -> Option<Session> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV).ok()?;
     let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
@@ -215,6 +135,15 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
+    // The title requirement is meaningful only for the same Session/container
+    // that workspace.update itself can mutate. A stale ambient Session must
+    // not brick an unrelated cwd, repository, or branch before the user can
+    // inspect and recover it.
+    if crate::agent_project_state::resolve_session_work_mutation_target(worktree_root, &session.id)
+        .is_err()
+    {
+        return Ok(false);
+    }
     let projection_root = if session.worktree_path.exists() {
         session.worktree_path.as_path()
     } else {
@@ -223,11 +152,7 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(projection) = load_workspace_projection(projection_root)? else {
         return Ok(false);
     };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session.id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(&session.id) else {
         return Ok(false);
     };
     if agent.is_unassigned() {
@@ -277,6 +202,85 @@ Use the configured narrative language for the purpose. Keep progress, completion
     Ok(HookOutput::Silent)
 }
 
+/// Issue #3984 (AC-2): the review window's own guard.
+///
+/// With the title gate lifted, the review session must not inherit a producing
+/// session's write surface. It may publish its verdict
+/// (`issue.monitor.review_verdict`), explain it on the Board, and read whatever
+/// it needs; it must not rewrite what the implementer produced. The denial is
+/// keyed on the canonical JSON envelope operation, which is how every skill
+/// invokes gwtd.
+fn evaluate_review_dispatch_guard(
+    event: &HookEvent,
+    review_dispatch_session: bool,
+) -> Result<HookOutput, HookError> {
+    if !review_dispatch_session {
+        return Ok(HookOutput::Silent);
+    }
+    // The title gate used to stop file edits in a review window as a side
+    // effect of denying everything. Lifting it must not open that door: the
+    // file tools are the most direct way to rewrite the very diff under review.
+    if matches!(
+        event.tool_name.as_deref(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch")
+    ) {
+        return Ok(review_dispatch_denial("editing files"));
+    }
+    if event.tool_name.as_deref() != Some("Bash") {
+        return Ok(HookOutput::Silent);
+    }
+    let Some(command) = event.command() else {
+        return Ok(HookOutput::Silent);
+    };
+    let Some(operation) = json_envelope_operation(command) else {
+        return Ok(HookOutput::Silent);
+    };
+    if !is_review_dispatch_denied_operation(&operation) {
+        return Ok(HookOutput::Silent);
+    }
+    Ok(review_dispatch_denial(&format!("`{operation}`")))
+}
+
+fn review_dispatch_denial(subject: &str) -> HookOutput {
+    HookOutput::pre_tool_use_permission(
+        format!("{subject} is outside the independent review contract"),
+        "This window is an independent-review dispatch session (SPEC #3200): it judges the implementation, it never produces or settles it. \
+Editing files, and the operations that rewrite the implementer's artifacts or authority — `pr.*`, `issue.spec.*`, `execution.*`, `workspace.*`, `build.*`, `verify.*` — belong to the implementing session and are refused here.\n\n\
+Publish the verdict instead, then report it on the Board:\n\
+  gwtd <<'JSON'\n\
+  {\"schema_version\":1,\"operation\":\"issue.monitor.review_verdict\",\"params\":{\"issue_number\":<n>,\"reviewed_sha\":\"<sha>\",\"verdict\":\"<verdict json>\"}}\n\
+  JSON\n\n\
+Read-only inspection (`git log`, `git diff`, the target test run, `issue.view`, `pr.view`, `execution.status`, `verify.lease.status`) stays available.",
+    )
+}
+
+/// The envelope operations a review dispatch session must not run. Read-only
+/// operations inside the same families (`execution.status`, `pr.view`,
+/// `workspace.candidates`, `verify.lease.status`, ...) stay available:
+/// refusing them would blind the reviewer without protecting anything, and
+/// AC-4 requires the review to be able to inspect the state it is judging.
+///
+/// `verify.*` is denied for a stronger reason than the rest: `verify.run`
+/// executes arbitrary commands and persists verification evidence, and its
+/// caller-authority check returns empty authority precisely because a review
+/// window has no Execution Control Record — so only this hook stands between a
+/// reviewer and the implementer's evidence bundle.
+fn is_review_dispatch_denied_operation(operation: &str) -> bool {
+    if is_read_only_json_envelope_operation(operation) || is_read_only_verify_operation(operation) {
+        return false;
+    }
+    operation.starts_with("execution.")
+        || operation.starts_with("workspace.")
+        || operation.starts_with("build.")
+        || operation.starts_with("pr.")
+        || operation.starts_with("issue.spec.")
+        || operation.starts_with("verify.")
+}
+
+fn is_read_only_verify_operation(operation: &str) -> bool {
+    matches!(operation, "verify.lease.status" | "verify.lease-status")
+}
+
 fn evaluate_pending_discussion_goal_guard(
     event: &HookEvent,
     pending_discussion_goal: Option<&PendingDiscussionGoal>,
@@ -307,119 +311,56 @@ Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{
     Ok(HookOutput::Silent)
 }
 
-fn evaluate_owner_guard(
-    event: &HookEvent,
-    worktree_root: &Path,
-    context: &WorkflowContext,
-) -> Result<HookOutput, HookError> {
-    if context.bypass.is_some() {
-        return Ok(HookOutput::Silent);
-    }
+/// SPEC-3248 P9a (T-120): the execution/evidence state files are written
+/// only by their canonical gwtd operations. Direct edits through the file
+/// tools are blocked in every lane — an edited record would fail integrity
+/// validation at the gates anyway, so the deny message routes to the
+/// canonical operations up front. (Bash-level writes are out of reach of
+/// path-based blocking and remain covered by the integrity hashes.)
+const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
+    "execution-control.json",
+    "execution-generation-pointer.json",
+    "generation-ledger.json",
+    "execution-repair-audit.json",
+    "verification-run.json",
+    "verification-plan.json",
+    "intake-outcome.json",
+    "action-obligations.json",
+    "action-obligation-revival.json",
+];
 
-    match context.owner {
-        WorkflowOwner::Unknown => {
-            if !requires_owner_for_mutating_work(event, worktree_root) {
-                return Ok(HookOutput::Silent);
-            }
-            Ok(HookOutput::pre_tool_use_permission(
-                "Owner Issue/SPEC is required before implementation",
-                "This tool call changes mutating implementation work, but no owner Issue/SPEC is linked to the current agent session.\n\n\
-Start or link the work first through `gwt-register-issue`, `gwt-fix-issue`, or an approved SPEC plan. Read-only exploration, explicit goal/workspace/Board bookkeeping, verification commands, transport-only commands, docs/chore edits, and low-risk worktree-local `touch`/`rm` file operations remain allowed.",
-            ))
-        }
-        WorkflowOwner::Issue(_) => Ok(HookOutput::Silent),
-        WorkflowOwner::Spec(number) if context.has_plan && context.has_tasks => {
-            let _ = number;
-            Ok(HookOutput::Silent)
-        }
-        WorkflowOwner::Spec(number) => {
-            if !requires_spec_plan_tasks(event, worktree_root) {
-                return Ok(HookOutput::Silent);
-            }
-            let detail = format!(
-                "SPEC #{number} is linked, but its cached `plan` and `tasks` sections are not both non-empty. Refresh the SPEC plan/tasks through `gwt-plan-spec` before changing implementation state."
-            );
-            Ok(HookOutput::pre_tool_use_permission(
-                "Owner SPEC needs plan and tasks before implementation",
-                detail,
-            ))
-        }
-    }
-}
-
-/// SPEC-3248 P4 (FR-011): a lane whose profile sets `block_production_code_edits`
-/// (intake today) may not edit production source. It registers Issues/SPECs and
-/// leaves implementation to Execute-lane sessions. Bookkeeping under `.gwt/` and
-/// `tasks/`, and documentation/guidance edits, stay allowed. Fail-open: if the
-/// target path cannot be determined, the edit is not blocked.
-fn evaluate_lane_code_edit_guard(
-    event: &HookEvent,
-    worktree_root: &Path,
-) -> Result<HookOutput, HookError> {
-    let lane = crate::cli::hook::context::HookContext::for_worktree(worktree_root).lane;
-    if !lane.policy_flags.block_production_code_edits || !is_mutating_work_event(event) {
+fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, HookError> {
+    if !matches!(
+        event.tool_name.as_deref(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch")
+    ) {
         return Ok(HookOutput::Silent);
     }
     let paths = event_target_paths(event);
-    if paths.is_empty()
-        || paths
-            .iter()
-            .all(|path| is_intake_editable_path(path, worktree_root))
-    {
+    let targets_trusted_state = paths.iter().any(|path| {
+        // Lowercase so case-variant spellings on case-insensitive
+        // filesystems cannot slip past the match.
+        let normalized = path.replace('\\', "/").to_lowercase();
+        TRUSTED_STATE_FILE_NAMES.iter().any(|name| {
+            // Worktree mirror (P9a) and the repo-scoped trusted store
+            // copy under `~/.gwt/projects/<hash>/trusted/<key>/` (P9b).
+            normalized.ends_with(&format!(".gwt/skill-state/{name}"))
+                || (normalized.contains("/.gwt/projects/")
+                    && normalized.contains("/trusted/")
+                    && normalized.ends_with(&format!("/{name}")))
+        })
+    });
+    if !targets_trusted_state {
         return Ok(HookOutput::Silent);
     }
     Ok(HookOutput::pre_tool_use_permission(
-        "Intake (Curate) sessions do not edit production code",
-        "This is a Curate (intake) session: it registers Issues/SPECs and does not implement. \
-Editing production source is blocked here. Register the work \
-(`gwt-register-issue` for a plain Issue, or `gwt-discussion` → `gwt-register-spec` for a SPEC) \
-and let an Execute-lane session (Workspace / Issue Monitor) implement it. \
-Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
+        "Execution/evidence state files are written only by their canonical operations",
+        "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.repair` / `execution.reopen` for execution authority, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
-/// Paths an intake session may still edit: gwt bookkeeping (`.gwt/`, `tasks/`)
-/// and documentation/guidance. Everything else inside the worktree is treated
-/// as production source and blocked.
-fn is_intake_editable_path(path: &str, worktree_root: &Path) -> bool {
-    if is_documentation_or_guidance_path(path, worktree_root) {
-        return true;
-    }
-    let candidate = Path::new(path);
-    let relative = candidate
-        .strip_prefix(worktree_root)
-        .unwrap_or(candidate)
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(part) => part.to_str(),
-            _ => None,
-        })
-        .next();
-    matches!(relative, Some(".gwt") | Some("tasks"))
-}
-
-fn requires_owner_for_mutating_work(event: &HookEvent, worktree_root: &Path) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit") => {
-            !event_targets_documentation_or_guidance(event, worktree_root)
-        }
-        Some("apply_patch") => !event_targets_documentation_or_guidance(event, worktree_root),
-        Some("Bash") => event
-            .command()
-            .is_some_and(|command| !command_segments_are_ownerless_safe(command, worktree_root)),
-        _ => false,
-    }
-}
-
-fn event_targets_documentation_or_guidance(event: &HookEvent, worktree_root: &Path) -> bool {
-    let paths = event_target_paths(event);
-    !paths.is_empty()
-        && paths
-            .iter()
-            .all(|path| is_documentation_or_guidance_path(path, worktree_root))
-}
-
-fn event_target_paths(event: &HookEvent) -> Vec<String> {
+pub(crate) fn event_target_paths(event: &HookEvent) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(path) = event
         .tool_input
@@ -465,160 +406,7 @@ fn apply_patch_target_paths(patch: &str) -> Vec<String> {
         .collect()
 }
 
-fn is_documentation_or_guidance_path(path: &str, worktree_root: &Path) -> bool {
-    let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
-    let path = Path::new(path);
-    let relative = if path.is_absolute() {
-        let Ok(relative) = path.strip_prefix(worktree_root) else {
-            return false;
-        };
-        relative
-    } else {
-        path
-    };
-    let normalized = relative.to_string_lossy();
-    normalized == "README.md"
-        || normalized == "README.ja.md"
-        || normalized == "AGENTS.md"
-        || normalized == "CLAUDE.md"
-        || normalized.starts_with("docs/")
-        || normalized.starts_with("tasks/")
-        || normalized.ends_with(".md")
-}
-
-fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> bool {
-    if command_segments_are_goal_safe(command) {
-        return true;
-    }
-    if has_shell_output_redirection(command) {
-        return false;
-    }
-    if is_standalone_json_envelope_command(command) {
-        return true;
-    }
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-        && segments
-            .iter()
-            .all(|segment| is_ownerless_safe_segment(segment, worktree_root))
-}
-
-fn is_ownerless_safe_segment(segment: &str, worktree_root: &Path) -> bool {
-    is_read_only_segment(segment)
-        || is_transport_segment(segment)
-        || is_verification_segment(segment)
-        || is_goal_bookkeeping_segment(segment)
-        || is_workspace_identity_update_segment(segment)
-        || is_board_post_segment(segment)
-        || is_low_risk_worktree_file_op_segment(segment, worktree_root)
-}
-
-fn is_low_risk_worktree_file_op_segment(segment: &str, worktree_root: &Path) -> bool {
-    let tokens = segment_tokens(segment);
-    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
-        return false;
-    };
-    match command_name.as_str() {
-        "touch" => {
-            let paths = tokens.iter().skip(1).copied().collect::<Vec<_>>();
-            !paths.is_empty()
-                && paths
-                    .iter()
-                    .all(|path| path_is_worktree_local(path, worktree_root))
-        }
-        "rm" => {
-            let paths = tokens
-                .iter()
-                .skip(1)
-                .copied()
-                .filter(|token| !token.starts_with('-'))
-                .collect::<Vec<_>>();
-            !paths.is_empty()
-                && paths
-                    .iter()
-                    .all(|path| path_is_worktree_local(path, worktree_root))
-        }
-        _ => false,
-    }
-}
-
-fn path_is_worktree_local(path: &str, worktree_root: &Path) -> bool {
-    let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return path.starts_with(worktree_root);
-    }
-    !path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-}
-
-fn requires_spec_plan_tasks(event: &HookEvent, worktree_root: &Path) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => {
-            !event_targets_documentation_or_guidance(event, worktree_root)
-        }
-        Some("Bash") => event
-            .command()
-            .is_some_and(command_requires_spec_plan_tasks),
-        _ => false,
-    }
-}
-
-fn command_requires_spec_plan_tasks(command: &str) -> bool {
-    if is_read_only_exploration_event(&HookEvent {
-        tool_name: Some("Bash".to_string()),
-        tool_input: Some(serde_json::json!({ "command": command })),
-        transcript_path: None,
-        cwd: None,
-    }) || command_segments_are_goal_safe(command)
-        || is_standalone_json_envelope_command(command)
-        || command_segments_are_transport_only(command)
-        || command_segments_are_verification_only(command)
-    {
-        return false;
-    }
-
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-}
-
-fn command_segments_are_transport_only(command: &str) -> bool {
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty() && segments.iter().all(|segment| is_transport_segment(segment))
-}
-
-fn is_transport_segment(segment: &str) -> bool {
-    let tokens = segment_tokens(segment);
-    matches!(tokens.as_slice(), ["git", "push", ..])
-}
-
-fn command_segments_are_verification_only(command: &str) -> bool {
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-        && segments
-            .iter()
-            .all(|segment| is_verification_segment(segment))
-}
-
-fn is_verification_segment(segment: &str) -> bool {
-    let tokens = segment_tokens(segment);
-    matches!(
-        tokens.as_slice(),
-        ["cargo", "test", ..]
-            | ["cargo", "clippy", ..]
-            | ["cargo", "fmt", ..]
-            | ["cargo", "build", ..]
-            | ["cargo", "check", ..]
-            | ["bun", "test", ..]
-            | ["bunx", "markdownlint-cli", ..]
-            | ["npm", "test", ..]
-            | ["pnpm", "test", ..]
-            | ["yarn", "test", ..]
-    )
-}
-
-fn is_mutating_work_event(event: &HookEvent) -> bool {
+pub(crate) fn is_mutating_work_event(event: &HookEvent) -> bool {
     match event.tool_name.as_deref() {
         Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
         Some("Bash") => {
@@ -779,7 +567,15 @@ fn is_read_only_json_envelope_command(command: &str) -> bool {
         .is_some_and(is_read_only_json_envelope_operation)
 }
 
-fn json_envelope_operation(command: &str) -> Option<String> {
+pub(crate) fn json_envelope_operation(command: &str) -> Option<String> {
+    let value = json_envelope(command)?;
+    value
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
     let segments = super::segments::split_command_segments(command);
     if segments.len() != 1
         || !segments
@@ -789,14 +585,10 @@ fn json_envelope_operation(command: &str) -> Option<String> {
         return None;
     }
     let json = extract_json_object(command)?;
-    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    value
-        .get("operation")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
+    serde_json::from_str::<serde_json::Value>(json).ok()
 }
 
-fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
@@ -805,7 +597,6 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "board.show"
             | "board.config.show"
             | "board.config-show"
-            | "improvement.list"
             | "issue.view"
             | "issue.comments"
             | "issue.linked_prs"
@@ -813,7 +604,12 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.read"
             | "issue.spec.section"
             | "issue.spec.list"
+            | "issue.spec.audit"
+            | "issue.monitor.status"
+            | "issue.monitor.profiles"
             | "pr.current"
+            | "pr.list"
+            | "github.budget"
             | "pr.view"
             | "pr.checks"
             | "pr.reviews"
@@ -825,15 +621,22 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "index.status"
             | "diagnostics.cpu"
             | "daemon.status"
+            | "execution.status"
+            | "execution.continue"
             | "hook.health"
             | "pane.list"
             | "pane.read"
+            | "perf.summary"
+            | "perf.violations"
+            | "pm.status"
             | "search"
     )
 }
 
 fn extract_json_object(segment: &str) -> Option<&str> {
-    let start = segment.find('{')?;
+    // Prefer the first `{"` so shell expansions like `${GWT_BIN}` before the
+    // heredoc body do not shift the extraction window off the JSON envelope.
+    let start = segment.find("{\"").or_else(|| segment.find('{'))?;
     let end = segment.rfind('}')?;
     (start <= end).then_some(&segment[start..=end])
 }
@@ -845,7 +648,7 @@ fn is_read_only_exploration_event(event: &HookEvent) -> bool {
     let Some(command) = event.command() else {
         return false;
     };
-    if has_shell_output_redirection(command) {
+    if has_file_output_redirection(command) {
         return false;
     }
     if is_read_only_json_envelope_command(command) {
@@ -855,19 +658,24 @@ fn is_read_only_exploration_event(event: &HookEvent) -> bool {
     !segments.is_empty() && segments.iter().all(|segment| is_read_only_segment(segment))
 }
 
-fn has_shell_output_redirection(command: &str) -> bool {
-    command.contains('>') || command.contains(" tee ") || command.contains("|tee ")
+/// True when the command redirects output into a real file. Detection is
+/// structural (quote-aware, heredoc bodies masked), so a `>` inside a string
+/// literal or heredoc payload is data, not a redirection (issue #3265).
+/// Pipeline sinks like `tee` are covered by per-segment classification —
+/// `tee` is not a read-only command.
+fn has_file_output_redirection(command: &str) -> bool {
+    !super::segments::output_redirect_file_targets(command).is_empty()
 }
 
-fn is_read_only_segment(segment: &str) -> bool {
+pub(crate) fn is_read_only_segment(segment: &str) -> bool {
     let tokens = segment_tokens(segment);
     let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
         return true;
     };
     match command_name.as_str() {
-        "awk" | "cat" | "date" | "echo" | "false" | "grep" | "head" | "jq" | "ls" | "nl"
-        | "printf" | "printenv" | "pwd" | "rg" | "tail" | "test" | "true" | "wc" | "which"
-        | "[" => true,
+        "awk" | "basename" | "cat" | "cut" | "date" | "dirname" | "echo" | "false" | "grep"
+        | "head" | "jq" | "ls" | "nl" | "printf" | "printenv" | "pwd" | "rg" | "sort" | "tail"
+        | "test" | "tr" | "true" | "uniq" | "wc" | "which" | "[" => true,
         "find" => !tokens
             .iter()
             .any(|token| matches!(*token, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
@@ -878,13 +686,25 @@ fn is_read_only_segment(segment: &str) -> bool {
         "env" => tokens
             .get(1)
             .is_none_or(|token| is_read_only_command_token(token)),
+        "gh" => is_read_only_gh_tokens(&tokens[1..]),
         "git" => is_read_only_git_tokens(&tokens[1..]),
         "gwtd" => is_read_only_gwtd_tokens(&tokens[1..]),
         _ => false,
     }
 }
 
-fn segment_tokens(segment: &str) -> Vec<&str> {
+/// Read-only `gh` queries used by release monitoring. Everything else remains
+/// classified as mutating (`gh run rerun`, `gh release create`, ...); note that a
+/// separate block-bash policy independently restricts `gh pr` / `gh issue` /
+/// `gh run view` regardless of owner state.
+fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
+    matches!(
+        tokens,
+        ["release", "view" | "list", ..] | ["run", "list", ..]
+    )
+}
+
+pub(crate) fn segment_tokens(segment: &str) -> Vec<&str> {
     let raw = segment.split_whitespace().collect::<Vec<_>>();
     let mut start = 0;
     while raw
@@ -940,8 +760,14 @@ fn is_env_assignment(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn normalize_command_name(token: &str) -> String {
+pub(crate) fn normalize_command_name(token: &str) -> String {
     let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
+    // Skills resolve gwtd through `resolve_gwt_bin` and invoke it as
+    // `"$GWT_BIN"`; treat that documented convention as the gwtd command so
+    // envelope classification does not depend on the invocation spelling.
+    if matches!(token, "$GWT_BIN" | "${GWT_BIN}") {
+        return "gwtd".to_string();
+    }
     Path::new(token)
         .file_name()
         .and_then(|name| name.to_str())
@@ -950,13 +776,27 @@ fn normalize_command_name(token: &str) -> String {
 }
 
 fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
-    match tokens {
-        ["cat-file" | "diff" | "log" | "ls-files" | "ls-tree" | "rev-parse" | "show" | "status", ..] => {
-            true
+    let mut subcommand_index = 0;
+    loop {
+        match tokens.get(subcommand_index).copied() {
+            Some("-C" | "-c") if tokens.get(subcommand_index + 1).is_some() => {
+                subcommand_index += 2;
+            }
+            Some("--no-pager" | "-P") => {
+                subcommand_index += 1;
+            }
+            Some("-C" | "-c") => return false,
+            _ => break,
         }
+    }
+    let tokens = &tokens[subcommand_index..];
+    match tokens {
+        ["cat-file" | "diff" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "rev-list"
+        | "rev-parse" | "show" | "status", ..] => true,
         ["branch", rest @ ..] => is_read_only_git_branch_args(rest),
         ["config", rest @ ..] => is_read_only_git_config_args(rest),
         ["remote", rest @ ..] => is_read_only_git_remote_args(rest),
+        ["tag", rest @ ..] => is_read_only_git_tag_args(rest),
         _ => false,
     }
 }
@@ -1116,6 +956,33 @@ fn is_read_only_git_remote_args(args: &[&str]) -> bool {
     matches!(args, [] | ["-v" | "--verbose"] | ["show" | "get-url", ..])
 }
 
+/// `git tag` is read-only only in list/query form. Creation (`git tag v1`),
+/// deletion, and re-pointing must keep requiring an owner.
+fn is_read_only_git_tag_args(args: &[&str]) -> bool {
+    let mut saw_query_flag = false;
+    let mut saw_positional = false;
+    for arg in args {
+        if let Some(flag) = arg.strip_prefix("--") {
+            let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+            match name {
+                "list" | "contains" | "no-contains" | "points-at" | "merged" | "no-merged"
+                | "sort" | "format" | "column" | "no-column" | "color" | "ignore-case"
+                | "omit-empty" => saw_query_flag = true,
+                _ => return false,
+            }
+        } else if let Some(flag) = arg.strip_prefix('-') {
+            match flag {
+                "l" | "i" => saw_query_flag = true,
+                _ if flag.starts_with('n') => saw_query_flag = true,
+                _ => return false,
+            }
+        } else {
+            saw_positional = true;
+        }
+    }
+    saw_query_flag || !saw_positional
+}
+
 fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
     match tokens {
         ["board", "show", ..] => true,
@@ -1133,136 +1000,14 @@ fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
     }
 }
 
-fn resolve_issue_from_linkage_store(
-    worktree_root: &Path,
-    session: Option<&Session>,
-) -> Option<u64> {
-    let repo_hash = crate::index_worker::detect_repo_hash(worktree_root)?;
-    let store_path = gwt_cache_dir()
-        .join("issue-links")
-        .join(format!("{}.json", repo_hash.as_str()));
-    let bytes = std::fs::read(&store_path).ok()?;
-    let store: IssueBranchLinkStore = serde_json::from_slice(&bytes).ok()?;
-    let branch = resolve_branch_name(worktree_root, session)?;
-    store.branches.get(&branch).copied()
-}
-
-fn resolve_branch_name(worktree_root: &Path, session: Option<&Session>) -> Option<String> {
-    if let Some(branch) = session
-        .map(|session| session.branch.trim())
-        .filter(|branch| !branch.is_empty())
-    {
-        return Some(branch.to_string());
-    }
-
-    gwt_git::Repository::discover(worktree_root)
-        .ok()?
-        .current_branch()
-        .ok()?
-}
-
-fn has_nonempty_section(spec_body: &SpecBody, name: &str) -> bool {
-    spec_body
-        .sections
-        .get(&SectionName(name.to_string()))
-        .is_some_and(|content| !content.trim().is_empty())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs};
-
-    use gwt_agent::{session::Session, types::AgentId};
-    use gwt_github::{
-        client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
-        Cache,
-    };
 
     use super::*;
 
-    use gwt_core::test_support::ScopedEnvVar;
-
-    fn init_repo(repo: &Path) {
-        fs::create_dir_all(repo).expect("create repo");
-        let mut init_cmd = gwt_core::process::hidden_command("git");
-        init_cmd.args(["init", "--quiet"]).current_dir(repo);
-        gwt_core::process::scrub_git_env(&mut init_cmd);
-        let init = init_cmd.output().expect("git init");
-        assert!(init.status.success(), "git init failed");
-
-        let mut remote_cmd = gwt_core::process::hidden_command("git");
-        remote_cmd
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/repo.git",
-            ])
-            .current_dir(repo);
-        gwt_core::process::scrub_git_env(&mut remote_cmd);
-        let remote = remote_cmd.output().expect("git remote add");
-        assert!(remote.status.success(), "git remote add failed");
-
-        let mut branch_cmd = gwt_core::process::hidden_command("git");
-        branch_cmd
-            .args(["checkout", "-b", "feature/coverage"])
-            .current_dir(repo);
-        gwt_core::process::scrub_git_env(&mut branch_cmd);
-        let branch = branch_cmd.output().expect("git checkout");
-        assert!(branch.status.success(), "git checkout failed");
-    }
-
-    fn issue_snapshot(number: u64, labels: &[&str], body: &str) -> IssueSnapshot {
-        IssueSnapshot {
-            number: IssueNumber(number),
-            title: format!("Issue {number}"),
-            body: body.to_string(),
-            labels: labels.iter().map(|label| (*label).to_string()).collect(),
-            state: IssueState::Open,
-            updated_at: UpdatedAt::new("2026-04-20T00:00:00Z"),
-            comments: Vec::new(),
-        }
-    }
-
-    fn spec_body_with_plan_and_tasks() -> &'static str {
-        r#"<!-- gwt-spec id=2001 version=1 -->
-<!-- sections:
-spec=body
-plan=body
-tasks=body
--->
-<!-- artifact:spec BEGIN -->
-Coverage requirements.
-<!-- artifact:spec END -->
-
-<!-- artifact:plan BEGIN -->
-1. Add tests.
-<!-- artifact:plan END -->
-
-<!-- artifact:tasks BEGIN -->
-- [ ] Enforce pre-push coverage.
-<!-- artifact:tasks END -->
-"#
-    }
-
-    fn write_issue_links(repo_path: &Path, links: &[(&str, u64)]) {
-        let repo_hash = crate::index_worker::detect_repo_hash(repo_path).expect("repo hash");
-        let path = gwt_cache_dir()
-            .join("issue-links")
-            .join(format!("{}.json", repo_hash.as_str()));
-        fs::create_dir_all(path.parent().expect("issue-links dir"))
-            .expect("create issue-links dir");
-        let branches = links
-            .iter()
-            .map(|(branch, number)| ((*branch).to_string(), *number))
-            .collect::<HashMap<_, _>>();
-        fs::write(
-            path,
-            serde_json::to_vec(&serde_json::json!({ "branches": branches })).expect("json"),
-        )
-        .expect("write issue links");
-    }
-
+    // Issue #3265: the `.gwt/` bookkeeping allowance resolves the redirect
+    // word the hook sees, which is *before* the shell expands it. Anything
+    // that could still expand elsewhere fails closed.
     #[test]
     fn handle_with_input_ignores_empty_and_rejects_invalid_json() {
         assert_eq!(
@@ -1298,42 +1043,466 @@ Coverage requirements.
         assert!(detail.contains("which window is doing what"), "{detail}");
     }
 
+    fn bash_event(command: &str) -> HookEvent {
+        HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            transcript_path: None,
+            cwd: None,
+        }
+    }
+
+    fn envelope_command(operation: &str, params: &str) -> String {
+        format!(
+            "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{params}}}\nJSON"
+        )
+    }
+
+    fn review_context() -> WorkflowContext {
+        // The review window is launched with the title missing and no
+        // Workspace Work — exactly the state that used to deny everything.
+        WorkflowContext::unknown()
+            .with_title_summary_missing(true)
+            .with_review_dispatch_session(true)
+    }
+
+    /// Issue #3984 AC-1/AC-2: the review window publishes its verdict and
+    /// explains it on the Board even though its identity can never be set.
     #[test]
-    fn lane_code_edit_guard_blocks_intake_production_edits_allows_bookkeeping() {
-        let repo = tempfile::tempdir().expect("repo");
-        let edit_event = |path: &std::path::Path| HookEvent {
-            tool_name: Some("Edit".to_string()),
-            tool_input: Some(serde_json::json!({ "file_path": path.to_str().unwrap() })),
+    fn review_dispatch_session_may_publish_its_verdict_and_post_to_the_board() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            envelope_command(
+                "issue.monitor.review_verdict",
+                r#"{"issue_number":3984,"reviewed_sha":"abc123","verdict":"{}"}"#,
+            ),
+            envelope_command("board.post", r#"{"kind":"status","body":"verdict: fail"}"#),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &review_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-2: the reviewer still cannot rewrite what the
+    /// implementing session produced, or settle its authority.
+    #[test]
+    fn review_dispatch_session_cannot_write_the_implementation_artifacts() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for (operation, params) in [
+            ("pr.edit", r#"{"number":4000,"body":"approved"}"#),
+            ("execution.complete", "{}"),
+            ("issue.spec.edit", r#"{"number":3984,"section":"tasks"}"#),
+            (
+                "workspace.update",
+                r#"{"purpose":"review","current_focus":"review"}"#,
+            ),
+            // `verify.run` executes arbitrary commands and writes the
+            // implementer's evidence bundle; its own caller-authority check is
+            // empty for a session with no Execution Control Record, so this
+            // hook is the only thing denying it.
+            ("verify.run", r#"{"commands":["cargo test -p gwt"]}"#),
+            ("verify.plan", r#"{"derive":true}"#),
+        ] {
+            let command = envelope_command(operation, params);
+            let output = evaluate_with_context(&bash_event(&command), worktree, &review_context())
+                .expect("guard output");
+            let HookOutput::PreToolUsePermission {
+                summary, detail, ..
+            } = output
+            else {
+                panic!("expected {operation} to be denied, got {output:?}");
+            };
+            assert!(summary.contains(operation), "{summary}");
+            assert!(
+                detail.contains("issue.monitor.review_verdict"),
+                "the denial must route to the verdict publish: {detail}"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-2: lifting the title gate must not open the file tools.
+    /// Before this change they were denied only as a side effect of that gate,
+    /// and they are the most direct way to rewrite the diff under review.
+    #[test]
+    fn review_dispatch_session_cannot_edit_files() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for tool in ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"] {
+            let event = HookEvent {
+                tool_name: Some(tool.to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("crates/gwt/src/lib.rs").to_string_lossy()
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+            let output =
+                evaluate_with_context(&event, worktree, &review_context()).expect("guard output");
+            assert!(
+                matches!(output, HookOutput::PreToolUsePermission { .. }),
+                "{tool} must be denied in a review window, got {output:?}"
+            );
+        }
+    }
+
+    /// The read-only half of the denied families stays available — refusing it
+    /// would blind the reviewer without protecting anything (AC-4).
+    #[test]
+    fn review_dispatch_session_keeps_the_read_only_half_of_denied_families() {
+        for operation in [
+            "execution.status",
+            "pr.view",
+            "pr.checks",
+            "workspace.candidates",
+            "verify.lease.status",
+        ] {
+            assert!(
+                !is_review_dispatch_denied_operation(operation),
+                "{operation} is read-only and must stay available"
+            );
+        }
+        for operation in [
+            "verify.run",
+            "verify.plan",
+            "verify.adjudicate",
+            "verify.lease.acquire",
+            "build.complete",
+        ] {
+            assert!(
+                is_review_dispatch_denied_operation(operation),
+                "{operation} must be denied"
+            );
+        }
+    }
+
+    /// Issue #3984 AC-4: review-necessary read-only work runs. `cargo test` is
+    /// not read-only, but nothing about a review window should block it —
+    /// before this change the title gate denied it outright.
+    #[test]
+    fn review_dispatch_session_may_run_review_commands() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            "git log --oneline -20",
+            "git diff origin/develop...HEAD",
+            "cargo test -p gwt --bin gwt review_dispatch",
+            "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON",
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(command), worktree, &review_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Non-regression: the review contract applies only to review windows. An
+    /// ordinary producing session keeps both the title gate and its full
+    /// write surface.
+    #[test]
+    fn an_ordinary_session_is_unaffected_by_the_review_contract() {
+        let command = envelope_command("pr.edit", r#"{"number":4000,"body":"x"}"#);
+        assert_eq!(
+            evaluate_review_dispatch_guard(&bash_event(&command), false).expect("guard output"),
+            HookOutput::Silent
+        );
+        assert!(matches!(
+            evaluate_title_summary_guard(&bash_event("cargo test -p gwt"), true)
+                .expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn trusted_state_write_guard_blocks_direct_edits_in_all_lanes() {
+        for state_file in [
+            ".gwt/skill-state/execution-control.json",
+            ".gwt/skill-state/execution-generation-pointer.json",
+            ".gwt/skill-state/verification-run.json",
+            ".gwt/skill-state/verification-plan.json",
+            ".gwt/skill-state/intake-outcome.json",
+            ".gwt/skill-state/action-obligations.json",
+            ".gwt/skill-state/action-obligation-revival.json",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Edit".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": format!("E:/work/repo/{state_file}")
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert!(
+                matches!(
+                    evaluate_trusted_state_write_guard(&event).expect("guard"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "direct edit of {state_file} must be blocked"
+            );
+        }
+
+        // Windows-style separators are normalized.
+        let event = HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "E:\\work\\repo\\.gwt\\skill-state\\execution-control.json"
+            })),
             transcript_path: None,
             cwd: None,
         };
-        let src = repo.path().join("crates/gwt/src/main.rs");
-        let bookkeeping = repo.path().join(".gwt/work/events.jsonl");
+        assert!(matches!(
+            evaluate_trusted_state_write_guard(&event).expect("guard"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
 
-        // Intake lane (from the lane file): block production source, allow the
-        // .gwt/ bookkeeping path.
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
-        assert!(
-            matches!(
-                evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
-                HookOutput::PreToolUsePermission { .. }
-            ),
-            "intake must not edit production source"
+        // P9b: the repo-scoped trusted store copies are equally protected,
+        // including case-variant spellings on case-insensitive filesystems.
+        for trusted_path in [
+            "C:/Users/u/.gwt/projects/abc123/trusted/0011223344556677/execution-control.json",
+            "C:\\Users\\u\\.gwt\\projects\\abc123\\trusted\\0011223344556677\\verification-run.json",
+            "C:/Users/u/.GWT/Projects/abc123/Trusted/0011223344556677/EXECUTION-CONTROL.JSON",
+            "E:/work/repo/.GWT/Skill-State/Verification-Plan.json",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Write".to_string()),
+                tool_input: Some(serde_json::json!({ "file_path": trusted_path })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert!(
+                matches!(
+                    evaluate_trusted_state_write_guard(&event).expect("guard"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "direct edit of trusted store copy {trusted_path} must be blocked"
+            );
+        }
+
+        // Ordinary files and non-file tools pass.
+        let event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "E:/work/repo/crates/gwt/src/main.rs"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_trusted_state_write_guard(&event).expect("guard"),
+            HookOutput::Silent
+        );
+        let bash = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": "cargo test" })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_trusted_state_write_guard(&bash).expect("guard"),
+            HookOutput::Silent
+        );
+    }
+
+    // SPEC-3248 P7A (T-076), amended by SPEC #3245: standalone gwtd JSON
+    // envelope operations that settle curation and execution remain silent
+    // after the lane/owner guards were removed.
+    #[test]
+    fn stop_gate_settlement_operations_pass_ownerless() {
+        let bash_event = |command: &str| HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        // Intake artifact gate settlement paths (FR-017).
+        let intake = tempfile::tempdir().expect("repo");
+        for operation in [
+            "issue.create",
+            "issue.edit",
+            "issue.comment",
+            "issue.spec.create",
+            "issue.spec.edit",
+            "intake.outcome.record",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert_eq!(
+                evaluate_with_context(
+                    &bash_event(&command),
+                    intake.path(),
+                    &WorkflowContext::unknown(),
+                )
+                .expect("guard"),
+                HookOutput::Silent,
+                "intake settlement op {operation} must pass PreToolUse ownerless"
+            );
+        }
+
+        // Execution-side gates (execution control, obligations, evidence,
+        // PR handoff) advertise these operations in their block messages.
+        let execution = tempfile::tempdir().expect("repo");
+        for operation in [
+            "verify.plan",
+            "verify.run",
+            "execution.complete",
+            "execution.blocked",
+            "execution.adopt",
+            "pr.create",
+            "pr.edit",
+            "pr.ready",
+            "build.complete",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert_eq!(
+                evaluate_with_context(
+                    &bash_event(&command),
+                    execution.path(),
+                    &WorkflowContext::unknown(),
+                )
+                .expect("guard"),
+                HookOutput::Silent,
+                "execution settlement op {operation} must pass PreToolUse ownerless"
+            );
+        }
+    }
+
+    // #3356 / SPEC #3245: read-only loops, bookkeeping writes, and production
+    // writes all stay silent after the owner guard removal.
+    #[test]
+    fn ownerless_read_only_loops_and_bookkeeping_writes_pass() {
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown();
+
+        for command in [
+            "for d in crates docs scripts; do ls \"$d\"; done",
+            "for f in a.json b.json; do head -c 200 \"$f\"; done",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(&event, repo.path(), &context).expect("guard"),
+                HookOutput::Silent,
+                "read-only loop must pass ownerless: {command}"
+            );
+        }
+
+        let write_event = |path: String| HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": path })),
+            transcript_path: None,
+            cwd: None,
+        };
+        // Worktree bookkeeping (any extension) and the OS temp scratchpad
+        // are sanctioned ownerless surfaces.
+        for path in [
+            repo.path()
+                .join(".gwt/work/scratch/data.json")
+                .to_string_lossy()
+                .to_string(),
+            repo.path()
+                .join("tasks/state.json")
+                .to_string_lossy()
+                .to_string(),
+            std::env::temp_dir()
+                .join("claude/session-x/scratchpad/probe.json")
+                .to_string_lossy()
+                .to_string(),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&write_event(path.clone()), repo.path(), &context)
+                    .expect("guard"),
+                HookOutput::Silent,
+                "bookkeeping write must pass ownerless: {path}"
+            );
+        }
+        // SPEC #3245 FR-009: production source writes are no longer
+        // owner-gated either — every surface above and below evaluates the
+        // same way for ownerless sessions.
+        let production = write_event(
+            repo.path()
+                .join("crates/gwt/src/main.rs")
+                .to_string_lossy()
+                .to_string(),
         );
         assert_eq!(
-            evaluate_lane_code_edit_guard(&edit_event(&bookkeeping), repo.path()).expect("guard"),
+            evaluate_with_context(&production, repo.path(), &context).expect("guard"),
             HookOutput::Silent,
-            "intake may edit .gwt bookkeeping"
+            "production source writes must pass ownerless after the owner guard removal"
         );
+    }
 
-        // Execution lane: no code-edit block.
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::EXECUTION_PROFILE)
-            .expect("execution lane");
-        assert_eq!(
-            evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
-            HookOutput::Silent,
-            "execution may edit production code"
-        );
+    #[test]
+    fn issue_monitor_json_operations_have_the_expected_policy_classification() {
+        assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
+        // SPEC #3914 FR-011: reading the candidate pool mutates nothing.
+        assert!(is_read_only_json_envelope_operation(
+            "issue.monitor.profiles"
+        ));
+        for operation in [
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            // SPEC #3914 FR-011: replacing the pool is a config write.
+            "issue.monitor.profiles.set",
+            // SPEC-3431 FR-006: launch_now mutates priority order, so it is
+            // not read-only — but it must stay ownerless-safe like its siblings.
+            "issue.monitor.launch_now",
+            // SPEC-3431 FR-033: stop revokes a launch's authority and slot.
+            "issue.monitor.stop",
+            // SPEC-3431 FR-029〜031: failover revokes it and requeues.
+            "issue.monitor.failover",
+            // Issue #3645 / #3628: requeue releases a dead failure hold.
+            "issue.monitor.requeue",
+            // Issue #3844: a wait declaration mutates the driver's liveness view.
+            "issue.monitor.wait",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown();
+        for operation in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            "issue.monitor.profiles",
+            "issue.monitor.profiles.set",
+            "issue.monitor.launch_now",
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            "issue.monitor.requeue",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": command})),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(&event, repo.path(), &context).expect("policy"),
+                HookOutput::Silent,
+                "operation must pass the ownerless execution policy: {operation}"
+            );
+        }
     }
 
     #[test]
@@ -1475,6 +1644,42 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_execution_status_before_identity_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_pm_status_before_identity_is_set() {
+        // SPEC-3431: pm.status is read-only diagnostics and must work before
+        // the session identity or an owner is established.
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
     fn title_summary_guard_allows_read_only_git_config_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
@@ -1506,6 +1711,30 @@ Coverage requirements.
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_read_only_git_after_global_options() {
+        for command in [
+            "git -C /tmp/repository log -1",
+            "git -c color.ui=false status --short",
+            "git --no-pager log -1",
+            "git -P show --stat HEAD",
+            "git -C /tmp/repository -c color.ui=false --no-pager log -1",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -1686,6 +1915,8 @@ Coverage requirements.
             }
         }
 
+        let repo = tempfile::tempdir().expect("repo");
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -1697,7 +1928,7 @@ Coverage requirements.
 
         let output = evaluate_with_context(
             &event,
-            std::path::Path::new("."),
+            repo.path(),
             &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
@@ -1726,7 +1957,7 @@ Coverage requirements.
         assert_eq!(
             evaluate_with_context(
                 &allowed,
-                std::path::Path::new("."),
+                repo.path(),
                 &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
@@ -1747,7 +1978,7 @@ Coverage requirements.
             assert_eq!(
                 evaluate_with_context(
                     &allowed,
-                    std::path::Path::new("."),
+                    repo.path(),
                     &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
@@ -1755,191 +1986,5 @@ Coverage requirements.
                 "{command}"
             );
         }
-    }
-
-    #[test]
-    fn owner_guard_allows_read_only_exploration_without_owner() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({
-                "command": "rg -n WorkflowContext crates/gwt/src"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        assert_eq!(
-            evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
-                .expect("guard output"),
-            HookOutput::Silent
-        );
-    }
-
-    #[test]
-    fn owner_guard_blocks_mutating_tools_without_owner() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Edit".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": "crates/gwt/src/lib.rs"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        let output = evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
-            .expect("guard output");
-        let HookOutput::PreToolUsePermission {
-            summary, detail, ..
-        } = output
-        else {
-            panic!("expected owner guard");
-        };
-        assert!(summary.contains("Owner Issue/SPEC"), "{summary}");
-        assert!(detail.contains("mutating implementation work"), "{detail}");
-    }
-
-    #[test]
-    fn owner_guard_requires_plan_and_tasks_for_spec_owner() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Write".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": "crates/gwt/src/lib.rs"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        let output = evaluate_with_context(
-            &event,
-            repo.path(),
-            &WorkflowContext::spec_issue(1935, true, false),
-        )
-        .expect("guard output");
-        let HookOutput::PreToolUsePermission { detail, .. } = output else {
-            panic!("expected SPEC plan/tasks guard");
-        };
-        assert!(detail.contains("SPEC #1935"), "{detail}");
-        assert!(detail.contains("`plan` and `tasks`"), "{detail}");
-
-        assert_eq!(
-            evaluate_with_context(
-                &event,
-                repo.path(),
-                &WorkflowContext::spec_issue(1935, true, true),
-            )
-            .expect("guard output"),
-            HookOutput::Silent
-        );
-
-        let transport = HookEvent {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({
-                "command": "git push origin develop"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-        assert_eq!(
-            evaluate_with_context(
-                &transport,
-                repo.path(),
-                &WorkflowContext::spec_issue(1935, false, true),
-            )
-            .expect("transport output"),
-            HookOutput::Silent
-        );
-    }
-
-    #[test]
-    fn owner_guard_honors_workflow_bypass() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Write".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": "CHANGELOG.md"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        assert_eq!(
-            evaluate_with_context(
-                &event,
-                repo.path(),
-                &WorkflowContext::with_bypass(WorkflowBypass::Chore),
-            )
-            .expect("guard output"),
-            HookOutput::Silent
-        );
-    }
-
-    #[test]
-    fn resolve_workflow_context_uses_session_cache_and_linkage_store() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _lock = crate::cli::fake_gh_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-
-        let repo = home.path().join("repo");
-        init_repo(&repo);
-
-        let cache_root =
-            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
-        let cache = Cache::new(cache_root);
-        cache
-            .write_snapshot(&issue_snapshot(41, &["bug"], "plain issue body"))
-            .expect("write plain issue");
-        cache
-            .write_snapshot(&issue_snapshot(
-                42,
-                &["gwt-spec", "phase/in-progress"],
-                spec_body_with_plan_and_tasks(),
-            ))
-            .expect("write spec issue");
-
-        let mut session = Session::new(&repo, "feature/coverage", AgentId::Codex);
-        session.linked_issue_number = Some(42);
-        session.workflow_bypass = Some(WorkflowBypass::Chore);
-        session.save(&gwt_sessions_dir()).expect("save session");
-        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
-
-        let context = resolve_workflow_context(&repo);
-        assert_eq!(context.owner, WorkflowOwner::Spec(42));
-        assert!(context.has_plan);
-        assert!(context.has_tasks);
-        assert_eq!(context.bypass, Some(WorkflowBypass::Chore));
-
-        let loaded = load_session_from_env().expect("session from env");
-        assert_eq!(loaded.id, session.id);
-
-        write_issue_links(&repo, &[("feature/coverage", 41)]);
-        session.linked_issue_number = None;
-        session.save(&gwt_sessions_dir()).expect("update session");
-
-        let linked_issue = resolve_issue_from_linkage_store(&repo, Some(&session));
-        assert_eq!(linked_issue, Some(41));
-        assert_eq!(
-            resolve_branch_name(&repo, Some(&session)).as_deref(),
-            Some("feature/coverage")
-        );
-
-        let plain_context = resolve_workflow_context(&repo);
-        assert_eq!(plain_context.owner, WorkflowOwner::Issue(41));
-        assert!(!plain_context.has_plan);
-        assert!(!plain_context.has_tasks);
-
-        let spec_body = gwt_github::body::SpecBody::parse(spec_body_with_plan_and_tasks(), &[])
-            .expect("parse spec body");
-        assert!(has_nonempty_section(&spec_body, "plan"));
-        assert!(has_nonempty_section(&spec_body, "tasks"));
-        assert!(!has_nonempty_section(&spec_body, "notes"));
     }
 }

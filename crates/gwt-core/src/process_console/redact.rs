@@ -7,6 +7,7 @@
 //! when running in verbose / debug mode:
 //!
 //! - `Authorization: <anything>` headers (case-insensitive)
+//! - URL userinfo (`scheme://user:password@host`)
 //! - `token=<value>` URL parameters
 //! - GitHub Personal Access Token prefixes (`gh_` / `ghp_` / `ghs_` / `ghu_`) followed by 16+ alphanumerics
 //!
@@ -29,9 +30,19 @@ pub const REDACTED: &str = "***redacted***";
 pub fn redact_line(line: &str) -> String {
     let mut out = line.to_string();
     out = authorization_re().replace_all(&out, REDACTED).into_owned();
+    out = url_userinfo_re()
+        .replace_all(&out, format!("${{1}}{REDACTED}@"))
+        .into_owned();
     out = url_token_re().replace_all(&out, REDACTED).into_owned();
     out = github_token_re().replace_all(&out, REDACTED).into_owned();
     out
+}
+
+fn url_userinfo_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@").expect("URL userinfo regex")
+    })
 }
 
 fn authorization_re() -> &'static Regex {
@@ -75,6 +86,16 @@ mod tests {
         assert!(out.contains(REDACTED));
         assert!(!out.contains("secretvalue123"));
         assert!(out.contains("/api/v3/user"));
+    }
+
+    #[test]
+    fn redacts_url_userinfo_credentials() {
+        let line = "fetch https://build-user:password-sentinel@example.test/repository";
+        let out = redact_line(line);
+
+        assert!(out.contains("https://***redacted***@example.test/repository"));
+        assert!(!out.contains("build-user"));
+        assert!(!out.contains("password-sentinel"));
     }
 
     #[test]

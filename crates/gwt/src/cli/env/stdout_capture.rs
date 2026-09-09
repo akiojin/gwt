@@ -88,6 +88,24 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_pr(number)
     }
 
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.inner.fetch_pr_quarantine_context(number)
+    }
+
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        self.inner.list_open_prs(options)
+    }
+
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        self.inner.probe_github_rate_limit()
+    }
+
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.inner.mark_pr_ready(number)
     }
@@ -126,6 +144,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String> {
         self.inner.fetch_actions_job_log(job_id)
+    }
+
+    fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
+        self.inner.rerun_actions(target)
     }
 
     fn run_internal_command(

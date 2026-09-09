@@ -2,7 +2,7 @@
 // Owns the wizard state (launchWizard / launchWizardOpenError /
 // launchWizardOpening / branch draft / pending action), the
 // wizardInteractionGuard that defers destructive re-renders while a native
-// <select> dropdown or the reasoning slider is mid-interaction, the field
+// <select>, segmented choice, or reasoning slider is mid-interaction, the field
 // builders, the state transitions, renderLaunchWizard, the wizard chrome
 // listeners (installWizardChrome), and the wizard branch of the global Esc
 // handler. Pure movement from app.js: behavior, DOM output, and WS protocol
@@ -26,6 +26,23 @@ import {
   buildReasoningField,
   buildToggleField,
 } from "/launch-controls.js";
+
+// SPEC-2359 W-24 (FR-572) / #3410: conversation history and Execution
+// generation are independent intents. The legacy resume methods reopen the
+// conversation with input enabled; producing authority is recovered by the
+// backend continuation coordinator, and Work-level Continue work owns
+// successor generations.
+export function launchWizardStartMethodIntent(methodKind) {
+  switch (methodKind) {
+    case "continue_last_session":
+    case "open_session_picker":
+      return "resume";
+    case "focus_running_session":
+      return "focus";
+    default:
+      return "launch";
+  }
+}
 
 export function createLaunchWizardSurface({
   createNode,
@@ -58,9 +75,12 @@ export function createLaunchWizardSurface({
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
       let launchWizardPendingAction = null;
-      // SPEC-2359 US-80 — Start Work duplicate-work advisory. The intake prompt
-      // is always skippable; these locals drive the debounced query and the
-      // non-blocking results panel. `wizardAdvisoryLatestRequestId` guards
+      let launchWizardPendingActionDisconnected = false;
+      let launchWizardPendingActionQueued = false;
+      // SPEC-2359 US-80 — Plan Agent duplicate-work advisory. The
+      // work-registration prompt is always skippable; these locals drive the
+      // debounced query and non-blocking results panel.
+      // `wizardAdvisoryLatestRequestId` guards
       // against stale responses arriving out of order.
       let wizardPromptDraft = "";
       let wizardPromptBackendValue = "";
@@ -86,7 +106,7 @@ export function createLaunchWizardSurface({
             return;
           }
           if (deferred.kind === "launch_wizard_state") {
-            if (!deferred.wizard?.launch_materialization_pending) {
+            if (shouldClearLaunchWizardPendingAction(deferred.wizard)) {
               clearLaunchWizardPendingAction();
             }
             clearLaunchWizardOpening();
@@ -170,6 +190,60 @@ export function createLaunchWizardSurface({
         }
         button.addEventListener("click", onSelect);
         return button;
+      }
+
+      // SPEC-3864 FR-005..FR-007: agent-independent setup affordance. The
+      // backend derives `launchWizard.agent_setup` from the selected agent's
+      // descriptor (install when no Installed / latest route exists,
+      // configure when first-time setup is missing); this renders whatever
+      // it says without any per-agent branch.
+      function appendAgentSetupNote(parent, setup) {
+        if (!setup) return null;
+        const note = createNode("div", "launch-note launch-agent-setup");
+        note.dataset.agentId = setup.agent_id || "";
+        note.dataset.setupKind = setup.kind || "";
+        note.setAttribute("role", "note");
+        note.appendChild(
+          createNode("div", "launch-agent-setup__title", setup.title || ""),
+        );
+        note.appendChild(
+          createNode("div", "launch-agent-setup__detail", setup.detail || ""),
+        );
+        if (setup.action_label) {
+          const button = createNode(
+            "button",
+            "launch-choice-button launch-agent-setup__action",
+            setup.action_label,
+          );
+          button.type = "button";
+          button.addEventListener("click", () =>
+            sendWizardAction({ kind: "run_agent_setup" }),
+          );
+          note.appendChild(button);
+        }
+        parent.appendChild(note);
+        return note;
+      }
+
+      // Issue #4079 AC-2: the Issue Monitor Agent Settings form always writes
+      // candidate 1 of the launch pool, so the backend derives which candidate
+      // that replaces and the pool summary the save will produce. Rendering it
+      // here is what stops a switch from looking like it did nothing when the
+      // chosen agent already sat further down the pool.
+      function appendIssueMonitorPoolImpactNote(parent, impact) {
+        if (!impact) return null;
+        const note = createNode("div", "launch-note launch-pool-impact");
+        note.dataset.poolAction = impact.action || "";
+        note.dataset.agentId = impact.agent_id || "";
+        note.setAttribute("role", "note");
+        note.appendChild(
+          createNode("div", "launch-pool-impact__title", impact.title || ""),
+        );
+        note.appendChild(
+          createNode("div", "launch-pool-impact__detail", impact.detail || ""),
+        );
+        parent.appendChild(note);
+        return note;
       }
 
       function appendChoiceField(
@@ -257,37 +331,47 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      // SPEC-3152: Hermes provider picker. The choices are enumerated from the
-      // user's own ~/.hermes/config.yaml (model.provider + providers: keys) and
-      // passed in via launchWizard.hermes_provider_options — gwt does not
-      // hardcode a provider list (it would go stale). A leading "use config
-      // default" option and a trailing "Other…" free-text entry cover the
-      // default path and the long tail (built-ins not present in config).
-      function appendHermesProviderField(parent, currentValue, choices, onChange) {
-        const providers = Array.isArray(choices) ? choices : [];
-        const field = createLaunchField("Provider", false);
+      // SPEC-3152 / Issue #3863: Hermes single-choice picker (Provider /
+      // Model / Profile). The choices are enumerated from the user's own
+      // ~/.hermes (config.yaml) and passed in via launchWizard.hermes_*_options
+      // — gwt does not hardcode Hermes lists (they would go stale). A leading
+      // "use config default" option and a trailing "Other…" free-text entry
+      // cover the default path and the long tail (values not present in
+      // config). With no choices the field degrades to default + Other.
+      function appendHermesChoiceField(
+        parent,
+        label,
+        currentValue,
+        choices,
+        onChange,
+        options = {},
+      ) {
+        const known = Array.isArray(choices) ? choices : [];
+        const defaultLabel = options.defaultLabel || "(use config default)";
+        const customLabel = options.customLabel || `Custom ${label.toLowerCase()}`;
+        const field = createLaunchField(label, false);
         const select = createNode("select", "launch-select");
-        select.setAttribute("aria-label", "Provider");
-        const addOption = (value, label) => {
+        select.setAttribute("aria-label", label);
+        const addOption = (value, text) => {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = label;
+          option.textContent = text;
           select.appendChild(option);
         };
-        addOption("", "(use config default)");
-        for (const provider of providers) {
-          addOption(provider, provider);
+        addOption("", defaultLabel);
+        for (const choice of known) {
+          addOption(choice, choice);
         }
         addOption("__other__", "Other…");
-        const isKnown = Boolean(currentValue) && providers.includes(currentValue);
+        const isKnown = Boolean(currentValue) && known.includes(currentValue);
         const isOther = Boolean(currentValue) && !isKnown;
         select.value = currentValue ? (isKnown ? currentValue : "__other__") : "";
 
         const otherInput = document.createElement("input");
         otherInput.type = "text";
         otherInput.className = "launch-input";
-        otherInput.placeholder = "custom provider id";
-        otherInput.setAttribute("aria-label", "Custom provider");
+        otherInput.placeholder = options.otherPlaceholder || "";
+        otherInput.setAttribute("aria-label", customLabel);
         otherInput.value = isOther ? currentValue : "";
         otherInput.style.display = isOther ? "" : "none";
         otherInput.style.marginTop = "6px";
@@ -303,6 +387,81 @@ export function createLaunchWizardSurface({
           }
         });
         field.appendChild(select);
+        field.appendChild(otherInput);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function splitCsvValues(value) {
+        return String(value || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0);
+      }
+
+      // Issue #3863 AC-3/AC-4: Hermes multi-choice picker (Toolsets / Skills).
+      // Known candidates render as checkboxes; an "Other" CSV input carries
+      // values absent from the user's config. The wizard state keeps the
+      // combined CSV string (the Hermes CLI flag format), so this control is
+      // the only place that splits / joins it. With no choices only the CSV
+      // input remains (the pre-#3863 free-text behaviour).
+      function appendHermesMultiChoiceField(
+        parent,
+        label,
+        currentValue,
+        choices,
+        onChange,
+        options = {},
+      ) {
+        const known = Array.isArray(choices) ? choices : [];
+        // Wide: a tall checkbox group must not stretch the sibling column
+        // (a lone select would float mid-row next to it).
+        const field = createLaunchField(label, true);
+        const selected = splitCsvValues(currentValue);
+        const otherInput = document.createElement("input");
+        otherInput.type = "text";
+        otherInput.className = "launch-input";
+        otherInput.placeholder = options.otherPlaceholder || "";
+        otherInput.setAttribute("aria-label", `Other ${label.toLowerCase()}`);
+        otherInput.value = selected.filter((item) => !known.includes(item)).join(",");
+
+        const checkboxes = [];
+        const emit = () => {
+          const values = [];
+          for (const checkbox of checkboxes) {
+            if (checkbox.checked && !values.includes(checkbox.value)) {
+              values.push(checkbox.value);
+            }
+          }
+          for (const extra of splitCsvValues(otherInput.value)) {
+            if (!values.includes(extra)) {
+              values.push(extra);
+            }
+          }
+          onChange(values.join(","));
+        };
+
+        if (known.length > 0) {
+          const list = createNode("div", "launch-multi-choice");
+          list.setAttribute("role", "group");
+          list.setAttribute("aria-label", label);
+          for (const choice of known) {
+            const item = createNode("label", "launch-inline-check");
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.value = choice;
+            checkbox.checked = selected.includes(choice);
+            checkbox.setAttribute("aria-label", `${label}: ${choice}`);
+            checkbox.addEventListener("change", emit);
+            checkboxes.push(checkbox);
+            item.appendChild(checkbox);
+            item.appendChild(createNode("span", "", choice));
+            list.appendChild(item);
+          }
+          field.appendChild(list);
+          otherInput.style.marginTop = "6px";
+        }
+        otherInput.addEventListener("change", emit);
         field.appendChild(otherInput);
         parent.appendChild(field);
         return field;
@@ -431,9 +590,9 @@ export function createLaunchWizardSurface({
         });
       }
 
-      // SPEC-2359 US-80 — is this a Start Work launch (where the work branch is
-      // auto-created)? Start Work hides the branch controls; that is the signal
-      // for showing the optional intake prompt + duplicate-work advisory.
+      // SPEC-2359 US-80 — is this a Plan Agent launch (where the work branch is
+      // auto-created)? Plan Agent hides the branch controls; that is the signal
+      // for showing the optional work-registration prompt and advisory.
       function isStartWorkLaunch() {
         return Boolean(launchWizard) && launchWizard.show_branch_controls === false;
       }
@@ -654,11 +813,55 @@ export function createLaunchWizardSurface({
 
       function setLaunchWizardPendingAction(action) {
         launchWizardPendingAction = action || null;
+        launchWizardPendingActionDisconnected = false;
+        launchWizardPendingActionQueued = false;
         renderLaunchWizard();
       }
 
       function clearLaunchWizardPendingAction() {
         launchWizardPendingAction = null;
+        launchWizardPendingActionDisconnected = false;
+        launchWizardPendingActionQueued = false;
+      }
+
+      function isHolderDecisionPendingAction() {
+        return Boolean(
+          launchWizardPendingAction
+            && (
+              launchWizardPendingAction.kind === "stop_and_start_successor"
+              || launchWizardPendingAction.kind === "move_existing_pane"
+            ),
+        );
+      }
+
+      function handleLaunchWizardTransportChange(connected) {
+        if (!connected && isHolderDecisionPendingAction()) {
+          launchWizardPendingActionDisconnected = true;
+        }
+      }
+
+      function isLaunchWizardCancellationBlocked() {
+        return Boolean(
+          launchWizardPendingAction || launchWizard?.launch_materialization_pending,
+        );
+      }
+
+      function shouldClearLaunchWizardPendingAction(nextWizard) {
+        if (!launchWizardPendingAction) return false;
+        const kind = launchWizardPendingAction.kind;
+        if (kind !== "stop_and_start_successor" && kind !== "move_existing_pane") {
+          return !nextWizard?.launch_materialization_pending;
+        }
+        if (!nextWizard) return true;
+        if (nextWizard.launch_materialization_pending) return false;
+        if (nextWizard.error || nextWizard.hydration_error) return true;
+        if (launchWizardPendingActionDisconnected && !launchWizardPendingActionQueued) {
+          return true;
+        }
+        const nextDecision = nextWizard.holder_decision;
+        return !nextDecision
+          || nextDecision.fingerprint !== launchWizardPendingAction.fingerprint
+          || nextDecision.holder_window_id !== launchWizardPendingAction.window_id;
       }
 
       function openLaunchPendingWizard({ title, meta, message }) {
@@ -673,11 +876,13 @@ export function createLaunchWizardSurface({
         renderLaunchWizard();
       }
 
-      function openStartWorkPendingWizard() {
+      // SPEC-3214 T-042: the standalone existing-branch picker keeps the
+      // pending-wizard UX the removed Start Work entry used to provide.
+      function openExistingBranchPendingWizard() {
         openLaunchPendingWizard({
-          title: "Start Work",
-          meta: "Plan Agent launch",
-          message: "Preparing Plan Agent...",
+          title: "Open existing branch",
+          meta: "Branch picker",
+          message: "Fetching remote branches...",
         });
       }
 
@@ -705,6 +910,7 @@ export function createLaunchWizardSurface({
         if (!releaseWizardInteractionGuardForChromeAction()) {
           return;
         }
+        if (isLaunchWizardCancellationBlocked()) return;
         clearLaunchWizardPendingAction();
         if (launchWizardOpenError) {
           closeLaunchWizardLocal();
@@ -717,7 +923,73 @@ export function createLaunchWizardSurface({
         return !event || event.button === 0 || event.button === undefined;
       }
 
+      function currentHolderDecision() {
+        const decision = launchWizard?.holder_decision;
+        return decision && typeof decision === "object" ? decision : null;
+      }
+
+      function hasHolderDecisionTarget(decision) {
+        return Boolean(
+          decision
+            && typeof decision.fingerprint === "string"
+            && decision.fingerprint.length > 0
+            && typeof decision.holder_window_id === "string"
+            && decision.holder_window_id.length > 0,
+        );
+      }
+
+      function holderDecisionActionAvailable(decision, actionKind) {
+        if (!hasHolderDecisionTarget(decision)) {
+          return false;
+        }
+        return actionKind === "stop_and_start_successor"
+          ? decision.stop_available === true
+          : decision.move_available === true;
+      }
+
+      function handleHolderDecisionAction(
+        actionKind,
+        button,
+        interactionGuardReleased = false,
+      ) {
+        if (
+          (!interactionGuardReleased
+            && !releaseWizardInteractionGuardForChromeAction())
+          || launchWizardOpenError
+          || launchWizardPendingAction
+          || button.disabled
+        ) {
+          return;
+        }
+        const decision = currentHolderDecision();
+        if (!holderDecisionActionAvailable(decision, actionKind)) {
+          return;
+        }
+        const action = {
+          kind: actionKind,
+          fingerprint: decision.fingerprint,
+          window_id: decision.holder_window_id,
+        };
+        setLaunchWizardPendingAction(action);
+        // A destructive holder action must not enter the generic reconnect
+        // queue: once shifted from that queue, a second disconnect could lose
+        // the only delivery while leaving the UI locked forever. An unsent or
+        // disconnected attempt becomes manually retryable after the next
+        // authoritative same-decision snapshot.
+        const disposition = sendWizardAction(action, {
+          queueIfDisconnected: false,
+        });
+        launchWizardPendingActionQueued = false;
+        if (disposition !== "sent") {
+          launchWizardPendingActionDisconnected = true;
+        }
+      }
+
       function handleLaunchWizardSubmitFromChrome() {
+        if (currentHolderDecision()) {
+          handleHolderDecisionAction("stop_and_start_successor", wizardSubmitButton);
+          return;
+        }
         if (
           !releaseWizardInteractionGuardForChromeAction()
           || launchWizardOpenError
@@ -731,6 +1003,7 @@ export function createLaunchWizardSurface({
       }
 
       function renderLaunchWizard() {
+        wizardSubmitButton.classList.remove("destructive");
         if (!launchWizard && !launchWizardOpenError && !launchWizardOpening) {
           clearLaunchWizardPendingAction();
           syncLaunchWizardPendingChrome(false);
@@ -746,7 +1019,7 @@ export function createLaunchWizardSurface({
             wizardFocusTrapRelease = null;
           }
           // SPEC-2356 — restore focus to the trigger that opened the wizard
-          // so keyboard users land back on Start Work / Launch Agent / etc.
+          // so keyboard users land back on Open Workspace / Launch Agent / etc.
           if (wasOpenBeforeClose && wizardFocusReturn && typeof wizardFocusReturn.focus === "function") {
             try { wizardFocusReturn.focus({ preventScroll: true }); }
             catch { wizardFocusReturn.focus(); }
@@ -771,8 +1044,8 @@ export function createLaunchWizardSurface({
         syncWizardDraftState();
         closeModal();
         // Issue #3192 — this derivation runs BEFORE the opening/openError
-        // early returns below, so it is reached for the Start Work /
-        // Launch Agent pending states where `launchWizard` is null
+        // early returns below, so it is reached for generic branch / agent
+        // pending states where `launchWizard` is null
         // (`launchWizardOpening` is set instead). Read the field null-safely:
         // a bare `launchWizard.launch_materialization_pending` throws and
         // renderLaunchWizard() never reaches the `.open` toggle, so the rail
@@ -809,9 +1082,9 @@ export function createLaunchWizardSurface({
 
         if (launchWizardOpening) {
           if (wizardTitle) {
-            wizardTitle.textContent = launchWizardOpening.title || "Start Work";
+            wizardTitle.textContent = launchWizardOpening.title || "Launch Agent";
           }
-          wizardMeta.textContent = launchWizardOpening.meta || "Plan Agent launch";
+          wizardMeta.textContent = launchWizardOpening.meta || "Agent launch";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = true;
           wizardSubmitButton.hidden = true;
@@ -827,7 +1100,7 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              launchWizardOpening.message || "Preparing Plan Agent...",
+              launchWizardOpening.message || "Preparing Launch Agent...",
             ),
           );
           wizardBody.appendChild(openingPanel);
@@ -856,23 +1129,39 @@ export function createLaunchWizardSurface({
           return;
         }
 
+        const holderDecision = currentHolderDecision();
+        const hasHolderTarget = hasHolderDecisionTarget(holderDecision);
         wizardSubmitButton.hidden = false;
+        wizardBackButton.textContent = holderDecision
+          ? launchWizardPendingAction?.kind === "move_existing_pane"
+            ? "Moving..."
+            : "Move existing pane"
+          : "Back";
         wizardBackButton.hidden = !launchWizard.show_back_button;
-        wizardBackButton.disabled = Boolean(
-          isLaunchActionPending
-            || launchWizard.is_hydrating
-            || launchWizard.runtime_resolution_pending
-            || !launchWizard.show_back_button,
-        );
+        if (holderDecision) {
+          wizardBackButton.hidden = false;
+        }
+        wizardBackButton.disabled = holderDecision
+          ? Boolean(
+              isLaunchActionPending
+                || !hasHolderTarget
+                || holderDecision.move_available !== true,
+            )
+          : Boolean(
+              isLaunchActionPending
+                || launchWizard.is_hydrating
+                || launchWizard.runtime_resolution_pending
+                || !launchWizard.show_back_button,
+            );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Plan Agent launch"
           : `Selected branch · ${
-            displayBranchName(
-              launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
-            )
-          }`;
+              displayBranchName(
+                launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
+              )
+            }`;
         wizardSubmitButton.textContent = isLaunchSubmitPending
           ? "Launching..."
           : launchWizard.primary_action_label || (
@@ -890,7 +1179,19 @@ export function createLaunchWizardSurface({
             || launchWizard.runtime_resolution_pending
             || launchWizard.primary_action_enabled === false,
         );
-        wizardCancelButton.disabled = false;
+        if (holderDecision) {
+          wizardSubmitButton.textContent =
+            launchWizardPendingAction?.kind === "stop_and_start_successor"
+              ? "Stopping..."
+              : "Stop and start successor";
+          wizardSubmitButton.classList.add("destructive");
+          wizardSubmitButton.disabled = Boolean(
+            isLaunchActionPending
+              || !hasHolderTarget
+              || holderDecision.stop_available !== true,
+          );
+        }
+        wizardCancelButton.disabled = isLaunchActionPending;
 
         if (launchWizard.error || launchWizard.hydration_error) {
           wizardError.hidden = false;
@@ -966,9 +1267,46 @@ export function createLaunchWizardSurface({
             ),
           );
         }
+        if (holderDecision) {
+          const section = createLaunchSection(
+            "Existing session",
+            "Choose how to continue with the session already holding this work.",
+          );
+          section.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              holderDecision.holder_summary
+                || (holderDecision.holder_session_id
+                  ? `Session ${holderDecision.holder_session_id} is holding this work.`
+                  : "An existing session is holding this work."),
+            ),
+          );
+          if (!hasHolderTarget || holderDecision.stop_available !== true) {
+            section.appendChild(
+              createNode(
+                "div",
+                "launch-field-help",
+                holderDecision.stop_unavailable_reason
+                  || "Stop and start successor is unavailable for this session.",
+              ),
+            );
+          }
+          if (!hasHolderTarget || holderDecision.move_available !== true) {
+            section.appendChild(
+              createNode(
+                "div",
+                "launch-field-help",
+                holderDecision.move_unavailable_reason
+                  || "Move existing pane is unavailable for this session.",
+              ),
+            );
+          }
+          panel.appendChild(section);
+        }
 
-        // SPEC-3165 — Start Work is now the Plan Agent entrypoint. The prompt
-        // is still skippable and still drives the duplicate-work advisory.
+        // SPEC-3165 — the generic work-registration prompt stays skippable
+        // and continues to drive the duplicate-work advisory.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
             "Register an Issue",
@@ -1033,7 +1371,7 @@ export function createLaunchWizardSurface({
             {
               id: "available",
               title: "Available",
-              copy: "Other ways to start or resume this agent.",
+              copy: "Other ways to start, resume, or focus this agent.",
             },
             {
               id: "unavailable",
@@ -1074,6 +1412,8 @@ export function createLaunchWizardSurface({
             for (const method of methods) {
               const button = createNode("button", "start-method-button");
               button.type = "button";
+              const startMethodIntent = launchWizardStartMethodIntent(method.kind);
+              button.dataset.executionIntent = startMethodIntent;
               const isStartMethodPending =
                 launchWizardPendingAction?.kind === "use_start_method"
                   && launchWizardPendingAction.method === method.kind;
@@ -1087,7 +1427,13 @@ export function createLaunchWizardSurface({
                 createNode(
                   "div",
                   "start-method-title",
-                  isStartMethodPending ? "Preparing..." : method.label,
+                  isStartMethodPending
+                    ? startMethodIntent === "resume"
+                      ? "Opening..."
+                      : startMethodIntent === "focus"
+                        ? "Focusing..."
+                        : "Preparing..."
+                    : method.label,
                 ),
               );
               if (method.badge) {
@@ -1146,7 +1492,25 @@ export function createLaunchWizardSurface({
         const openBranchCandidates = Array.isArray(launchWizard.open_branch_candidates)
           ? launchWizard.open_branch_candidates
           : [];
-        if (showStartMethods && openBranchCandidates.length > 0) {
+        // SPEC-3214 FR-010: the standalone picker mode always renders this
+        // section — it IS the surface — including a fetching placeholder
+        // while the candidate refresh is still running.
+        const isExistingBranchMode = launchWizard.mode === "existing_branch";
+        if (isExistingBranchMode && openBranchCandidates.length === 0) {
+          const branchPickerSection = createLaunchSection(
+            "Open an existing branch",
+            "Continue on a remote branch instead of creating a new work branch.",
+          );
+          branchPickerSection.appendChild(
+            createNode(
+              "div",
+              "start-method-summary",
+              "Fetching remote branches...",
+            ),
+          );
+          panel.appendChild(branchPickerSection);
+        }
+        if ((showStartMethods || isExistingBranchMode) && openBranchCandidates.length > 0) {
           const branchPickerSection = createLaunchSection(
             "Open an existing branch",
             "Continue on a remote branch instead of creating a new work branch.",
@@ -1304,7 +1668,19 @@ export function createLaunchWizardSurface({
                   agent_id: value,
                 }),
             );
-            if ((launchWizard.model_options || []).length > 0) {
+            if (launchWizard.selected_agent_id === "grok") {
+              appendTextField(
+                grid,
+                "Model",
+                launchWizard.selected_model,
+                "Grok model id (blank = config)",
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_model",
+                    model: value,
+                  }),
+              );
+            } else if ((launchWizard.model_options || []).length > 0) {
               appendSelectField(
                 grid,
                 "Model",
@@ -1317,10 +1693,23 @@ export function createLaunchWizardSurface({
                   }),
               );
             }
+            // Issue #3962 AC-5: a saved model that left the agent's catalog
+            // falls back to the default instead of failing the launch. Say so
+            // next to the Model field so the swap is never silent.
+            if (launchWizard.model_fallback_notice) {
+              const fallback = createLaunchField("Model changed", true);
+              fallback.appendChild(
+                createNode("div", "launch-note", launchWizard.model_fallback_notice),
+              );
+              grid.appendChild(fallback);
+            }
             if (launchWizard.show_reasoning) {
+              const reasoningLabel = launchWizard.selected_agent_id === "grok"
+                ? "Effort"
+                : "Reasoning";
               appendReasoningField(
                 grid,
-                "Reasoning",
+                reasoningLabel,
                 launchWizard.reasoning_options || [],
                 launchWizard.selected_reasoning,
                 (value) =>
@@ -1355,6 +1744,13 @@ export function createLaunchWizardSurface({
             );
           }
           section.appendChild(grid);
+          if (launchWizard.show_agent_settings) {
+            appendAgentSetupNote(section, launchWizard.agent_setup);
+            appendIssueMonitorPoolImpactNote(
+              section,
+              launchWizard.issue_monitor_pool_impact,
+            );
+          }
           panel.appendChild(section);
         }
 
@@ -1426,19 +1822,12 @@ export function createLaunchWizardSurface({
         if (showSetupForms && launchWizard.show_hermes_options) {
           const section = createLaunchSection(
             "Hermes options",
-            "Provider and optional overrides for the Hermes agent. Blank fields use your hermes setup (config.yaml).",
+            "Provider, model, profile, toolsets and skills for the Hermes agent, listed from your ~/.hermes config. Blank fields use your hermes setup (config.yaml); pick Other… for values not in config.",
           );
-          if (launchWizard.hermes_needs_setup) {
-            const note = createNode(
-              "div",
-              "launch-note",
-              "Hermes is not set up yet (no credentials in ~/.hermes). Run `hermes setup` (or `hermes model`) in a terminal to choose a provider and sign in; gwt will then bridge it into every worktree. You can still launch — Hermes will prompt for setup.",
-            );
-            section.appendChild(note);
-          }
           const grid = createNode("div", "launch-form-grid");
-          appendHermesProviderField(
+          appendHermesChoiceField(
             grid,
+            "Provider",
             launchWizard.hermes_provider,
             launchWizard.hermes_provider_options || [],
             (value) =>
@@ -1447,53 +1836,64 @@ export function createLaunchWizardSurface({
                 field: "provider",
                 value,
               }),
+            { otherPlaceholder: "custom provider id", customLabel: "Custom provider" },
           );
-          appendTextField(
+          // Issue #3863 AC-1: model candidates follow the selected provider
+          // (`providers.<id>.models`); the wizard state stays free-text so
+          // "Other…" still reaches `set_model` unchanged.
+          appendHermesChoiceField(
             grid,
             "Model",
             launchWizard.selected_model,
-            "e.g. anthropic/claude-sonnet-4 (blank = config.yaml)",
+            launchWizard.hermes_model_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_model",
                 model: value,
               }),
+            {
+              otherPlaceholder: "e.g. anthropic/claude-sonnet-4",
+              customLabel: "Custom model",
+            },
           );
-          appendTextField(
+          appendHermesChoiceField(
             grid,
             "Profile",
             launchWizard.hermes_profile,
-            "Hermes profile name (optional)",
+            launchWizard.hermes_profile_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "profile",
                 value,
               }),
+            { otherPlaceholder: "custom profile name", customLabel: "Custom profile" },
           );
-          appendTextField(
+          appendHermesMultiChoiceField(
             grid,
             "Toolsets",
             launchWizard.hermes_toolsets,
-            "comma-separated, e.g. fs,web (optional)",
+            launchWizard.hermes_toolset_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "toolsets",
                 value,
               }),
+            { otherPlaceholder: "other toolsets, comma-separated (optional)" },
           );
-          appendTextField(
+          appendHermesMultiChoiceField(
             grid,
             "Skills",
             launchWizard.hermes_skills,
-            "preloaded skills (optional)",
+            launchWizard.hermes_skill_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "skills",
                 value,
               }),
+            { otherPlaceholder: "other skills, comma-separated (optional)" },
           );
           appendTextField(
             grid,
@@ -1524,34 +1924,16 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // SPEC-3151 FR-008/009/010: OpenCode-specific launch options, rendered
-        // only for the OpenCode agent. OpenCode takes a single free-text
+        // SPEC-3151 FR-008: OpenCode-specific launch options, rendered only
+        // for the OpenCode agent. OpenCode takes a single free-text
         // `provider/model` string (auth is host-global, so no provider bridge
-        // is needed). When no AI provider is configured, a non-blocking note
-        // offers an in-pane setup launcher that runs `opencode auth login`.
+        // is needed). The "not set up" hint and its in-pane launcher moved to
+        // the agent-independent setup affordance (SPEC-3864).
         if (showSetupForms && launchWizard.show_opencode_options) {
           const section = createLaunchSection(
             "OpenCode options",
             "Model and provider sign-in for the OpenCode agent. Blank model uses your OpenCode config.",
           );
-          if (launchWizard.opencode_needs_setup) {
-            const note = createNode(
-              "div",
-              "launch-note",
-              "OpenCode has no AI provider configured yet. Run `/connect` inside OpenCode or `opencode auth login` to sign in. You can still launch — OpenCode will prompt for setup.",
-            );
-            const setupButton = createNode(
-              "button",
-              "launch-choice-button",
-              "Run OpenCode setup",
-            );
-            setupButton.type = "button";
-            setupButton.addEventListener("click", () =>
-              sendWizardAction({ kind: "run_opencode_setup" }),
-            );
-            note.appendChild(setupButton);
-            section.appendChild(note);
-          }
           const grid = createNode("div", "launch-form-grid");
           appendTextField(
             grid,
@@ -1695,7 +2077,8 @@ export function createLaunchWizardSurface({
         ) {
           return;
         }
-        if (!event.wizard?.launch_materialization_pending) {
+        const previousHolderFingerprint = currentHolderDecision()?.fingerprint || null;
+        if (shouldClearLaunchWizardPendingAction(event.wizard)) {
           clearLaunchWizardPendingAction();
         }
         clearLaunchWizardOpening();
@@ -1704,6 +2087,16 @@ export function createLaunchWizardSurface({
         }
         launchWizard = event.wizard;
         renderLaunchWizard();
+        const nextHolderFingerprint = currentHolderDecision()?.fingerprint || null;
+        if (
+          nextHolderFingerprint
+          && nextHolderFingerprint !== previousHolderFingerprint
+          && !wizardCancelButton.disabled
+          && typeof wizardCancelButton.focus === "function"
+        ) {
+          try { wizardCancelButton.focus({ preventScroll: true }); }
+          catch { wizardCancelButton.focus(); }
+        }
       }
 
       function applyLaunchWizardOpenErrorEvent(event) {
@@ -1739,6 +2132,10 @@ export function createLaunchWizardSurface({
             event.preventDefault();
             return true;
           }
+          if (isLaunchWizardCancellationBlocked()) {
+            event.preventDefault();
+            return true;
+          }
           if (launchWizardOpenError) {
             closeLaunchWizardLocal();
           } else {
@@ -1755,13 +2152,10 @@ export function createLaunchWizardSurface({
       function installWizardChrome() {
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardBackButton.addEventListener("click", () => {
-        if (
-          !releaseWizardInteractionGuardForChromeAction()
-          || launchWizardOpenError
-          || wizardBackButton.disabled
-        ) {
-          return;
-        }
+        if (!releaseWizardInteractionGuardForChromeAction()) return;
+        if (launchWizardOpenError || wizardBackButton.disabled) return;
+        if (currentHolderDecision())
+          return handleHolderDecisionAction("move_existing_pane", wizardBackButton, true);
         flushWizardBranchDraft();
         sendWizardAction({ kind: "back" });
       });
@@ -1789,14 +2183,30 @@ export function createLaunchWizardSurface({
       // are coalesced for the whole interaction, not committed on every step.
       const isGuardedRange = (el) =>
         Boolean(el && el.classList && el.classList.contains("launch-range__input"));
+      const isGuardedSegmentedOption = (el) =>
+        Boolean(
+          el
+            && el.classList
+            && el.classList.contains("launch-segmented__option"),
+        );
       wizardBody.addEventListener("pointerdown", (event) => {
         const target = event.target;
-        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+        if (
+          target
+          && (
+            target.tagName === "SELECT"
+            || isGuardedRange(target)
+            || isGuardedSegmentedOption(target)
+          )
+        ) {
           wizardInteractionGuard.activate();
         }
       });
       wizardBody.addEventListener("focusin", (event) => {
-        if (isGuardedRange(event.target)) {
+        if (
+          isGuardedRange(event.target)
+          || isGuardedSegmentedOption(event.target)
+        ) {
           wizardInteractionGuard.activate();
         }
       });
@@ -1810,7 +2220,14 @@ export function createLaunchWizardSurface({
       });
       wizardBody.addEventListener("focusout", (event) => {
         const target = event.target;
-        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+        if (
+          target
+          && (
+            target.tagName === "SELECT"
+            || isGuardedRange(target)
+            || isGuardedSegmentedOption(target)
+          )
+        ) {
           wizardInteractionGuard.release();
         }
       });
@@ -1825,11 +2242,12 @@ export function createLaunchWizardSurface({
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openExistingBranchPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
       };

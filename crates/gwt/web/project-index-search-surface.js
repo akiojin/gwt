@@ -18,8 +18,8 @@ import {
 // - focusWindowLocally(id): local focus bookkeeping owned by app.js.
 // - activeProjectTab(): active project tab lookup owned by app.js.
 // - makeEl / clearChildren: DOM helpers owned by app.js.
-// - focusOrSpawnPreset / knowledgeKindForPreset / requestKnowledgeDetail /
-//   renderKnowledgeBridge: knowledge-window integration owned by app.js.
+// - focusOrSpawnPreset / knowledgeKindForPreset / requestKnowledgeDetail:
+//   knowledge-window integration owned by app.js.
 // - renderIndexPanelInAllSettingsWindows / refreshProjectTabStateCues: status
 //   fan-out hooks owned by app.js (Settings panel + project tab state cues).
 // - requestFullIndexStatusRefresh(): Health tab refresh request owned by
@@ -34,7 +34,6 @@ export function createProjectIndexSearchSurface({
   focusOrSpawnPreset,
   knowledgeKindForPreset,
   requestKnowledgeDetail,
-  renderKnowledgeBridge,
   renderIndexPanelInAllSettingsWindows,
   refreshProjectTabStateCues,
   requestFullIndexStatusRefresh,
@@ -649,7 +648,6 @@ export function createProjectIndexSearchSurface({
         }
         if (windowId) {
           requestKnowledgeDetail(windowId, knowledgeKind, number);
-          renderKnowledgeBridge(windowId);
           return;
         }
         pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number });

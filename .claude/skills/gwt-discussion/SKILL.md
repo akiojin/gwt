@@ -42,11 +42,26 @@ that case.
 Keep these artifacts throughout the discussion:
 
 - `Intake Memo` in conversation context for background, scope, and constraints
-- `Discussion TODO` in conversation context and mirrored to
-  `.gwt/work/discussions.md`; legacy `.gwt/discussion.md` is read fallback only
+- `Discussion TODO` in conversation context and mirrored to the
+  machine-local work-notes discussion log
+  (`~/.gwt/projects/<repo-hash>/work-notes/discussions.md`, SPEC-3214);
+  the repo-local `.gwt/work/discussions.md` and legacy `.gwt/discussion.md`
+  are read fallbacks only
 - `Action Delta` for changes that are ready to land in `spec`, `plan`, `issue`,
   or build context
 - `Action Bundle` for the concrete follow-up actions that should happen next
+
+When the discussed work touches multiple Issues/SPECs, the artifact update is
+not complete until exactly one Primary Execution Owner is selected and every
+related owner is classified (SPEC-3248 Multi-Issue Primary Owner Bundle):
+
+- `bundled-required` — must ship in the Primary owner's PR; copy or summarize
+  its required tasks and acceptance into the Primary so a single-Issue
+  Execution launch can implement the full bundled scope without opening every
+  related Issue
+- `dependent-follow-up` — separately deliverable with explicit ordering and
+  blocker notes; never a hidden Primary completion requirement
+- `reference-only` — background reading, not part of the PR's completion
 
 `Discussion TODO` is not an implementation task list. It tracks unresolved
 questions, dependency checks, deferred decisions, coverage gaps, exit blockers,
@@ -56,7 +71,7 @@ Evidence is part of the discussion state, not a later implementation detail.
 Do not mark a proposal `[chosen]` until its evidence fields prove the outcome
 without relying on speculation, guesses, or vibes.
 
-Mirror structure inside an active entry in `.gwt/work/discussions.md`:
+Mirror structure inside an active entry in the work-notes discussion log:
 
 ```markdown
 ## Discussion TODO
@@ -101,8 +116,9 @@ high-impact unknown behind it has been resolved.
 ## Exit CLI (Stop-block contract)
 
 SPEC-1935 FR-014p routes Stop events through `skill-discussion-stop-check`,
-which inspects `.gwt/work/discussions.md` and falls back to legacy
-`.gwt/discussion.md`, then blocks Stop (with
+which inspects the work-notes discussion log and falls back to the
+repo-local `.gwt/work/discussions.md`, then legacy `.gwt/discussion.md`,
+then blocks Stop (with
 `{"decision":"block","reason":"..."}`) while any proposal is still
 `[active]` with a non-empty `Next Question:`, unresolved `Exit Blockers:`,
 incomplete proof fields, incomplete depth fields, or an `Evidence Gate:` that
@@ -123,11 +139,25 @@ proposal before stopping. The runtime's `stop_hook_active` flag (built into
 Claude Code; shared with Codex via `codex_hooks`) keeps the handler fail-safe:
 at most one forced continuation per Stop cycle.
 
+The Stop gate is session-scoped (Issue #3465). The work-notes discussion log is
+machine-local but project-scoped, so every session of the project reads the
+same entries. `discussion.update` stamps the opening session into the entry
+metadata as `Origin Session: <GWT_SESSION_ID>`, and `skill-discussion-stop-check`
+only blocks on entries whose `Origin Session` matches the current session. An
+entry that records no `Origin Session`, or a session launched without
+`GWT_SESSION_ID`, keeps the previous fail-closed behaviour. Never run
+`discuss.park` / `resolve` / `reject` on another session's proposal just to free
+your own Stop — it rewrites the owner's in-progress state.
+
+Open a discussion entry with `discussion.update` before writing the
+`Discussion TODO` proposals, so the entry carries its `Origin Session` stamp.
+
 ## Resume hooks
 
 Managed hook settings in `.claude/settings.local.json` and `.codex/hooks.json`
-may surface unfinished discussion candidates from `.gwt/work/discussions.md`
-with legacy `.gwt/discussion.md` fallback.
+may surface unfinished discussion candidates from the work-notes discussion
+log with repo-local `.gwt/work/discussions.md` and legacy `.gwt/discussion.md`
+fallbacks.
 
 Use this contract:
 
@@ -138,7 +168,7 @@ Use this contract:
   fallback from `UserPromptSubmit` and surface it after the next `Stop`.
 - Offer exactly `Resume discussion`, `Park proposal`, and `Dismiss for now`.
 - `Resume discussion` continues `gwt-discussion` before other work proceeds.
-- `Park proposal` changes the matching proposal in `.gwt/work/discussions.md`
+- `Park proposal` changes the matching proposal in the work-notes discussion log
   from `[active]` to `[parked]`.
 - `Dismiss for now` suppresses the prompt only for the current agent session. A
   later session may surface it again.
@@ -175,7 +205,7 @@ exception path. Keep the same one-question-at-a-time discipline.
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.
 6. If the clear owner is an existing SPEC, run the Board active-claim preflight
-   before changing `.gwt/work/discussions.md` or any SPEC/plan artifacts:
+   before changing the work-notes discussion log or any SPEC/plan artifacts:
    - Read the current Board with JSON operation `board.show`.
    - Look for active `claim` entries from another session that mention the same
      owner (`#<N>` or `SPEC-<N>`) or the same phase/topic under discussion.
@@ -434,7 +464,7 @@ autonomously after user approval, arm a runtime goal from the bundle
 2. Before the final discussion response stops, write the condition to a temp
    file and run JSON operation `discuss.goal_pending`
    after resolving the chosen proposal. This records `Goal State: pending`
-   in `.gwt/work/discussions.md` so the next `UserPromptSubmit` hook can remind
+   in the work-notes discussion log so the next `UserPromptSubmit` hook can remind
    the agent even though the approval arrives in a later turn.
 3. In the next turn, if the user approves the Action Bundle and asks the
    follow-up work to continue autonomously, start the goal per runtime:

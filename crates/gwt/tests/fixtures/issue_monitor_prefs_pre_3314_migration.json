@@ -1,0 +1,62 @@
+{
+  "enabled": true,
+  "max_active_agents": 3,
+  "priority_order": [43, 42, 99],
+  "launch_profile": {
+    "agent_id": "codex",
+    "model": "gpt-5.5",
+    "reasoning": "high",
+    "version": "0.121.0",
+    "session_mode": "Resume",
+    "skip_permissions": true,
+    "codex_fast_mode": true,
+    "runtime_target": "Docker",
+    "docker_service": "app",
+    "docker_lifecycle_intent": "Restart",
+    "windows_shell": "power_shell_7"
+  },
+  "launched_issues": [
+    {
+      "issue_number": 70,
+      "window_id": "tab-1::agent-70"
+    }
+  ],
+  "launching_issues": [
+    {
+      "issue_number": 71,
+      "claimed_at": "2026-07-20T00:00:00Z"
+    }
+  ],
+  "failed_issues": [
+    {
+      "issue_number": 42,
+      "message": "Current branch is unavailable: Git error: Not a git repository: __PROJECT_ROOT__"
+    },
+    {
+      "issue_number": 43,
+      "message": "unrelated launch failure",
+      "window_id": "tab-2::agent-43"
+    }
+  ],
+  "merged_issues": [77],
+  "autonomous_mode": true,
+  "autonomous_tuning": {
+    "max_attempts": 7,
+    "stuck_timeout_secs": 900,
+    "heartbeat_interval_secs": 60,
+    "merge_watch_timeout_secs": 1800,
+    "deliver_fix_loop_cap": 4,
+    "retry_backoff_base_secs": 30,
+    "retry_backoff_cap_secs": 600,
+    "review_model": "claude-sonnet"
+  },
+  "autonomous_records": [
+    {
+      "issue_number": 99,
+      "phase": "implementing",
+      "active_launch_id": "launch-99",
+      "attempts": 2,
+      "last_heartbeat": "2026-07-20T00:00:00Z"
+    }
+  ]
+}

@@ -216,3 +216,138 @@ fn red_18_splice_adds_new_section() {
 fn _touch(idx: &SectionsIndex) -> usize {
     idx.0.len()
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-3248 P7C bootstrap (#3284): fail-closed split-section validation
+// ---------------------------------------------------------------------------
+
+fn mk_split_body(section: &str, comment_ids: &[u64]) -> String {
+    let refs = comment_ids
+        .iter()
+        .map(|id| format!("comment:{id}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "<!-- gwt-spec id=2003 version=1 -->\n\
+<!-- sections:\n\
+{section}={refs}\n\
+spec=body\n\
+-->\n\
+\n\
+<!-- artifact:spec BEGIN -->\n\
+s\n\
+<!-- artifact:spec END -->\n"
+    )
+}
+
+fn mk_part_comment(id: u64, name: &str, index: u32, total: u32, content: &str) -> Comment {
+    Comment {
+        id,
+        body: format!(
+            "<!-- artifact:{name} BEGIN part={index}/{total} -->\n{content}\n<!-- artifact:{name} END part={index}/{total} -->"
+        ),
+    }
+}
+
+// RED-80: a part is missing (totals say 3, only parts 1 and 2 referenced) —
+// parse must fail closed instead of silently joining a truncated section.
+#[test]
+fn red_80_incomplete_parts_rejected() {
+    let body = mk_split_body("plan", &[111, 222]);
+    let comments = [
+        mk_part_comment(111, "plan", 1, 3, "alpha"),
+        mk_part_comment(222, "plan", 2, 3, "beta"),
+    ];
+    let err = SpecBody::parse(&body, &comments).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::IncompleteParts { section, expected: 3, found: 2 } if section == "plan"
+        ),
+        "expected IncompleteParts, got {err:?}"
+    );
+}
+
+// RED-81: duplicate part index must be rejected, not double-joined.
+#[test]
+fn red_81_duplicate_part_index_rejected() {
+    let body = mk_split_body("plan", &[111, 222]);
+    let comments = [
+        mk_part_comment(111, "plan", 1, 2, "alpha"),
+        mk_part_comment(222, "plan", 1, 2, "alpha again"),
+    ];
+    let err = SpecBody::parse(&body, &comments).unwrap_err();
+    assert!(
+        matches!(&err, ParseError::IncompleteParts { section, .. } if section == "plan")
+            || matches!(&err, ParseError::BrokenIndex(_)),
+        "expected fail-closed error, got {err:?}"
+    );
+}
+
+// RED-82: inconsistent totals across parts must be rejected.
+#[test]
+fn red_82_inconsistent_totals_rejected() {
+    let body = mk_split_body("plan", &[111, 222]);
+    let comments = [
+        mk_part_comment(111, "plan", 1, 2, "alpha"),
+        mk_part_comment(222, "plan", 2, 3, "beta"),
+    ];
+    let err = SpecBody::parse(&body, &comments).unwrap_err();
+    assert!(
+        matches!(&err, ParseError::IncompleteParts { section, .. } if section == "plan")
+            || matches!(&err, ParseError::BrokenIndex(_)),
+        "expected fail-closed error, got {err:?}"
+    );
+}
+
+// RED-83: mixing a part-marked comment and an unmarked comment for the same
+// section is structurally ambiguous — fail closed.
+#[test]
+fn red_83_mixed_part_and_unmarked_rejected() {
+    let body = mk_split_body("plan", &[111, 222]);
+    let comments = [
+        mk_comment(111, "plan", "alpha"),
+        mk_part_comment(222, "plan", 2, 2, "beta"),
+    ];
+    let err = SpecBody::parse(&body, &comments).unwrap_err();
+    assert!(
+        matches!(&err, ParseError::IncompleteParts { section, .. } if section == "plan")
+            || matches!(&err, ParseError::BrokenIndex(_)),
+        "expected fail-closed error, got {err:?}"
+    );
+}
+
+// RED-84: complete parts listed out of id order still join by part index.
+#[test]
+fn red_84_out_of_order_ids_join_by_part_index() {
+    let body = mk_split_body("plan", &[222, 111]);
+    let comments = [
+        mk_part_comment(111, "plan", 1, 2, "alpha"),
+        mk_part_comment(222, "plan", 2, 2, "beta"),
+    ];
+    let spec_body = SpecBody::parse(&body, &comments).unwrap();
+    assert_eq!(
+        spec_body
+            .sections
+            .get(&n("plan"))
+            .map(std::string::String::as_str),
+        Some("alpha\nbeta")
+    );
+}
+
+// RED-85: part count must also match the number of referenced comments —
+// referencing the same complete pair twice is rejected.
+#[test]
+fn red_85_reference_count_mismatch_rejected() {
+    let body = mk_split_body("plan", &[111, 222, 111]);
+    let comments = [
+        mk_part_comment(111, "plan", 1, 2, "alpha"),
+        mk_part_comment(222, "plan", 2, 2, "beta"),
+    ];
+    let err = SpecBody::parse(&body, &comments).unwrap_err();
+    assert!(
+        matches!(&err, ParseError::IncompleteParts { section, .. } if section == "plan")
+            || matches!(&err, ParseError::BrokenIndex(_)),
+        "expected fail-closed error, got {err:?}"
+    );
+}

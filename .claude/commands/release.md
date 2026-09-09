@@ -64,6 +64,33 @@ git rev-parse --abbrev-ref HEAD
 **判定**: 結果が `develop` でなければ、以下のメッセージを表示して中断：
 > 「エラー: developブランチでのみ実行可能です。現在のブランチ: {ブランチ名}」
 
+### 1.5 リリース bypass の arm（必須・Issue #3267）
+
+リリースは owner Issue を持たない chore 作業だが、workflow-policy の owner guard は
+owner 未リンク session の mutating コマンド（`git fetch` / `git commit` /
+`cargo update` / `Cargo.toml` 編集 / `gh run rerun` など）をブロックする。
+以降のステップを通すため、**literal な `gwtd` コマンド名の単一 heredoc** で
+session に Release bypass を arm する（変数経由の呼び出しは arm 前の hook に
+envelope として認識されない場合がある）:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"workflow.bypass","params":{"mode":"release"}}
+JSON
+```
+
+- bypass は **6 時間で自動失効**する（disarm 忘れの恒久化防止）。長時間の
+  transient 復旧で失効した場合は同じコマンドで再 arm する。
+- `unknown operation` エラーになる場合は gwtd が古い。`cargo build -p gwt --bin gwtd`
+  で dev バイナリをビルドし `./target/debug/gwtd` で実行するか、Issue #3267 を参照。
+- **リリース完了時（ステップ 13.5）と全ての中断パスで必ず disarm する**:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"workflow.bypass","params":{"mode":"off"}}
+JSON
+```
+
 ### 2. リモート同期
 
 ```bash
@@ -551,6 +578,15 @@ gh release view v{NEW_VERSION} --repo akiojin/gwt --json isDraft,assets,publishe
 > 「Release URL: `https://github.com/akiojin/gwt/releases/tag/v{NEW_VERSION}`」
 > 「公開済み assets: {asset 一覧}」
 > （transient 失敗を再実行した場合はその回数も報告する）
+
+完了報告の直後に、ステップ 1.5 で arm した Release bypass を必ず disarm する
+（中断でリリースを終える場合も同様）:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"workflow.bypass","params":{"mode":"off"}}
+JSON
+```
 
 ステップ 5.4 で arm したゴールは、この確定確認をもって満たされ自動的に解除される。
 
