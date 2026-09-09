@@ -2477,9 +2477,46 @@ pub(crate) fn confirm_bound_terminal_compatibility_authority(
     Ok(())
 }
 
+pub(crate) fn confirm_bound_terminal_compatibility_authority_held_global_lease(
+    authority: &BoundTerminalCompatibilityAuthority,
+    request: AgentWorkTerminalizationRequest,
+    held_trusted_dir: &Path,
+) -> Result<()> {
+    let mut confirmation = authority.clone();
+    confirmation.disposition = BoundTerminalCompatibilityDisposition::ConfirmOnly;
+    let receipt = continue_bound_terminal_compatibility_held_global_lease(
+        &confirmation,
+        request,
+        held_trusted_dir,
+    )
+    .map_err(mutation_error)?;
+    if receipt.outcome != AgentWorkTerminalizationOutcome::AlreadyMatching {
+        return Err(mutation_error(
+            "canonical Work terminal readback does not match the pre-request authority",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn continue_bound_terminal_compatibility(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+    continue_bound_terminal_compatibility_inner(authority, request, None)
+}
+
+pub(crate) fn continue_bound_terminal_compatibility_held_global_lease(
+    authority: &BoundTerminalCompatibilityAuthority,
+    request: AgentWorkTerminalizationRequest,
+    held_trusted_dir: &Path,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+    continue_bound_terminal_compatibility_inner(authority, request, Some(held_trusted_dir))
+}
+
+fn continue_bound_terminal_compatibility_inner(
+    authority: &BoundTerminalCompatibilityAuthority,
+    request: AgentWorkTerminalizationRequest,
+    held_trusted_dir: Option<&Path>,
 ) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
     if request.claimed_session_id != authority.identity.session_id
         || request.terminal_kind != authority.requested_terminal
@@ -2510,6 +2547,24 @@ pub(crate) fn continue_bound_terminal_compatibility(
                     .to_string()
             })?;
     let result = if use_blocked_build_abort {
+        if let Some(held_trusted_dir) = held_trusted_dir {
+            crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_held_global_lease(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &expected_identity,
+                held_trusted_dir,
+                |_| {
+                    apply_terminal_compatibility_under_lease(
+                        &session_path,
+                        &expected_identity,
+                        &project_state_root,
+                        &work_id,
+                        policy,
+                        request,
+                        true,
+                    )
+                },
+            )
+        } else {
         crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &expected_identity,
@@ -2522,6 +2577,24 @@ pub(crate) fn continue_bound_terminal_compatibility(
                     policy,
                     request,
                     true,
+                )
+            },
+        )
+        }
+    } else if let Some(held_trusted_dir) = held_trusted_dir {
+        crate::cli::execution_state::with_current_active_session_execution_identity_held_global_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected_identity,
+            held_trusted_dir,
+            |_| {
+                apply_terminal_compatibility_under_lease(
+                    &session_path,
+                    &expected_identity,
+                    &project_state_root,
+                    &work_id,
+                    policy,
+                    request,
+                    false,
                 )
             },
         )
@@ -4110,6 +4183,7 @@ mod tests {
                 missing_verification: None,
                 launched_at: now,
                 settled_at: Some(now),
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),

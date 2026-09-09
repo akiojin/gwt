@@ -9,6 +9,7 @@ pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;
+pub(crate) mod branch;
 mod build;
 mod commands;
 pub mod daemon;
@@ -17,13 +18,10 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
-pub mod improvement;
-pub mod improvement_contract;
-mod improvement_owner;
-mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -33,10 +31,12 @@ pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
 mod pane;
+pub(crate) mod perf;
 mod plan;
 mod pm;
 mod pr;
 pub(crate) mod register;
+mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
 #[cfg(test)]
@@ -50,12 +50,11 @@ pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
+pub(crate) mod worktree_gc;
 
-use std::{
-    io::{self},
-    path::PathBuf,
-};
+use std::{io, path::PathBuf};
 
+pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
@@ -64,99 +63,14 @@ pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
-pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
+pub use pr::types::{
+    LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
+    PrReviewThread, PrReviewThreadComment,
+};
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
-
-/// Compact linked PR summary used by `issue.linked_prs`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LinkedPrSummary {
-    pub number: u64,
-    pub title: String,
-    pub state: String,
-    pub url: String,
-    #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
-    pub will_close_target: bool,
-    /// GitHub merge instant used to prove that an ordinary Issue has not
-    /// advanced since the closing work was delivered.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merged_at: Option<String>,
-}
-
-/// Compact PR check entry used by `pr.checks`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrCheckItem {
-    pub name: String,
-    pub state: String,
-    pub conclusion: String,
-    pub url: String,
-    pub started_at: String,
-    pub completed_at: String,
-    pub workflow: String,
-}
-
-/// Render-friendly aggregate used by `pr.checks`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrChecksSummary {
-    pub summary: String,
-    pub ci_status: String,
-    pub merge_status: String,
-    pub review_status: String,
-    pub checks: Vec<PrCheckItem>,
-}
-
-/// PR review summary used by `pr.reviews`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrReview {
-    pub id: String,
-    pub state: String,
-    pub body: String,
-    pub submitted_at: String,
-    pub author: String,
-}
-
-/// Single comment inside a review thread.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrReviewThreadComment {
-    pub id: String,
-    pub body: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub author: String,
-}
-
-/// Review thread snapshot used by `pr.review_threads`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PrReviewThread {
-    pub id: String,
-    pub is_resolved: bool,
-    pub is_outdated: bool,
-    pub path: String,
-    pub line: Option<u64>,
-    pub comments: Vec<PrReviewThreadComment>,
-}
-
-/// Test-visible log entry for `pr.create`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrCreateCall {
-    pub base: String,
-    pub head: Option<String>,
-    pub title: String,
-    pub body: String,
-    pub labels: Vec<String>,
-    pub draft: bool,
-}
-
-/// Test-visible log entry for `pr.edit`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrEditCall {
-    pub number: u64,
-    pub title: Option<String>,
-    pub body: Option<String>,
-    pub add_labels: Vec<String>,
-}
 
 /// Top-level argv parse result for the CLI. SPEC-1942 FR-088〜092: each top
 /// verb maps to one family-typed inner enum, so the parent enum stays compact
@@ -167,8 +81,11 @@ pub enum CliCommand {
     Pr(PrCommand),
     Actions(ActionsCommand),
     Board(BoardCommand),
+    /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
+    Branch(branch::BranchCommand),
+    /// Issue #4009: `worktree.gc_build_artifacts` build-cache reclaim.
+    Worktree(worktree_gc::WorktreeCommand),
     Hook(HookCommand),
-    Improvement(ImprovementCommand),
     Index(IndexCommand),
     /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
     Intake(intake_outcome::IntakeCommand),
@@ -190,12 +107,17 @@ pub enum CliCommand {
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` read operations.
+    Perf(perf::PerfCommand),
     /// SPEC-3431: `pm.*` PM agent diagnostics.
     Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
+    GithubBudget(github_budget::GithubBudgetCommand),
+    /// Issue #3516: `release.*` interrupted-release standing check.
+    Release(release::ReleaseCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -211,6 +133,9 @@ pub enum DaemonCommand {
     /// fan-out pipeline.
     Subscribe {
         channels: Vec<String>,
+        /// SPEC-3431 FR-141: optional explicit project daemon authority for the
+        /// event stream; `None` preserves the legacy cwd-derived scope.
+        project_root: Option<PathBuf>,
         /// SPEC-3431 FR-025: bound the read so an unattended caller can run
         /// subscribe → reconcile in a loop without an external supervisor.
         timeout_seconds: Option<u64>,
@@ -292,15 +217,6 @@ pub enum WorkspaceCommand {
         ids: Vec<String>,
         project_root: Option<String>,
     },
-}
-
-/// SPEC-1942 command model for `actions.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionsCommand {
-    /// `actions.logs`.
-    Logs { run_id: u64 },
-    /// `actions.job_logs`.
-    JobLogs { job_id: u64 },
 }
 
 /// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.
@@ -647,7 +563,8 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
-        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
+        CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
+        CliCommand::Worktree(inner) => worktree_gc::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
@@ -656,6 +573,8 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
+        CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
+        CliCommand::Release(inner) => release::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
@@ -753,6 +672,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
         CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,

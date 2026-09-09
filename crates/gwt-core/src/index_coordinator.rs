@@ -29,6 +29,17 @@ pub const COORDINATOR_SCHEMA_VERSION: u32 = 1;
 /// is host CPU, so a second exclusion mechanism would only add a lock ordering
 /// problem.
 pub const VERIFICATION_SCOPE: &str = "verification";
+/// Issue #4086: how long a refused verification claimant stays pending as a
+/// reservation with no live process behind it. The gwt-verify retry cadence
+/// is 3 minutes, so a reservation only lapses once the agent has truly given
+/// up; background index jobs defer to it the whole time (AC-1).
+pub const VERIFICATION_RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
+/// Issue #4086: TTL horizon on index-job heavy leases. The kernel lock still
+/// decides exclusion; the TTL makes a runaway runner visible as `expired` in
+/// status output instead of `expires_at_ms=unknown`.
+pub const INDEX_HEAVY_LEASE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+const HEAVY_PROGRESS_FILE: &str = "heavy.progress.json";
+const RESERVATION_PREFIX: &str = "reservation-";
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
 const LEASE_EVENT_LOG_NAME: &str = "lease-events.jsonl";
@@ -234,6 +245,31 @@ pub struct LeaseEvent {
     pub reason: Option<String>,
 }
 
+/// Why a heavy-lease holder handed the host-wide lease back before its own
+/// job finished (Issue #4140).
+///
+/// A long job that keeps the lease for its whole run starves every other
+/// claimant, and heavy verification is the claimant that cannot route around
+/// it: an agent that cannot verify cannot open a PR. Yielding trades the
+/// exclusion guarantee for liveness, so it is a deliberate decision the
+/// caller records rather than a silent release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeavyYieldReason {
+    /// A claimant with strictly higher priority queued behind this holder.
+    Preempted,
+    /// The lease outlived its TTL while the job was still running.
+    CapReached,
+}
+
+impl HeavyYieldReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeavyYieldReason::Preempted => "preempted",
+            HeavyYieldReason::CapReached => "cap-reached",
+        }
+    }
+}
+
 /// Read-only view of the host-wide heavy lease (SPEC #3576 US-1). The kernel
 /// lock decides `held`; the ticket only enriches a lock that is genuinely
 /// taken, so crash residue can never be mistaken for a live holder.
@@ -250,8 +286,15 @@ pub struct HeavyLeaseStatus {
     /// TTL, `Some(0)` once an expired lease is still physically held.
     pub remaining_ms: Option<u64>,
     pub expired: bool,
-    /// Live claimants queued behind the current holder.
+    /// Live claimants queued behind the current holder, reservations included.
     pub pending: usize,
+    /// Issue #4086 AC-4: what kind of job holds the lease.
+    pub holder_kind: Option<HeavyHolderKind>,
+    /// Index holders only: batches left according to the runner's progress.
+    pub remaining_batches: Option<u64>,
+    /// Best-effort wait estimate: the TTL remainder for a verification
+    /// holder, `remaining_batches × batch_ms` for an index holder.
+    pub estimated_remaining_ms: Option<u64>,
 }
 
 /// Outcome of a shared job, as observed by the owner or a joined waiter.
@@ -296,6 +339,73 @@ struct Registration {
     owner: OwnerIdentity,
     priority: JobPriority,
     registered_at_ms: u64,
+    /// Issue #4086: a reservation is a registration that stays live until
+    /// this instant even though nobody holds its shared lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserved_until_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// Who holds the host-wide heavy lease (Issue #4086 AC-4), derived from the
+/// ticket target: verification targets carry the [`VERIFICATION_SCOPE`],
+/// every other coordinator target is an index build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeavyHolderKind {
+    Verification,
+    Index,
+    /// The lock is taken but no ticket describes the holder.
+    Other,
+}
+
+impl HeavyHolderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeavyHolderKind::Verification => "verification",
+            HeavyHolderKind::Index => "index",
+            HeavyHolderKind::Other => "other",
+        }
+    }
+
+    fn of_target(target: &str) -> Self {
+        match target.split("--").nth(1) {
+            Some(scope) if scope == VERIFICATION_SCOPE => HeavyHolderKind::Verification,
+            Some(_) => HeavyHolderKind::Index,
+            None => HeavyHolderKind::Other,
+        }
+    }
+}
+
+/// Batch progress an index runner publishes next to the heavy ticket
+/// (Issue #4086 AC-4) so a refused claimant can estimate the wait.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyProgress {
+    /// Coordinator target stem of the running job, e.g. `repo--issues`.
+    pub target: String,
+    pub done: u64,
+    pub total: u64,
+    pub batch_size: u64,
+    /// Wall-clock milliseconds of the most recent batch.
+    pub batch_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+impl HeavyProgress {
+    /// Batches still to run, rounding a partial batch up.
+    pub fn remaining_batches(&self) -> u64 {
+        let remaining = self.total.saturating_sub(self.done);
+        let batch = self.batch_size.max(1);
+        remaining.div_ceil(batch)
+    }
+}
+
+/// A durable pending claim on the heavy lease (Issue #4086).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavyReservation {
+    pub target: String,
+    pub priority: JobPriority,
+    pub expires_at_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -440,6 +550,8 @@ impl IndexCoordinator {
                         owner: OwnerIdentity::current(),
                         priority,
                         registered_at_ms: now_ms(),
+                        reserved_until_ms: None,
+                        reason: None,
                     };
                     {
                         let mut handle = &waiter_file;
@@ -502,6 +614,24 @@ impl IndexCoordinator {
             });
         };
         let now = now_ms();
+        let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
+        let holder_kind = HeavyHolderKind::of_target(&ticket.target);
+        let progress = match holder_kind {
+            HeavyHolderKind::Index => self.read_heavy_progress().filter(|progress| {
+                progress.target == ticket.target && progress.updated_at_ms >= ticket.acquired_at_ms
+            }),
+            _ => None,
+        };
+        let remaining_batches = progress.as_ref().map(HeavyProgress::remaining_batches);
+        let estimated_remaining_ms = match holder_kind {
+            HeavyHolderKind::Verification => remaining_ms,
+            HeavyHolderKind::Index => progress.as_ref().map(|progress| {
+                progress
+                    .remaining_batches()
+                    .saturating_mul(progress.batch_ms)
+            }),
+            HeavyHolderKind::Other => None,
+        };
         Ok(HeavyLeaseStatus {
             held: true,
             lease_id: ticket.lease_id,
@@ -510,10 +640,69 @@ impl IndexCoordinator {
             priority: Some(ticket.priority),
             acquired_at_ms: Some(ticket.acquired_at_ms),
             expires_at_ms: ticket.expires_at_ms,
-            remaining_ms: ticket.expires_at_ms.map(|at| at.saturating_sub(now)),
+            remaining_ms,
             expired: ticket.expires_at_ms.is_some_and(|at| now >= at),
             pending,
+            holder_kind: Some(holder_kind),
+            remaining_batches,
+            estimated_remaining_ms,
         })
+    }
+
+    /// Reservation file for `key` under `heavy.pending/` (Issue #4086). One
+    /// per claimant target, so a retry refreshes rather than duplicates it.
+    pub fn heavy_reservation_path(&self, key: &TargetKey) -> PathBuf {
+        self.heavy_pending_dir()
+            .join(format!("{RESERVATION_PREFIX}{}.json", key.file_stem()))
+    }
+
+    /// Leave a durable pending claim for `key` (Issue #4086 AC-1). Unlike a
+    /// live registration it needs no process to stay behind it: background
+    /// claimants defer to it until `ttl` lapses or the reserving target is
+    /// granted the lease, whichever comes first.
+    pub fn reserve_heavy(
+        &self,
+        key: &TargetKey,
+        priority: JobPriority,
+        ttl: Duration,
+        reason: Option<&str>,
+    ) -> Result<HeavyReservation, CoordinatorError> {
+        let expires_at_ms = now_ms().saturating_add(ttl.as_millis() as u64);
+        let registration = Registration {
+            schema_version: COORDINATOR_SCHEMA_VERSION,
+            owner: OwnerIdentity::current(),
+            priority,
+            registered_at_ms: now_ms(),
+            reserved_until_ms: Some(expires_at_ms),
+            reason: reason.map(str::to_string),
+        };
+        write_json_atomic(&self.heavy_reservation_path(key), &registration)?;
+        Ok(HeavyReservation {
+            target: key.file_stem(),
+            priority,
+            expires_at_ms,
+        })
+    }
+
+    /// Drop the reservation for `key`. Returns whether one existed.
+    pub fn clear_heavy_reservation(&self, key: &TargetKey) -> Result<bool, CoordinatorError> {
+        match fs::remove_file(self.heavy_reservation_path(key)) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(CoordinatorError::Io(err)),
+        }
+    }
+
+    /// Publish (or refresh) the running index job's batch progress
+    /// (Issue #4086 AC-4). The Python runner writes the same file directly.
+    pub fn write_heavy_progress(&self, progress: &HeavyProgress) -> Result<(), CoordinatorError> {
+        write_json_atomic(&self.root.join(HEAVY_PROGRESS_FILE), progress)?;
+        Ok(())
+    }
+
+    fn read_heavy_progress(&self) -> Option<HeavyProgress> {
+        let raw = fs::read(self.root.join(HEAVY_PROGRESS_FILE)).ok()?;
+        serde_json::from_slice(&raw).ok()
     }
 
     /// Every recorded verification lease transition, oldest first
@@ -588,6 +777,8 @@ impl TargetJobGuard {
             owner: OwnerIdentity::current(),
             priority: self.priority,
             registered_at_ms: now_ms(),
+            reserved_until_ms: None,
+            reason: None,
         };
         // Payload first, liveness lock second — see the waiter registration
         // above for why a Windows shared lock cannot come first.
@@ -633,6 +824,12 @@ impl TargetJobGuard {
                         };
                         let _ = write_json_atomic(&self.root.join("heavy.ticket.json"), &ticket);
                         cleanup_pending(pending_file, &pending_path);
+                        // The grant consumes the claimant's own reservation
+                        // (Issue #4086): its turn has come.
+                        let _ = fs::remove_file(
+                            pending_dir
+                                .join(format!("{RESERVATION_PREFIX}{}.json", self.key.file_stem())),
+                        );
                         let lease = HeavyLease {
                             _lock_file: heavy_file,
                             root: self.root.clone(),
@@ -737,6 +934,11 @@ impl HeavyLease {
         &self.ticket.target
     }
 
+    /// The published diagnostic ticket.
+    pub fn ticket(&self) -> &Ticket {
+        &self.ticket
+    }
+
     pub fn acquired_at_ms(&self) -> u64 {
         self.ticket.acquired_at_ms
     }
@@ -773,6 +975,47 @@ impl HeavyLease {
         write_json_atomic(&self.ticket_path, &self.ticket)?;
         self.record_event(LeaseEventKind::Extended, None);
         Ok(())
+    }
+
+    /// Hold this lease for as long as `job_running` stays true, handing it
+    /// back early when the TTL lapses or a strictly higher-priority claimant
+    /// queues behind it (Issue #4140).
+    ///
+    /// `acquire_heavy_inner`'s priority check only runs *before* the lock is
+    /// taken, so a holder that parks on a long child process is invisible to
+    /// it — that is how a background index job kept heavy verification out for
+    /// half an hour. This is the holding-side half of the same rule, and it
+    /// mirrors the cooperative `BuildStep::Yielded` loop that in-process index
+    /// builds already use.
+    ///
+    /// The lease is always released by the time this returns: `None` means the
+    /// job finished first, `Some(reason)` means the job is still running
+    /// without the lease. Nothing here interrupts the job — AC-Y3 (finish the
+    /// command, then release) stays true, and yielding only gives up the
+    /// exclusion, not the work.
+    pub fn hold_while(
+        self,
+        poll: Duration,
+        job_running: impl Fn() -> bool,
+    ) -> Option<HeavyYieldReason> {
+        let pending_dir = self.root.join("heavy.pending");
+        let priority = self.ticket.priority;
+        loop {
+            if !job_running() {
+                return None;
+            }
+            if self.is_expired() {
+                return Some(HeavyYieldReason::CapReached);
+            }
+            if scan_live_pending(&pending_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .any(|pending| pending < priority)
+            {
+                return Some(HeavyYieldReason::Preempted);
+            }
+            std::thread::sleep(poll);
+        }
     }
 
     /// Release the lease explicitly, recording whether it ran past its TTL.
@@ -975,8 +1218,12 @@ fn append_lease_event(root: &Path, event: &LeaseEvent) {
         return;
     };
     line.push(b'\n');
+    // `read(true)` is not for reading: Windows `LockFileEx` refuses a handle
+    // that only carries `FILE_APPEND_DATA` (ERROR_ACCESS_DENIED), so an
+    // append-only ledger never recorded a single line there (Issue #4105).
     let Ok(file) = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(root.join(LEASE_EVENT_LOG_NAME))
     else {
@@ -1041,6 +1288,23 @@ fn sweep_live_registrations_excluding(
         };
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
+                // A reservation (Issue #4086) has no holder by design: it is
+                // live until its deadline and residue afterwards. Release the
+                // probe lock before reading: Windows refuses reads through a
+                // second handle while this one holds the exclusive range.
+                let _ = fs2::FileExt::unlock(&file);
+                let registration = read_registration(&path);
+                if let Some(reserved_until_ms) =
+                    registration.as_ref().and_then(|r| r.reserved_until_ms)
+                {
+                    if reserved_until_ms > now_ms() {
+                        live.push(registration);
+                    } else {
+                        drop(file);
+                        let _ = fs::remove_file(&path);
+                    }
+                    continue;
+                }
                 // No live holder. A freshly created registration is briefly
                 // lockable while its owner writes the payload and then takes
                 // the shared lock — leave it alone so a concurrent sweep
@@ -1411,5 +1675,181 @@ mod tests {
             waiter.wait(Duration::from_secs(5)).unwrap(),
             JobOutcome::OwnerGone
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #4086: verification reservations outlive their claimant so a
+    // background index job can never slip in between two retries.
+    // ------------------------------------------------------------------
+
+    fn verification_key() -> TargetKey {
+        TargetKey::verification("repo-a", "wt-1")
+    }
+
+    #[test]
+    fn heavy_reservation_counts_as_live_pending_without_a_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let reservation = coordinator
+            .reserve_heavy(
+                &verification_key(),
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                Some("Issue 4086 RED"),
+            )
+            .expect("reserve");
+        assert_eq!(reservation.priority, JobPriority::ManualRebuild);
+        assert!(reservation.expires_at_ms > now_ms());
+
+        // Nobody holds a lock on the reservation file, yet it is pending.
+        assert!(coordinator
+            .pending_higher_priority(JobPriority::Background)
+            .unwrap());
+        assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 1);
+
+        // A background index job defers for as long as the reservation lives.
+        let index = own(
+            &coordinator,
+            &TargetKey::repo_shared("repo-a", "issues"),
+            JobPriority::Background,
+        );
+        match index.acquire_heavy(Duration::from_millis(200)) {
+            Ok(_) => panic!("background must defer to a live verification reservation"),
+            Err(CoordinatorError::Timeout { .. }) => {}
+            Err(other) => panic!("expected timeout, got {other:?}"),
+        }
+
+        assert!(coordinator
+            .clear_heavy_reservation(&verification_key())
+            .unwrap());
+        assert!(!coordinator
+            .pending_higher_priority(JobPriority::Background)
+            .unwrap());
+        let heavy = index.acquire_heavy(Duration::from_secs(5)).unwrap();
+        drop(heavy);
+        index.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn expired_heavy_reservation_is_swept_and_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        coordinator
+            .reserve_heavy(
+                &verification_key(),
+                JobPriority::ManualRebuild,
+                Duration::from_millis(1),
+                None,
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!coordinator
+            .pending_higher_priority(JobPriority::Background)
+            .unwrap());
+        assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 0);
+        assert!(
+            !coordinator
+                .heavy_reservation_path(&verification_key())
+                .exists(),
+            "an expired reservation is swept on the first scan"
+        );
+    }
+
+    #[test]
+    fn granting_the_heavy_lease_clears_the_claimants_reservation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        coordinator
+            .reserve_heavy(
+                &verification_key(),
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                None,
+            )
+            .unwrap();
+        let guard = own(
+            &coordinator,
+            &verification_key(),
+            JobPriority::ManualRebuild,
+        );
+        // The claimant's own reservation never defers the claimant itself.
+        let heavy = guard
+            .acquire_heavy_with_ttl(Duration::from_millis(250), Duration::from_secs(60))
+            .expect("the reserving claimant acquires immediately");
+        assert!(!coordinator
+            .heavy_reservation_path(&verification_key())
+            .exists());
+        assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 0);
+        drop(heavy);
+        guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn heavy_lease_status_reports_holder_kind_and_index_estimate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::repo_shared("repo-a", "issues");
+        let index = own(&coordinator, &key, JobPriority::Background);
+        let heavy = index
+            .acquire_heavy_with_ttl(Duration::from_secs(5), INDEX_HEAVY_LEASE_TTL)
+            .unwrap();
+
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.holder_kind, Some(HeavyHolderKind::Index));
+        assert!(status.expires_at_ms.is_some(), "index leases carry a TTL");
+        assert_eq!(status.remaining_batches, None);
+        assert_eq!(status.estimated_remaining_ms, None);
+
+        // The runner publishes its batch progress next to the ticket.
+        coordinator
+            .write_heavy_progress(&HeavyProgress {
+                target: key.file_stem(),
+                done: 10,
+                total: 100,
+                batch_size: 16,
+                batch_ms: 2_000,
+                updated_at_ms: now_ms(),
+            })
+            .unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        // ceil(90 / 16) = 6 batches × 2 s each.
+        assert_eq!(status.remaining_batches, Some(6));
+        assert_eq!(status.estimated_remaining_ms, Some(12_000));
+
+        // Progress written for another target is not attributed to this holder.
+        coordinator
+            .write_heavy_progress(&HeavyProgress {
+                target: "repo-b--files--wt".to_string(),
+                done: 0,
+                total: 1_000,
+                batch_size: 16,
+                batch_ms: 9_000,
+                updated_at_ms: now_ms(),
+            })
+            .unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.remaining_batches, None);
+        assert_eq!(status.estimated_remaining_ms, None);
+        drop(heavy);
+        index.complete(JobOutcome::Completed).unwrap();
+
+        let guard = own(
+            &coordinator,
+            &verification_key(),
+            JobPriority::ManualRebuild,
+        );
+        let heavy = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(600))
+            .unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.holder_kind, Some(HeavyHolderKind::Verification));
+        assert_eq!(status.estimated_remaining_ms, status.remaining_ms);
+        drop(heavy);
+        guard.complete(JobOutcome::Completed).unwrap();
+
+        assert_eq!(coordinator.heavy_lease_status().unwrap().holder_kind, None);
+        assert_eq!(HeavyHolderKind::Index.as_str(), "index");
+        assert_eq!(HeavyHolderKind::Verification.as_str(), "verification");
+        assert_eq!(HeavyHolderKind::Other.as_str(), "other");
     }
 }

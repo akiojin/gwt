@@ -658,6 +658,40 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
     )
 }
 
+/// Issue #3684 AC-2: physically detach this session's claim-provenance refs
+/// from same-container duplicates of its canonical Work, under the split-root
+/// state lock. Pure projection repair — no events are appended. A later full
+/// rebuild folds the same healed shape because the duplicate claim is now
+/// rejected at fold time (`would_reject_session_attach`). Returns the healed
+/// Work ids.
+pub fn heal_same_container_duplicate_claim_attachments_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    canonical_id: &str,
+) -> Result<Vec<String>> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        |_| {
+            let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)?
+            else {
+                return Ok(Vec::new());
+            };
+            let healed =
+                work_items.detach_same_container_duplicate_claims(session_id, canonical_id);
+            if !healed.is_empty() {
+                save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
+            }
+            Ok(healed)
+        },
+    )
+}
+
 /// Recover an interrupted Workspace state transaction without synthesizing or
 /// mutating Workspace state when no transaction is pending.
 pub fn recover_pending_workspace_state_transaction(repo_path: &Path) -> Result<()> {
@@ -4583,6 +4617,57 @@ pub fn record_workspace_work_events_paths(
     })
 }
 
+/// Latest superseded Pause acceptance time per Work item in `events`. A Pause
+/// is superseded when the stored projection already holds a newer
+/// session-attachment event (Start/Claim/Resume/Split): the close was accepted
+/// before that newer generation committed.
+fn superseded_pause_cutoffs(
+    projection: &WorkItemsProjection,
+    events: &[WorkEvent],
+) -> HashMap<String, DateTime<Utc>> {
+    let mut cutoffs: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for pause in events
+        .iter()
+        .filter(|event| event.kind == WorkEventKind::Pause)
+    {
+        let superseded = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == pause.work_item_id)
+            .is_some_and(|item| {
+                item.events.iter().any(|event| {
+                    event.updated_at > pause.updated_at
+                        && workspace_event_establishes_session_attachment(event.kind)
+                })
+            });
+        if superseded {
+            let cutoff = cutoffs
+                .entry(pause.work_item_id.clone())
+                .or_insert(pause.updated_at);
+            *cutoff = (*cutoff).max(pause.updated_at);
+        }
+    }
+    cutoffs
+}
+
+/// Whether `event` belongs to a superseded Pause batch: the superseded Pause
+/// itself, or a Board-ref Update stamped no later than that Pause. Any other
+/// event for the same Work item (e.g. a genuinely newer Update in the same
+/// batch) must still fold into the stored projection (PR #3787 review).
+fn event_belongs_to_superseded_pause(
+    event: &WorkEvent,
+    cutoffs: &HashMap<String, DateTime<Utc>>,
+) -> bool {
+    let Some(cutoff) = cutoffs.get(&event.work_item_id) else {
+        return false;
+    };
+    match event.kind {
+        WorkEventKind::Pause => event.updated_at <= *cutoff,
+        WorkEventKind::Update => event.board_entry_id.is_some() && event.updated_at <= *cutoff,
+        _ => false,
+    }
+}
+
 fn persist_workspace_work_events_locked(
     work_items_path: &Path,
     events_path: &Path,
@@ -4592,8 +4677,18 @@ fn persist_workspace_work_events_locked(
     if events.is_empty() {
         return Ok(0);
     }
+    // A pane-close worker may acquire the WorkItems lock only after a newer
+    // Resume/Start has committed. Its Pause timestamp is the close acceptance
+    // time, so retain the late event for audit but never regress the newer
+    // producing projection. Only the superseded Pause and the Board-ref
+    // Updates stamped with it are skipped; unrelated newer events in the same
+    // batch still fold (PR #3787 review).
+    let pause_cutoffs = superseded_pause_cutoffs(projection, &events);
     let mut candidate = projection.clone();
     for event in &events {
+        if event_belongs_to_superseded_pause(event, &pause_cutoffs) {
+            continue;
+        }
         if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Ok(0);
         }
@@ -4613,8 +4708,12 @@ fn persist_workspace_work_events_to_store_locked(
     if events.is_empty() {
         return Ok(0);
     }
+    let pause_cutoffs = superseded_pause_cutoffs(projection, &events);
     let mut candidate = projection.clone();
     for event in &events {
+        if event_belongs_to_superseded_pause(event, &pause_cutoffs) {
+            continue;
+        }
         if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Ok(0);
         }
