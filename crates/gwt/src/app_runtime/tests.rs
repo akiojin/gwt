@@ -53067,6 +53067,7 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap()
     .expect("enabled host Codex launch should register trust");
@@ -53079,6 +53080,73 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         "Codex config should contain trusted hashes, got: {config}"
     );
     assert_eq!(report.config_path, codex_config_path);
+}
+
+/// Issue #3967 (recurrence in v9.93.1): materialization resolves the fallback
+/// binary a managed hook command embeds, pins it for the duration of the
+/// generation call, and releases the pin on the way out. Trust pre-registration
+/// then re-derived an answer of its own, and for a gwt started from a checkout
+/// build that answer was `target/debug/gwtd` — reduced to the bare `gwtd` for a
+/// config outside that checkout — where the generated command carried the
+/// installed absolute path. All five managed hooks failed the exact-command
+/// match, and Codex stopped every launch on `Hooks need review`. The launch has
+/// to vouch for the value materialization actually wrote.
+#[test]
+fn codex_hook_trust_launch_vouches_for_the_binary_materialization_pinned() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let worktree = tempdir().expect("worktree tempdir");
+
+    // An installed binary the ambient resolver cannot reach: it is neither this
+    // process, nor its sibling, nor anything on PATH. Materialization pins it,
+    // generates with it, and drops the pin — the shape of the `GWT_HOOK_BIN`
+    // guard in `regenerate_managed_hook_configs_for_targets`.
+    let generated_hook_bin = home
+        .path()
+        .join("Programs")
+        .join("GWT")
+        .join("gwtd")
+        .to_string_lossy()
+        .into_owned();
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(&generated_hook_bin);
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    }
+
+    // Re-deriving the binary once the pin is gone is what the launch used to
+    // do, and it cannot reach the pinned value — every managed hook stays
+    // untrusted and Codex stops the launch.
+    let guessed = gwt_skills::register_codex_managed_hook_trust_for_mode(
+        worktree.path(),
+        &home.path().join("guessed-codex-config.toml"),
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    )
+    .unwrap();
+    assert!(
+        !guessed.untrusted_gwt_hooks.is_empty(),
+        "a re-derived binary must not be able to vouch for a pin it cannot reach; if it can, \
+         the launch no longer needs to be told which binary was written: {guessed:?}"
+    );
+
+    let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &profile_config_path,
+        worktree.path(),
+        &gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        None,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        Some(generated_hook_bin.as_str()),
+    )
+    .unwrap()
+    .expect("enabled host Codex launch should register trust");
+
+    assert!(
+        report.untrusted_gwt_hooks.is_empty(),
+        "every hook materialization generated must be trusted, got: {report:?}"
+    );
+    assert_eq!(report.trusted_entries.len(), 5);
 }
 
 #[test]
@@ -53098,6 +53166,7 @@ fn codex_hook_trust_launch_uses_effective_codex_home_config() {
         None,
         Some(codex_home.path()),
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap()
     .expect("Codex launch should register trust into the effective CODEX_HOME");
@@ -53131,6 +53200,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -53153,6 +53223,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert!(disabled.is_none());
@@ -53172,6 +53243,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -53190,6 +53262,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .unwrap();
     assert!(claude.is_none());
@@ -53326,6 +53399,7 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     )
     .expect("launch trust registration must succeed")
     .expect("Codex host launch registers trust");
@@ -53370,6 +53444,7 @@ fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     );
 
     let error = result.expect_err("untrusted gwt hook must abort the launch");
@@ -53402,6 +53477,7 @@ fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
         None,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        None,
     );
 
     let error = result.expect_err("unwritable Codex trust state must abort the launch");
