@@ -60036,6 +60036,80 @@ fn repeated_restores_never_accumulate_sessions_without_a_resume_handle() {
 }
 
 #[test]
+fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let runner_bin = write_fixture_runners(temp.path(), &["codex", "npx", "bunx"]);
+
+    for (origin, expected_route) in [
+        (
+            super::startup::RestoreOrigin::Automatic,
+            gwt_agent::LaunchRoute::Autonomous,
+        ),
+        (
+            super::startup::RestoreOrigin::UserRequested,
+            gwt_agent::LaunchRoute::Manual,
+        ),
+    ] {
+        let case_root = temp.path().join(format!("{origin:?}"));
+        let repo = case_root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
+        let mut settings = Settings::default();
+        pin_launch_package_runners(&mut settings, &runner_bin);
+        settings
+            .profiles
+            .set_env_var(
+                "default",
+                "CODEX_HOME",
+                case_root.join("codex-home").to_str().expect("Codex home"),
+            )
+            .expect("isolate Codex state and shared spawn pacing");
+        write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
+        runtime.agent_capability_issuer =
+            Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+                "http://127.0.0.1:43123/internal/hook-live",
+                "ws://127.0.0.1:43124/ws",
+                "ws://127.0.0.1:43123/internal/pane-ws",
+            ));
+        let mut source = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::Codex);
+        source.agent_session_id = Some("conversation-4217-restart".to_string());
+        source.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        source.save(&runtime.sessions_dir).expect("save source");
+
+        runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        });
+        let recorded = recorded_events.lock().expect("event log");
+        let completion = recorded
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::LaunchComplete { result, .. } => Some(result.as_ref()),
+                _ => None,
+            })
+            .expect("launch completion")
+            .as_ref()
+            .expect("successful restore preparation");
+        // Inspect preparation without dispatching the completion into a PTY.
+        let successor =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
+                .expect("load restored Session");
+        assert_eq!(successor.launch_route, expected_route, "{origin:?}");
+    }
+}
+
+#[test]
 fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
     let _env_lock = env_test_lock()
         .lock()
@@ -66871,6 +66945,32 @@ fn continue_work_durable_seed_with_foreign_owner_resolves_to_work_owner() {
         issue_3489_binding_installs(&config, owner.number),
         "a foreign-owner durable seed must be re-resolved before the PTY starts"
     );
+}
+
+#[test]
+fn continue_work_from_autonomous_session_uses_manual_launch_route() {
+    let mut seed = issue_3489_durable_seed(Some(4217));
+    let ContinueWorkLaunchSeed::DurableSession(session) = &mut seed else {
+        unreachable!("durable fixture");
+    };
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    // Restoring the same launch must retain its route; an explicit Continue
+    // work action starts a new manual launch from that conversation.
+    assert_eq!(
+        super::launch_config_from_persisted_session(session).launch_route,
+        gwt_agent::LaunchRoute::Autonomous
+    );
+    let (config, _) = continuation_launch_config(
+        &seed,
+        Path::new("/tmp/gwt-issue-3489/work"),
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4217,
+        },
+        None,
+    );
+
+    assert_eq!(config.launch_route, gwt_agent::LaunchRoute::Manual);
 }
 
 /// Issue #3489 AC-2: the Work projection seed keeps the same single source of
