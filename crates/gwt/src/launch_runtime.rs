@@ -1654,6 +1654,7 @@ mod tests {
     #[test]
     fn worktree_holder_with_dead_child_is_not_kept_alive_by_gui_host() {
         let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let runtime_path =
             gwt_agent::runtime_state_path_for_pid(temp.path(), std::process::id(), "dead-child");
         let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
@@ -1668,6 +1669,7 @@ mod tests {
     #[test]
     fn worktree_holder_with_live_child_is_kept_despite_stopped_sidecar() {
         let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let process_id = std::process::id();
         let process_started_at = gwt::process::host_process_start_time(process_id).unwrap();
         let runtime_path =
