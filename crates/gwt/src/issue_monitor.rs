@@ -23118,6 +23118,46 @@ mod tests {
     }
 
     #[test]
+    fn adopting_orphan_queue_merges_without_duplicate_issue_numbers() {
+        let now = "2026-09-10T00:02:00Z";
+        let host = crate::process::current_hostname();
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[7], "operator", now);
+        monitor.terminal_queues.insert(
+            "retired-host".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![
+                    IssueMonitorTerminalQueueEntry {
+                        number: 7,
+                        queued_at: "2026-09-09T23:00:00Z".to_string(),
+                        queued_by: "retired".to_string(),
+                    },
+                    IssueMonitorTerminalQueueEntry {
+                        number: 8,
+                        queued_at: "2026-09-09T23:01:00Z".to_string(),
+                        queued_by: "retired".to_string(),
+                    },
+                ],
+                last_seen_at: Some("2026-09-09T23:01:00Z".to_string()),
+            },
+        );
+
+        assert_eq!(monitor.adopt_terminal_queue("retired-host", now), 1);
+        assert_eq!(monitor.adopt_terminal_queue("missing-host", now), 0);
+        let queue = monitor.terminal_queues.get(&host).expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(queue.last_seen_at.as_deref(), Some(now));
+        assert!(monitor.terminal_queue_orphans().is_empty());
+    }
+
+    #[test]
     fn enabled_auto_refill_populates_only_an_empty_local_queue_within_limit() {
         let now = "2026-09-10T00:00:00Z";
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
