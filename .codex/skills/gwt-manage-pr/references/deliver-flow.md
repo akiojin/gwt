@@ -64,8 +64,14 @@ Refuse to arm auto-merge when any of these hold:
   *creating* a Draft/Ready PR per the shared Ready PR Gate, but it is **not**
   sufficient to merge unattended — Deliver requires `confirmed`, `n/a`, or
   `n/a (autonomous)`. Never relabel a `skipped(<reason>)` as
-  `n/a (autonomous)`: the waiver comes from `GWT_AUTONOMOUS_EXECUTION`, not
-  from the agent finding the check inconvenient.
+  `n/a (autonomous)`: the waiver comes from the launch route recorded on the
+  Session (`execution.status` → `launch_route: autonomous`; the legacy
+  `GWT_AUTONOMOUS_EXECUTION` marker still counts when present, but its absence
+  proves nothing), not from the agent finding the check inconvenient.
+- `User Verification Result` is `deferred (autonomous execution)`. That value
+  says the owner's visual check has not happened yet, so the PR stays Draft by
+  design and gwt refuses to mark it Ready. It reaches auto-merge only after the
+  owner sweeps it and the result becomes `confirmed`.
 - `gwt-verify --mode pre-pr` returns `Overall: FAIL` or `failed: tooling-missing`.
 
 On gate failure, stop. Do not run `gh pr merge --auto`. Route the failure for
