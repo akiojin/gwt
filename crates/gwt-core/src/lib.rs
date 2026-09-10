@@ -10,6 +10,7 @@ pub mod config;
 pub mod coordination;
 pub mod daemon;
 pub mod error;
+pub mod error_ledger;
 pub mod github_quota;
 pub mod index;
 pub mod index_coordinator;

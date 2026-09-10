@@ -53,6 +53,299 @@ impl PrStatus {
     }
 }
 
+/// Hours without an `updatedAt` bump after which an open PR is stale for the
+/// PM inventory (Issue #3781 AC-2).
+pub const PR_STALE_AFTER_HOURS: i64 = 72;
+
+/// Lifecycle class the PM uses to pick a default action (Issue #3781 AC-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrLifecycleClass {
+    MergeCandidate,
+    Conflicted,
+    Behind,
+    CiRed,
+    Superseded,
+    InProgress,
+}
+
+impl PrLifecycleClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MergeCandidate => "MERGE-CANDIDATE",
+            Self::Conflicted => "CONFLICTED",
+            Self::Behind => "BEHIND",
+            Self::CiRed => "CI-RED",
+            Self::Superseded => "SUPERSEDED",
+            Self::InProgress => "IN-PROGRESS",
+        }
+    }
+}
+
+/// Closing Issue referenced by an open PR, when `gh pr list` exposes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrClosingIssue {
+    pub number: u64,
+    pub state: Option<String>,
+}
+
+/// Fields needed to classify one open PR without the derived lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrInventoryFields {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub is_draft: bool,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub mergeable: String,
+    pub merge_state_status: String,
+    pub ci_status: String,
+    pub review_status: String,
+    pub body: String,
+    pub closing_issues: Vec<PrClosingIssue>,
+}
+
+/// Result of classifying one open PR for the PM inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrLifecycleDecision {
+    pub class: PrLifecycleClass,
+    pub stale: bool,
+    pub owner_issue_closed: bool,
+    pub default_action: String,
+}
+
+/// One open-PR inventory row returned by `pr.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrInventoryItem {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub is_draft: bool,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub mergeable: String,
+    pub merge_state_status: String,
+    pub ci_status: String,
+    pub review_status: String,
+    pub body: String,
+    pub closing_issues: Vec<PrClosingIssue>,
+    pub lifecycle: String,
+    pub stale: bool,
+    pub owner_issue_closed: bool,
+    pub default_action: String,
+}
+
+fn looks_superseded(title: &str, body: &str) -> bool {
+    let mut haystack = String::with_capacity(title.len() + body.len() + 1);
+    haystack.push_str(title);
+    haystack.push('\n');
+    haystack.push_str(body);
+    haystack.to_ascii_lowercase().contains("superseded")
+}
+
+fn owner_issue_is_closed(issues: &[PrClosingIssue]) -> bool {
+    if issues.is_empty() {
+        return false;
+    }
+    issues.iter().all(|issue| {
+        issue
+            .state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("CLOSED"))
+    })
+}
+
+fn pr_is_stale(updated_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    updated_at.is_some_and(|updated| (now - updated).num_hours() >= PR_STALE_AFTER_HOURS)
+}
+
+/// Classify one open PR into the PM inventory taxonomy.
+pub fn classify_pr_lifecycle(
+    fields: &PrInventoryFields,
+    now: DateTime<Utc>,
+) -> PrLifecycleDecision {
+    let stale = pr_is_stale(fields.updated_at, now);
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let class = if looks_superseded(&fields.title, &fields.body) || owner_issue_closed {
+        PrLifecycleClass::Superseded
+    } else if fields.mergeable.eq_ignore_ascii_case("CONFLICTING")
+        || fields.merge_state_status.eq_ignore_ascii_case("DIRTY")
+    {
+        PrLifecycleClass::Conflicted
+    } else if fields.merge_state_status.eq_ignore_ascii_case("BEHIND") {
+        PrLifecycleClass::Behind
+    } else if fields.ci_status.eq_ignore_ascii_case("FAILURE") {
+        PrLifecycleClass::CiRed
+    } else if fields.mergeable.eq_ignore_ascii_case("MERGEABLE")
+        && fields.ci_status.eq_ignore_ascii_case("SUCCESS")
+        && (fields.merge_state_status.eq_ignore_ascii_case("CLEAN")
+            || fields.merge_state_status.is_empty())
+    {
+        PrLifecycleClass::MergeCandidate
+    } else {
+        PrLifecycleClass::InProgress
+    };
+
+    let default_action = match (class, fields.is_draft, stale) {
+        (PrLifecycleClass::MergeCandidate, true, _) => "mark ready",
+        (PrLifecycleClass::MergeCandidate, false, _) => "propose merge",
+        (PrLifecycleClass::Conflicted, _, _) => "relaunch owner to resolve conflict",
+        (PrLifecycleClass::Behind, _, _) => "update-branch",
+        (PrLifecycleClass::CiRed, _, _) => "relaunch owner to fix CI",
+        (PrLifecycleClass::Superseded, _, _) => "propose close in digest (never auto-close)",
+        (PrLifecycleClass::InProgress, _, true) => "escalate: no update for 72h",
+        (PrLifecycleClass::InProgress, _, false) => "leave in progress",
+    }
+    .to_string();
+
+    PrLifecycleDecision {
+        class,
+        stale,
+        owner_issue_closed,
+        default_action,
+    }
+}
+
+fn inventory_item_from_fields(fields: PrInventoryFields, now: DateTime<Utc>) -> PrInventoryItem {
+    let decision = classify_pr_lifecycle(&fields, now);
+    PrInventoryItem {
+        number: fields.number,
+        title: fields.title,
+        url: fields.url,
+        is_draft: fields.is_draft,
+        updated_at: fields.updated_at,
+        mergeable: fields.mergeable,
+        merge_state_status: fields.merge_state_status,
+        ci_status: fields.ci_status,
+        review_status: fields.review_status,
+        body: fields.body,
+        closing_issues: fields.closing_issues,
+        lifecycle: decision.class.as_str().to_string(),
+        stale: decision.stale,
+        owner_issue_closed: decision.owner_issue_closed,
+        default_action: decision.default_action,
+    }
+}
+
+fn parse_closing_issues(value: &serde_json::Value) -> Vec<PrClosingIssue> {
+    let nodes = match value {
+        serde_json::Value::Array(items) => items.as_slice(),
+        serde_json::Value::Object(map) => match map.get("nodes").and_then(|nodes| nodes.as_array())
+        {
+            Some(items) => items.as_slice(),
+            None => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let number = node.get("number").and_then(serde_json::Value::as_u64)?;
+            let state = node
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some(PrClosingIssue { number, state })
+        })
+        .collect()
+}
+
+fn inventory_item_from_value(
+    value: &serde_json::Value,
+    now: DateTime<Utc>,
+) -> Result<PrInventoryItem> {
+    let single_json = serde_json::to_string(value).map_err(|e| GwtError::Other(e.to_string()))?;
+    let status = parse_pr_status_json(&single_json)?;
+    let fields = PrInventoryFields {
+        number: status.number,
+        title: status.title,
+        url: status.url,
+        is_draft: value
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        updated_at: parse_github_timestamp(
+            value.get("updatedAt").and_then(serde_json::Value::as_str),
+        )
+        .or(status.created_at),
+        mergeable: status.mergeable,
+        merge_state_status: status.merge_state_status,
+        ci_status: status.ci_status,
+        review_status: status.review_status,
+        body: value
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        closing_issues: value
+            .get("closingIssuesReferences")
+            .map(parse_closing_issues)
+            .unwrap_or_default(),
+    };
+    Ok(inventory_item_from_fields(fields, now))
+}
+
+/// Parse `gh pr list --json` output into classified inventory rows.
+pub fn parse_pr_inventory_json(json: &str, now: DateTime<Utc>) -> Result<Vec<PrInventoryItem>> {
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+    arr.iter()
+        .map(|value| inventory_item_from_value(value, now))
+        .collect()
+}
+
+const INVENTORY_JSON_FIELDS: &str = "number,title,url,isDraft,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,closingIssuesReferences";
+const INVENTORY_JSON_FIELDS_WITHOUT_CLOSING: &str = "number,title,url,isDraft,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body";
+
+/// Fetch open PRs and classify them for the PM inventory (`pr.list`).
+pub fn fetch_pr_inventory(repo_path: &Path) -> Result<Vec<PrInventoryItem>> {
+    fetch_pr_inventory_with(repo_path, Utc::now(), run_gh_command)
+}
+
+fn fetch_pr_inventory_with<F>(
+    repo_path: &Path,
+    now: DateTime<Utc>,
+    mut run_gh: F,
+) -> Result<Vec<PrInventoryItem>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let primary = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            INVENTORY_JSON_FIELDS,
+        ],
+    )?;
+    if primary.success {
+        return parse_pr_inventory_json(&primary.stdout, now);
+    }
+    let fallback = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            INVENTORY_JSON_FIELDS_WITHOUT_CLOSING,
+        ],
+    )?;
+    if !fallback.success {
+        return Err(GwtError::Git(format!(
+            "gh pr list inventory: {}",
+            fallback.stderr.trim()
+        )));
+    }
+    parse_pr_inventory_json(&fallback.stdout, now)
+}
+
 /// Fetch the status of a PR by number using `gh pr view --json`.
 ///
 /// The `repo_slug` should be in "owner/repo" format.
@@ -2207,5 +2500,238 @@ mod tests {
             })
         });
         assert_eq!(failed, None, "gh failure → None");
+    }
+
+    fn sample_inventory_fields() -> PrInventoryFields {
+        PrInventoryFields {
+            number: 1,
+            title: "feat: example".to_string(),
+            url: "https://github.com/o/r/pull/1".to_string(),
+            is_draft: false,
+            updated_at: Some("2026-08-30T00:00:00Z".parse().expect("now")),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
+            ci_status: "SUCCESS".to_string(),
+            review_status: "APPROVED".to_string(),
+            body: "Closes #10".to_string(),
+            closing_issues: vec![],
+        }
+    }
+
+    #[test]
+    fn classifies_merge_candidate_when_clean_and_green() {
+        let decision = classify_pr_lifecycle(
+            &sample_inventory_fields(),
+            "2026-08-30T00:00:00Z".parse().expect("now"),
+        );
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert!(!decision.stale);
+        assert!(!decision.owner_issue_closed);
+        assert_eq!(decision.default_action, "propose merge");
+    }
+
+    #[test]
+    fn classifies_draft_merge_candidate_as_mark_ready() {
+        let mut fields = sample_inventory_fields();
+        fields.is_draft = true;
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert_eq!(decision.default_action, "mark ready");
+    }
+
+    #[test]
+    fn classifies_conflicted_ahead_of_ci_red() {
+        let mut fields = sample_inventory_fields();
+        fields.mergeable = "CONFLICTING".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Conflicted);
+        assert_eq!(
+            decision.default_action,
+            "relaunch owner to resolve conflict"
+        );
+    }
+
+    #[test]
+    fn classifies_behind_from_merge_state() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Behind);
+        assert_eq!(decision.default_action, "update-branch");
+    }
+
+    #[test]
+    fn classifies_ci_red() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "FAILURE".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::CiRed);
+        assert_eq!(decision.default_action, "relaunch owner to fix CI");
+    }
+
+    #[test]
+    fn classifies_superseded_from_title_or_body_ahead_of_conflict() {
+        let mut fields = sample_inventory_fields();
+        fields.title = "feat: old path (superseded by #99)".to_string();
+        fields.mergeable = "CONFLICTING".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+        assert_eq!(
+            decision.default_action,
+            "propose close in digest (never auto-close)"
+        );
+
+        fields.title = "feat: example".to_string();
+        fields.body = "This PR is superseded by #100".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+    }
+
+    #[test]
+    fn classifies_owner_issue_closed_as_superseded_close_proposal() {
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("CLOSED".to_string()),
+        }];
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+        assert!(decision.owner_issue_closed);
+        assert_eq!(
+            decision.default_action,
+            "propose close in digest (never auto-close)"
+        );
+    }
+
+    #[test]
+    fn owner_issue_stays_open_when_any_closing_issue_is_open() {
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![
+            PrClosingIssue {
+                number: 10,
+                state: Some("CLOSED".to_string()),
+            },
+            PrClosingIssue {
+                number: 11,
+                state: Some("OPEN".to_string()),
+            },
+        ];
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert!(!decision.owner_issue_closed);
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+    }
+
+    #[test]
+    fn classifies_in_progress_for_pending_ci_or_unknown_merge() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "PENDING".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::InProgress);
+        assert_eq!(decision.default_action, "leave in progress");
+    }
+
+    #[test]
+    fn marks_pr_stale_after_72_hours_without_update() {
+        let mut fields = sample_inventory_fields();
+        fields.updated_at = Some("2026-08-26T23:59:59Z".parse().expect("old"));
+        fields.ci_status = "PENDING".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert!(decision.stale);
+        assert_eq!(decision.class, PrLifecycleClass::InProgress);
+        assert_eq!(decision.default_action, "escalate: no update for 72h");
+    }
+
+    #[test]
+    fn parse_pr_inventory_json_classifies_rows() {
+        let json = r#"[
+            {
+                "number": 42,
+                "title": "feat: ready",
+                "url": "https://github.com/o/r/pull/42",
+                "isDraft": false,
+                "updatedAt": "2026-08-30T00:00:00Z",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+                "reviewDecision": "APPROVED",
+                "body": "Closes #7",
+                "closingIssuesReferences": [{"number": 7, "state": "OPEN"}]
+            }
+        ]"#;
+        let items = parse_pr_inventory_json(json, "2026-08-30T00:00:00Z".parse().expect("now"))
+            .expect("parse inventory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].number, 42);
+        assert_eq!(items[0].lifecycle, "MERGE-CANDIDATE");
+        assert_eq!(items[0].default_action, "propose merge");
+        assert!(!items[0].stale);
+        assert_eq!(items[0].closing_issues[0].number, 7);
+    }
+
+    #[test]
+    fn parse_pr_inventory_json_accepts_nested_closing_issue_nodes() {
+        let json = r#"[
+            {
+                "number": 8,
+                "title": "fix: leftover",
+                "url": "https://github.com/o/r/pull/8",
+                "isDraft": true,
+                "updatedAt": "2026-08-01T00:00:00Z",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [],
+                "body": "superseded by #9",
+                "closingIssuesReferences": {"nodes": [{"number": 3, "state": "CLOSED"}]}
+            }
+        ]"#;
+        let items = parse_pr_inventory_json(json, "2026-08-30T00:00:00Z".parse().expect("now"))
+            .expect("parse nested closing issues");
+        assert_eq!(items[0].lifecycle, "SUPERSEDED");
+        assert!(items[0].owner_issue_closed);
+        assert!(items[0].stale);
+        assert!(items[0].is_draft);
+    }
+
+    #[test]
+    fn fetch_pr_inventory_with_lists_open_prs_and_classifies() {
+        let repo_path = Path::new("/tmp/repo");
+        let mut calls = Vec::new();
+        let items = fetch_pr_inventory_with(
+            repo_path,
+            "2026-08-30T00:00:00Z".parse().expect("now"),
+            |path, args| {
+                assert_eq!(path, repo_path);
+                calls.push(args.join(" "));
+                match args {
+                    ["pr", "list", ..] => {
+                        assert!(args.contains(&"--state"));
+                        assert!(args.contains(&"open"));
+                        Ok(GhCliOutput {
+                            success: true,
+                            stdout: r#"[{
+                                "number": 3,
+                                "title": "feat: behind",
+                                "url": "https://github.com/o/r/pull/3",
+                                "isDraft": false,
+                                "updatedAt": "2026-08-30T00:00:00Z",
+                                "mergeable": "MERGEABLE",
+                                "mergeStateStatus": "BEHIND",
+                                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+                                "body": ""
+                            }]"#
+                            .to_string(),
+                            stderr: String::new(),
+                        })
+                    }
+                    other => panic!("unexpected gh invocation: {other:?}"),
+                }
+            },
+        )
+        .expect("inventory");
+        assert!(calls[0].starts_with("pr list"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].lifecycle, "BEHIND");
+        assert_eq!(items[0].default_action, "update-branch");
     }
 }

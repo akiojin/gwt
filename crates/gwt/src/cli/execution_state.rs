@@ -8251,6 +8251,35 @@ fn with_exact_recovery_session_lease<T>(
     )
 }
 
+fn update_exact_recovery_session<T>(
+    expected_session: &gwt_agent::Session,
+    mutate: impl FnOnce(&mut gwt_agent::Session) -> io::Result<T>,
+) -> io::Result<T> {
+    match gwt_agent::update_session_if_unchanged_with(
+        &gwt_core::paths::gwt_sessions_dir(),
+        expected_session,
+        mutate,
+    ) {
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated(value)) => Ok(value),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
+            ),
+        )),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotUnreadable(error)) => {
+            Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
+                ),
+            ))
+        }
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::MutationFailed(error)) => Err(error),
+        Err(error) => Err(error),
+    }
+}
+
 fn ensure_recovery_session_snapshot_unchanged(
     state: &gwt_agent::SessionPathState,
     expected_session: &gwt_agent::Session,
@@ -8515,6 +8544,49 @@ fn persist_generation_takeover_if_owned(
     persist_generation_takeover_if_owned_with_session(worktree, record, transfer, None)
 }
 
+fn bind_recovery_session_to_generation(
+    session: &mut gwt_agent::Session,
+    owner: ExecutionOwnerKey,
+    identity: gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<()> {
+    let repo_hash = session.repo_hash.clone().ok_or_else(|| {
+        invalid_generation_data("recovery Session repository identity is unavailable")
+    })?;
+    let capability_generation = match session.execution_binding.as_ref() {
+        Some(current)
+            if current.schema_version
+                == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+                && current.session_id == session.id
+                && current.repo_hash == repo_hash
+                && current.owner_kind == owner.kind.as_str()
+                && current.owner_number == owner.number
+                && current.identity == identity =>
+        {
+            current.capability_generation
+        }
+        Some(current) => current
+            .capability_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid_generation_data("Session capability generation overflow"))?,
+        None => 1,
+    };
+    session
+        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash,
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity,
+            capability_generation,
+        }))
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "adopting Session execution binding is invalid: {error}"
+            ))
+        })
+}
+
 fn persist_generation_takeover_if_owned_for_recovery(
     worktree: &Path,
     record: &ExecutionControlRecord,
@@ -8579,12 +8651,12 @@ fn persist_generation_takeover_if_owned_with_session(
                 "generation takeover CAS does not match the current Active worktree/session/projection",
             ));
         }
-        let commit = || {
+        let mut commit = |session: Option<&mut gwt_agent::Session>| {
             append_takeover_event(
                 &mut ledger,
                 GenerationTakeoverAudit {
                     sequence: 0,
-                    generation_id: current.identity.generation_id,
+                    generation_id: current.identity.generation_id.clone(),
                     from_session_id: transfer.from_session_id.clone(),
                     to_session_id: transfer.to_session_id.clone(),
                     reason: transfer.reason.clone(),
@@ -8595,13 +8667,193 @@ fn persist_generation_takeover_if_owned_with_session(
                 },
             );
             stamp_generation_ledger(&mut ledger);
+            if let Some(session) = session {
+                bind_recovery_session_to_generation(
+                    session,
+                    owner,
+                    execution_binding_for_generation(&ledger, &current),
+                )?;
+            }
             write_activated_generation(context, &ledger, &projection)?;
             Ok(true)
         };
         match expected_session {
-            Some(expected_session) => with_exact_recovery_session_lease(expected_session, commit),
-            None => commit(),
+            Some(expected_session) => {
+                update_exact_recovery_session(expected_session, |session| commit(Some(session)))
+            }
+            None => commit(None),
         }
+    })
+}
+
+fn persist_current_generation_binding_if_owned_for_recovery(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+    expected_session: &gwt_agent::Session,
+) -> io::Result<()> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during ownership recovery")
+        })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let current_projection = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "current generation recovery projection is malformed: {error}"
+            ))
+        })?;
+        if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+            || current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || current_projection != *record
+            || current_projection.primary_session_id != expected_session.id
+        {
+            return Err(generation_conflict(
+                "generation recovery binding CAS does not match the current Active worktree/session/projection",
+            ));
+        }
+        let identity = execution_binding_for_generation(&ledger, current);
+        update_exact_recovery_session(expected_session, |session| {
+            bind_recovery_session_to_generation(session, owner, identity)
+        })
+    })
+}
+
+fn active_generation_owner_for_recovery_session(
+    worktree: &Path,
+    session: &gwt_agent::Session,
+) -> io::Result<Option<ExecutionOwnerKey>> {
+    let Some(number) = session.linked_issue_number else {
+        return Ok(None);
+    };
+    let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+        .ok_or_else(|| invalid_generation_data("trusted generation store path is unavailable"))?;
+    let owner = match discover_repair_owner(worktree, &session.id, &trusted_dir) {
+        Ok(owner) if owner.number == number => owner,
+        Ok(_) => {
+            return Err(invalid_generation_data(
+                "generation owner does not match the adopting Session recovery scope",
+            ))
+        }
+        Err(error)
+            if error
+                .to_string()
+                .starts_with("execution_repair_owner_unknown:") =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let context = GenerationTransactionContext::resolve(worktree, owner)?;
+    match load_owner_generation_ledger_from_context(&context) {
+        Ok(Some(ledger))
+            if ledger.current_generation().is_some_and(|generation| {
+                generation.identity.worktree_binding_hash == context.worktree_binding_hash
+                    && ledger.effective_status_for(generation) == ExecutionControlStatus::Active
+            }) =>
+        {
+            Ok(Some(owner))
+        }
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
+/// Re-publish one already-committed same-generation takeover after a
+/// ledger-first partial write. The owner ledger is authoritative, so the
+/// retry derives both the flat projection/pointer and Session binding from
+/// its exact current head without appending a second transfer.
+fn reconcile_committed_generation_takeover_for_recovery(
+    worktree: &Path,
+    expected_session: &gwt_agent::Session,
+) -> io::Result<bool> {
+    let Some(owner) = active_generation_owner_for_recovery_session(worktree, expected_session)?
+    else {
+        return Ok(false);
+    };
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during adopt reconciliation")
+        })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let projection_json = ledger.effective_projection_for(current).to_string();
+        let projection = serde_json::from_str::<ExecutionControlRecord>(&projection_json)
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "committed takeover projection is malformed: {error}"
+                ))
+            })?;
+        let takeover = ledger
+            .takeovers
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.generation_id == current.identity.generation_id)
+            .max_by_key(|(_, event)| event.sequence);
+        let latest_event_sequence = ledger
+            .takeovers
+            .iter()
+            .map(|event| event.sequence)
+            .chain(ledger.lifecycle_events.iter().map(|event| event.sequence))
+            .max();
+        if current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || ledger.effective_status_for(current) != ExecutionControlStatus::Active
+            || projection.owner_kind != owner.kind
+            || projection.owner_number != owner.number
+            || projection.primary_session_id != expected_session.id
+            || takeover.is_none_or(|(_, event)| {
+                event.to_session_id != expected_session.id
+                    || Some(event.sequence) != latest_event_sequence
+            })
+        {
+            return Ok(false);
+        }
+        let (takeover_index, _) = takeover.expect("validated latest takeover");
+        let mut prefix = ledger.clone();
+        prefix.takeovers.remove(takeover_index);
+        let prefix_current = prefix.current_generation().ok_or_else(|| {
+            invalid_generation_data("takeover prefix lost the current generation")
+        })?;
+        let prior_projection = prefix.effective_projection_for(prefix_current);
+        let prior_pointer = generation_pointer(&ledger, prior_projection)?;
+        let prior_pointer_bytes = serde_json::to_vec_pretty(&prior_pointer).map_err(|error| {
+            invalid_generation_data(format!(
+                "serialize pre-takeover generation pointer: {error}"
+            ))
+        })?;
+        let Some(actual_projection) = read_optional_authority_bytes(
+            &context.worktree_trusted_dir.join("execution-control.json"),
+        )?
+        else {
+            return Ok(false);
+        };
+        let Some(actual_pointer) = read_optional_authority_bytes(
+            &context.worktree_trusted_dir.join(GENERATION_POINTER_FILE),
+        )?
+        else {
+            return Ok(false);
+        };
+        if actual_pointer != prior_pointer_bytes
+            || (actual_projection.as_slice() != prior_projection.as_bytes()
+                && actual_projection.as_slice() != projection_json.as_bytes())
+        {
+            return Ok(false);
+        }
+        let identity = execution_binding_for_generation(&ledger, current);
+        update_exact_recovery_session(expected_session, |session| {
+            bind_recovery_session_to_generation(session, owner, identity)?;
+            write_activated_generation(context, &ledger, &projection_json)
+        })?;
+        Ok(true)
     })
 }
 
@@ -12442,7 +12694,30 @@ fn run_adopt_locked(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let prerequisites = match evaluate_execution_adopt_prerequisites(worktree, session_id) {
+    let mut prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
+    let mut reconciled = false;
+    if prerequisites.is_err() {
+        match reconcile_committed_generation_takeover_for_recovery(worktree, expected_session) {
+            Ok(true) => {
+                reconciled = true;
+                prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
+            }
+            Ok(false) => {}
+            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+                out.push_str(&format!("execution: adopt refused — {err}\n"));
+                return Ok(2);
+            }
+            Err(err) => {
+                return Err(SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error(
+                        "reconciling adopted execution authority",
+                        &err,
+                    ),
+                )))
+            }
+        }
+    }
+    let prerequisites = match prerequisites {
         Ok(prerequisites) => prerequisites,
         Err(refusal) => {
             out.push_str(&format!("execution: adopt refused — {}\n", refusal.reason));
@@ -12450,10 +12725,24 @@ fn run_adopt_locked(
         }
     };
     let mut record = match prerequisites {
-        ExecutionAdoptPrerequisites::Satisfied { record, .. } => {
-            match with_satisfied_recovery_session_lease(worktree, &record, expected_session, || {
+        ExecutionAdoptPrerequisites::Satisfied { record, binding } => {
+            let session_result = if reconciled {
                 Ok(())
-            }) {
+            } else if binding.is_some() {
+                persist_current_generation_binding_if_owned_for_recovery(
+                    worktree,
+                    &record,
+                    expected_session,
+                )
+            } else {
+                with_satisfied_recovery_session_lease(
+                    worktree,
+                    &record,
+                    expected_session,
+                    || Ok(()),
+                )
+            };
+            match session_result {
                 Ok(()) => {}
                 Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
                     out.push_str(&format!("execution: adopt refused — {err}\n"));
@@ -12468,6 +12757,18 @@ fn run_adopt_locked(
                     )))
                 }
             }
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                worktree,
+                Some(session_id),
+            )
+            .map_err(|err| {
+                SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error(
+                        "authenticating adopted execution authority",
+                        &err,
+                    ),
+                ))
+            })?;
             out.push_str("execution: the current session already owns this record\n");
             return Ok(0);
         }
@@ -12521,6 +12822,18 @@ fn run_adopt_locked(
             }
         }
     }
+    crate::cli::verification_record::authenticate_current_generation_caller(
+        worktree,
+        Some(session_id),
+    )
+    .map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error(
+                "authenticating adopted execution authority",
+                &err,
+            ),
+        ))
+    })?;
     out.push_str(&format!(
         "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record)\n",
         kind = record.owner_kind.as_str(),
@@ -24033,6 +24346,369 @@ exit 1
 
         // P9a (T-117): execution.adopt takes over with an audited reason and
         // then allows same-session settlement.
+        #[test]
+        fn adopt_installs_durable_binding_for_current_generation_caller() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-old")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let original_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("active generation must expose its binding");
+            persist_generation_session_binding(dir.path(), owner, "sess-old", original_binding);
+            let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
+            assert!(recovery_session.execution_binding.is_none());
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "crash recovery of the implementing window".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+
+            let current = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("adopted generation must retain current authority");
+            let durable = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
+            )
+            .unwrap();
+            let binding = durable
+                .execution_binding
+                .expect("adopting Session must receive the transferred execution binding");
+            assert_eq!(binding.session_id, "sess-new");
+            assert_eq!(binding.owner_kind, owner.kind.as_str());
+            assert_eq!(binding.owner_number, owner.number);
+            assert_eq!(binding.identity, current);
+            assert_eq!(binding.capability_generation, 1);
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                dir.path(),
+                Some("sess-new"),
+            )
+            .expect("adopting Session must authenticate immediately after transfer");
+        }
+
+        #[test]
+        fn adopt_production_dispatch_unlocks_verify_and_ready_pr_handoff() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-handoff");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-crashed")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let original_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("original generation binding");
+            persist_generation_session_binding(dir.path(), owner, "sess-crashed", original_binding);
+            persist_recovery_session_snapshot(dir.path(), owner, "sess-handoff");
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let (adopt_code, adopt_out) = run_collect(
+                &mut env,
+                CliCommand::Execution(ExecutionCommand::Adopt {
+                    reason: "recover the crashed implementation Session".to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(adopt_code, 0, "{adopt_out}");
+
+            let commands = vec!["git --version".to_string()];
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: commands.clone(),
+                    derive: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+
+            env.seed_created_pr(gwt_git::PrStatus {
+                number: 7,
+                title: "Adopted execution handoff".to_string(),
+                state: gwt_git::pr_status::PrState::Open,
+                url: "https://example.invalid/pr/7".to_string(),
+                created_at: None,
+                ci_status: "PENDING".to_string(),
+                mergeable: "UNKNOWN".to_string(),
+                merge_state_status: "UNKNOWN".to_string(),
+                review_status: "REVIEW_REQUIRED".to_string(),
+            });
+            let (pr_code, pr_out) = run_collect(
+                &mut env,
+                CliCommand::Pr(crate::cli::PrCommand::CreateBody {
+                    base: "develop".to_string(),
+                    head: None,
+                    title: "fix: restore adopted authority".to_string(),
+                    body: "production-path authority acceptance".to_string(),
+                    labels: Vec::new(),
+                    draft: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(pr_code, 0, "{pr_out}");
+            assert_eq!(env.pr_create_call_log.len(), 1);
+            assert!(!env.pr_create_call_log[0].draft);
+        }
+
+        #[test]
+        fn adopt_retry_repairs_binding_after_takeover_response_loss() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-old")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
+
+            let mut record = load(dir.path()).unwrap().unwrap();
+            let transfer = OwnershipTransfer {
+                from_session_id: "sess-old".to_string(),
+                to_session_id: "sess-new".to_string(),
+                reason: "crash recovery of the implementing window".to_string(),
+                transferred_at: Utc::now(),
+            };
+            record.transfers.push(transfer.clone());
+            record.primary_session_id = "sess-new".to_string();
+            assert!(
+                persist_generation_takeover_if_owned(dir.path(), &record, &transfer).unwrap(),
+                "fixture must commit the takeover before losing the Session publication response"
+            );
+            assert!(
+                gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml")
+                )
+                .unwrap()
+                .execution_binding
+                .is_none(),
+                "fixture must reproduce the interrupted post-takeover publication"
+            );
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "retry crash recovery".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let current = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("takeover generation must remain current");
+            let durable = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
+            )
+            .unwrap();
+            assert_eq!(
+                durable
+                    .execution_binding
+                    .as_ref()
+                    .map(|binding| &binding.identity),
+                Some(&current)
+            );
+            assert_eq!(load(dir.path()).unwrap().unwrap().transfers.len(), 1);
+            assert!(recovery_session.execution_binding.is_none());
+        }
+
+        #[test]
+        fn adopt_retry_repairs_partial_generation_publication_and_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+
+            for (index, failure_point) in [
+                GenerationWriteFailurePoint::AfterLedger,
+                GenerationWriteFailurePoint::AfterProjection,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let old_session_id = format!("sess-old-partial-{index}");
+                let new_session_id = format!("sess-new-partial-{index}");
+                let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &new_session_id);
+                let dir = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+                let owner = ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3258 + index as u64,
+                };
+                let mut record = active_record(&old_session_id);
+                record.owner_number = owner.number;
+                save(dir.path(), &record).unwrap();
+                ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+                persist_recovery_session_snapshot(dir.path(), owner, &new_session_id);
+
+                set_generation_write_failure(failure_point);
+                let error = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "recover across partial generation publication".to_string(),
+                    },
+                )
+                .expect_err("the injected first publication must fail");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("injected generation write failure"),
+                    "{error}"
+                );
+                assert!(
+                    gwt_agent::Session::load(
+                        &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml"))
+                    )
+                    .unwrap()
+                    .execution_binding
+                    .is_none(),
+                    "a failed generation publication must not publish Session authority"
+                );
+
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "retry partial generation publication".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+                let current = current_execution_binding(dir.path(), owner)
+                    .unwrap()
+                    .expect("the retry must restore strict generation authority");
+                let durable = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml")),
+                )
+                .unwrap();
+                assert_eq!(
+                    durable
+                        .execution_binding
+                        .as_ref()
+                        .map(|binding| &binding.identity),
+                    Some(&current)
+                );
+                assert_eq!(load(dir.path()).unwrap().unwrap().transfers.len(), 1);
+                crate::cli::verification_record::authenticate_current_generation_caller(
+                    dir.path(),
+                    Some(&new_session_id),
+                )
+                .expect("the repaired Session must authenticate without another operation");
+            }
+        }
+
+        #[test]
+        fn adopt_refuses_to_repair_authority_tampered_after_successful_takeover() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+
+            for (index, authority_file) in ["execution-control.json", GENERATION_POINTER_FILE]
+                .into_iter()
+                .enumerate()
+            {
+                let old_session_id = format!("sess-old-tamper-{index}");
+                let new_session_id = format!("sess-new-tamper-{index}");
+                let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &new_session_id);
+                let dir = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+                let owner = ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3268 + index as u64,
+                };
+                let mut record = active_record(&old_session_id);
+                record.owner_number = owner.number;
+                save(dir.path(), &record).unwrap();
+                ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+                persist_recovery_session_snapshot(dir.path(), owner, &new_session_id);
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "complete one valid takeover".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+                let binding_before = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml")),
+                )
+                .unwrap()
+                .execution_binding;
+                let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
+                let tampered_path = context.worktree_trusted_dir.join(authority_file);
+                fs::write(&tampered_path, b"{tampered").unwrap();
+
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "must not launder later authority corruption".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(
+                    out.contains("refused") && out.contains("unreadable"),
+                    "{out}"
+                );
+                assert_eq!(fs::read(&tampered_path).unwrap(), b"{tampered");
+                assert_eq!(
+                    gwt_agent::Session::load(
+                        &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml"))
+                    )
+                    .unwrap()
+                    .execution_binding,
+                    binding_before,
+                    "adopt refusal must not rotate Session authority"
+                );
+            }
+        }
+
         #[test]
         fn adopt_op_transfers_ownership_with_reason() {
             let _env_lock = crate::env_test_lock()

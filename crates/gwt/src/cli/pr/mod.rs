@@ -35,6 +35,10 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Current)
         }
+        Some("list") => {
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::List)
+        }
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
         Some("view") => {
@@ -191,6 +195,11 @@ pub(super) fn run<E: CliEnv>(
                 }
                 None => out.push_str("no current pull request\n"),
             }
+            0
+        }
+        PrCommand::List => {
+            let items = env.list_open_prs().map_err(super::io_as_api_error)?;
+            render_pr_inventory(out, &items);
             0
         }
         PrCommand::Create {
@@ -566,6 +575,41 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     })
 }
 
+pub(super) fn render_pr_inventory(out: &mut String, items: &[gwt_git::PrInventoryItem]) {
+    let rows: Vec<serde_json::Value> = items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "number": item.number,
+                "title": item.title,
+                "url": item.url,
+                "is_draft": item.is_draft,
+                "updated_at": item.updated_at,
+                "mergeable": item.mergeable,
+                "merge_state_status": item.merge_state_status,
+                "ci_status": item.ci_status,
+                "review_status": item.review_status,
+                "closing_issues": item.closing_issues,
+                "lifecycle": item.lifecycle,
+                "stale": item.stale,
+                "owner_issue_closed": item.owner_issue_closed,
+                "default_action": item.default_action,
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({
+        "count": rows.len(),
+        "pull_requests": rows,
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            out.push_str(&rendered);
+            out.push('\n');
+        }
+        Err(error) => out.push_str(&format!("pr.list JSON: {error}\n")),
+    }
+}
+
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
@@ -650,6 +694,26 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    fn seeded_inventory_item() -> gwt_git::PrInventoryItem {
+        gwt_git::PrInventoryItem {
+            number: 7,
+            title: "CLI family split".to_string(),
+            url: "https://example.com/pr/7".to_string(),
+            is_draft: false,
+            updated_at: None,
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
+            ci_status: "SUCCESS".to_string(),
+            review_status: "APPROVED".to_string(),
+            body: String::new(),
+            closing_issues: vec![],
+            lifecycle: "MERGE-CANDIDATE".to_string(),
+            stale: false,
+            owner_issue_closed: false,
+            default_action: "propose merge".to_string(),
+        }
     }
 
     fn seeded_pr() -> gwt_git::PrStatus {
@@ -1515,6 +1579,26 @@ mod tests {
         assert!(out.contains("#7 [OPEN] CLI family split"));
         assert_eq!(env.pr_current_call_count, 1);
         assert!(env.client.call_log().is_empty());
+    }
+
+    #[test]
+    fn pr_family_run_renders_open_pr_inventory_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr_inventory(vec![seeded_inventory_item()]);
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::List, &mut out).expect("run pr list");
+
+        assert_eq!(code, 0);
+        assert_eq!(env.pr_list_call_count, 1);
+        assert!(out.contains("\"lifecycle\": \"MERGE-CANDIDATE\""), "{out}");
+        assert!(
+            out.contains("\"default_action\": \"propose merge\""),
+            "{out}"
+        );
+        assert!(out.contains("\"count\": 1"), "{out}");
+        assert!(!out.contains("CLI family split body"), "{out}");
     }
 
     #[test]

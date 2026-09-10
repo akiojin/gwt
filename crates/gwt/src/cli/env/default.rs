@@ -473,6 +473,10 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
             .map_err(|err| io::Error::other(err.to_string()))
     }
+    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+        gwt_git::fetch_pr_inventory(&self.repo_path)
+            .map_err(|err| io::Error::other(err.to_string()))
+    }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::pr::mark_pr_ready_via_gh(

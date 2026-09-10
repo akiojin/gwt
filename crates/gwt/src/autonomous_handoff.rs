@@ -18,8 +18,10 @@
 //! agent judged the decision to need a human — or ignored the policy, in which
 //! case escalating is the safe outcome.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Marks a launch as a monitor-driven autonomous execution (SPEC #3200).
 /// Absent for every human-driven launch, which keeps their behavior unchanged.
@@ -80,6 +82,208 @@ pub enum AutonomousHandoffState {
     Resumed,
 }
 
+/// Durable physical-delivery state for one answered handoff.
+///
+/// `Attempting` is a write-ahead fence: it is committed before any bytes may
+/// be submitted to the provider. If its bound materializer disappears without
+/// an authenticated `UserPromptSubmit` receipt, the outcome is ambiguous and
+/// must never cause an automatic replay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AutonomousHandoffDeliveryState {
+    /// The current answer has not crossed a physical submit boundary.
+    #[default]
+    Pending,
+    /// A submit is about to be attempted. Persisted before touching the pane
+    /// or starting a provider process.
+    Attempting {
+        attempt: u32,
+        prompt_sha256: String,
+        started_at: String,
+        /// Host identity of the process that created the fence. This closes
+        /// the prepare-to-target-bind race without mistaking a recycled PID
+        /// for the original materializer.
+        #[serde(default)]
+        materializer_pid: u32,
+        #[serde(default)]
+        materializer_started_at: u64,
+        /// Exact runtime identity authorized to submit this prompt. It is
+        /// rebound after the target gwt Session/window is materialized but
+        /// before any provider process or PTY write may begin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<Box<AutonomousHandoffDeliveryTarget>>,
+    },
+    /// The bound materializer disappeared while an Attempting record was
+    /// unresolved. Automatic retry is forbidden because the submit may have
+    /// reached the provider.
+    Ambiguous {
+        attempt: u32,
+        prompt_sha256: String,
+        detected_at: String,
+        reason: String,
+    },
+    /// A failure was proved to have happened before submit. The exact-session
+    /// retry remains bounded and cannot run before this clock.
+    RetryBackoff {
+        attempt: u32,
+        retry_not_before: String,
+        last_error: String,
+    },
+    /// The bounded, definitely-not-submitted retry ladder was exhausted.
+    Exhausted {
+        attempt: u32,
+        failed_at: String,
+        last_error: String,
+    },
+    /// An authenticated UserPromptSubmit receipt matched the current answer,
+    /// asking Session, attempt number, and protected prompt hash.
+    Delivered {
+        attempt: u32,
+        prompt_sha256: String,
+        delivered_at: String,
+    },
+}
+
+/// Durable destination of one answer attempt. The hook receipt must reproduce
+/// every provider/project/session field; the stored delivery/window pair also
+/// lets that same receipt settle launch ownership atomically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousHandoffDeliveryTarget {
+    pub gwt_session_id: String,
+    pub native_session_id: String,
+    pub provider: String,
+    pub issue_number: u64,
+    pub repo_hash: String,
+    pub project_state_root: String,
+    pub window_id: String,
+    #[serde(default)]
+    pub materializer_id: String,
+    #[serde(default)]
+    pub materializer_pid: u32,
+    #[serde(default)]
+    pub materializer_started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+}
+
+/// Provider-observed identity accompanying a `UserPromptSubmit` receipt.
+/// Window/delivery ownership remains trusted from the pre-submit target bind;
+/// the child proves only the identity it can independently observe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutonomousHandoffReceiptIdentity {
+    pub gwt_session_id: String,
+    pub native_session_id: String,
+    pub provider: String,
+    pub issue_number: u64,
+    pub repo_hash: String,
+    pub project_state_root: String,
+}
+
+/// Parsed identity from a protected autonomous-answer prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutonomousHandoffAnswerMarker {
+    pub handoff_id: String,
+    pub session_id: String,
+    pub attempt: u32,
+    pub prompt_sha256: String,
+}
+
+const AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX: &str = "\n\n[gwt-autonomous-answer:v1:";
+
+fn autonomous_handoff_answer_prompt_sha256(
+    body: &str,
+    handoff_id: &str,
+    session_id: &str,
+    attempt: u32,
+) -> String {
+    fn update_part(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"gwt autonomous handoff answer v1\0");
+    update_part(&mut hasher, handoff_id.as_bytes());
+    update_part(&mut hasher, session_id.as_bytes());
+    hasher.update(attempt.to_be_bytes());
+    update_part(&mut hasher, body.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Protect one answer prompt with its exact handoff, Session, attempt, and
+/// canonical body hash. The identifiers are URL-safe base64 so delimiters in a
+/// normal handoff id can never change the parsed identity.
+pub fn protected_autonomous_handoff_answer_prompt(
+    body: &str,
+    handoff_id: &str,
+    session_id: &str,
+    attempt: u32,
+) -> Option<String> {
+    if body.is_empty() || handoff_id.is_empty() || session_id.is_empty() || attempt == 0 {
+        return None;
+    }
+    let prompt_sha256 =
+        autonomous_handoff_answer_prompt_sha256(body, handoff_id, session_id, attempt);
+    Some(format!(
+        "{body}{AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX}{}:{}:{attempt}:{prompt_sha256}]",
+        URL_SAFE_NO_PAD.encode(handoff_id.as_bytes()),
+        URL_SAFE_NO_PAD.encode(session_id.as_bytes()),
+    ))
+}
+
+/// Parse and authenticate a protected answer prompt. Any body, identity,
+/// attempt, encoding, or hash alteration fails closed.
+pub fn parse_protected_autonomous_handoff_answer_prompt(
+    prompt: &str,
+) -> Option<AutonomousHandoffAnswerMarker> {
+    let prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
+    let marker_start = prompt.rfind(AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX)?;
+    let body = &prompt[..marker_start];
+    let marker = prompt[marker_start..]
+        .strip_prefix(AUTONOMOUS_HANDOFF_ANSWER_MARKER_PREFIX)?
+        .strip_suffix(']')?;
+    let mut parts = marker.split(':');
+    let handoff_encoded = parts.next()?;
+    let session_encoded = parts.next()?;
+    let attempt_raw = parts.next()?;
+    let prompt_sha256 = parts.next()?;
+    if parts.next().is_some() || !is_canonical_sha256(prompt_sha256) {
+        return None;
+    }
+    let handoff_bytes = URL_SAFE_NO_PAD.decode(handoff_encoded).ok()?;
+    let session_bytes = URL_SAFE_NO_PAD.decode(session_encoded).ok()?;
+    if URL_SAFE_NO_PAD.encode(&handoff_bytes) != handoff_encoded
+        || URL_SAFE_NO_PAD.encode(&session_bytes) != session_encoded
+    {
+        return None;
+    }
+    let handoff_id = String::from_utf8(handoff_bytes).ok()?;
+    let session_id = String::from_utf8(session_bytes).ok()?;
+    let attempt = attempt_raw.parse::<u32>().ok()?;
+    if handoff_id.is_empty()
+        || session_id.is_empty()
+        || attempt == 0
+        || attempt.to_string() != attempt_raw
+        || autonomous_handoff_answer_prompt_sha256(body, &handoff_id, &session_id, attempt)
+            != prompt_sha256
+    {
+        return None;
+    }
+    Some(AutonomousHandoffAnswerMarker {
+        handoff_id,
+        session_id,
+        attempt,
+        prompt_sha256: prompt_sha256.to_string(),
+    })
+}
+
 /// One selectable answer the agent offered.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousHandoffOption {
@@ -125,11 +329,19 @@ pub struct AutonomousQuestionHandoff {
     pub answer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_at: Option<String>,
+    /// Monotonic identity of the human answer. Timestamps remain useful for
+    /// display, but cannot order two replacements recorded in the same second.
+    #[serde(default)]
+    pub answer_revision: u64,
     /// When the answer was handed to the resumed session. `None` on a
     /// `Resumed` handoff means the resume prompt is still owed to the launch
     /// path; set exactly once so the answer is never replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<String>,
+    /// Physical answer delivery. Missing in legacy preferences means the
+    /// current answer has not been attempted.
+    #[serde(default)]
+    pub delivery: AutonomousHandoffDeliveryState,
 }
 
 impl AutonomousQuestionHandoff {
@@ -162,7 +374,9 @@ The question was converted into this handoff before the provider's question UI c
             state: AutonomousHandoffState::Pending,
             answer: None,
             answered_at: None,
+            answer_revision: 0,
             delivered_at: None,
+            delivery: AutonomousHandoffDeliveryState::Pending,
         }
     }
 

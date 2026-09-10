@@ -64,20 +64,7 @@ fn guard_lock_path(path: &Path) -> PathBuf {
 /// to a fixed sentinel as a last resort so the lock path is always
 /// resolvable (preventing accidental cross-user lock sharing).
 pub fn current_user_id() -> String {
-    let raw = whoami::username();
-    let trimmed = raw.trim();
-    if !trimmed.is_empty() {
-        return sanitize_user_id_segment(trimmed);
-    }
-    let env_var = if cfg!(target_os = "windows") {
-        "USERNAME"
-    } else {
-        "USER"
-    };
-    if let Some(value) = std::env::var(env_var).ok().filter(|v| !v.trim().is_empty()) {
-        return sanitize_user_id_segment(value.trim());
-    }
-    "unknown".to_string()
+    sanitize_user_id_segment(&crate::process::current_username())
 }
 
 fn sanitize_user_id_segment(value: &str) -> String {

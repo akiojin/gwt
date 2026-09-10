@@ -160,6 +160,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::LastSettings,
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
+            quota_hold: None,
             autonomous_issues: Vec::new(),
         },
     };

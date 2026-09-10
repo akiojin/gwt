@@ -103,6 +103,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_pr(number)
     }
 
+    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+        self.inner.list_open_prs()
+    }
+
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.inner.mark_pr_ready(number)
     }

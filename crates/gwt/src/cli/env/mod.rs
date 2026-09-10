@@ -66,6 +66,7 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>>;
     fn create_pr(
         &mut self,
         base: &str,

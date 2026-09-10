@@ -18,7 +18,10 @@
         findTitlebarDockTarget,
         resolveDragReleasePoint,
       } from "/window-docking.js";
-      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import {
+        createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
+        mergeActiveWorkProjectionPatch,
+      } from "/workspace-kanban-surface.js";
       import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -4385,6 +4388,11 @@
           } catch {
             // Picker may not be mounted yet during bootstrap.
           }
+          try {
+            renderAllKnowledgeBridgeWindows();
+          } catch {
+            // Knowledge surfaces may not be mounted yet during bootstrap.
+          }
           const notice = launchPending.consumeTimeoutNotice();
           if (notice) {
             console.warn("[launch-pending]", notice);
@@ -4421,6 +4429,7 @@
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         closeKanbanDrawer,
         mountKnowledgeWindow,
@@ -5753,6 +5762,24 @@
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
+          case "active_work_projection_patch":
+            activeWorkProjection = mergeActiveWorkProjectionPatch(
+              activeWorkProjection,
+              event.projection || null,
+            );
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+            );
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
+            workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
+            recomputeOperatorTelemetry();
+            break;
           // SPEC-3064 Phase 3 (E7): window list entries and rendering live
           // in the project shell surface.
           case "window_list":
@@ -5996,7 +6023,20 @@
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);
-            launchPending.settleAck(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh();
+              }
+            }
             break;
           // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
           // accepted — settle pending UI and dismiss the picker.

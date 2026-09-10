@@ -292,6 +292,222 @@ test.describe("Issue Bridge load recovery", () => {
   });
 });
 
+test.describe("Issue Related Work Resume", () => {
+  test.use({
+    deviceScaleFactor: 1,
+    viewport: { width: 1440, height: 900 },
+  });
+
+  test("correlates one real click, ignores stale error, and visibly recovers from the exact error", async ({
+    page,
+  }, testInfo) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, {
+      includeRelatedWork: true,
+      theme,
+    });
+    await page.goto(APP_URL);
+    await page.addStyleTag({
+      content: "#fleet-minimap { pointer-events: none !important; }",
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+    await page
+      .locator(".surface-knowledge .knowledge-row[data-issue-number='3096']")
+      .click();
+    const resume = page.locator(
+      '.surface-knowledge [data-action="resume-related-session"]'
+        + '[data-session-id="related-gwt-session"]'
+        + '[data-agent-session-id="related-conversation"]',
+    );
+    await expect(resume).toBeVisible();
+
+    await resume.click();
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await expect(resume).toHaveClass(/is-pending/);
+
+    const first = await page.evaluate(() => {
+      const messages = window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "resume_workspace_agent",
+      );
+      return messages[0];
+    });
+    expect(first).toBeTruthy();
+    expect(Object.keys(first).sort()).toEqual([
+      "agent_session_id",
+      "bounds",
+      "kind",
+      "operation_id",
+      "session_id",
+    ]);
+    expect(first.operation_id).toEqual(expect.stringMatching(/^resume-/));
+    expect(first.operation_id).not.toBe("");
+    expect(first.session_id).toBe("related-gwt-session");
+    expect(first.agent_session_id).toBe("related-conversation");
+    expect(first.bounds).toEqual(expect.objectContaining({
+      width: expect.any(Number),
+      height: expect.any(Number),
+    }));
+
+    // Bypass the native disabled guard once so the shared pending controller
+    // must also reject a duplicate event for the same Session.
+    await resume.dispatchEvent("click");
+    await expect.poll(() => page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "resume_workspace_agent",
+      ).length,
+    )).toBe(1);
+
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(
+        (message) => message.kind === "resume_workspace_agent",
+      );
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "workspace_resume_agent_error",
+        operation_id: `${request.operation_id}-stale`,
+        session_id: request.session_id,
+        message: "Stale Resume failure must stay invisible",
+      });
+    });
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await expect(
+      page.locator('.toast-alerts__item[data-level="error"]').filter({
+        hasText: "Stale Resume failure must stay invisible",
+      }),
+    ).toHaveCount(0);
+
+    const loadCountBeforeError = await page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "load_knowledge_bridge",
+      ).length,
+    );
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(
+        (message) => message.kind === "resume_workspace_agent",
+      );
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "workspace_resume_agent_error",
+        operation_id: request.operation_id,
+        session_id: request.session_id,
+        message: '<img src=x onerror="window.__resumeToastXss=true">Fixture backend rejected Related Work Resume',
+      });
+    });
+
+    await expect(resume).toBeEnabled();
+    await expect(resume).toHaveText("Resume");
+    await expect(resume).not.toHaveClass(/is-pending/);
+    await expect(page.locator("#workspace-resume-picker-modal")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+    const errorToast = page
+      .locator('.toast-alerts__item[data-level="error"]')
+      .filter({ hasText: "Fixture backend rejected Related Work Resume" });
+    await expect(errorToast).toBeVisible();
+    await expect(errorToast.locator(".toast-alerts__dismiss")).toBeVisible();
+    await expect(errorToast).toContainText(
+      '<img src=x onerror="window.__resumeToastXss=true">Fixture backend rejected Related Work Resume',
+    );
+    await expect(errorToast.locator("img, script")).toHaveCount(0);
+    expect(await page.evaluate(() => window.__resumeToastXss === true)).toBe(false);
+
+    await expect.poll(() => page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "load_knowledge_bridge",
+      ).length,
+    )).toBeGreaterThan(loadCountBeforeError);
+    const latestLoad = await page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "load_knowledge_bridge",
+      ).at(-1),
+    );
+    expect(latestLoad.refresh).toBe(false);
+
+    await errorToast.locator(".toast-alerts__dismiss").click();
+    await expect(errorToast).toHaveCount(0);
+    await resume.click();
+    await expect.poll(() => page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "resume_workspace_agent",
+      ).length,
+    )).toBe(2);
+    const operations = await page.evaluate(() =>
+      window.__knowledgeLoadMessages
+        .filter((message) => message.kind === "resume_workspace_agent")
+        .map((message) => message.operation_id),
+    );
+    expect(operations[1]).toEqual(expect.stringMatching(/^resume-/));
+    expect(operations[1]).not.toBe(operations[0]);
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("re-enables Resume when the captured 20,000ms pending timeout fires", async ({
+    page,
+  }, testInfo) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, {
+      captureLaunchPendingTimeout: true,
+      includeRelatedWork: true,
+      theme,
+    });
+    await page.goto(APP_URL);
+    await page.addStyleTag({
+      content: "#fleet-minimap { pointer-events: none !important; }",
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+    await page
+      .locator(".surface-knowledge .knowledge-row[data-issue-number='3096']")
+      .click();
+    const resume = page.locator(
+      '.surface-knowledge [data-action="resume-related-session"]'
+        + '[data-session-id="related-gwt-session"]'
+        + '[data-agent-session-id="related-conversation"]',
+    );
+    await expect(resume).toBeVisible();
+    await resume.click();
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await expect.poll(() => page.evaluate(
+      () => window.__launchPendingTimeoutDelays,
+    )).toEqual([20_000]);
+
+    await page.evaluate(() => window.__fireLaunchPendingTimeouts());
+
+    await expect(resume).toBeEnabled();
+    await expect(resume).toHaveText("Resume");
+    await expect(resume).not.toHaveClass(/is-pending/);
+    const timeoutToast = page
+      .locator('.toast-alerts__item[data-level="error"]')
+      .filter({ hasText: "Resume request timed out" });
+    await expect(timeoutToast).toBeVisible();
+    await expect(timeoutToast.locator(".toast-alerts__title")).toHaveText(
+      "Launch timed out",
+    );
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+});
+
 // SPEC #3170 T-955 — both the Issue preset and the SPEC preset normalize to
 // the backend `issue` knowledge kind, so every selection scenario runs twice
 // against the same surface contract.
@@ -1274,22 +1490,57 @@ async function installSpecPresetBackend(page, { theme }) {
 async function installIssueBridgeBackend(
   page,
   {
+    captureLaunchPendingTimeout = false,
     errorOnForcedRefresh = false,
+    includeRelatedWork = false,
     ignoreFirstLoad = false,
     legacyPreset = false,
     staleDetailBeforeWorkspace = false,
+    theme = null,
     triggerAutoRefreshOnce = false,
   } = {},
 ) {
   await page.addInitScript(
     ({
+      captureLaunchPendingTimeout: shouldCaptureLaunchPendingTimeout,
       errorOnForcedRefresh: shouldErrorOnForcedRefresh,
+      includeRelatedWork: shouldIncludeRelatedWork,
       ignoreFirstLoad: shouldIgnoreFirstLoad,
       legacyPreset: shouldUseLegacyPreset,
       staleDetailBeforeWorkspace: shouldSeedStaleDetail,
+      theme: selectedTheme,
       triggerAutoRefreshOnce: shouldTriggerAutoRefreshOnce,
     }) => {
       window.__knowledgeLoadMessages = [];
+      if (selectedTheme) {
+        localStorage.setItem("gwt:ui:theme", selectedTheme);
+      }
+      if (shouldCaptureLaunchPendingTimeout) {
+        const originalSetTimeout = window.setTimeout.bind(window);
+        const originalClearTimeout = window.clearTimeout.bind(window);
+        const callbacks = new Map();
+        let nextCapturedTimerId = -1;
+        window.__launchPendingTimeoutDelays = [];
+        window.__fireLaunchPendingTimeouts = () => {
+          const pendingCallbacks = [...callbacks.values()];
+          callbacks.clear();
+          for (const callback of pendingCallbacks) callback();
+        };
+        window.setTimeout = (callback, delay, ...args) => {
+          if (delay === 20_000 && typeof callback === "function") {
+            const timerId = nextCapturedTimerId;
+            nextCapturedTimerId -= 1;
+            window.__launchPendingTimeoutDelays.push(delay);
+            callbacks.set(timerId, () => callback(...args));
+            return timerId;
+          }
+          return originalSetTimeout(callback, delay, ...args);
+        };
+        window.clearTimeout = (timerId) => {
+          if (callbacks.delete(Number(timerId))) return;
+          originalClearTimeout(timerId);
+        };
+      }
       if (shouldTriggerAutoRefreshOnce) {
         window.__knowledgeAutoRefreshCallbacks = [];
         window.__triggerKnowledgeAutoRefresh = () => {
@@ -1437,6 +1688,7 @@ async function installIssueBridgeBackend(
           super();
           this.url = url;
           this.readyState = FixtureWebSocket.CONNECTING;
+          window.__issueBridgeFixtureSocket = this;
           setTimeout(() => {
             this.readyState = FixtureWebSocket.OPEN;
             this.dispatchEvent(new Event("open"));
@@ -1524,6 +1776,31 @@ async function installIssueBridgeBackend(
                 subtitle: "Cached Issue detail",
                 labels: ["bug"],
                 launch_issue_number: message.number,
+                related_works: shouldIncludeRelatedWork && message.number === 3096
+                  ? [
+                      {
+                        id: "related-work-1",
+                        title: "Issue Related Work Resume fixture",
+                        status_category: "idle",
+                        branch: "work/issue-related-resume",
+                        worktree_path: "/fixture/work/issue-related-resume",
+                        agents: [
+                          {
+                            session_id: "related-gwt-session",
+                            agent_id: "codex",
+                            display_name: "Codex",
+                            sessions: [
+                              {
+                                agent_session_id: "related-conversation",
+                                is_active: false,
+                                resumable: true,
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ]
+                  : [],
                 sections: [
                   {
                     title: "Description",
@@ -1561,10 +1838,13 @@ async function installIssueBridgeBackend(
       });
     },
     {
+      captureLaunchPendingTimeout,
       errorOnForcedRefresh,
+      includeRelatedWork,
       ignoreFirstLoad,
       legacyPreset,
       staleDetailBeforeWorkspace,
+      theme,
       triggerAutoRefreshOnce,
     },
   );

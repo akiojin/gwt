@@ -276,6 +276,33 @@ fn ensure_running_reports_the_reason_when_the_daemon_cannot_be_started() {
     supervisor.shutdown();
 }
 
+#[test]
+fn ensure_running_records_a_daemon_fault_in_the_error_ledger() {
+    let fixture = fixture();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(&fixture.gwt_home);
+    let supervisor = DaemonSupervisor::with_spawner(|_context: &DaemonSpawnContext<'_>| {
+        Err(std::io::Error::other("gwtd binary could not be resolved"))
+    });
+
+    let error = supervisor
+        .ensure_running(&fixture.project_root)
+        .expect_err("spawn failure must be reported");
+    assert!(
+        error.contains("gwtd binary could not be resolved"),
+        "{error}"
+    );
+
+    let listed = gwt_core::error_ledger::list_since(None).expect("list");
+    assert!(
+        listed.iter().any(|row| {
+            row.kind == gwt_core::error_ledger::ErrorKind::DaemonFault
+                && row.message.contains("gwtd binary could not be resolved")
+        }),
+        "daemon fault must land in the error ledger: {listed:?}"
+    );
+    supervisor.shutdown();
+}
+
 /// The child must ask for the daemon through gwtd's only sanctioned transport
 /// (a stdin JSON envelope — legacy argv is refused with exit 2), and it must
 /// run inside the project it serves because the daemon derives its

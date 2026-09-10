@@ -24,7 +24,10 @@ pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};
 pub use issue::{Issue, IssueCache};
 pub use pr_status::{
-    fetch_pr_list, pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrStatus, ReviewStatus,
+    classify_pr_lifecycle, fetch_pr_inventory, fetch_pr_list, parse_pr_inventory_json,
+    pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrClosingIssue, PrInventoryFields,
+    PrInventoryItem, PrLifecycleClass, PrLifecycleDecision, PrStatus, ReviewStatus,
+    PR_STALE_AFTER_HOURS,
 };
 pub use refs::list_existing_refs;
 pub use repository::{

@@ -221,6 +221,21 @@ impl AppRuntime {
             error = %sanitized_error,
             "launch wizard action failed"
         );
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            sanitized_error,
+            gwt_core::error_ledger::ErrorTarget {
+                issue: view
+                    .linked_issue_number
+                    .or(session.issue_monitor_launch_issue_number),
+                window_id: Some(session.wizard_id.clone()),
+                session_id: session
+                    .manual_holder_intent
+                    .as_ref()
+                    .map(|intent| intent.predecessor.session_id.clone()),
+                project_root: None,
+            },
+        );
     }
 
     fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
@@ -251,6 +266,22 @@ impl AppRuntime {
             branch = %branch_name,
             error = %sanitized_error,
             "window launch failed"
+        );
+        let project_root = self.window_lookup.get(window_id).and_then(|address| {
+            self.tabs
+                .iter()
+                .find(|tab| tab.id == address.tab_id)
+                .map(|tab| tab.project_root.display().to_string())
+        });
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            sanitized_error,
+            gwt_core::error_ledger::ErrorTarget {
+                window_id: Some(window_id.to_string()),
+                session_id: session.map(|session| session.session_id.clone()),
+                project_root,
+                issue: None,
+            },
         );
     }
 
@@ -335,6 +366,12 @@ impl AppRuntime {
             .as_ref()
             .and_then(|context| context.issue_monitor_session_mode)
             .unwrap_or(gwt_agent::SessionMode::Normal);
+        let issue_monitor_autonomous_handoff = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_autonomous_handoff.clone());
+        let issue_monitor_autonomous_submit_started = launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_autonomous_submit_started);
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
@@ -347,13 +384,24 @@ impl AppRuntime {
             );
             events.push(terminal_output);
             if let Some(issue_number) = issue_monitor_issue_number {
-                events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
-                    issue_monitor_project_root.as_deref(),
-                    issue_number,
-                    &detail,
-                    issue_monitor_delivery_id.as_deref(),
-                    issue_monitor_session_mode,
-                ));
+                if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
+                    events.extend(self.answered_handoff_launch_failure_events(
+                        issue_monitor_project_root.as_deref(),
+                        issue_number,
+                        issue_monitor_delivery_id.as_deref(),
+                        handoff,
+                        issue_monitor_autonomous_submit_started,
+                        &detail,
+                    ));
+                } else {
+                    events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
+                        issue_monitor_project_root.as_deref(),
+                        issue_number,
+                        &detail,
+                        issue_monitor_delivery_id.as_deref(),
+                        issue_monitor_session_mode,
+                    ));
+                }
             }
             return events;
         }
@@ -373,15 +421,99 @@ impl AppRuntime {
             ));
         }
         if let Some(issue_number) = issue_monitor_issue_number {
-            events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
-                issue_monitor_project_root.as_deref(),
-                issue_number,
-                &detail,
-                issue_monitor_delivery_id.as_deref(),
-                issue_monitor_session_mode,
-            ));
+            if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
+                events.extend(self.answered_handoff_launch_failure_events(
+                    issue_monitor_project_root.as_deref(),
+                    issue_number,
+                    issue_monitor_delivery_id.as_deref(),
+                    handoff,
+                    issue_monitor_autonomous_submit_started,
+                    &detail,
+                ));
+            } else {
+                events.extend(self.issue_monitor_launch_failed_delivery_events_with_mode(
+                    issue_monitor_project_root.as_deref(),
+                    issue_number,
+                    &detail,
+                    issue_monitor_delivery_id.as_deref(),
+                    issue_monitor_session_mode,
+                ));
+            }
         }
         events
+    }
+
+    fn answered_handoff_launch_failure_events(
+        &mut self,
+        project_root: Option<&std::path::Path>,
+        issue_number: u64,
+        delivery_id: Option<&str>,
+        handoff: &gwt::AutonomousHandoffDeliveryAttempt,
+        submit_started: bool,
+        detail: &str,
+    ) -> Vec<OutboundEvent> {
+        let local_delivery_key = delivery_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("handoff:{}", handoff.handoff_id));
+        self.issue_monitor_launch_deliveries
+            .remove(&local_delivery_key);
+        let durable_note = project_root.map_or_else(
+            || "; the owning Project State is unavailable".to_string(),
+            |project_root| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                if submit_started {
+                    match gwt::mark_autonomous_handoff_delivery_ambiguous_from_prefs(
+                        &prefs_path,
+                        &handoff.handoff_id,
+                        &handoff.session_id,
+                        handoff.attempt,
+                        detail,
+                        &now,
+                    ) {
+                        Ok(true) => {
+                            "; the ambiguous attempt was parked for human review".to_string()
+                        }
+                        Ok(false) => "; the durable attempt no longer matched".to_string(),
+                        Err(error) => {
+                            format!("; durable ambiguity could not be recorded: {error}")
+                        }
+                    }
+                } else {
+                    match gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                        &prefs_path,
+                        &handoff.handoff_id,
+                        &handoff.session_id,
+                        handoff.attempt,
+                        detail,
+                        &now,
+                    ) {
+                        Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Retry {
+                            retry_not_before,
+                            ..
+                        }) => format!(
+                            "; the definitely pre-submit attempt will retry after {retry_not_before}"
+                        ),
+                        Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Escalated {
+                            ..
+                        }) => "; the bounded retry ladder was exhausted".to_string(),
+                        Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Rejected) => {
+                            "; the durable attempt no longer matched".to_string()
+                        }
+                        Err(error) => {
+                            format!("; durable pre-submit failure could not be recorded: {error}")
+                        }
+                    }
+                }
+            },
+        );
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message: format!(
+                "Issue Monitor could not confirm the exact answered-session submit{durable_note}: {detail}"
+            ),
+            issue_number: Some(issue_number),
+        })]
     }
 
     fn user_facing_launch_error_detail(detail: &str) -> String {

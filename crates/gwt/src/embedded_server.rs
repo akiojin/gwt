@@ -202,6 +202,7 @@ struct PreparedOutbound {
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
 
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
+    gwt::error_report::record_backend_event(event);
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id) = match event {
         gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone())),
@@ -1131,6 +1132,7 @@ struct AgentCapabilityRegistryState {
 struct ManualExecutionHandoffState {
     binding: gwt_agent::SessionExecutionBinding,
     suspended: Option<SuspendedManualExecutionCapability>,
+    restore_suspended_on_rollback: bool,
 }
 
 struct SuspendedManualExecutionCapability {
@@ -1540,6 +1542,7 @@ impl AgentCapabilityRegistry {
             ManualExecutionHandoffState {
                 binding: expected_binding.clone(),
                 suspended: None,
+                restore_suspended_on_rollback: false,
             },
         );
         Ok(ManualExecutionHandoffReservation {
@@ -1606,6 +1609,106 @@ impl AgentCapabilityRegistry {
                     principal,
                     principal_key,
                 }),
+                restore_suspended_on_rollback: true,
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn active_execution_binding_for_token(
+        &self,
+        token: &str,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.authenticate(token)?
+            .active_execution_binding()
+            .cloned()
+    }
+
+    fn self_close_active_execution_binding(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing_by_ticket
+            .get(ticket.id())
+            .filter(|closing| !closing.revoked)
+            .and_then(|closing| closing.principal.active_execution_binding().cloned())
+    }
+
+    /// Transfer one already-accepted correlated self-close into the same
+    /// exact-generation handoff used by a manual close. This is deliberately
+    /// one registry transaction: the direct ACK has already moved the bearer
+    /// out of `principals_by_token`, so trying to begin a token handoff would
+    /// always fail and leave the durable Session running.
+    fn begin_self_close_manual_execution_handoff(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("manual execution handoff is already reserved".to_string());
+        }
+        let closing = state
+            .closing_by_ticket
+            .get(ticket.id())
+            .ok_or_else(|| "self-close capability is missing or no longer current".to_string())?;
+        if closing.revoked {
+            return Err("self-close capability was revoked".to_string());
+        }
+        if closing.principal.active_execution_binding() != Some(expected_binding) {
+            return Err("self-close capability binding changed".to_string());
+        }
+
+        let closing = state
+            .closing_by_ticket
+            .remove(ticket.id())
+            .expect("validated self-close ticket remains present");
+        let principal_key = (
+            closing.principal.canonical_project_root().to_path_buf(),
+            closing.principal.session_id().to_string(),
+        );
+        if state
+            .closing_ticket_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| current == ticket.id())
+        {
+            state
+                .closing_ticket_by_project_session
+                .remove(&principal_key);
+        }
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: Some(SuspendedManualExecutionCapability {
+                    token: closing.token,
+                    principal: closing.principal,
+                    principal_key,
+                }),
+                // The direct self-close ACK is the bearer revocation commit
+                // point. Later PTY, persistence, or scheduling failures may
+                // release this fence, but must never authenticate the closed
+                // origin socket again.
+                restore_suspended_on_rollback: false,
             },
         );
         Ok(ManualExecutionHandoffReservation {
@@ -1646,6 +1749,9 @@ impl AgentCapabilityRegistry {
         let Some(suspended) = handoff.suspended.take() else {
             return true;
         };
+        if !handoff.restore_suspended_on_rollback {
+            return true;
+        }
         if state.principals_by_token.contains_key(&suspended.token)
             || state
                 .token_by_project_session
@@ -2201,6 +2307,29 @@ impl AgentCapabilityIssuer {
     ) -> Result<ManualExecutionHandoffReservation, String> {
         self.registry
             .begin_manual_execution_handoff(token, expected_binding)
+    }
+
+    pub(crate) fn active_execution_binding_for_token(
+        &self,
+        token: &str,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.registry.active_execution_binding_for_token(token)
+    }
+
+    pub(crate) fn self_close_active_execution_binding(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+    ) -> Option<gwt_agent::SessionExecutionBinding> {
+        self.registry.self_close_active_execution_binding(ticket)
+    }
+
+    pub(crate) fn begin_self_close_manual_execution_handoff(
+        &self,
+        ticket: &AgentSelfCloseCapabilityTicket,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .begin_self_close_manual_execution_handoff(ticket, expected_binding)
     }
 
     pub(crate) fn release_manual_execution_handoff(
@@ -4109,6 +4238,7 @@ fn handle_frontend_message(
                 .send(UserEvent::RuntimeApprovalResolutionStarted { id: id.clone() });
             resolution_marked = true;
         }
+        let had_unsent = pty.has_unsent_user_input();
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
@@ -4121,6 +4251,11 @@ fn handle_frontend_message(
                     write_us = write_started.elapsed().as_micros() as u64,
                     "terminal_input written to PTY via WS fast-path"
                 );
+                if had_unsent && !pty.has_unsent_user_input() {
+                    state
+                        .proxy
+                        .send(UserEvent::FlushPendingPmWake { id: id.clone() });
+                }
                 return;
             }
             Err(_error) => {
@@ -4736,6 +4871,63 @@ mod tests {
             .issue_bound(project.path(), &binding.session_id, binding.clone())
             .is_err());
         assert!(issuer.release_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
+    fn accepted_self_close_handoff_rollback_releases_fence_without_restoring_bearer() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-self-close-handoff".to_string(),
+            repo_hash: "repo-self-close-handoff".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3783,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-self-close-handoff".to_string(),
+                binding_id: "binding-self-close-handoff".to_string(),
+                ledger_head_hash: "head-self-close-handoff".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let active = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("issue exact active holder");
+        let grant = issuer
+            .grant_for_test(&active.token)
+            .expect("current capability grant");
+        let ticket = issuer
+            .begin_self_close_if_current(&grant)
+            .expect("accept correlated self-close");
+        let reservation = issuer
+            .begin_self_close_manual_execution_handoff(&ticket, &binding)
+            .expect("transfer accepted self-close into exact handoff");
+
+        assert!(!issuer.authenticates_token(&active.token));
+        assert!(
+            issuer
+                .issue_bound(project.path(), &binding.session_id, binding.clone())
+                .is_err(),
+            "the in-flight finalizer fence must block replacement capability issuance"
+        );
+
+        assert!(issuer.rollback_manual_execution_handoff(&reservation));
+        assert!(
+            !issuer.authenticates_token(&active.token),
+            "an accepted self-close bearer must stay revoked when finalization fails"
+        );
+        assert!(!issuer.grant_is_current(&grant));
+        let replacement = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("rollback releases only the finalizer fence");
+        assert_ne!(replacement.token, active.token);
+        assert!(issuer.active_token_is_current(&replacement.token, &binding));
+        assert!(!issuer.rollback_manual_execution_handoff(&reservation));
     }
 
     #[test]
@@ -7998,6 +8190,59 @@ mod tests {
             [UserEvent::RuntimeApprovalResolutionStarted { id }]
                 if id == "tab-1::agent-1"
         ));
+        drop(recorded);
+        drop(pane);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "test-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running test pane");
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::pm-window".to_string(), pane.shared_pty());
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::pm-window".to_string(),
+                data: "実行されてい".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(1),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::pm-window".to_string(),
+                data: "ますか？\r".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            recorded.iter().any(|event| matches!(
+                event,
+                UserEvent::FlushPendingPmWake { id } if id == "tab-1::pm-window"
+            )),
+            "submitting unsent composer text must ask the event loop to flush a held PM wake: {recorded:?}"
+        );
         drop(recorded);
         drop(pane);
     }

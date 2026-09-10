@@ -1609,6 +1609,12 @@ pub enum BackendEvent {
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
     },
+    /// Issue #3783: bounded lifecycle/watcher update. The browser replaces
+    /// live membership and scalar fields while preserving its existing Work,
+    /// journal, and per-agent Session history for the same projection id.
+    ActiveWorkProjectionPatch {
+        projection: Box<ActiveWorkProjectionView>,
+    },
     WindowList {
         windows: Vec<PersistedWindowState>,
     },
@@ -2401,6 +2407,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "active_work_projection_patch",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "window_list",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2908,6 +2919,7 @@ impl BackendEvent {
         match self {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
+            BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
             BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
@@ -3891,6 +3903,16 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false),
             "Work cleanup must default to local-only deletion"
+        );
+        let BackendEvent::ActiveWorkProjection { projection } = event else {
+            unreachable!("constructed full projection")
+        };
+        let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
+            .expect("serialize bounded active work projection patch");
+        assert_eq!(
+            patch.get("kind"),
+            Some(&Value::String("active_work_projection_patch".to_string())),
+            "bounded lifecycle updates need merge semantics on the frontend"
         );
     }
 
