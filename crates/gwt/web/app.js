@@ -166,6 +166,7 @@
         mapAgentTelemetryState,
         normalizeWindowRuntimeState,
         presetSupportsWaitingStatus,
+        selectNextAgentFocusWindowId,
         windowRuntimeLabel,
       } from "/window-runtime-state.js";
       import {
@@ -1703,11 +1704,16 @@
       // remaining caller).
 
       function runtimeStateForWindow(windowData) {
-        const cachedState = windowRuntimeStateMap.get(windowData.id);
-        if (cachedState) {
-          return cachedState;
-        }
-        return normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        const sourceState = windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id)
+          : windowData.status;
+        return normalizeWindowRuntimeState(sourceState, windowData.preset);
+      }
+
+      function runtimeStateForAgentFocus(windowData) {
+        return windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id)
+          : windowData.status;
       }
 
       // SPEC-3064 Phase 3 (E7): the Window List dropdown
@@ -2279,7 +2285,12 @@
       function resolvePendingWindowFrames() {
         if (pendingFrameWindowId) {
           const windowId = pendingFrameWindowId;
-          if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+          const windowData = workspaceWindowById(windowId);
+          if (
+            windowData &&
+            visibleWindowData(windowData) &&
+            windowMap.has(windowId)
+          ) {
             pendingFrameWindowId = null;
             frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
           }
@@ -2470,25 +2481,29 @@
       }
 
       function cycleFocus(direction) {
-        if (windowMap.size === 0) {
-          return;
-        }
-        // SPEC-2008 camera-focus: cycling flies the local camera between
-        // windows in creation order (per viewer) instead of asking the backend
-        // to move a shared focus. Keep notifying the backend of the new focus
-        // for z-order/highlight, but the camera move is local.
-        const windows = (activeWorkspace().windows || []).filter(visibleWindowData);
-        if (windows.length === 0) {
-          return;
-        }
-        const currentIndex = windows.findIndex(
-          (windowData) => windowData.id === focusedId,
+        // SPEC-3263 FR-014..FR-019 / Issue #3551: cycle the Canvas Agent
+        // projection in runtime-priority order. Hidden tab members remain
+        // candidates and are activated before the existing local camera frame
+        // path notifies the backend of focus for z-order/highlight.
+        const windows = activeWorkspace().windows || [];
+        const nextWindowId = selectNextAgentFocusWindowId(
+          windows,
+          focusedId,
+          direction,
+          runtimeStateForAgentFocus,
         );
-        const delta = direction === "backward" ? -1 : 1;
-        const baseIndex = currentIndex === -1 ? 0 : currentIndex;
-        const nextIndex =
-          (baseIndex + delta + windows.length) % windows.length;
-        frameWindow(windows[nextIndex].id);
+        if (!nextWindowId) {
+          return;
+        }
+        const nextWindow = windows.find(
+          (windowData) => windowData.id === nextWindowId,
+        );
+        if (nextWindow?.tab_group_id && !nextWindow.tab_group_active) {
+          pendingFrameWindowId = nextWindowId;
+          send({ kind: "activate_window_tab", id: nextWindowId });
+          return;
+        }
+        frameWindow(nextWindowId);
       }
 
       function shouldHandleFocusShortcut(event) {
@@ -3451,10 +3466,20 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
-            if (windowRuntimeStateMap.get(windowId) !== runtimeState) {
+            // Issue #3551: the map keeps the raw source state so Agent focus
+            // ordering can fail closed on unknown states. Compare the
+            // normalized display state so the since-timestamp still tracks
+            // display transitions, not legacy-alias spellings of the same one.
+            const previousRuntimeState = windowRuntimeStateMap.has(windowId)
+              ? normalizeWindowRuntimeState(
+                  windowRuntimeStateMap.get(windowId),
+                  windowData?.preset,
+                )
+              : undefined;
+            if (previousRuntimeState !== runtimeState) {
               windowRuntimeStateSinceMap.set(windowId, Date.now());
             }
-            windowRuntimeStateMap.set(windowId, runtimeState);
+            windowRuntimeStateMap.set(windowId, status);
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3570,20 +3595,24 @@
       const STOPPED_RUNTIME_STATES = new Set(["stopped", "exited", "error"]);
 
       function updateWindowKillSwitchControls(element, windowData, runtimeState) {
-        const stopButton = element.querySelector("[data-action='stop']");
         const restartButton = element.querySelector("[data-action='restart']");
-        if (!stopButton || !restartButton) {
+        const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
+        const openIssueButton = element.querySelector("[data-action='open-issue']");
+        if (!restartButton || !minimizeToIssueButton || !openIssueButton) {
           return;
         }
+        // SPEC #3885 FR-015: the Issue controls exist exactly when the window is
+        // the canvas face of an Issue — the same condition that gives it an
+        // Issue header. FR-013's bare terminal shows neither.
+        const isIssueWindow = Boolean(issueWindowHeaderModelFor(windowData));
+        minimizeToIssueButton.hidden = !isIssueWindow;
+        openIssueButton.hidden = !isIssueWindow;
         const isAgentWindow = shouldShowRuntimeStatus(windowData);
         if (!isAgentWindow) {
-          stopButton.hidden = true;
           restartButton.hidden = true;
           return;
         }
-        const isStopped = STOPPED_RUNTIME_STATES.has(runtimeState);
-        stopButton.hidden = isStopped;
-        restartButton.hidden = !isStopped;
+        restartButton.hidden = !STOPPED_RUNTIME_STATES.has(runtimeState);
       }
 
       function stopSpinnerAnimation(overlay) {
@@ -3708,9 +3737,7 @@
           return;
         }
         const isAgentWindow = shouldShowRuntimeStatus(windowData);
-        const runtimeState =
-          windowRuntimeStateMap.get(windowId) ||
-          normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        const runtimeState = runtimeStateForWindow(windowData);
         windowCloseConfirmState = {
           open: true,
           windowId,
@@ -3735,9 +3762,7 @@
           if (!element) continue;
           const windowData = workspaceWindowById(windowId);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
-          const runtimeState =
-            windowRuntimeStateMap.get(windowId) ||
-            normalizeWindowRuntimeState(windowData.status, windowData.preset);
+          const runtimeState = runtimeStateForWindow(windowData);
           if (!STOPPED_RUNTIME_STATES.has(runtimeState)) {
             count += 1;
           }
@@ -3765,10 +3790,7 @@
       // surfaces render plain tabs.
       function windowTabTelemetryState(tab) {
         if (!shouldShowRuntimeStatus(tab)) return "";
-        const runtimeState =
-          windowRuntimeStateMap.get(tab.id) ||
-          normalizeWindowRuntimeState(tab.status, tab.preset);
-        return runtimeState;
+        return runtimeStateForWindow(tab);
       }
 
       // AS-2.2: a runtime state change must repaint the tab strip of every
@@ -4886,7 +4908,6 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openIntakePendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -5091,6 +5112,13 @@
         const body = element.querySelector(".window-body");
         if (!body) return;
         const model = issueWindowHeaderModelFor(windowData);
+        // SPEC #3885 FR-015: the titlebar's Issue controls appear on exactly the
+        // windows that carry the header, so they follow placement changes
+        // (Windowize / return to list) and not just runtime status events.
+        const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
+        const openIssueButton = element.querySelector("[data-action='open-issue']");
+        if (minimizeToIssueButton) minimizeToIssueButton.hidden = !model;
+        if (openIssueButton) openIssueButton.hidden = !model;
         const existing = body.querySelector(".issue-window-header");
         // The terminal fills the body absolutely; the class tells the stylesheet to
         // leave the header's band free rather than letting the two overlap.
@@ -5376,7 +5404,8 @@
               </div>
               <div class="window-actions">
                 <button class="icon-button" data-action="restart" aria-label="Restart agent" title="Restart agent" hidden>↻</button>
-                <button class="icon-button" data-action="stop" aria-label="Stop agent" title="Stop agent" hidden>■</button>
+                <button class="icon-button" data-action="minimize-to-issue" aria-label="Return to Issue list" title="Return to Issue list" hidden>▁</button>
+                <button class="icon-button" data-action="open-issue" aria-label="Open Issue" title="Open Issue" hidden>⧉</button>
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
@@ -5389,22 +5418,40 @@
 
           const titlebar = element.querySelector(".titlebar");
           const closeButton = element.querySelector("[data-action='close']");
-          const stopButton = element.querySelector("[data-action='stop']");
           const restartButton = element.querySelector("[data-action='restart']");
+          const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
+          const openIssueButton = element.querySelector("[data-action='open-issue']");
           const resizeHandle = element.querySelector(".resize-handle");
 
-          // SPEC-2356 Anshin Addendum (FR-041/FR-044): the kill-switch lives in
-          // the window chrome next to close. STOP halts the agent runtime but
-          // keeps the window + its output; RESTART relaunches the same preset
-          // in place. Both target the window id; visibility is driven per
-          // render from the runtime state by the status-apply path.
-          stopButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "stop_window", id: windowData.id });
-          });
+          // SPEC-2356 Anshin Addendum (FR-044): RESTART relaunches the same
+          // preset in place. The agent-stop button that used to sit beside it
+          // was removed by SPEC #3885 FR-015 (user ruling 2026-09-03): stopping
+          // an agent is offered only from the Issue row's ⋯ menu, so the window
+          // chrome cannot halt a run with one stray click. Visibility is driven
+          // per render from the runtime state by the status-apply path.
           restartButton.addEventListener("click", (event) => {
             event.stopPropagation();
             send({ kind: "restart_window", id: windowData.id });
+          });
+
+          // SPEC #3885 FR-015: the freed slot carries the Issue controls —
+          // minimize folds the window back into its Issue row (the FR-012 path)
+          // and the popup opens the Issue this agent works on. Both read the
+          // live window so a window that gains its Issue after mount still acts
+          // on the current link.
+          minimizeToIssueButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            runIssueWindowHeaderAction(
+              "return-to-list",
+              workspaceWindowById(windowData.id) || windowData,
+            );
+          });
+          openIssueButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            runIssueWindowHeaderAction(
+              "open-issue",
+              workspaceWindowById(windowData.id) || windowData,
+            );
           });
 
           // SPEC-2008 camera-focus: minimize/maximize buttons were removed
@@ -6324,8 +6371,8 @@
             applyLaunchWizardStateEvent(event);
             break;
           case "work_advisory_result":
-            // SPEC-2359 US-80: duplicate-work advisory results for the Start
-            // Work intake prompt.
+            // SPEC-2359 US-80: duplicate-work advisory results for the Plan
+            // Agent work-registration prompt.
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
@@ -7055,6 +7102,12 @@
             return;
           }
           event.preventDefault();
+          // Issue #4069: this listener runs in the capture phase, but xterm.js
+          // still receives the chord on its textarea and translates
+          // Ctrl+Shift+Arrow into CSI input for the focused terminal
+          // (Meta+Arrow is dropped by xterm, which is why macOS never showed
+          // it). Focus cycling is navigation-only, so stop the event here.
+          event.stopPropagation();
           cycleFocus(event.key === "ArrowRight" ? "forward" : "backward");
         },
         true,
@@ -7074,14 +7127,8 @@
         openModal();
       });
 
-      // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
-      document
-        .getElementById("canvas-empty-intake")
-        ?.addEventListener("click", () => {
-          document.dispatchEvent(
-            new CustomEvent("op:command", { detail: { id: "intake-session" } }),
-          );
-        });
+      // SPEC-3038 AS-4.5 / SPEC-3245 Stage E: the empty canvas keeps the
+      // normal Workspace and Add Window actions after Intake removal.
       document
         .getElementById("canvas-empty-open-workspace")
         ?.addEventListener("click", () => {
@@ -7405,13 +7452,6 @@
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");
-            return;
-          case "intake-session":
-            // SPEC-3214 Phase 3: ephemeral intake session (branchless).
-            openIntakePendingWizard();
-            frontendUnits.socketTransport.send({
-              kind: "open_intake_session",
-            });
             return;
           case "stop-all-windows":
             requestStopAllWindows();

@@ -734,3 +734,73 @@ fn spec_edit_of_spec_section_on_auto_merge_issue_requires_acceptance_block() {
         0
     );
 }
+
+/// Issue #4146 AC-4: the audit names the closed SPECs whose `tasks` section
+/// carries checkbox-less task rows — the shape that read as "all complete" —
+/// and leaves a fully tracked SPEC out of the report.
+#[test]
+fn spec_audit_reports_closed_specs_with_untracked_task_rows() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    seed_closed_spec(
+        &env,
+        3700,
+        "SPEC: perf instrumentation",
+        "- [x] T001\n- [x] T002\n- T010 never tracked\n- T011 never tracked\n",
+    );
+    seed_closed_spec(
+        &env,
+        3800,
+        "SPEC: fully tracked",
+        "- [x] T001\n- [ ] T002\n",
+    );
+
+    let mut out = String::new();
+    assert_eq!(
+        run(&mut env, IssueCommand::SpecAudit { state: None }, &mut out).unwrap(),
+        0
+    );
+
+    assert!(
+        out.contains("#3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"),
+        "untracked rows are reported with their counts: {out}"
+    );
+    assert!(
+        !out.contains("#3800"),
+        "a SPEC whose rows all carry checkboxes is not flagged: {out}"
+    );
+    assert!(
+        out.contains("audit: scanned 2, flagged 1, no tasks section 0, unreadable 0"),
+        "the scan reports its own coverage: {out}"
+    );
+}
+
+#[test]
+fn spec_audit_parse_accepts_state_flag() {
+    let args = [
+        "audit".to_string(),
+        "--state".to_string(),
+        "all".to_string(),
+    ];
+    let refs = args.iter().collect::<Vec<_>>();
+    assert!(matches!(
+        parse(&refs),
+        Ok(IssueCommand::SpecAudit { state }) if state.as_deref() == Some("all")
+    ));
+}
+
+fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(number),
+        title: title.to_string(),
+        body: issue_body("spec body", tasks),
+        labels: vec!["gwt-spec".to_string()],
+        state: IssueState::Closed,
+        updated_at: UpdatedAt::new(format!("seed-{number}")),
+        comments: Vec::new(),
+    };
+    env.client.seed(snapshot.clone());
+    Cache::new(env.cache_root())
+        .write_snapshot(&snapshot)
+        .unwrap();
+}

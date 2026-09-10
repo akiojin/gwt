@@ -36,11 +36,30 @@ impl PerfStore<SystemUtcDateClock> {
     pub(crate) fn new(retention_days: u32) -> io::Result<Self> {
         Self::with_clock(retention_days, SystemUtcDateClock)
     }
+
+    /// Open the perf log only when it has already been established.
+    ///
+    /// Issue #4145: the GUI is the always-on collector and owns creating
+    /// `~/.gwt/logs/perf/`. A short-lived `gwtd` invocation only appends to a
+    /// log that already exists, so running an operation against a hermetic
+    /// container HOME leaves that HOME byte-identical — the property
+    /// `crates/gwt/tests/workspace_cli_test.rs` asserts for every forwarded
+    /// `workspace.update`.
+    pub(crate) fn open_established(retention_days: u32) -> io::Result<Option<Self>> {
+        if !perf_log_dir().is_dir() {
+            return Ok(None);
+        }
+        Self::new(retention_days).map(Some)
+    }
+}
+
+fn perf_log_dir() -> PathBuf {
+    gwt_logs_dir().join("perf")
 }
 
 impl<C: UtcDateClock> PerfStore<C> {
     fn with_clock(retention_days: u32, clock: C) -> io::Result<Self> {
-        let log_dir = gwt_logs_dir().join("perf");
+        let log_dir = perf_log_dir();
         fs::create_dir_all(&log_dir)?;
         let today = clock.today_utc();
         let _housekeep_report = housekeep_at(

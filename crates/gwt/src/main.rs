@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
+    sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock, RwLock},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -1191,6 +1191,25 @@ fn issue_monitor_daemon_user_event(
                 launch_session_strategy,
             })
         }
+        // Issue #4084 AC-2/AC-3: the daemon released an idle launch and asks
+        // the GUI to close the pane it just unbound.
+        "idle_pane_close" => {
+            let window_id = payload.get("window_id")?.as_str()?.to_string();
+            if window_id.is_empty() {
+                return None;
+            }
+            Some(UserEvent::IssueMonitorIdlePaneClose {
+                window_id,
+                issue_number: payload
+                    .get("issue_number")
+                    .and_then(serde_json::Value::as_u64),
+                idle_kind: payload
+                    .get("idle_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        }
         "review_dispatch" => {
             // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
             // review agent for a PR-ready autonomous issue.
@@ -1295,6 +1314,8 @@ enum UserEvent {
         id: String,
         incarnation: u64,
         data: Vec<u8>,
+        /// Pane stream position after this chunk was parsed (Issue #4095).
+        seq: u64,
     },
     /// A submit-terminated choice or standalone Escape is about to be written
     /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
@@ -1448,6 +1469,13 @@ enum UserEvent {
     /// Completion of an off-event-loop physical answer submit to an exact
     /// live pane. Durable delivery acknowledgment begins only on this event.
     IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
+    /// Issue #4084 AC-2/AC-3: close the pane of an idle agent window whose
+    /// Issue Monitor launch the daemon already released (daemon → GUI).
+    IssueMonitorIdlePaneClose {
+        window_id: String,
+        issue_number: Option<u64>,
+        idle_kind: String,
+    },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -2475,6 +2503,7 @@ mod tests {
             tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         }
     }
@@ -2896,7 +2925,7 @@ mod tests {
                 WindowProcessStatus::Ready,
                 "Shell ready".to_string(),
             )],
-            vec![("tab-1::shell-1".to_string(), snapshot)],
+            vec![("tab-1::shell-1".to_string(), snapshot, None)],
             None,
             Some(UpdateState::UpToDate { checked_at: None }),
         );
@@ -3226,6 +3255,7 @@ mod tests {
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
+            issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
             project_tab_incarnations,
@@ -3266,6 +3296,7 @@ mod tests {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
+            project_open_started: None,
             pending_pm_launches: HashMap::new(),
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
@@ -3273,6 +3304,7 @@ mod tests {
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
+            restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             update_resume_tab_ids: std::collections::HashSet::new(),
             update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
@@ -3363,7 +3395,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 Vec::new(),
             ),
@@ -3483,7 +3514,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
@@ -5595,7 +5625,6 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
-                    ephemeral_base_ref: None,
                 },
                 sample_wizard_stale_agent_options(),
                 Vec::new(),
@@ -8307,7 +8336,64 @@ fn apply_agent_frontend_dispatch_outcome(
     }
 }
 
+/// Issue #4145 AC-1: the startup route is measured from the first statement of
+/// `main` to the moment the canvas reports its bounds, so the sample covers
+/// everything a person waits through — logging init, session restore, worktree
+/// enumeration, the embedded server bind and the first render.
+static PROCESS_STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Record the startup route exactly once per process.
+///
+/// The canvas can report bounds again after a reconnect; only the first report
+/// is the startup a user experienced.
+fn record_startup_perf_route_once() {
+    static RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RECORDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(started) = PROCESS_STARTED_AT.get() {
+        gwt::perf::record_route(gwt::perf::PerfRoute::Startup, started.elapsed());
+    }
+}
+
+/// Record the descriptor ceiling the process runs under (Issue #4142 AC-3).
+/// A raise that fell short of [`gwt_core::fd_limit::MIN_SOFT_FD_LIMIT`] is a
+/// warning rather than a fatal error: gwt still runs, it just cannot host many
+/// panes, and the log line is what makes that explicable afterwards.
+fn log_startup_fd_limit(raise: gwt_core::fd_limit::FdLimitRaise) {
+    let Some(after) = raise.after else {
+        return;
+    };
+    let hard = if after.hard == u64::MAX {
+        "unlimited".to_string()
+    } else {
+        after.hard.to_string()
+    };
+    let before_soft = raise.before.map(|limit| limit.soft).unwrap_or(after.soft);
+    if raise.meets_minimum() {
+        tracing::info!(
+            target: "gwt::startup::fd_limit",
+            soft_before = before_soft,
+            soft_after = after.soft,
+            hard = %hard,
+            requested = raise.requested.unwrap_or(after.soft),
+            "raised soft RLIMIT_NOFILE"
+        );
+    } else {
+        tracing::warn!(
+            target: "gwt::startup::fd_limit",
+            soft_before = before_soft,
+            soft_after = after.soft,
+            hard = %hard,
+            minimum = gwt_core::fd_limit::MIN_SOFT_FD_LIMIT,
+            error = raise.error.as_deref().unwrap_or("none"),
+            "soft RLIMIT_NOFILE stayed below the minimum gwt needs for concurrent PTY panes"
+        );
+    }
+}
+
 fn main() -> std::io::Result<()> {
+    let _ = PROCESS_STARTED_AT.set(std::time::Instant::now());
     let argv: Vec<String> = std::env::args().collect();
     // POSIX bound launches still host the gate here (the gate `exec`s the target
     // so the gated PID survives). Windows routes it to the console-subsystem
@@ -8383,6 +8469,20 @@ fn main() -> std::io::Result<()> {
             eprintln!("gwt logging init failed: {error}");
         })
         .ok();
+
+    // SPEC #3700 / Issue #4145 AC-1: install the always-on performance
+    // collector next to the logging subscriber, before any startup step that
+    // can be measured. Fail-open — a disabled kill switch or an unwritable log
+    // directory leaves every later `record_*` call a no-op.
+    gwt::perf::install_from_settings();
+
+    // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
+    // and every live PTY pane costs three descriptors, so the process runs out
+    // of file descriptors at roughly 80 concurrent agents — after which PTY
+    // creation, daemon connect, Issue Monitor prefs reads and tokio runtime
+    // builds all fail with `Too many open files`. Raise the ceiling before any
+    // pane can spawn, and record the value the process actually ended up with.
+    log_startup_fd_limit(gwt_core::fd_limit::raise_soft_fd_limit());
 
     // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
     // (tray-resident) route so VPN-reachable hosts can run
@@ -8890,6 +8990,10 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
+                // Issue #4145 AC-1: the canvas reporting its bounds is the
+                // app's own definition of "ready", and the gate agent panes
+                // wait on, so it closes the startup route.
+                let canvas_ready = matches!(event, FrontendEvent::StartupAutoResumeReady { .. });
                 // Phase 0 perf instrumentation (measure-first): time the handler
                 // on the main event-loop thread so a synchronous repo-scaling
                 // handler that freezes the GUI is diagnosable, and inter-event
@@ -8897,6 +9001,9 @@ fn main() -> std::io::Result<()> {
                 let dispatch_kind = frontend_event_kind_label(&event);
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                if canvas_ready {
+                    record_startup_perf_route_once();
+                }
                 let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
                 if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
                     tracing::warn!(
@@ -8976,8 +9083,9 @@ fn main() -> std::io::Result<()> {
                 id,
                 incarnation,
                 data,
+                seq,
             }) => {
-                let events = app.handle_runtime_output_event(id, incarnation, data);
+                let events = app.handle_runtime_output_event(id, incarnation, data, seq);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
@@ -9185,6 +9293,15 @@ fn main() -> std::io::Result<()> {
                 events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                     items,
                 }));
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
+                window_id,
+                issue_number,
+                idle_kind,
+            }) => {
+                let events =
+                    app.issue_monitor_idle_pane_close_events(&window_id, issue_number, &idle_kind);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {

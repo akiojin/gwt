@@ -482,6 +482,11 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
     ) -> CloseWindowOutcome {
+        // Issue #4145 AC-1: every close route converges here, and Issue #3783
+        // designed the accepted close to stay on the event loop, so this guard
+        // measures exactly the latency a person sees when a pane disappears.
+        // The detached teardown that follows is deliberately outside it.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneClose);
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         if !close_window_from_workspace(
             &mut self.tabs,
@@ -494,6 +499,11 @@ impl AppRuntime {
                 events: Vec::new(),
             };
         }
+        // Issue #4084: the review-dispatch marker dies with its window.
+        self.issue_monitor_review_dispatch_windows.remove(id);
+        // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
+        // in-flight restore marker must not outlive its window.
+        self.restore_launch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
         // runs in one detached finalizer and cannot delay PaneCloseResult.
