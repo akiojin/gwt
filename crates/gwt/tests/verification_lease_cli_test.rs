@@ -357,6 +357,17 @@ fn refusal_reports_holder_kind_and_reserves_the_next_turn() {
 
     let status = arena.run(STATUS);
     assert_eq!(field_u64(&status, "pending"), 1, "{status}");
+    // Issue #4169 AC-2: `pending: 1` alone never said who was waiting or for
+    // how long, which is what an agent needs to decide whether to keep waiting.
+    let waiter = field(&status, "queue[0]");
+    assert!(
+        waiter.contains("--verification--") && waiter.contains("priority=manual-rebuild"),
+        "the queue must name the waiting claimant:\n{status}"
+    );
+    assert!(
+        waiter.contains("queued_at_ms=") && waiter.contains("waiting_ms="),
+        "the queue must say when each claimant joined and how long it has waited:\n{status}"
+    );
 
     let granted = arena.run(ACQUIRE_2M);
     assert_eq!(
