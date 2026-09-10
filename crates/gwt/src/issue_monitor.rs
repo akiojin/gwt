@@ -840,6 +840,8 @@ pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
     pub priority_order: Vec<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1025,12 +1027,29 @@ pub struct IssueMonitorPrefs {
     pub last_scan_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTerminalQueueEntry {
+    pub number: u64,
+    pub queued_at: String,
+    #[serde(default)]
+    pub queued_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMonitorTerminalQueue {
+    #[serde(default)]
+    pub entries: Vec<IssueMonitorTerminalQueueEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
+}
+
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
             enabled: false,
             max_active_agents: 1,
             priority_order: Vec::new(),
+            terminal_queues: BTreeMap::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -2758,6 +2777,8 @@ pub struct IssueMonitorState {
     launch_auth_required: bool,
     active_launches: Vec<u64>,
     priority_order: Vec<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -4523,6 +4544,7 @@ impl IssueMonitorState {
             launch_auth_required: false,
             active_launches: Vec::new(),
             priority_order: Vec::new(),
+            terminal_queues: BTreeMap::new(),
             launch_profiles: Vec::new(),
             launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
@@ -4575,6 +4597,7 @@ impl IssueMonitorState {
         state.launch_profiles = prefs.launch_profile_pool();
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.priority_order = prefs.priority_order;
+        state.terminal_queues = prefs.terminal_queues;
         state.last_scan_at = prefs.last_scan_at;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
         state.provider_quota_hold_evidence =
@@ -4767,6 +4790,7 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             max_active_agents: self.config.max_active.max(1),
             priority_order: self.priority_order.clone(),
+            terminal_queues: self.terminal_queues.clone(),
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -9052,6 +9076,52 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
     }
 
+    /// Add Issues to this terminal's explicit queue, preserving order and
+    /// avoiding duplicates. The queue itself is durable through [`prefs`].
+    pub fn terminal_queue_push(&mut self, issue_numbers: &[u64], queued_by: &str, now: &str) {
+        let host = crate::process::current_hostname();
+        let queue = self.terminal_queues.entry(host).or_default();
+        for number in issue_numbers {
+            if !queue.entries.iter().any(|entry| entry.number == *number) {
+                queue.entries.push(IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: now.to_string(),
+                    queued_by: queued_by.to_string(),
+                });
+            }
+        }
+        queue.last_seen_at = Some(now.to_string());
+    }
+
+    pub fn terminal_queue_remove(&mut self, issue_numbers: &[u64], now: &str) {
+        let host = crate::process::current_hostname();
+        if let Some(queue) = self.terminal_queues.get_mut(&host) {
+            queue
+                .entries
+                .retain(|entry| !issue_numbers.contains(&entry.number));
+            queue.last_seen_at = Some(now.to_string());
+        }
+    }
+
+    pub fn terminal_queue_move(&mut self, number: u64, position: usize, now: &str) -> bool {
+        let host = crate::process::current_hostname();
+        let Some(queue) = self.terminal_queues.get_mut(&host) else {
+            return false;
+        };
+        let Some(index) = queue
+            .entries
+            .iter()
+            .position(|entry| entry.number == number)
+        else {
+            return false;
+        };
+        let entry = queue.entries.remove(index);
+        let target = position.min(queue.entries.len());
+        queue.entries.insert(target, entry);
+        queue.last_seen_at = Some(now.to_string());
+        true
+    }
+
     fn apply_priority_order_to_queue(&mut self) {
         let mut remaining: Vec<u64> = self.queue.iter().copied().collect();
         let mut reordered = VecDeque::new();
@@ -12152,6 +12222,16 @@ pub fn scan_issue_monitor_candidates(
     monitor.last_scan_at = Some(now.to_string());
     monitor.last_error = None;
     monitor.launch_auth_required = false;
+    let terminal_queue = monitor
+        .terminal_queues
+        .get(&crate::process::current_hostname())
+        .map(|queue| {
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<BTreeSet<_>>()
+        });
 
     for issue in issues {
         summary.scanned += 1;
@@ -12173,6 +12253,13 @@ pub fn scan_issue_monitor_candidates(
             continue;
         }
         if !is_auto_improve_candidate(issue, &monitor.config) {
+            summary.skipped += 1;
+            continue;
+        }
+        if terminal_queue
+            .as_ref()
+            .is_some_and(|entries| !entries.contains(&issue.number))
+        {
             summary.skipped += 1;
             continue;
         }
@@ -22784,6 +22871,86 @@ mod tests {
             readiness: IssueMonitorReadiness::NotApplicable,
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn explicit_terminal_queue_excludes_unqueued_candidates() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queues.insert(
+            crate::process::current_hostname(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 1,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: None,
+            },
+        );
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[
+                auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+                auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            ],
+            "2026-09-10T00:01:00Z",
+        );
+        assert!(monitor.inbox_item(1).is_some());
+        assert!(monitor.inbox_item(2).is_none());
+    }
+
+    #[test]
+    fn missing_terminal_queue_keeps_legacy_derive_behavior() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            "2026-09-10T00:01:00Z",
+        );
+        assert!(monitor.inbox_item(2).is_some());
+    }
+
+    #[test]
+    fn terminal_queue_prefs_round_trip_and_legacy_default() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.terminal_queues.insert(
+            "host-a".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 7,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: Some("2026-09-10T00:01:00Z".to_string()),
+            },
+        );
+        let encoded = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: IssueMonitorPrefs = serde_json::from_str(&encoded).expect("prefs parse");
+        assert_eq!(decoded.terminal_queues, prefs.terminal_queues);
+        let legacy: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":false,"max_active_agents":1,"priority_order":[]}"#)
+                .expect("legacy prefs parse");
+        assert!(legacy.terminal_queues.is_empty());
+    }
+
+    #[test]
+    fn terminal_queue_operations_are_deduplicated_ordered_and_non_destructive() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[3, 1, 3], "test", "2026-09-10T00:00:00Z");
+        assert!(monitor.terminal_queue_move(1, 0, "2026-09-10T00:01:00Z"));
+        monitor.terminal_queue_remove(&[3], "2026-09-10T00:02:00Z");
+        let queue = monitor
+            .terminal_queues
+            .get(&crate::process::current_hostname())
+            .expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     fn autonomous_state() -> IssueMonitorState {

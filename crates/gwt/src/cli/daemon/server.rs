@@ -4039,11 +4039,7 @@ fn scan_issue_monitor_once_blocking(
             detail: error.to_string(),
         });
     }
-    let monitor_owner = format!(
-        "{}:{}",
-        crate::process::current_username(),
-        std::process::id()
-    );
+    let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
         &loaded,

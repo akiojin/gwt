@@ -2267,14 +2267,7 @@ fn observe_local_claim_candidates(
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
     })?;
-    Ok(Some((
-        format!(
-            "{}:{}",
-            gwt::process::current_username(),
-            std::process::id()
-        ),
-        observations,
-    )))
+    Ok(Some((gwt::process::current_claim_owner(), observations)))
 }
 
 /// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): the deadline boundary of one

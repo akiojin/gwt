@@ -131,6 +131,25 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         issue_numbers: Vec<u64>,
     },
+    MonitorQueueList {
+        project_root: Option<std::path::PathBuf>,
+        terminal: Option<String>,
+    },
+    MonitorQueuePush {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+        position: Option<usize>,
+        force: bool,
+    },
+    MonitorQueueRemove {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+    },
+    MonitorQueueMove {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        position: usize,
+    },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
         enabled: Option<bool>,
