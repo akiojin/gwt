@@ -4254,7 +4254,18 @@ impl AppRuntime {
         project_root: &Path,
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
-        self.apply_workspace_projection_title_sync_cache_only(project_root, projection)
+        let events = self.apply_workspace_projection_title_sync_cache_only(project_root, projection);
+        // Issue #3777 AC-3: the cache-only merge above is the non-blocking half
+        // of this path — it must stay on the Tao loop, so it republishes the
+        // last materialized view with the watcher payload merged in rather than
+        // decoding Session/WorkItems here. That keeps the loop responsive but
+        // leaves the cache behind whatever else the projection changed, so the
+        // accurate view has to be rebuilt off-thread and committed under a
+        // generation check. Without this the watcher path never rebuilds at all
+        // and the cached view is the last word until some other event happens
+        // to schedule one.
+        self.schedule_active_work_projection_refresh(project_root, None);
+        events
     }
 }
 
