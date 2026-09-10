@@ -159,6 +159,8 @@ an old browser tab.
                  ($allow_missing_logical
                    and startswith("managed hook binary missing: ")
                    and endswith(" uses gwtd"))
+                 or (startswith("managed hook failure: ")
+                   and test(" state=fail-open( |$)"))
                  | not
                )
            ] as $blocking_issues
@@ -245,6 +247,8 @@ an old browser tab.
                  ($allow_missing_logical
                    and startswith("managed hook binary missing: ")
                    and endswith(" uses gwtd"))
+                 or (startswith("managed hook failure: ")
+                   and test(" state=fail-open( |$)"))
                  | not
                )
            ] as $blocking_issues
