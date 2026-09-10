@@ -9,6 +9,7 @@ use crate::{
 
 const CLAIM_BEGIN: &str = "<!-- gwt-auto-improve-claim v1 -->";
 const CLAIM_END: &str = "<!-- /gwt-auto-improve-claim -->";
+pub const QUEUED_LABEL: &str = "gwt-queued";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

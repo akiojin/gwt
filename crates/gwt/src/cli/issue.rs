@@ -727,7 +727,14 @@ fn run_monitor_queue_push<E: CliEnv>(
         if let Ok(gwt_github::client::FetchResult::Updated(snapshot)) =
             env.client().fetch(IssueNumber(*number), None)
         {
-            let claims = gwt_github::issue_auto_claim::extract_claim_comments(&snapshot.comments);
+            let claims =
+                if snapshot.labels.iter().any(|label| {
+                    label.eq_ignore_ascii_case(gwt_github::issue_auto_claim::QUEUED_LABEL)
+                }) {
+                    gwt_github::issue_auto_claim::extract_claim_comments(&snapshot.comments)
+                } else {
+                    Vec::new()
+                };
             if !force
                 && claims.iter().any(|claim| {
                     claim.issue_number == *number
@@ -755,6 +762,20 @@ fn run_monitor_queue_push<E: CliEnv>(
                 IssueNumber(*number),
                 &gwt_github::issue_auto_claim::render_claim_comment(&claim),
             );
+            let mut labels = snapshot.labels.clone();
+            if !labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(gwt_github::issue_auto_claim::QUEUED_LABEL))
+            {
+                labels.push(gwt_github::issue_auto_claim::QUEUED_LABEL.to_string());
+                let _ = env.client().patch_issue_fields(
+                    IssueNumber(*number),
+                    &gwt_github::client::IssueFieldsPatch {
+                        labels: Some(labels),
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
     let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
