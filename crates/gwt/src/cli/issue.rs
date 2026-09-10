@@ -720,6 +720,7 @@ fn run_monitor_queue_push<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
+    let queued_expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
     // Queue claims are advisory: a GitHub outage must not make the local
     // queue unusable. Active claims remain authoritative and are left alone.
     for number in numbers {
@@ -747,7 +748,7 @@ fn run_monitor_queue_push<E: CliEnv>(
                 issue_number: *number,
                 status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
                 heartbeat_at: now.clone(),
-                expires_at: now.clone(),
+                expires_at: queued_expires_at.clone(),
                 launched_work_id: None,
             };
             let _ = env.client().create_comment(

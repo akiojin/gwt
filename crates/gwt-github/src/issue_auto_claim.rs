@@ -114,6 +114,10 @@ pub fn claim_is_active(claim: &ClaimComment, now: &str) -> bool {
     claim.status == ClaimStatus::Active && claim.expires_at.as_str() > now
 }
 
+pub fn claim_is_queued(claim: &ClaimComment, now: &str) -> bool {
+    claim.status == ClaimStatus::Queued && claim.expires_at.as_str() > now
+}
+
 pub fn select_winning_claim<'a>(claims: &'a [ClaimComment], now: &str) -> Option<&'a ClaimComment> {
     claims
         .iter()
@@ -286,6 +290,13 @@ fn classify_claim_resolution(
     issue_number: IssueNumber,
     now: &str,
 ) -> ClaimResolution {
+    if let Some(queued) = claims.iter().find(|existing| {
+        claim_is_queued(existing, now)
+            && existing.issue_number == issue_number.0
+            && existing.owner != requested.owner
+    }) {
+        return ClaimResolution::Blocked(queued.clone());
+    }
     let active_own_exists = claims.iter().any(|existing| {
         claim_identity_matches(existing, requested, issue_number) && claim_is_active(existing, now)
     });
@@ -602,6 +613,34 @@ mod tests {
                 "2026-09-10T00:00:01Z"
             ),
             ClaimResolution::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn live_foreign_queued_claim_blocks_acquisition_but_expired_one_does_not() {
+        let requested = claim("studio:akiojin:40272");
+        let mut queued = claim("macbook:akiojin:40272");
+        queued.claim_id = "queued-claim".to_string();
+        queued.status = ClaimStatus::Queued;
+        queued.expires_at = "2026-09-10T01:00:00Z".to_string();
+        assert!(matches!(
+            classify_claim_resolution(
+                &[queued.clone()],
+                &requested,
+                IssueNumber(42),
+                "2026-09-10T00:30:00Z"
+            ),
+            ClaimResolution::Blocked(_)
+        ));
+        queued.expires_at = "2026-09-10T00:01:00Z".to_string();
+        assert!(matches!(
+            classify_claim_resolution(
+                &[queued],
+                &requested,
+                IssueNumber(42),
+                "2026-09-10T00:30:00Z"
+            ),
+            ClaimResolution::NoWinner
         ));
     }
 }
