@@ -9124,7 +9124,8 @@ impl IssueMonitorState {
     }
 
     /// Add Issues to this terminal's explicit queue, preserving order and
-    /// avoiding duplicates. The queue itself is durable through [`prefs`].
+    /// avoiding duplicates. The queue itself is durable through
+    /// [`IssueMonitorState::prefs`].
     pub fn terminal_queue_push(&mut self, issue_numbers: &[u64], queued_by: &str, now: &str) {
         let host = crate::process::current_hostname();
         let queue = self.terminal_queues.entry(host).or_default();
