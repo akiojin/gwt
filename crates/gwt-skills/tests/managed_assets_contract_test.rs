@@ -424,6 +424,58 @@ fn browser_check_hook_repair_blocks_url_handoff_when_doctor_reports_issues() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn browser_check_gates_allow_only_fail_open_hook_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755)).unwrap();
+
+    for state in ["fail-open", "fail-closed", "unresolved"] {
+        let issue = format!(
+            "managed hook failure: PostToolUse/forward/live-forward state={state} recorded_at=2026-09-10T00:00:00Z (errors.list id=test)"
+        );
+        let health = serde_json::json!({
+            "status": if state == "fail-open" { "needs-attention" } else { "degraded" },
+            "issues": [issue],
+        });
+        for gate in ["hook-repair", "hook-audit"] {
+            let evidence = if gate == "hook-repair" {
+                serde_json::json!({"health": health})
+            } else {
+                health.clone()
+            };
+            let response = serde_json::json!({"ok": true, "output": evidence.to_string()});
+            let output = hidden_command("bash")
+                .args(["-c", &browser_check_shell_block(gate)])
+                .current_dir(dir.path())
+                .env("REPO_ROOT", dir.path())
+                .env("CHECK_HOME", dir.path())
+                .env("CHECKOUT_GWTD", &fake_gwtd)
+                .env("CHECK_HOOK_BIN", "gwtd")
+                .env("DOCTOR_RESPONSE", response.to_string())
+                .output()
+                .expect("run browser-check gate");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.success(),
+                state == "fail-open",
+                "{gate} state={state}: {stderr}"
+            );
+            if state != "fail-open" {
+                assert!(stderr.contains(&format!("state={state}")), "{stderr}");
+            }
+        }
+    }
+}
+
 #[test]
 fn user_verification_handoff_is_identifiable_and_actionable() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
