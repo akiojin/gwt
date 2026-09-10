@@ -4855,6 +4855,7 @@ impl AppRuntime {
             session.docker_service = config.docker_service.clone();
             session.docker_lifecycle_intent = config.docker_lifecycle_intent;
             session.linked_issue_number = config.linked_issue_number;
+            session.launch_route = config.launch_route;
             session.launch_command =
                 durable_tool_runtime_command.unwrap_or_else(|| config.command.clone());
             session.launch_args = config.args.clone();
