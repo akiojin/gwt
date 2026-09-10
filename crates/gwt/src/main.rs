@@ -9276,11 +9276,13 @@ fn main() -> std::io::Result<()> {
                 tab_id,
                 target,
                 payload,
-            }) => {
-                if app.active_tab_id.as_deref() == Some(tab_id.as_str()) {
-                    clients.dispatch_prepared_active_work(payload, target);
-                }
+            }) if app.active_tab_id.as_deref() == Some(tab_id.as_str()) => {
+                clients.dispatch_prepared_active_work(payload, target);
             }
+            // A background projection that finished after the user moved to
+            // another tab is dropped: the tab it was prepared for is no longer
+            // the one on screen (Issue #3777).
+            Event::UserEvent(UserEvent::PreparedActiveWorkDispatch { .. }) => {}
             Event::UserEvent(UserEvent::WindowCloseFinalized {
                 window_id,
                 project_root,
