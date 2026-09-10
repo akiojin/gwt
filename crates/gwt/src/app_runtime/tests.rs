@@ -313,7 +313,15 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
                 ),
                 (
                     "fast_path_write",
-                    vec!["client_id", "seq", "stage", "window_id", "write_us"],
+                    vec![
+                        "client_id",
+                        "elapsed_ms",
+                        "pty_writer_count",
+                        "seq",
+                        "stage",
+                        "window_id",
+                        "write_us",
+                    ],
                 ),
                 (
                     "fast_path_write_err",
@@ -363,10 +371,14 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
                 })
                 .collect::<Vec<_>>();
             fields.sort_unstable();
-            assert!(
-                actual.insert(stage, fields).is_none(),
-                "{source_name} repeats gwt_input_trace stage {stage}",
+            // A stage can have separate WARN/DEBUG sites; audit every site
+            // before collecting stages so one cannot hide another's fields.
+            assert_eq!(
+                Some(&fields),
+                expected[source_name].get(stage),
+                "{source_name} gwt_input_trace stage {stage} changed its allowed fields",
             );
+            actual.insert(stage, fields);
         }
         assert_eq!(
             actual,
@@ -28092,8 +28104,12 @@ fn managed_hook_health_for_saved_row_ignores_ambient_session_runtime_state() {
         &foreign_runtime_path,
     );
 
-    let health =
-        super::workspace_views::managed_hook_health_view_for_worktree(&worktree, temp.path(), &[]);
+    let health = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        temp.path(),
+        &[],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
+    );
 
     assert!(health.is_none(), "{health:?}");
 }
@@ -28144,6 +28160,7 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
         &worktree,
         &sessions_dir,
         &[&first, &second],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
     )
     .expect("managed hook health");
 

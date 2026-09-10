@@ -1426,6 +1426,58 @@ fn tracked_canonical_hook_config_is_not_reported_as_binary_skew() {
     );
 }
 
+#[test]
+fn managed_hook_health_snapshot_is_reused_and_refreshes_on_next_projection() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+    use gwt_core::error_ledger::{record, ErrorKind, ErrorRecord, ErrorTarget};
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = home.path().join("repo");
+    fs::create_dir(&worktree).unwrap();
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    input.expected_hook_bin = None;
+    let snapshot = ManagedHookFailureSnapshot::read();
+    let before = snapshot.read_health(&input);
+    let failure = record(ErrorRecord::new(
+        ErrorKind::HookFailure,
+        "test failure",
+        ErrorTarget {
+            project_root: Some(worktree.display().to_string()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        snapshot.read_health(&input),
+        before,
+        "one projection must not reread the ledger"
+    );
+    let refreshed = ManagedHookFailureSnapshot::read();
+    let health = refreshed.read_health(&input);
+    assert_eq!(health, read_managed_hook_health(&input));
+    assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains(&failure.id)));
+    input.worktree_root = home.path().join("other");
+    fs::create_dir(&input.worktree_root).unwrap();
+    assert!(
+        !refreshed
+            .read_health(&input)
+            .issues
+            .iter()
+            .any(|issue| issue.contains(&failure.id)),
+        "shared snapshot must preserve worktree filtering"
+    );
+}
+
 /// Issue #3541 AC-2 / AC-5: a handler failure must surface in `hook.health`,
 /// and a later successful event must turn it into "recovered" evidence
 /// instead of erasing it back to an empty `issues` list.
