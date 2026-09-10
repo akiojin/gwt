@@ -5162,7 +5162,7 @@ mod tests {
         });
 
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(2)).ok(),
+            rx.recv_timeout(HANG_GUARD).ok(),
             Some(true),
             "duplicate start must promptly refuse to serve a live socket"
         );
@@ -5641,13 +5641,26 @@ exit 0
         ScopedEnvVar::set("PATH", std::env::join_paths(paths).expect("join PATH"))
     }
 
-    /// Every marker these tests wait for is published within milliseconds of
-    /// the work that produces it, so overrunning this means the producer
-    /// deadlocked rather than that the runner is loaded. It exists only to turn
-    /// a hang into a readable failure, and is deliberately far above any
-    /// plausible scheduling delay: a saturated runner must delay a wait, never
-    /// decide its outcome (Issue #3641).
-    const MARKER_WAIT_HANG_GUARD: Duration = Duration::from_secs(60);
+    /// The single budget for every wait in this module whose outcome must be
+    /// "it happened".
+    ///
+    /// Everything these tests wait for - a marker, a status projection, a
+    /// receipt, a worker join - is produced within milliseconds of the work
+    /// that produces it, so overrunning this means the producer deadlocked
+    /// rather than that the runner is loaded. It exists only to turn a hang into
+    /// a readable failure, and is deliberately far above any plausible
+    /// scheduling delay: a saturated runner must delay a wait, never decide its
+    /// outcome (Issue #3641).
+    ///
+    /// Issue #3921: the tests that kept failing on unrelated PRs were the ones
+    /// that still spelled their own one-to-three second budget. Those numbers
+    /// were never claims about the daemon; they were claims about how quickly
+    /// this host schedules threads and forks processes, and this repository runs
+    /// several agents' builds concurrently. A short budget belongs only to an
+    /// assertion that something must *not* happen inside it, or to a value the
+    /// daemon itself consumes (a poll interval, an operation timeout, a budget a
+    /// test deliberately exhausts).
+    const HANG_GUARD: Duration = Duration::from_secs(60);
 
     /// Issue #4096: commit an executor result the way every effect-commit test
     /// must. Each test owns its `prefs_path`, but the production 250 ms prefs
@@ -5661,7 +5674,7 @@ exit 0
         monitor: &mut crate::IssueMonitorState,
         completed: super::CompletedIssueMonitorEffect,
     ) -> bool {
-        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         super::try_commit_issue_monitor_effect_result(prefs_path, monitor, completed)
             .unwrap_or_else(|error| {
                 panic!(
@@ -5681,7 +5694,7 @@ exit 0
         monitor: &mut crate::IssueMonitorState,
         control: IssueMonitorControl,
     ) -> super::IssueMonitorControlCommit {
-        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let commit = super::try_apply_issue_monitor_control_with_disk_migration(
             prefs_path, monitor, control,
         );
@@ -5717,8 +5730,8 @@ exit 0
                 Ok(value) => return value,
                 Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                     assert!(
-                        started.elapsed() < MARKER_WAIT_HANG_GUARD,
-                        "{what}: still refused as busy after {MARKER_WAIT_HANG_GUARD:?}; \
+                        started.elapsed() < HANG_GUARD,
+                        "{what}: still refused as busy after {HANG_GUARD:?}; \
                          a writer that outlives a fork window is a leak, not a race"
                     );
                     std::thread::sleep(Duration::from_millis(10));
@@ -5729,7 +5742,7 @@ exit 0
     }
 
     async fn wait_for_path(path: &Path) -> bool {
-        tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
+        tokio::time::timeout(HANG_GUARD, async {
             while !path.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -5798,9 +5811,9 @@ exit 0
                         format!("read active owner root {}: {error}", active_root.display());
                 }
             }
-            if started.elapsed() >= MARKER_WAIT_HANG_GUARD {
+            if started.elapsed() >= HANG_GUARD {
                 return Err(format!(
-                    "fake gh did not publish a live owner within {MARKER_WAIT_HANG_GUARD:?}; \
+                    "fake gh did not publish a live owner within {HANG_GUARD:?}; \
                      last observation: {last_observation}"
                 ));
             }
@@ -5959,8 +5972,8 @@ exit 0
                     return;
                 }
                 assert!(
-                    started.elapsed() < MARKER_WAIT_HANG_GUARD,
-                    "{} fake gh is still running after {MARKER_WAIT_HANG_GUARD:?} \
+                    started.elapsed() < HANG_GUARD,
+                    "{} fake gh is still running after {HANG_GUARD:?} \
                      without publishing its markers",
                     self.markers.name
                 );
@@ -6187,7 +6200,7 @@ exit 0
                 return;
             }
             assert!(
-                started.elapsed() < MARKER_WAIT_HANG_GUARD,
+                started.elapsed() < HANG_GUARD,
                 "killed fake gh must remain unreaped for the test"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -6205,6 +6218,23 @@ exit 0
             .is_ok_and(|status| status.success())
     }
 
+    /// Wait for one published status projection that satisfies `predicate`.
+    ///
+    /// Only a closed channel ends the search early. Issue #3921: every other
+    /// interruption used to end it too, and each one reported a state that was
+    /// already published as one that never arrived.
+    ///
+    /// The one that actually fired is lag. The worker republishes its whole
+    /// projection on every control retry - one every
+    /// `ISSUE_MONITOR_AUTHORITY_RETRY_DELAY` while a contended prefs lock keeps
+    /// the barrier up - and `BroadcastHub` retains only
+    /// `DEFAULT_CHANNEL_CAPACITY` frames. A caller that waits on a process
+    /// marker or a receipt in between falls that far behind on any host slow
+    /// enough to keep the barrier up for a few seconds, and the lag it is then
+    /// told about means "you missed frames", not "the state you are waiting for
+    /// is unreachable". Since every status frame carries the whole projection
+    /// and the retained window always holds the newest frames, resuming from
+    /// wherever the receiver landed still observes the state.
     async fn recv_issue_monitor_status_matching(
         receiver: &mut tokio::sync::broadcast::Receiver<DaemonFrame>,
         timeout: Duration,
@@ -6212,7 +6242,11 @@ exit 0
     ) -> Option<crate::IssueMonitorStatusView> {
         tokio::time::timeout(timeout, async {
             loop {
-                let frame = receiver.recv().await.ok()?;
+                let frame = match receiver.recv().await {
+                    Ok(frame) => frame,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                };
                 let DaemonFrame::Event { channel, payload } = frame else {
                     continue;
                 };
@@ -6221,7 +6255,15 @@ exit 0
                 {
                     continue;
                 }
-                let status = serde_json::from_value(payload.get("payload")?.clone()).ok()?;
+                // A frame this projection cannot read is one more frame to skip,
+                // never a verdict about the frames still to come.
+                let Some(status) = payload
+                    .get("payload")
+                    .cloned()
+                    .and_then(|payload| serde_json::from_value(payload).ok())
+                else {
+                    continue;
+                };
                 if predicate(&status) {
                     return Some(status);
                 }
@@ -6230,6 +6272,54 @@ exit 0
         .await
         .ok()
         .flatten()
+    }
+
+    /// Issue #3921: the retry barrier publishes faster than a waiting test
+    /// consumes, so the wait helper must survive being lapped.
+    ///
+    /// This is the mechanism behind the whole family of "settles or retries"
+    /// failures on PRs that never touched daemon code: the state under test was
+    /// published on time, and the wait reported it as never reached because the
+    /// backlog had overrun the receiver's retained window first. It fails
+    /// instantly rather than at the deadline, which is why raising the deadlines
+    /// never helped.
+    #[tokio::test]
+    async fn status_wait_resumes_after_the_broadcast_backlog_laps_it() {
+        let project = TempDir::new().expect("project tempdir");
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
+            .expect("worker scope");
+        let project_store =
+            crate::runtime_daemon_events::ProjectStoreIdentity::from_runtime_scope(&scope);
+        let hub = BroadcastHub::new();
+        let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let mut premise_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+
+        for _ in 0..=super::super::broadcast::DEFAULT_CHANNEL_CAPACITY {
+            super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+        }
+        // `premise_rx` subscribed at the same position as `status_rx` and is
+        // read only here, so its verdict is `status_rx`'s verdict.
+        assert!(
+            matches!(
+                premise_rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))
+            ),
+            "fixture premise: the barrier's republishes must lap the waiting receiver"
+        );
+        monitor.record_scan_error("2026-09-10T00:00:00Z", "released scan settled");
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+
+        let settled = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status.last_scan_at.is_some()
+        })
+        .await;
+
+        assert!(
+            settled.is_some(),
+            "a lapped receiver must resume the search instead of reporting the \
+             published state as unreachable"
+        );
     }
 
     /// Issue #3596: every Issue Monitor frame names the actual worker store,
@@ -6601,7 +6691,7 @@ exit 0
         );
 
         drop(materializer);
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while hub.issue_monitor_materializer_connected() {
                 tokio::task::yield_now().await;
             }
@@ -11052,7 +11142,7 @@ exit 0
         // transaction the same hang-guard treatment every other wait in this
         // module gets (Issue #3641): a saturated runner may delay it, never
         // decide it.
-        let _prefs_timeout = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _prefs_timeout = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
 
         let workspace_home = temp.path().join("workspace");
         let bare_repo = workspace_home.join("repo.git");
@@ -11180,7 +11270,7 @@ exit 0
             fs2::FileExt::unlock(&lock).expect("release prefs lock");
         });
         acquired_rx
-            .recv_timeout(MARKER_WAIT_HANG_GUARD)
+            .recv_timeout(HANG_GUARD)
             .expect("the injected prefs lock holder must take the lock");
         holder
     }
@@ -11600,7 +11690,7 @@ exit 0
     /// markers, so a test can observe repeated fake-gh invocations rather than
     /// only the first one.
     async fn wait_for_marker_count(path: &Path, expected: usize) -> bool {
-        tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
+        tokio::time::timeout(HANG_GUARD, async {
             loop {
                 if fs::read_to_string(path).unwrap_or_default().lines().count() >= expected {
                     return;
@@ -11699,7 +11789,7 @@ exit 0
 
         let first_scan_started = wait_for_path(&scan_started_path).await;
         let expired_status =
-            recv_issue_monitor_status_matching(&mut status_rx, MARKER_WAIT_HANG_GUARD, |status| {
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
                 status.last_error.as_deref().is_some_and(|error| {
                     error.contains("deadline")
                         || error.contains("timed out")
@@ -11713,7 +11803,7 @@ exit 0
         // teardown wait out another full budget.
         fs::write(&release_scan_path, "release").expect("release the hung fake gh");
         shutdown.request();
-        tokio::time::timeout(MARKER_WAIT_HANG_GUARD, worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -11856,18 +11946,16 @@ exit 0
             .await
             .is_ok();
 
-        let responsive_status = recv_issue_monitor_status_matching(
-            &mut status_rx,
-            Duration::from_millis(500),
-            |status| status.max_active_agents == 7,
-        )
-        .await;
-        let tick_status = recv_issue_monitor_status_matching(
-            &mut status_rx,
-            Duration::from_millis(1_500),
-            |status| status.max_active_agents == 7,
-        )
-        .await;
+        let responsive_status =
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+                status.max_active_agents == 7
+            })
+            .await;
+        let tick_status =
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+                status.max_active_agents == 7
+            })
+            .await;
         let scans_started_while_blocked = fs::read_to_string(&scan_started_path)
             .unwrap_or_default()
             .lines()
@@ -11883,18 +11971,17 @@ exit 0
             })
             .await
             .is_ok();
-        let disabled_status = recv_issue_monitor_status_matching(
-            &mut status_rx,
-            Duration::from_millis(500),
-            |status| !status.enabled,
-        )
-        .await;
+        let disabled_status =
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+                !status.enabled
+            })
+            .await;
 
         // Always release the fake process before asserting RED so a failed test
         // cannot strand a blocking child or the Tokio blocking pool.
         fs::write(&release_scan_path, b"release").expect("release fake gh scan");
         let settled_status =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(3), |status| {
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
                 status.max_active_agents == 7 && status.last_scan_at.is_some()
             })
             .await;
@@ -11906,7 +11993,7 @@ exit 0
             .and_then(|record| record.last_heartbeat.as_deref())
             .map(str::to_string);
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -12050,7 +12137,7 @@ exit 0
             "stale startup snapshot must not begin a grant before OFF commits"
         );
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -12144,7 +12231,7 @@ exit 0
         };
 
         let reaped = match ready_pid.as_ref() {
-            Ok(pid) => tokio::time::timeout(Duration::from_secs(1), async {
+            Ok(pid) => tokio::time::timeout(HANG_GUARD, async {
                 while process_exists(*pid) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -12331,7 +12418,7 @@ exit 1
         })
         .await
         .expect("worker accepts autonomous OFF");
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             loop {
                 let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load OFF prefs");
                 if prefs.effect_authority_epoch == 8
@@ -12358,7 +12445,7 @@ exit 1
             wait_for_path(&disarm_done).await,
             "compensating disarm must run after the stale arm result"
         );
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             loop {
                 let prefs =
                     crate::load_issue_monitor_prefs(&prefs_path).expect("load settled prefs");
@@ -12385,7 +12472,7 @@ exit 1
         );
 
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -12480,7 +12567,7 @@ exit 1
 
         tokio::time::sleep(Duration::from_millis(350)).await;
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded despite the lock")
             .expect("worker exits cleanly");
@@ -12499,14 +12586,21 @@ exit 1
             "a worker that never established its fence must not create one outside the prefs lock"
         );
 
-        let replacement = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: only the first worker tests an exhausted prefs budget.
+        // After unlocking, establish the replacement independently of that
+        // budget so a retry-pending load cannot masquerade as successful startup.
+        let replacement = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
         assert!(
             !replacement.recovery_blocked,
             "replacement establishes the first lifetime fence after the lock is released"
         );
+        assert!(replacement.authority_lease.is_some());
         let replayed = crate::load_issue_monitor_prefs(&prefs_path).expect("reload replayed prefs");
         assert_eq!(replayed.effect_authority_epoch, 7);
         assert_eq!(
@@ -12597,12 +12691,18 @@ exit 1
         )
         .expect("seed prefs");
 
-        let loaded = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: this test requires a committed fence, not a timed-out
+        // attempt that returns non-blocked with no authority lease.
+        let loaded = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
         assert!(!loaded.recovery_blocked);
+        assert!(loaded.authority_lease.is_some());
         let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
         let fence: serde_json::Value =
             serde_json::from_slice(&fs::read(&marker).expect("read active fence"))
@@ -12673,7 +12773,7 @@ exit 1
         assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
         FileExt::unlock(&lock).expect("unlock");
 
-        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let retried = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
@@ -12754,10 +12854,9 @@ exit 1
         // Releasing the lock must not allow a new authority attempt once the
         // startup-wide budget has already expired.
         drop(local_lease);
-        let status =
-            tokio::time::timeout(Duration::from_secs(5), hub.wait_for_issue_monitor_status()).await;
+        let status = tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_status()).await;
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(5), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -12820,17 +12919,16 @@ exit 1
                     ..Default::default()
                 },
             );
-            let queued = tokio::time::timeout(Duration::from_secs(5), submitted.notified()).await;
+            let queued = tokio::time::timeout(HANG_GUARD, submitted.notified()).await;
             let status =
-                tokio::time::timeout(Duration::from_secs(3), hub.wait_for_issue_monitor_status())
-                    .await;
+                tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_status()).await;
             // Always release our blocking thread before assertions, including
             // RED, so Runtime::drop cannot hang waiting for the test fixture.
             release_tx.send(()).expect("release occupied slot");
             blocker.await.expect("blocker exits");
             drop(local_lease);
             shutdown.request();
-            tokio::time::timeout(Duration::from_secs(5), worker)
+            tokio::time::timeout(HANG_GUARD, worker)
                 .await
                 .expect("worker shutdown")
                 .expect("worker exits");
@@ -12882,9 +12980,9 @@ exit 1
                     ..Default::default()
                 },
             );
-            let running = tokio::time::timeout(Duration::from_secs(5), started.notified()).await;
+            let running = tokio::time::timeout(HANG_GUARD, started.notified()).await;
             shutdown.request();
-            let stopped = tokio::time::timeout(Duration::from_secs(5), worker).await;
+            let stopped = tokio::time::timeout(HANG_GUARD, worker).await;
             FileExt::unlock(&lock).expect("unlock after worker exit");
             // With one blocking slot, this barrier drains any attempt the
             // worker incorrectly detached before reporting shutdown complete.
@@ -12954,7 +13052,7 @@ exit 1
             "fence-less contention keeps controls in Starting"
         );
         drop(local_lease);
-        let publish_result = tokio::time::timeout(Duration::from_secs(2), publisher)
+        let publish_result = tokio::time::timeout(HANG_GUARD, publisher)
             .await
             .expect("publisher reaches Ready after lease release")
             .expect("publisher task joins");
@@ -12963,7 +13061,7 @@ exit 1
             "the retried daemon owns and commits the control: {publish_result:?}"
         );
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -12987,7 +13085,7 @@ exit 1
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
@@ -13034,7 +13132,7 @@ exit 1
         );
 
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -13090,7 +13188,7 @@ exit 1
         prefs_lock.unlock().expect("release prefs lock");
         drop(local_lease);
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker stops")
             .expect("worker joins");
@@ -13109,11 +13207,18 @@ exit 1
         )
         .expect("seed prefs");
 
-        let first = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: overlap requires the first load to own authority.
+        // Scope the success budget to each owner load, leaving the contended
+        // overlap attempt on its own budget.
+        let first = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
         assert!(!first.recovery_blocked);
+        assert!(first.authority_lease.is_some());
 
         let overlap = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
@@ -13128,11 +13233,15 @@ exit 1
         );
 
         drop(first);
-        let replacement = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        let replacement = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
         assert!(!replacement.recovery_blocked);
+        assert!(replacement.authority_lease.is_some());
         assert_eq!(
             replacement.monitor.effect_authority_epoch(),
             8,
@@ -13155,7 +13264,7 @@ exit 1
         // that only a recovery-blocked lane may refuse. Pin the hang-guard
         // budget so the runner may delay these transactions but never decide
         // them (Issue #3641 / #4033 / #4096).
-        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
@@ -13226,7 +13335,7 @@ exit 1
         );
 
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -13353,7 +13462,7 @@ exit 1
         // expired attempt against a *retained* fence is reported as terminal
         // recovery-blocked — so the runner, not the fence, decided this
         // assertion (Issue #3641 / #4033 / #4096).
-        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _prefs_budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(
@@ -13438,7 +13547,7 @@ exit 1
 
         // The retry is not the subject: it must prove recovery, so a saturated
         // runner may delay it but never decide it (Issue #3641 / #4033).
-        let _retry_budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _retry_budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let retried = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
@@ -13481,12 +13590,18 @@ exit 1
         super::persist_issue_monitor_shutdown_revoke_marker(&prefs_path)
             .expect("persist shutdown marker");
 
-        let loaded = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: revocation and compensation must commit before their
+        // contents are asserted; a retained fence after timeout proves neither.
+        let loaded = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
         assert!(!loaded.recovery_blocked);
+        assert!(loaded.authority_lease.is_some());
         let replayed = crate::load_issue_monitor_prefs(&prefs_path).expect("reload replayed prefs");
         assert_eq!(replayed.effect_authority_epoch, 8);
         assert!(replayed.pending_effects.iter().any(|effect| matches!(
@@ -13558,7 +13673,7 @@ exit 1
 
         // Issue #4033: the replacement load must prove that authority is taken
         // over, not that this host writes JSON inside 250 ms.
-        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(MARKER_WAIT_HANG_GUARD);
+        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
         let replacement = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
@@ -13726,7 +13841,7 @@ exit 1
             Ok(late)
         });
         started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(HANG_GUARD)
             .expect("scan entered blocking pool");
         let deadline = Instant::now() + Duration::from_millis(25);
         let mut in_flight = Some(super::InFlightIssueMonitorScan {
@@ -13757,7 +13872,7 @@ exit 1
 
         release_tx.send(()).expect("release scan");
         let (captured_revision, captured_epoch, captured_deadline, result) = tokio::time::timeout(
-            Duration::from_secs(1),
+            HANG_GUARD,
             super::wait_for_issue_monitor_scan(&mut in_flight),
         )
         .await
@@ -13905,7 +14020,7 @@ exit 1
             (accepted, canonical)
         });
         started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(HANG_GUARD)
             .expect("accept thread started");
         std::thread::sleep(Duration::from_millis(80));
         FileExt::unlock(&lock).expect("release prefs lock after scan deadline");
@@ -13998,7 +14113,7 @@ exit 1
             }
         });
         started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(HANG_GUARD)
             .expect("effect entered blocking pool");
         let deadline = Instant::now() + Duration::from_millis(25);
         let mut in_flight = Some(super::InFlightIssueMonitorEffect {
@@ -14025,7 +14140,7 @@ exit 1
 
         release_tx.send(()).expect("release effect");
         let completed = tokio::time::timeout(
-            Duration::from_secs(1),
+            HANG_GUARD,
             super::wait_for_issue_monitor_effect(&mut in_flight),
         )
         .await
@@ -14062,7 +14177,7 @@ exit 1
                 release_rx.recv().expect("release blocker");
             });
             started_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(HANG_GUARD)
                 .expect("blocking pool occupied");
             let effect = crate::PendingIssueMonitorEffect::prepared(
                 "release:claim:42:7:8",
@@ -14246,7 +14361,7 @@ exit 1
                 release_rx.recv().expect("release blocker");
             });
             started_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(HANG_GUARD)
                 .expect("blocking pool occupied");
 
             let permit = super::IssueMonitorEffectPermit::new();
@@ -14719,15 +14834,14 @@ exit 1
         // re-projected for operators that connect later.
         tokio::time::sleep(Duration::from_millis(100)).await;
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
-        let status =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(2), |status| {
-                status
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("authority recovery is blocked"))
-            })
-            .await
-            .expect("recovery-blocked status");
+        let status = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("authority recovery is blocked"))
+        })
+        .await
+        .expect("recovery-blocked status");
         assert!(!status.enabled);
         assert!(!status.autonomous_mode);
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -14749,7 +14863,7 @@ exit 1
             "corrupt prefs must retain the independent shutdown marker"
         );
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(1), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("recovery-blocked worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -16528,7 +16642,7 @@ exit 1
         FileExt::unlock(&lock).expect("release issue monitor prefs lock");
 
         let committed_monitor = done_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(HANG_GUARD)
             .expect("daemon writer completes after unlock");
         writer.join().expect("daemon writer thread");
         let committed =
@@ -16715,7 +16829,7 @@ exit 1
                 .expect("return committed control state");
         });
         contended_rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(HANG_GUARD)
             .expect("control transaction reaches the held sibling lock");
         assert!(
             matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
@@ -16726,7 +16840,7 @@ exit 1
         FileExt::unlock(&lock).expect("release issue monitor prefs lock");
 
         let (commit, committed_monitor) = done_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(HANG_GUARD)
             .expect("control transaction completes after unlock");
         writer.join().expect("control writer thread");
         assert!(matches!(
@@ -17163,7 +17277,7 @@ exit 1
             }
         });
         let failed_status =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(1), |status| {
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
                 status
                     .last_error
                     .as_deref()
@@ -17172,13 +17286,13 @@ exit 1
             .await;
         tokio::time::sleep(Duration::from_millis(650)).await;
         FileExt::unlock(&lock).expect("release prefs lock");
-        tokio::time::timeout(Duration::from_secs(2), off_receipt)
+        tokio::time::timeout(HANG_GUARD, off_receipt)
             .await
             .expect("OFF receipt resolves after retry")
             .expect("OFF publisher joins")
             .expect("durable OFF commit is acknowledged");
 
-        let committed = tokio::time::timeout(Duration::from_secs(2), async {
+        let committed = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
                 let compensation_count = prefs
@@ -17208,7 +17322,7 @@ exit 1
         let stable = crate::load_issue_monitor_prefs(&prefs_path).expect("reload stable prefs");
         fs::write(&effect_release, b"release").expect("release in-flight effect");
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -17291,11 +17405,16 @@ exit 1
             },
             Duration::from_secs(2),
         );
-        let _ =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(1), |status| {
-                status.enabled
-            })
-            .await;
+        // The lock below must be taken after the worker has published its
+        // seeded projection, or the contention this test is about never
+        // happens. Issue #3921: discarding this barrier let a slow runner skip
+        // it silently instead of failing on it.
+        assert!(
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| status.enabled)
+                .await
+                .is_some(),
+            "the worker publishes its seeded projection before controls contend"
+        );
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
         let source_pid = std::process::id().wrapping_add(1);
         let mut publishers = Vec::new();
@@ -17317,14 +17436,13 @@ exit 1
             }));
             tokio::task::yield_now().await;
         }
-        let failed =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(1), |status| {
-                status
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("control commit failed"))
-            })
-            .await;
+        let failed = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("control commit failed"))
+        })
+        .await;
         assert!(failed.is_some(), "OFF lock timeout becomes visible");
         assert!(
             publishers.iter().all(|publisher| !publisher.is_finished()),
@@ -17332,14 +17450,14 @@ exit 1
         );
         FileExt::unlock(&lock).expect("release prefs lock");
         for publisher in publishers {
-            tokio::time::timeout(Duration::from_secs(2), publisher)
+            tokio::time::timeout(HANG_GUARD, publisher)
                 .await
                 .expect("ordered control receipt resolves")
                 .expect("ordered control publisher joins")
                 .expect("ordered durable control commits");
         }
 
-        let ordered = tokio::time::timeout(Duration::from_secs(2), async {
+        let ordered = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
                 if prefs.enabled && prefs.effect_authority_epoch == 11 {
@@ -17351,7 +17469,7 @@ exit 1
         .await
         .ok();
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -17450,29 +17568,28 @@ exit 1
             }
         });
 
-        let failure =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(1), |status| {
-                status
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("control commit failed"))
-            })
-            .await;
+        let failure = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("control commit failed"))
+        })
+        .await;
         assert!(failure.is_some(), "OFF reaches retry barrier");
         assert!(!pending.is_finished(), "retryable OFF has no ACK yet");
         assert!(!queued.is_finished(), "FIFO successor has no ACK yet");
 
         shutdown.request();
-        let pending_result = tokio::time::timeout(Duration::from_secs(2), pending)
+        let pending_result = tokio::time::timeout(HANG_GUARD, pending)
             .await
             .expect("pending receipt resolves")
             .expect("pending publisher joins");
-        let queued_result = tokio::time::timeout(Duration::from_secs(2), queued)
+        let queued_result = tokio::time::timeout(HANG_GUARD, queued)
             .await
             .expect("queued receipt resolves")
             .expect("queued publisher joins");
         FileExt::unlock(&lock).expect("release prefs lock");
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
@@ -17544,14 +17661,13 @@ exit 1
         let first = publish(hub.clone(), 4);
         tokio::task::yield_now().await;
         let second = publish(hub.clone(), 7);
-        let failure =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(1), |status| {
-                status
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("control commit failed"))
-            })
-            .await;
+        let failure = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("control commit failed"))
+        })
+        .await;
         assert!(failure.is_some());
         assert!(
             !first.is_finished(),
@@ -17678,14 +17794,13 @@ exit 1
             })
             .await
             .expect("control is admitted before the worker loop runs");
-        let failure =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(1), |status| {
-                status
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("control commit failed"))
-            })
-            .await;
+        let failure = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("control commit failed"))
+        })
+        .await;
         assert!(failure.is_some(), "initial heartbeat commit reaches retry");
         assert!(
             wait_for_path(&scan_started_path).await,
@@ -17697,17 +17812,16 @@ exit 1
         );
 
         FileExt::unlock(&lock).expect("release prefs lock");
-        tokio::time::timeout(Duration::from_secs(2), receipt)
+        tokio::time::timeout(HANG_GUARD, receipt)
             .await
             .expect("heartbeat receipt resolves after retry")
             .expect("heartbeat receipt sender remains live")
             .expect("heartbeat retry commits");
         fs::write(&release_scan_path, b"release").expect("release captured scan");
-        let settled =
-            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(3), |status| {
-                status.last_scan_at.is_some()
-            })
-            .await;
+        let settled = recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+            status.last_scan_at.is_some()
+        })
+        .await;
         assert!(settled.is_some(), "released scan settles or retries");
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
         let heartbeat = persisted
@@ -17716,7 +17830,7 @@ exit 1
             .find(|record| record.issue_number == 43)
             .and_then(|record| record.last_heartbeat.as_deref());
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(3), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits");
@@ -18444,7 +18558,7 @@ exit 1
         );
 
         shutdown.request();
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
