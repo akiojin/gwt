@@ -11,7 +11,9 @@ use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
     session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
-    types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
+    types::{
+        AgentColor, AgentId, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
+    },
 };
 
 /// `RUST_LOG` filter that turns on Codex's own file logging (Issue #3341).
@@ -1159,6 +1161,10 @@ pub struct LaunchConfig {
     /// implementing session's execution lifecycle.
     pub suppress_execution_control: bool,
     pub execution_intent: ExecutionLaunchIntent,
+    /// Issue #4217 FR-002: who started this launch. Only the launcher knows,
+    /// so it is stamped here and persisted onto the Session rather than being
+    /// re-derived later from the agent's environment.
+    pub launch_route: LaunchRoute,
 }
 
 /// Permission mode for agent launch.
@@ -1222,6 +1228,7 @@ pub struct AgentLaunchBuilder {
     ephemeral_base_ref: Option<String>,
     suppress_execution_control: bool,
     execution_intent: ExecutionLaunchIntent,
+    launch_route: LaunchRoute,
 }
 
 impl AgentLaunchBuilder {
@@ -1262,6 +1269,7 @@ impl AgentLaunchBuilder {
             ephemeral_base_ref: None,
             suppress_execution_control: false,
             execution_intent: ExecutionLaunchIntent::Automatic,
+            launch_route: LaunchRoute::Manual,
         }
     }
 
@@ -1278,6 +1286,15 @@ impl AgentLaunchBuilder {
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;
+        self
+    }
+
+    /// Issue #4217 FR-002: stamp the route this launch came in through.
+    ///
+    /// Only the launcher can know it, and every consumer downstream reads it
+    /// from the durable Session instead of sniffing the environment.
+    pub fn launch_route(mut self, route: LaunchRoute) -> Self {
+        self.launch_route = route;
         self
     }
 
@@ -1648,6 +1665,7 @@ impl AgentLaunchBuilder {
             ephemeral_base_ref: self.ephemeral_base_ref,
             suppress_execution_control: self.suppress_execution_control,
             execution_intent: self.execution_intent,
+            launch_route: self.launch_route,
         }
     }
 
