@@ -50987,10 +50987,18 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
 
     let events = runtime.handle_workspace_projection_changed_events(&repo, &projection);
 
-    assert!(events
+    // Issue #3783 keeps this watcher path cache-only on purpose: it merges the
+    // already-loaded payload into the last materialized view instead of
+    // decoding Session/WorkItems, because a full rebuild here blocks every pane
+    // request. So read the projection out of the broadcast it just published
+    // rather than waiting for a background rebuild this path must not schedule.
+    let refreshed_projection = events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })));
-    let refreshed_projection = wait_for_active_work_projection(&mut runtime);
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjectionPatch { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("cache-only projection broadcast");
     assert_eq!(refreshed_projection.active_agents, 1);
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab.workspace.window("agent-1").expect("agent window");
@@ -51618,7 +51626,16 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
             .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
         "ActiveWorkProjection broadcast must still fire: {events:?}"
     );
-    let active_work = wait_for_active_work_projection(&mut runtime);
+    // Cache-only by design (Issue #3783): assert the broadcast this path just
+    // published rather than waiting for a background rebuild it must not
+    // schedule, since a full decode here would block every pane request.
+    let active_work = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjectionPatch { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("cache-only projection broadcast");
     assert_eq!(active_work.active_agents, 1);
 }
 
