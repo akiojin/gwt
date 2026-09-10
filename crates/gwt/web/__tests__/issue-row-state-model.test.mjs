@@ -226,7 +226,7 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     "queue position and the SPEC attribute win over the remaining labels",
   );
   assert.deepEqual(queued.actions, ["launch-now", "configure-issue"]);
-  assert.deepEqual(queued.overflow, ["move-up", "move-down"]);
+  assert.deepEqual(queued.overflow, ["queue-remove", "move-up", "move-down"]);
 
   const liveInline = issueRowStateModel({
     entry: knowledgeEntry(3671, { monitor_state: "launched", labels: ["auto-merge"] }),
@@ -554,7 +554,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
     { kind: "chip", text: "Spec" },
   ]);
   assert.deepEqual(visibleActions(row42), ["launch-now", "configure-issue"]);
-  assert.deepEqual(overflowActions(row42), ["move-up", "move-down"]);
+  assert.deepEqual(overflowActions(row42), ["queue-remove", "move-up", "move-down"]);
   assert.equal(row42.querySelector('[data-action="move-up"]').disabled, true);
   assert.equal(row42.querySelector('[data-action="move-down"]').disabled, false);
 

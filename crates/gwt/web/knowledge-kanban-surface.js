@@ -252,7 +252,7 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   switch (monitor?.state) {
     case "queued":
       return {
-        order: ["launch-now", "queue-remove", "configure-issue", "move-up", "move-down", ...workActions],
+        order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
     case "launch_failed":
     case "agent_failed":
