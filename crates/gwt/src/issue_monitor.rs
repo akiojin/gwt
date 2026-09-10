@@ -5460,6 +5460,17 @@ impl IssueMonitorState {
                 current.issue_updated_at.as_deref(),
                 incoming.issue_updated_at.as_deref(),
             );
+            if winner.state == IssueClosureState::Closed
+                && [current, incoming].iter().any(|record| {
+                    record.evidence == IssueClosureEvidence::ExplicitRevision
+                        && Self::closure_revision_floor_order(
+                            record.issue_updated_at.as_deref(),
+                            winner.issue_updated_at.as_deref(),
+                        ) == Some(std::cmp::Ordering::Equal)
+                })
+            {
+                winner.evidence = IssueClosureEvidence::ExplicitRevision;
+            }
         }
         winner.generation = current.generation.max(incoming.generation);
         winner
@@ -5515,10 +5526,9 @@ impl IssueMonitorState {
         }
 
         // A carried floor is only a lower bound for a non-explicit closure,
-        // not its exact revision. It can reject an explicit Open at or below
-        // that floor, or prove an incoming closure is at/above the current
-        // explicit Open. Other cross-process orderings remain generation
-        // fenced until a subsequent complete Live scan resolves them.
+        // not its exact revision. An older Open cannot cross it. At the same
+        // revision an inferred absence is ordered by generation: a subsequent
+        // live observation may recover the Issue, while a stale process cannot.
         if current.state == IssueClosureState::Closed
             && current.evidence != IssueClosureEvidence::ExplicitRevision
             && current
@@ -5529,6 +5539,11 @@ impl IssueMonitorState {
             && incoming.evidence == IssueClosureEvidence::ExplicitRevision
         {
             return ordering.and_then(|ordering| match ordering {
+                std::cmp::Ordering::Equal
+                    if current.evidence == IssueClosureEvidence::CompleteLiveAbsence =>
+                {
+                    None
+                }
                 std::cmp::Ordering::Less | std::cmp::Ordering::Equal => Some(false),
                 std::cmp::Ordering::Greater => None,
             });
@@ -5543,6 +5558,11 @@ impl IssueMonitorState {
                 .is_some_and(Self::closure_revision_floor_is_valid)
         {
             return ordering.and_then(|ordering| match ordering {
+                std::cmp::Ordering::Equal
+                    if incoming.evidence == IssueClosureEvidence::CompleteLiveAbsence =>
+                {
+                    None
+                }
                 std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => Some(true),
                 std::cmp::Ordering::Less => None,
             });
@@ -5662,8 +5682,10 @@ impl IssueMonitorState {
                     issue_updated_at.as_deref(),
                 ) {
                     Some(std::cmp::Ordering::Greater) => true,
-                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => false,
-                    None => current.evidence != IssueClosureEvidence::ExplicitRevision,
+                    Some(std::cmp::Ordering::Less) => false,
+                    Some(std::cmp::Ordering::Equal) | None => {
+                        current.evidence != IssueClosureEvidence::ExplicitRevision
+                    }
                 }
             } else {
                 true
@@ -5679,7 +5701,16 @@ impl IssueMonitorState {
                         issue_number,
                         generation: current.generation.saturating_add(1),
                         state,
-                        evidence,
+                        // Absence cannot downgrade a positive Closed revision
+                        // into an inference that a same-revision Open may undo.
+                        evidence: if state == IssueClosureState::Closed
+                            && current.evidence == IssueClosureEvidence::ExplicitRevision
+                            && evidence == IssueClosureEvidence::CompleteLiveAbsence
+                        {
+                            current.evidence
+                        } else {
+                            evidence
+                        },
                         issue_updated_at: revision_floor,
                     },
                 );
@@ -5756,7 +5787,10 @@ impl IssueMonitorState {
                 return match ordering {
                     std::cmp::Ordering::Greater => true,
                     std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Equal => incoming_state == IssueClosureState::Closed,
+                    std::cmp::Ordering::Equal => {
+                        incoming_state == IssueClosureState::Closed
+                            || current.evidence == IssueClosureEvidence::CompleteLiveAbsence
+                    }
                 };
             }
         }
@@ -13610,6 +13644,11 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    let previous_inbox = monitor
+        .inbox
+        .iter()
+        .map(|item| item.issue.number)
+        .collect::<BTreeSet<_>>();
     if monitor.legacy_git_launch_failure_migration_version
         < LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
         && source == IssueMonitorCandidateSource::Live
@@ -13669,9 +13708,31 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
         IssueMonitorScanDriverKind::Daemon
     };
     let drive_diagnosis = monitor.diagnose_scan_drive(driver, std::process::id(), now);
-    let summary = scan_issue_monitor_candidates(monitor, issues, now);
+    let mut summary = scan_issue_monitor_candidates(monitor, issues, now);
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
+    }
+    if monitor.inbox.len() < previous_inbox.len() {
+        let previous_count = previous_inbox.len();
+        let removed = previous_inbox
+            .into_iter()
+            .filter(|number| monitor.inbox_item(*number).is_none())
+            .collect::<Vec<_>>();
+        let message = format!(
+            "issue monitor inbox population shrank: {} -> {}; removed issues: {removed:?}; source: {source:?}",
+            previous_count,
+            monitor.inbox.len(),
+        );
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::DaemonFault,
+            &message,
+            gwt_core::error_ledger::ErrorTarget {
+                project_root: Some(project_root.display().to_string()),
+                ..Default::default()
+            },
+        );
+        monitor.record_scan_error(now, &message);
+        summary.errors.push(message);
     }
     summary
 }

@@ -640,8 +640,9 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     owner: &str,
     repo: &str,
 ) -> Result<LoadedIssueMonitorCandidates, String> {
-    let live_error = match gwt_git::issue::fetch_issues(owner, repo) {
-        Ok(raw_issues) => {
+    let live_error = match gwt_git::issue::fetch_issue_listing(owner, repo) {
+        Ok(listing) => {
+            let source = live_candidate_source(listing.capped);
             let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
                 .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
             // Issue #4087: the cache fallback below and the offline
@@ -657,14 +658,13 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 );
             }
             let (issues, readiness_errors) =
-                issue_monitor_candidates_with_readiness(raw_issues, &cache_root, |number| {
+                issue_monitor_candidates_with_readiness(listing.issues, &cache_root, |number| {
                     crate::issue_cache::refresh_issue_cache_entry_from_remote(
                         repo_path,
                         &cache_root,
                         number,
                     )
                 });
-            let source = live_candidate_source(issues.len());
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 source,
@@ -715,15 +715,15 @@ pub fn refresh_issue_cache_for_scan_if_stale(
 }
 
 fn resolve_loaded_issue_monitor_candidates<I>(
-    live_result: Result<Vec<IssueMonitorIssue>, String>,
+    live_result: Result<(Vec<IssueMonitorIssue>, bool), String>,
     cache_results: I,
 ) -> Result<LoadedIssueMonitorCandidates, String>
 where
     I: IntoIterator<Item = Result<Vec<IssueMonitorIssue>, String>>,
 {
     match live_result {
-        Ok(issues) => {
-            let source = live_candidate_source(issues.len());
+        Ok((issues, capped)) => {
+            let source = live_candidate_source(capped);
             Ok(LoadedIssueMonitorCandidates {
                 issues,
                 source,
@@ -745,14 +745,11 @@ where
     }
 }
 
-fn live_candidate_source(issue_count: usize) -> IssueMonitorCandidateSource {
-    let configured_limit = gwt_git::issue::GITHUB_ISSUE_LIST_LIMIT
-        .parse::<usize>()
-        .unwrap_or(usize::MAX);
-    if issue_count < configured_limit {
-        IssueMonitorCandidateSource::Live
-    } else {
+fn live_candidate_source(capped: bool) -> IssueMonitorCandidateSource {
+    if capped {
         IssueMonitorCandidateSource::LiveIncomplete
+    } else {
+        IssueMonitorCandidateSource::Live
     }
 }
 
@@ -3376,6 +3373,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inbox_population_shrink_is_recorded_in_the_error_ledger() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7)],
+            IssueMonitorCandidateSource::Live,
+            temp.path(),
+            "2026-09-10T00:00:00Z",
+        );
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert!(
+            rows.iter().any(|row| {
+                row.message.contains("inbox population shrank")
+                    && row.message.contains("2 -> 1")
+                    && row.message.contains("8")
+                    && row.target.project_root.as_deref() == temp.path().to_str()
+            }),
+            "missing population diagnostic: {rows:?}"
+        );
+    }
+
     /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches
     /// the cache and the inbox through the scan-owned full refresh once the
     /// cache TTL has expired; a second pass inside the TTL costs no list call.
@@ -3432,6 +3458,28 @@ mod tests {
             Some(MonitorInboxState::Queued),
             "the externally created Issue has an inbox row"
         );
+        monitor.escalate_to_needs_human(
+            7,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "operator decision required",
+        );
+        for _ in 0..2 {
+            crate::issue_cache::sync_issue_cache_from_remote(&repo_path, &cache_root)
+                .expect("full refresh");
+            let candidates = load_cached_issue_monitor_candidates(&cache_root).unwrap();
+            crate::issue_monitor::scan_issue_monitor_candidates(
+                &mut monitor,
+                &candidates,
+                "2026-09-10T00:00:00Z",
+            );
+            assert_eq!(monitor.agent_status().inbox.len(), 2);
+            let held = monitor.inbox_item(7).unwrap();
+            assert_eq!(held.state, MonitorInboxState::NeedsHuman);
+            assert_eq!(
+                held.error_message.as_deref(),
+                Some("operator decision required")
+            );
+        }
 
         let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
             .expect("fresh cache is left alone");
@@ -3480,7 +3528,7 @@ mod tests {
         let cached_issue = issue(43);
 
         let live = resolve_loaded_issue_monitor_candidates(
-            Ok(vec![live_issue.clone()]),
+            Ok((vec![live_issue.clone()], false)),
             [Ok(vec![cached_issue.clone()])],
         )
         .expect("live result");
@@ -3500,7 +3548,7 @@ mod tests {
         );
 
         let empty_live = resolve_loaded_issue_monitor_candidates(
-            Ok(Vec::new()),
+            Ok((Vec::new(), false)),
             [Ok(vec![cached_issue.clone()])],
         )
         .expect("empty live result still authoritative");
@@ -3509,7 +3557,7 @@ mod tests {
         assert!(empty_live.issues.is_empty());
 
         let limit_sized_live = resolve_loaded_issue_monitor_candidates(
-            Ok((1..=1_000).map(issue).collect()),
+            Ok(((1..=990).map(issue).collect(), true)),
             std::iter::empty::<Result<Vec<IssueMonitorIssue>, String>>(),
         )
         .expect("limit-sized live result");
