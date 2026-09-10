@@ -12325,6 +12325,18 @@ pub fn scan_issue_monitor_candidates(
     monitor.last_scan_at = Some(now.to_string());
     monitor.last_error = None;
     monitor.launch_auth_required = false;
+    if monitor
+        .terminal_queues
+        .get(&crate::process::current_hostname())
+        .is_some_and(|queue| queue.entries.is_empty())
+    {
+        let refill = issues
+            .iter()
+            .filter(|issue| is_auto_improve_candidate(issue, &monitor.config))
+            .map(|issue| issue.number)
+            .collect::<Vec<_>>();
+        monitor.auto_refill_terminal_queue(&refill, now);
+    }
     let terminal_queue = monitor
         .terminal_queues
         .get(&crate::process::current_hostname())
@@ -23103,6 +23115,78 @@ mod tests {
             1
         );
         assert!(monitor.terminal_queue_orphans().is_empty());
+    }
+
+    #[test]
+    fn enabled_auto_refill_populates_only_an_empty_local_queue_within_limit() {
+        let now = "2026-09-10T00:00:00Z";
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_auto_refill = true;
+        monitor.terminal_queue_auto_refill_limit = 2;
+        let host = crate::process::current_hostname();
+        monitor.terminal_queues.insert(
+            host.clone(),
+            IssueMonitorTerminalQueue {
+                entries: Vec::new(),
+                last_seen_at: None,
+            },
+        );
+
+        assert_eq!(monitor.auto_refill_terminal_queue(&[4, 5, 6], now), 2);
+        let queue = monitor.terminal_queues.get(&host).expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert_eq!(queue.entries[0].queued_by, "auto-refill");
+        assert_eq!(queue.last_seen_at.as_deref(), Some(now));
+
+        // The direct refill primitive remains bounded and deduplicated when
+        // called again by a scheduler.
+        assert_eq!(monitor.auto_refill_terminal_queue(&[6], now), 1);
+        assert_eq!(
+            monitor
+                .terminal_queues
+                .get(&host)
+                .expect("local queue")
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn scan_auto_refill_is_opt_in_and_requires_a_defined_empty_queue() {
+        let now = "2026-09-10T00:00:00Z";
+        let mut absent = IssueMonitorState::new(IssueMonitorConfig::default());
+        absent.terminal_queue_auto_refill = true;
+        absent.terminal_queue_auto_refill_limit = 3;
+        scan_issue_monitor_candidates(&mut absent, &[issue(1)], now);
+        assert!(absent.terminal_queues.is_empty());
+
+        let mut enabled = IssueMonitorState::new(IssueMonitorConfig::default());
+        enabled.terminal_queue_auto_refill = true;
+        enabled.terminal_queue_auto_refill_limit = 1;
+        enabled.terminal_queue_push(&[], "operator", now);
+        scan_issue_monitor_candidates(&mut enabled, &[issue(2), issue(3)], now);
+        let queue = enabled
+            .terminal_queues
+            .get(&crate::process::current_hostname())
+            .expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     fn autonomous_state() -> IssueMonitorState {
