@@ -2625,6 +2625,10 @@ impl AppRuntime {
             config.session_mode = gwt_agent::SessionMode::Normal;
             config.resume_session_id = None;
         }
+        // Issue #4217 (AC-2): every launch that reaches this path was started
+        // by the Issue Monitor, so the route is recorded before — and
+        // independently of — the `autonomous_mode` preference read below.
+        launch_request.set_issue_monitor_launch_route();
         // SPEC #3200 T-040/FR-006: in unattended autonomous mode the
         // monitor-launched implementation agent must not stall on a permission
         // prompt. Default OFF leaves the SPEC #3165 human-gated launch untouched.
@@ -2977,6 +2981,9 @@ impl AppRuntime {
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok((None, None));
         }
+        // Issue #4217 (AC-2): a resumed monitor launch is still a monitor
+        // launch. The route is stamped whatever the preference below says.
+        config.launch_route = gwt_agent::LaunchRoute::Autonomous;
         let autonomous_mode = gwt::load_issue_monitor_prefs(
             &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
         )

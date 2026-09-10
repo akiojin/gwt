@@ -244,6 +244,34 @@ fn verification_adjudication_note(
     note
 }
 
+/// The body a Ready handoff would publish, or the body the target PR already
+/// carries (Issue #4217 AC-4).
+fn ready_handoff_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<String> {
+    match cmd {
+        PrCommand::CreateBody { body, .. } => Ok(body.clone()),
+        PrCommand::Create { file, .. } => env.read_file(file),
+        PrCommand::Ready { number } => env
+            .fetch_pr_quarantine_context(*number)
+            .map(|context| context.body),
+        other => Err(std::io::Error::other(format!(
+            "not a Ready handoff: {other:?} carries no PR body"
+        ))),
+    }
+}
+
+/// Issue #4217 AC-4 / FR-004: why a deferred verification stops at Draft.
+fn deferred_user_verification_refusal() -> String {
+    format!(
+        "PR handoff refused: this PR records `{label} {deferred}`, so it stays Draft until \
+         the owner performs the visual check. Automation ends at PR creation; the merge \
+         decision is the owner's. List what is waiting with `pr.list` \
+         (`include: [\"body\"]`, field `deferred_user_verification`), and mark this PR Ready \
+         only after the result is `confirmed`.\n",
+        label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+        deferred = gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+    )
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: PrCommand,
@@ -296,6 +324,23 @@ pub(super) fn run<E: CliEnv>(
                 PrCommand::Ready { number } => Some(*number),
                 _ => None,
             };
+            // Issue #4217 AC-4: a body that postpones the owner's visual check
+            // keeps its PR Draft. Deferral is not a verdict, and Ready is the
+            // step that hands the change to `auto-merge.yml` — which keys on
+            // `draft == false` — so this is exactly where the postponement has
+            // to hold. Nothing here touches the Draft flow: only the Ready door.
+            //
+            // A creation carries its body in hand, so that half of the gate is
+            // decided locally and never fails. `pr.ready` has to read the body
+            // back from GitHub, and an unreadable body is left to the gates
+            // below rather than turned into a refusal — a rate-limited read
+            // must not be the thing that stops a legitimate handoff.
+            if let Ok(body) = ready_handoff_body(env, &cmd) {
+                if gwt_git::pr_status::body_defers_user_verification(&body) {
+                    out.push_str(&deferred_user_verification_refusal());
+                    return Ok(2);
+                }
+            }
             let completed_evidence = crate::cli::execution_state::load(&worktree)
                 .map_err(super::io_as_api_error)?
                 .filter(|record| {
@@ -1132,6 +1177,7 @@ mod tests {
             unchanged_cycles: 2,
             escalate_after_cycles: 3,
             escalation_due: false,
+            deferred_user_verification: None,
         }
     }
 
@@ -2504,6 +2550,109 @@ mod tests {
                 escalate_after_cycles: 2,
                 ..gwt_git::PrInventoryOptions::default()
             })
+        );
+    }
+
+    /// Issue #4217 AC-4 / FR-004: automation ends at PR creation. A body that
+    /// postpones the owner's visual check keeps its PR Draft, so
+    /// `auto-merge.yml` — which acts only on `draft == false` — never sees it.
+    #[test]
+    fn a_deferred_user_verification_keeps_its_pr_draft() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.pr_quarantine_contexts.insert(
+            7,
+            crate::cli::pr::PrQuarantineContext {
+                number: 7,
+                body: format!(
+                    "## Verification\n{} {}\n",
+                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+                ),
+                comments: Vec::new(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("stays Draft"), "{out}");
+        assert!(
+            env.pr_ready_call_log.is_empty(),
+            "the refusal must happen before the mutation"
+        );
+
+        // The same postponement refuses a Ready-at-creation, which is the
+        // other door into `draft == false`.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: "develop".to_string(),
+                head: None,
+                title: "feat: deferred".to_string(),
+                body: format!(
+                    "{} {}\n",
+                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+                ),
+                labels: Vec::new(),
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run pr create");
+        assert_eq!(code, 2, "{out}");
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "the refusal must happen before the mutation"
+        );
+    }
+
+    /// AC-4 non-regression: the Draft flow stays open mid-work, and a PR whose
+    /// verification was performed or never applied is unaffected.
+    #[test]
+    fn a_settled_user_verification_still_reaches_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        env.pr_quarantine_contexts.insert(
+            7,
+            crate::cli::pr::PrQuarantineContext {
+                number: 7,
+                body: "## Verification\nUser Verification Result: confirmed\n".to_string(),
+                comments: Vec::new(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: "develop".to_string(),
+                head: None,
+                title: "feat: deferred but draft".to_string(),
+                body: format!(
+                    "{} {}\n",
+                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+                ),
+                labels: Vec::new(),
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run pr create draft");
+        assert_eq!(
+            code, 0,
+            "a deferred verification is exactly what a Draft PR is for: {out}"
         );
     }
 
