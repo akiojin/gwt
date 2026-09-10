@@ -1,9 +1,11 @@
 # User Verification Guide (Target Card + 4-step 導線 + Actionable Checks)
 
 After automated tests pass, `gwt-verify` hands off to the user for manual
-confirmation when `--mode full` or `--mode pre-pr` is active and the
+confirmation when the launch mode is `interactive`, `--mode full` or
+`--mode pre-pr` is active, and the
 changed surfaces include any `Required` or `Recommended` user-check
-entries (per `surface-taxonomy.md`). This includes a backend-only diff that
+entries (per `surface-taxonomy.md`). An `autonomous` launch never reaches this
+handoff — see **Skip rules** below. This includes a backend-only diff that
 `surface-taxonomy.md`'s acceptance-aware escalation promotes to a
 user-facing surface because its acceptance manifests in the UI / CLI: the
 handoff fires for the escalated surface even though no UI / CLI file
@@ -163,6 +165,13 @@ When the user selects `Rejected`:
 
 The handoff is **automatically skipped** (no user prompt) when:
 
+- The launch mode is `autonomous` (`GWT_AUTONOMOUS_EXECUTION` is set by the
+  gwt Issue Monitor). Nobody is watching the session, and calling the question
+  tool would park the owner Issue instead of pausing for an answer. Record
+  `User Verification Result: n/a (autonomous)` and cover any UI surface with
+  the `Agent Visual Check:` line described in SKILL.md. This waiver is a
+  property of the launch, not a judgement, so it is never written as
+  `skipped(<reason>)`.
 - `--mode quick` is in effect (TDD mid-iteration).
 - `Changed surfaces: (none)` — nothing to verify.
 - All changed surfaces are `docs-only` per `surface-taxonomy.md`.

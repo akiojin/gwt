@@ -174,6 +174,30 @@ impl BoardEscalationStore {
         changed
     }
 
+    /// Put a historical `blocked` post back into the index without replaying
+    /// the rest of the stream.
+    ///
+    /// A hot-window rebuild (`from_entries` on the 500-entry projection)
+    /// drops overflowed unblock requests. The next `params.resolves` still
+    /// names those ids, and closing them must not depend on folding every
+    /// later Board post — or on `superseded_by`, which would treat a
+    /// recovered older row as a restatement of a newer one.
+    pub fn restore_lost_blocked(&mut self, entry: &BoardEntry) -> bool {
+        if entry.kind != BoardEntryKind::Blocked {
+            return false;
+        }
+        if self
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == entry.id)
+        {
+            return false;
+        }
+        self.escalations.push(BoardEscalation::from_entry(entry));
+        self.updated_at = Utc::now();
+        true
+    }
+
     /// Replay a whole event stream. Entries must already be ordered oldest
     /// first, which is the order both the segment loader and the hot
     /// projection produce.
@@ -340,7 +364,7 @@ impl OperationRefusalKind {
                 "この session には権限がありません。正しい authority を持つ session を割り当てるか、authority の不整合を解消してください。"
             }
             Self::Permission => {
-                "この操作はこの surface では拒否されます。PM 側での代行、または設定・ツール側の修正が必要です。"
+                "この操作はこの surface で拒否されました。まず拒否メッセージが示す順序・前提の不足を担当が解消して再試行し、それでも通らなければ PM 側での代行、または設定・ツール側の修正が必要です。"
             }
         }
     }
@@ -386,6 +410,21 @@ pub fn classify_operation_refusal(operation: &str, error: &str) -> Option<Operat
         return None;
     }
     let lowered = error.to_lowercase();
+    // Issue #3868 AC-24: a refusal that names the agent's own next step is not
+    // a governance refusal, whatever family emitted it. These phrases come from
+    // the obligation gate (T-247), the evidence gate, and the receipt gate;
+    // escalating them told agents that their input could not fix the problem
+    // when it could.
+    for self_resolvable in [
+        "open action obligations",
+        "stale evidence",
+        "rerun `verify.run`",
+        "commit it, and push it",
+    ] {
+        if lowered.contains(self_resolvable) {
+            return None;
+        }
+    }
     // The needle lists are the refusal vocabulary these surfaces actually
     // emit, not an attempt to anticipate English. When a surface starts
     // refusing with new wording, extend the list — over-broad matching would
@@ -445,7 +484,8 @@ pub fn render_operation_refusal_body(
     format!(
         "事象: JSON operation `{operation}` が拒否されました。\n\
          ```\n{error}\n```\n\
-         原因: {kind} 由来の拒否です。agent 側の入力の作り直しでは解消しません。\n\
+         原因: 未判定。拒否メッセージ本文を読んで判断してください（機械分類の候補: {kind}）。\
+         担当 agent 側の順序・前提・入力の修正で解消できる場合があります。\n\
          依頼: {request}\n\
          再開条件: 上記が解消され、`{operation}` 相当の操作が通る状態になること。\n\
          \n\
@@ -641,6 +681,41 @@ mod tests {
             .unwrap();
         assert_eq!(closed.resolved_by_entry_id.as_deref(), Some("r1"));
         assert!(closed.resolved_at.is_some());
+    }
+
+    #[test]
+    fn restore_lost_blocked_reinserts_a_historical_row_without_superseding_others() {
+        let mut first = blocked("b1", &["2338"]);
+        first.origin_session_id = Some("session-a".to_string());
+        let mut later = blocked("b2", &["2338"]);
+        later.origin_session_id = Some("session-a".to_string());
+
+        let mut store = BoardEscalationStore::default();
+        store.apply_entry(&later);
+        assert!(store.restore_lost_blocked(&first));
+        assert!(!store.restore_lost_blocked(&first), "restore is idempotent");
+
+        assert_eq!(
+            store.open().count(),
+            2,
+            "repair must not replay superseded_by"
+        );
+        assert!(store
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == "b1" && escalation.is_open()));
+        assert!(store
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == "b2" && escalation.is_open()));
+    }
+
+    #[test]
+    fn restore_lost_blocked_ignores_non_blocked_history() {
+        let mut store = BoardEscalationStore::default();
+        let status = entry("s1", BoardEntryKind::Status, &["2338"], "noise");
+        assert!(!store.restore_lost_blocked(&status));
+        assert!(store.escalations.is_empty());
     }
 
     #[test]
@@ -944,6 +1019,27 @@ mod tests {
                 "workspace.update",
                 "workspace.update refused: workspace_ensure_required",
             ),
+            // Issue #3868 AC-24: the T-247 obligation refusal and the
+            // stale-evidence / receipt refusals from `execution.complete` are
+            // the agent's own next step. On 2026-09-01 all four of the day's
+            // auto-filed escalations were this shape, and three were
+            // self-resolvable; the "permission" verdict made the agents stop.
+            (
+                "execution.complete",
+                "execution: completion refused — open action obligations [pr] from this session's \
+                 prompts are unsettled (T-247). Settle them with the operation that is executable in \
+                 the current state",
+            ),
+            (
+                "execution.complete",
+                "execution: completion refused — the worktree changed after the last verification \
+                 run (stale evidence) — rerun `verify.run`",
+            ),
+            (
+                "execution.complete",
+                "execution: completion refused — Work #3832 has no generation-scoped Work event \
+                 receipt. Complete its terminal Work update, commit it, and push it before retrying.",
+            ),
         ] {
             assert_eq!(
                 classify_operation_refusal(operation, error),
@@ -967,6 +1063,19 @@ mod tests {
             "the verbatim error is what tells the PM which lever to pull: {body}"
         );
         assert!(body.contains("fresh launch"), "{body}");
+        // Issue #3868 AC-24: the classifier is a heuristic, so the body must
+        // not assert the cause — that assertion made agents give up on
+        // refusals they could resolve themselves.
+        assert!(body.contains("原因: 未判定"), "{body}");
+        assert!(body.contains("拒否メッセージ本文を読んで"), "{body}");
+        assert!(!body.contains("由来の拒否です"), "{body}");
+        assert!(!body.contains("入力の作り直しでは解消しません"), "{body}");
+        let permission = render_operation_refusal_body(
+            "pr.ready",
+            "PR handoff refused: verification record is stale",
+            OperationRefusalKind::Permission,
+        );
+        assert!(permission.contains("担当が解消して再試行"), "{permission}");
     }
 
     #[test]

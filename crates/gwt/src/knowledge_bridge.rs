@@ -81,6 +81,86 @@ pub fn extract_phase(labels: &[String]) -> ExtractedPhase {
     }
 }
 
+/// SPEC-3885 FR-018: derive the owning SPEC of an Issue from the first
+/// reference inside its `## Related SPECs` section.
+///
+/// The section is located case-insensitively at any Markdown heading level and
+/// ends at the next heading of the same or a higher rank. Inside it, the first
+/// reference in `SPEC-N`, `SPEC #N` or `#N` form wins (`Owner: SPEC #N` matches
+/// through the `SPEC #N` form), so an explicit `None` — or any section without a
+/// reference — yields `None`.
+pub fn parent_spec_from_body(body: &str) -> Option<u64> {
+    let mut section_level: Option<usize> = None;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let heading_level = markdown_heading_level(trimmed);
+
+        match (section_level, heading_level) {
+            (None, Some((level, text))) if text.eq_ignore_ascii_case("Related SPECs") => {
+                section_level = Some(level);
+            }
+            (None, _) => {}
+            (Some(level), Some((next_level, _))) if next_level <= level => break,
+            (Some(_), _) => {
+                if let Some(number) = first_spec_reference(trimmed) {
+                    return Some(number);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Split a trimmed Markdown line into its ATX heading level and heading text.
+fn markdown_heading_level(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &line[hashes..];
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some((hashes, rest.trim()))
+}
+
+/// First `SPEC-N` / `SPEC #N` / `#N` reference in a single line, scanned left to
+/// right so the earliest reference wins regardless of its form.
+fn first_spec_reference(line: &str) -> Option<u64> {
+    line.char_indices()
+        .find_map(|(start, _)| spec_reference_at(&line[start..]))
+}
+
+/// Parse a reference anchored at the start of `rest`, or `None` when it does not
+/// begin with one.
+fn spec_reference_at(rest: &str) -> Option<u64> {
+    // A bare number is not a reference: it needs the `SPEC` keyword, the `#`
+    // sigil, or both.
+    let mut anchored = false;
+    let mut tail = rest;
+    if rest
+        .get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case("spec"))
+    {
+        anchored = true;
+        tail = &rest[4..];
+        tail = tail
+            .strip_prefix('-')
+            .unwrap_or_else(|| tail.trim_start_matches(' '));
+    }
+    if let Some(after_sigil) = tail.strip_prefix('#') {
+        anchored = true;
+        tail = after_sigil;
+    }
+    if !anchored {
+        return None;
+    }
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeKind {
@@ -116,6 +196,11 @@ pub struct KnowledgeListItem {
     /// always grouped into the Backlog column and are not draggable.
     #[serde(default)]
     pub is_spec: bool,
+    /// SPEC-3885 FR-018: owning SPEC number derived from the body's
+    /// `## Related SPECs` section, so the Issue list can nest a child row under
+    /// its parent SPEC row. `None` when the body declares no owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_spec: Option<u64>,
     /// Issue Monitor lifecycle state projected onto this cached Issue row.
     /// `None` means no monitor snapshot was joined to the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +211,25 @@ pub struct KnowledgeListItem {
     /// Human-readable reason for a non-terminal monitor exclusion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<String>,
+    /// SPEC-3671 FR-012: identity of the Works the backend already correlated to
+    /// this row (the same correlation that produces `related_work_count`). The
+    /// Issue surface joins these against the `active_work_projection` it already
+    /// receives, so Work lifecycle / attention / PR state reach the Issue row
+    /// without a second derivation or a new data path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_work_refs: Vec<KnowledgeWorkRefView>,
+}
+
+/// SPEC-3671 FR-012: the join key between a cached Issue row and the active Work
+/// projection. Identity only — every display field stays owned by the projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeWorkRefView {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1021,9 +1125,11 @@ fn issue_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
+        parent_spec: parent_spec_from_body(&entry.snapshot.body),
         monitor_state: None,
         queue_position: None,
         exclusion_reason: None,
+        related_work_refs: Vec::new(),
     }
 }
 
@@ -1049,9 +1155,11 @@ fn spec_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
+        parent_spec: parent_spec_from_body(&entry.snapshot.body),
         monitor_state: None,
         queue_position: None,
         exclusion_reason: None,
+        related_work_refs: Vec::new(),
     }
 }
 
@@ -1737,6 +1845,98 @@ Extra context.
         assert_eq!(detail.state, "closed");
         assert!(detail.subtitle.contains("Done"));
         assert!(!detail.subtitle.contains("phase/implementation"));
+    }
+
+    #[test]
+    fn parent_spec_from_body_reads_the_first_related_specs_reference() {
+        // SPEC-3885 FR-018: every accepted reference form resolves to the same
+        // owner number, and only the first reference in the section counts.
+        for body in [
+            "## Related SPECs\n\nSPEC-3671\n",
+            "## Related SPECs\n\nSPEC #3671\n",
+            "## Related SPECs\n\n#3671\n",
+            "## Related SPECs\n\nOwner: SPEC #3671\n",
+            "## Related SPECs\n\n- SPEC-3671 (parent)\n- SPEC-2805\n",
+            "# Body\n\n## related specs\n\n#3671\n",
+        ] {
+            assert_eq!(
+                parent_spec_from_body(body),
+                Some(3671),
+                "body did not resolve to the owner SPEC: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_spec_from_body_is_none_without_a_usable_reference() {
+        for body in [
+            "",
+            "Body without the section.\n\n#3671\n",
+            "## Related SPECs\n\nNone\n",
+            "## Related SPECs\n\n## Out of Scope\n\n#3671\n",
+            "## Related SPECs\n",
+        ] {
+            assert_eq!(
+                parent_spec_from_body(body),
+                None,
+                "body unexpectedly resolved to an owner SPEC: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_list_item_projects_the_parent_spec_from_the_body() {
+        let cache_dir = tempfile::tempdir().expect("temp cache");
+        let cache = Cache::new(cache_dir.path().to_path_buf());
+
+        let child = issue_snapshot(
+            4101,
+            "Child issue",
+            "Summary\n\n## Related SPECs\n\nOwner: SPEC #3885\n",
+            &["bug"],
+            IssueState::Open,
+        );
+        cache.write_snapshot(&child).expect("write child issue");
+        let child_entry = cache
+            .load_entry(gwt_github::IssueNumber(4101))
+            .expect("load child issue");
+        assert_eq!(
+            issue_list_item(&child_entry, &HashMap::new(), None).parent_spec,
+            Some(3885)
+        );
+
+        let orphan = issue_snapshot(
+            4102,
+            "Orphan issue",
+            "Summary\n\n## Related SPECs\n\nNone\n",
+            &["bug"],
+            IssueState::Open,
+        );
+        cache.write_snapshot(&orphan).expect("write orphan issue");
+        let orphan_entry = cache
+            .load_entry(gwt_github::IssueNumber(4102))
+            .expect("load orphan issue");
+        assert_eq!(
+            issue_list_item(&orphan_entry, &HashMap::new(), None).parent_spec,
+            None
+        );
+
+        // A gwt-spec row carries the same projection so a nested SPEC keeps its
+        // own parent when the list groups rows.
+        let mut nested_spec = spec_snapshot(4103);
+        nested_spec
+            .body
+            .push_str("\n## Related SPECs\n\nSPEC-3885\n");
+        cache
+            .write_snapshot(&nested_spec)
+            .expect("write nested spec");
+        let nested_entry = cache
+            .load_entry(gwt_github::IssueNumber(4103))
+            .expect("load nested spec");
+        assert_eq!(
+            spec_list_item(&nested_entry, &HashMap::new(), None).parent_spec,
+            Some(3885)
+        );
     }
 
     #[test]

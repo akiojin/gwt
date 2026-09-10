@@ -168,6 +168,21 @@ pub type OwnerMutationResult<T> = Result<T, OwnerMutationError>;
 /// The abstract GitHub Issue client. All mutating operations return the
 /// post-write server snapshot so callers can atomically update their local
 /// cache.
+/// Fields of a single-request Issue update (Issue #3865). `None` leaves the
+/// field untouched; `Some(vec![])` for `labels` clears them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueFieldsPatch {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub labels: Option<Vec<String>>,
+}
+
+impl IssueFieldsPatch {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.body.is_none() && self.labels.is_none()
+    }
+}
+
 pub trait IssueClient: Send + Sync {
     fn fetch(
         &self,
@@ -178,6 +193,36 @@ pub trait IssueClient: Send + Sync {
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError>;
 
     fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError>;
+
+    /// Update title / body / labels in one remote request so a partial
+    /// failure cannot leave a half-applied Issue (Issue #3865). Transports
+    /// with a combined update endpoint override this; the default composes
+    /// the single-field patches for test doubles and is not atomic.
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut latest = None;
+        if let Some(title) = &fields.title {
+            latest = Some(self.patch_title(number, title)?);
+        }
+        if let Some(body) = &fields.body {
+            latest = Some(self.patch_body(number, body)?);
+        }
+        if let Some(labels) = &fields.labels {
+            latest = Some(self.set_labels(number, labels)?);
+        }
+        match latest {
+            Some(snapshot) => Ok(snapshot),
+            None => match self.fetch(number, None)? {
+                FetchResult::Updated(snapshot) => Ok(snapshot),
+                FetchResult::NotModified => Err(ApiError::Unexpected(
+                    "unconditional fetch reported not modified".to_string(),
+                )),
+            },
+        }
+    }
 
     fn patch_comment(
         &self,

@@ -3238,7 +3238,6 @@ fn workspace_tokens(value: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-#[cfg(unix)]
 pub(crate) fn publish_workspace_change(project_root: &std::path::Path) {
     let result = crate::daemon_publisher::publish_event(
         project_root,
@@ -3253,9 +3252,6 @@ pub(crate) fn publish_workspace_change(project_root: &std::path::Path) {
         );
     }
 }
-
-#[cfg(not(unix))]
-pub(crate) fn publish_workspace_change(_project_root: &std::path::Path) {}
 
 fn parse_status_category(value: &str) -> Result<WorkspaceStatusCategory, String> {
     match value {
@@ -4553,6 +4549,7 @@ pub(crate) mod tests {
             missing_verification: None,
             launched_at: now,
             settled_at: Some(now),
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -7963,6 +7960,7 @@ pub(crate) mod tests {
             &mut env,
             crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands: plan.commands,
+                max_wait_secs: None,
             }),
         )
         .expect("run the status-advertised verification plan");

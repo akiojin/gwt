@@ -29,7 +29,10 @@ use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 // Issue #3632: every prompt this module injects closes with the one canonical
 // reporting clause the Stop-gate continuation also uses; see
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
-use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE};
+use gwt::pm_registry::{
+    self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE, PM_GWTD_EXECUTION_CLAUSE,
+    PM_STEERING_WAKE_CLAUSE,
+};
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
@@ -105,7 +108,11 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
 };
 
 /// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
-const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this from here rather than recovering it
+/// out of the persisted `launch_args`.
+pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
 /// SPEC-3431 T-093 (FR-012): a wake the monitor-event path decided on — which
 /// pane receives the prompt and what it says. The window id is only ever the
@@ -115,6 +122,13 @@ const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 pub(crate) struct PmWakeDecision {
     pub(crate) window_id: String,
     pub(crate) prompt: String,
+}
+
+/// Outcome of attempting to type a wake prompt into the PM pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PmWakeWrite {
+    Injected,
+    Deferred,
 }
 
 /// What one monitor inbox snapshot contributes to the wake decision: every
@@ -229,8 +243,12 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
 pub(crate) enum PmEnsureTrigger {
     /// Project open / startup restore. Honours the opt-out.
     Automatic,
-    /// Launcher click, Restart, crash recovery. Ignores the opt-out.
+    /// Launcher click or crash recovery. Ignores the opt-out.
     Explicit,
+    /// Profile restart after the predecessor registration was deliberately
+    /// cleared. The accepted close still finalizes in the background, but its
+    /// generic anti-respawn fence must not suppress this requested successor.
+    Restart,
 }
 
 impl AppRuntime {
@@ -290,6 +308,14 @@ impl AppRuntime {
             return Vec::new();
         }
         let project_root = tab.project_root.clone();
+        if trigger != PmEnsureTrigger::Restart && self.pending_pm_closes.contains_key(&project_root)
+        {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM ensure skipped while explicit pane close is finalizing"
+            );
+            return Vec::new();
+        }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         let prefs = match pm_registry::load_pm_prefs(&prefs_path) {
             Ok(prefs) => prefs,
@@ -355,8 +381,13 @@ impl AppRuntime {
         if let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) {
             if session.worktree_path.exists() {
                 let before = self.pm_window_ids(tab_id);
-                let events =
-                    self.spawn_restored_agent_session(tab_id, session, None, PM_WINDOW_GEOMETRY);
+                let events = self.spawn_restored_agent_session(
+                    tab_id,
+                    session,
+                    None,
+                    PM_WINDOW_GEOMETRY,
+                    crate::app_runtime::startup::RestoreOrigin::Automatic,
+                );
                 self.mark_new_pm_windows(tab_id, &before, &project_root);
                 return events;
             }
@@ -366,11 +397,27 @@ impl AppRuntime {
 
     /// SPEC-3431 FR-026: the PM settings snapshot for the active project tab.
     ///
-    /// `None` when there is no Git project to configure — the panel then keeps
-    /// showing whatever it last had rather than being fed an empty project's
-    /// defaults as if they were this one's.
-    pub(crate) fn pm_status_event(&self) -> Option<BackendEvent> {
-        let project_root = self.active_pm_project_root()?;
+    /// A non-Git or missing active tab produces an explicit unavailable
+    /// snapshot. Shared Settings windows can outlive a project tab, so silence
+    /// would leak the previous project's values into the new scope.
+    pub(crate) fn pm_status_event(&self) -> BackendEvent {
+        let Some(project_root) = self.active_pm_project_root() else {
+            let loop_interval_secs = pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS;
+            return BackendEvent::PmStatus {
+                available: false,
+                auto_start: true,
+                loop_interval_secs,
+                loop_interval_secs_decimal: loop_interval_secs.to_string(),
+                agent_options: Vec::new(),
+                configured_agent_id: String::new(),
+                configured_model: None,
+                configured_reasoning: None,
+                running_agent_id: None,
+                running_model: None,
+                running_reasoning: None,
+                is_running: false,
+            };
+        };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).unwrap_or_default();
         let configured = prefs.settings.launch_profile_or_default();
@@ -381,10 +428,14 @@ impl AppRuntime {
             .registration
             .as_ref()
             .filter(|registration| self.pm_registration_is_live(registration));
+        let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
         let running_profile = running.map(|registration| self.pm_running_profile(registration));
         let agent_options = Self::pm_agent_options(&configured.agent_id);
-        Some(BackendEvent::PmStatus {
+        BackendEvent::PmStatus {
+            available: true,
             auto_start: prefs.settings.auto_start,
+            loop_interval_secs,
+            loop_interval_secs_decimal: loop_interval_secs.to_string(),
             agent_options,
             configured_agent_id: configured.agent_id,
             configured_model: configured.model,
@@ -399,7 +450,7 @@ impl AppRuntime {
                 .as_ref()
                 .and_then(|profile| profile.reasoning.clone()),
             is_running: running_profile.is_some(),
-        })
+        }
     }
 
     /// Resolve the launch identity of the conversation that is running now.
@@ -430,10 +481,7 @@ impl AppRuntime {
     /// PM state. Every PM state transition must pass through here — the panel
     /// has no other source of truth, so a silent transition leaves it stale.
     pub(crate) fn pm_status_broadcast_events(&self) -> Vec<OutboundEvent> {
-        self.pm_status_event()
-            .map(OutboundEvent::broadcast)
-            .into_iter()
-            .collect()
+        vec![OutboundEvent::broadcast(self.pm_status_event())]
     }
 
     /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
@@ -456,7 +504,9 @@ impl AppRuntime {
 
     fn active_pm_project_root(&self) -> Option<PathBuf> {
         let tab_id = self.active_tab_id.clone()?;
-        self.tab(&tab_id).map(|tab| tab.project_root.clone())
+        self.tab(&tab_id)
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+            .map(|tab| tab.project_root.clone())
     }
 
     /// SPEC-3431 FR-026/FR-002: persist the auto-start opt-out.
@@ -473,6 +523,37 @@ impl AppRuntime {
             prefs.settings.auto_start = enabled;
         }) {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
+            return Vec::new();
+        }
+        self.pm_status_broadcast_events()
+    }
+
+    /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
+    ///
+    /// Reject before resolving or opening the preferences file so an invalid
+    /// wire value cannot enter the shared read-modify-write path. A committed
+    /// write changes only the interval; the live PM and its registration keep
+    /// running and reload the preference on their next loop/wake evaluation.
+    pub(crate) fn set_pm_loop_interval_events(
+        &mut self,
+        loop_interval_secs: u64,
+    ) -> Vec<OutboundEvent> {
+        if loop_interval_secs < pm_registry::PM_LOOP_INTERVAL_MIN_SECS {
+            tracing::warn!(
+                loop_interval_secs,
+                minimum = pm_registry::PM_LOOP_INTERVAL_MIN_SECS,
+                "rejected PM loop interval below the minimum"
+            );
+            return Vec::new();
+        }
+        let Some(project_root) = self.active_pm_project_root() else {
+            return Vec::new();
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.loop_interval_secs = loop_interval_secs;
+        }) {
+            tracing::warn!(%error, "failed to persist the PM loop interval");
             return Vec::new();
         }
         self.pm_status_broadcast_events()
@@ -551,7 +632,7 @@ impl AppRuntime {
         }
         // The ensure gate broadcasts the post-restart pm_status itself, so the
         // panel is refreshed exactly once rather than twice per restart.
-        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Explicit));
+        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Restart));
         events
     }
 
@@ -642,9 +723,11 @@ impl AppRuntime {
         Some(PmWakeDecision {
             window_id,
             prompt: format!(
-                "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
-                 Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
-                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                "[gwt] Monitor activity while the PM was idle ({}). Reconcile now: fresh \
+                 `issue.monitor.status`, triage new items, inventory PRs with `pr.list` \
+                 (stale/SUPERSEDED/owner-closed rows: digest, never auto-close). \
+                 {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 reasons.join(", "),
                 escalations = open_escalation_prompt_section(project_root),
             ),
@@ -717,9 +800,11 @@ impl AppRuntime {
         Some(PmWakeDecision {
             window_id,
             prompt: format!(
-                "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
-                 fresh `issue.monitor.status` snapshot, check the running agents' \
-                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
+                 `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
+                 (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never \
+                 auto-close). {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 escalations = open_escalation_prompt_section(project_root),
             ),
         })
@@ -737,10 +822,16 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(()) => {
+            Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake re-armed the resident PM from the scheduled snapshot"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "periodic wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -781,10 +872,16 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(()) => {
+            Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "woke the resident PM for new Issue Monitor activity"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "Issue Monitor wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -1431,14 +1528,61 @@ impl AppRuntime {
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
-    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
-        match self.runtimes.get(&decision.window_id) {
-            None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => {
-                let pane = Arc::clone(&runtime.pane);
-                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+    ///
+    /// Issue #3702: if the PM TUI composer already has unsent keystrokes,
+    /// hold one coalesced prompt instead of splicing `[gwt]` into the line.
+    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
+        let pane = match self.runtimes.get(&decision.window_id) {
+            None => return Err(format!("no live runtime for pane {}", decision.window_id)),
+            Some(runtime) => Arc::clone(&runtime.pane),
+        };
+        let unsent = pane
+            .lock()
+            .map(|pane| pane.has_unsent_user_input())
+            .unwrap_or(false);
+        if unsent {
+            self.pending_pm_wakes
+                .insert(decision.window_id.clone(), decision.clone());
+            return Ok(PmWakeWrite::Deferred);
+        }
+        self.pending_pm_wakes.remove(&decision.window_id);
+        super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)?;
+        Ok(PmWakeWrite::Injected)
+    }
+
+    /// Issue #3702 AC-2: deliver a held wake once the composer is submitted
+    /// or cleared. Missing pending entries are a no-op so every pane submit
+    /// can call this cheaply.
+    pub(crate) fn flush_pending_pm_wake(&mut self, window_id: &str) {
+        let Some(decision) = self.pending_pm_wakes.get(window_id).cloned() else {
+            return;
+        };
+        if self.pane_has_unsent_user_input(window_id) {
+            return;
+        }
+        match self.write_pm_wake_prompt(&decision) {
+            Ok(PmWakeWrite::Injected) => {
+                tracing::info!(
+                    window_id,
+                    "delivered a PM wake held while the composer was busy"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_id,
+                    "held PM wake prompt injection failed"
+                );
             }
         }
+    }
+
+    pub(crate) fn pane_has_unsent_user_input(&self, window_id: &str) -> bool {
+        self.runtimes
+            .get(window_id)
+            .and_then(|runtime| runtime.pane.lock().ok())
+            .is_some_and(|pane| pane.has_unsent_user_input())
     }
 
     /// Authoritative liveness for a stored PM registration (FR-001): the
@@ -1533,7 +1677,7 @@ impl AppRuntime {
     }
 
     /// Keep the per-broadcast PM marker in step with the durable record.
-    fn sync_pm_session_cache(
+    pub(super) fn sync_pm_session_cache(
         &mut self,
         project_root: &Path,
         registration: Option<&PmRegistration>,
@@ -1556,23 +1700,37 @@ impl AppRuntime {
     ///
     /// Returns whether this close actually deregistered a PM, so the caller can
     /// refresh the settings panel only for the close that changed PM state.
-    pub(super) fn deregister_pm_for_closed_window(
-        &mut self,
+    pub(super) fn deregister_pm_for_closed_window_in_background(
         project_root: &Path,
         session_id: &str,
-    ) -> bool {
+    ) -> (bool, Option<BackendEvent>) {
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         match pm_registry::deregister_pm(&prefs_path, session_id) {
-            Ok((_, true)) => {
+            Ok((prefs, true)) => {
                 tracing::info!(%session_id, "PM pane closed; registration cleared");
-                self.sync_pm_session_cache(project_root, None);
                 Self::cleanup_pm_worktree(project_root);
-                true
+                let configured = prefs.settings.launch_profile_or_default();
+                let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
+                let status = BackendEvent::PmStatus {
+                    available: true,
+                    auto_start: prefs.settings.auto_start,
+                    loop_interval_secs,
+                    loop_interval_secs_decimal: loop_interval_secs.to_string(),
+                    agent_options: Self::pm_agent_options(&configured.agent_id),
+                    configured_agent_id: configured.agent_id,
+                    configured_model: configured.model,
+                    configured_reasoning: configured.reasoning,
+                    running_agent_id: None,
+                    running_model: None,
+                    running_reasoning: None,
+                    is_running: false,
+                };
+                (true, Some(status))
             }
-            Ok((_, false)) => false,
+            Ok((_, false)) => (false, None),
             Err(error) => {
                 tracing::warn!(%error, "failed to deregister PM on window close");
-                false
+                (false, None)
             }
         }
     }

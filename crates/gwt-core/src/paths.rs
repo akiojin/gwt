@@ -816,6 +816,11 @@ pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
 }
 
+/// Return the host-wide error ledger directory (`~/.gwt/logs/errors/`).
+pub fn gwt_error_ledger_dir() -> PathBuf {
+    gwt_logs_dir().join("errors")
+}
+
 /// Return the legacy coordination root (`~/.gwt/coordination/`).
 pub fn gwt_coordination_root() -> PathBuf {
     gwt_home().join("coordination")
@@ -1241,6 +1246,15 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_logs_dir();
         assert!(p.ends_with(gwt_home_suffix(&["logs"])));
+    }
+
+    #[test]
+    fn gwt_error_ledger_dir_is_under_logs() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let p = gwt_error_ledger_dir();
+        assert!(p.ends_with(gwt_home_suffix(&["logs", "errors"])));
     }
 
     #[test]
