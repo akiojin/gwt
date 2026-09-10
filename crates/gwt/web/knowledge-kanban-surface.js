@@ -187,7 +187,12 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
   if (Number.isFinite(entry?.queue_position)) {
-    items.push({ kind: "chip", key: "queue", label: `Queue ${entry.queue_position}` });
+    const terminal = String(entry?.queue_terminal || "").trim();
+    items.push({
+      kind: "chip",
+      key: "queue",
+      label: terminal ? `Queue ${entry.queue_position} · ${terminal}` : `Queue ${entry.queue_position}`,
+    });
   }
   if (work?.pr_number) {
     const prState = String(work.pr_state || "").trim();
@@ -219,7 +224,7 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   switch (monitor?.state) {
     case "queued":
       return {
-        order: ["launch-now", "configure-issue", "move-up", "move-down", ...workActions],
+        order: ["launch-now", "queue-remove", "configure-issue", "move-up", "move-down", ...workActions],
       };
     case "launch_failed":
     case "agent_failed":
@@ -255,6 +260,10 @@ function issueRowActionAvailable(action, { entry, work, queue }) {
   switch (action) {
     case "launch-now":
       return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "queue-push":
+      return issueEntryStateKey(entry) === "open" && !monitor;
+    case "queue-remove":
+      return Boolean(Number.isFinite(entry?.queue_position));
     case "configure-issue":
       return Boolean(monitor);
     case "move-up":
