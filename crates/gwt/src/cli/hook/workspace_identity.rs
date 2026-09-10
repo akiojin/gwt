@@ -377,18 +377,19 @@ mod tests {
 
     #[test]
     fn user_prompt_submit_split_repair_fails_open_under_work_lease_contention() {
-        // Both projections below are stored under `gwt_home()`, which resolves
-        // from the process-global `HOME` / `USERPROFILE`: `cargo_test_home_override`
-        // routes to the per-binary sandbox only while neither of those points
-        // inside `temp_dir()`. Many tests in `agent_project_state` set `HOME` to a
-        // `tempfile::tempdir()` under this same lock, which flips that resolution
-        // for *every* thread. Without the lock, the save below and the load at the
-        // end of this test could resolve to two different homes, and the canonical
-        // projection then read back as absent (Issue #3777, CI run 34437864926).
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
+        // Both projections below are stored under `gwt_home()`, which resolves from
+        // the process-global `HOME` / `USERPROFILE`: `cargo_test_home_override`
+        // routes to the per-binary sandbox only while neither of those points
+        // inside `temp_dir()`. Other tests in this binary set both to a
+        // `tempfile::tempdir()` — `board_audience::isolate_gwt_home` does it without
+        // taking `env_test_lock` — which flips that resolution for *every* thread.
+        // That made the save below and the load at the end of this test resolve to
+        // two different homes, so the canonical projection read back as absent
+        // (Issue #3777, CI run 34437864926). `gwt_home()` consults this thread-local
+        // override before it looks at the environment, so pinning it here is immune
+        // to what other threads do to those variables.
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
         let project_root = temp.path().join("workspace-home");
         let worktree = temp.path().join("split-worktree");
         std::fs::create_dir_all(&project_root).expect("project root");
