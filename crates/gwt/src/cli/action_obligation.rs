@@ -634,10 +634,18 @@ mod tests {
             .expect("WouldBlock fallback remains fail-open");
 
         assert!(armed);
+        // Assert the bound itself rather than how long the call happened to
+        // take. The wall clock here measures the runner as much as the code:
+        // under CI's default parallelism this observed 208ms against a 200ms
+        // limit even though the deadline was honoured (Issue #3777, CI run
+        // 34450187892), and in isolation the same call returns in 0.05s.
+        // `prompt_write_lease_wait` is a pure function of the ambient deadline,
+        // so checking it proves the clamp that the timing was only a proxy for.
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(200),
-            "prompt lease must not consume its standalone 300ms wait: {:?}",
-            started.elapsed()
+            prompt_write_lease_wait() <= std::time::Duration::from_millis(40),
+            "the lease wait must be clamped to the hook deadline, not the \
+             standalone 300ms wait: {:?}",
+            prompt_write_lease_wait()
         );
         release_tx.send(()).expect("release holder");
         holder.join().expect("holder thread");
