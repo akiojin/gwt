@@ -270,6 +270,10 @@ pub struct VerificationAdjudicationRef {
 pub struct VerificationRunRecord {
     pub record_id: String,
     pub session_id: String,
+    /// The reported human verification outcome, separate from automated test
+    /// success. Omission remains unknown for existing records (Issue #4217).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_verification_result: Option<String>,
     /// Linked owner number copied from the Execution Control Record at run
     /// time (`None` for unlinked worktrees).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2490,7 +2494,7 @@ pub fn run_verification(
     session_id: &str,
     commands: &[String],
 ) -> Result<(VerificationRunRecord, String), String> {
-    run_verification_inner(worktree, session_id, commands, None, &[], "", || {})
+    run_verification_inner(worktree, session_id, commands, None, &[], None, || {})
 }
 
 fn run_verification_for_caller(
@@ -2499,7 +2503,7 @@ fn run_verification_for_caller(
     commands: &[String],
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    quarantine_diagnostics: &str,
+    user_verification_result: Option<&str>,
 ) -> Result<(VerificationRunRecord, String), String> {
     run_verification_inner(
         worktree,
@@ -2507,7 +2511,7 @@ fn run_verification_for_caller(
         commands,
         Some(authority),
         prepared_quarantines,
-        quarantine_diagnostics,
+        user_verification_result,
         || {},
     )
 }
@@ -2518,7 +2522,7 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    quarantine_diagnostics: &str,
+    user_verification_result: Option<&str>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2565,7 +2569,6 @@ where
     let started_at = Utc::now();
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
-    transcript.push_str(quarantine_diagnostics);
     if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
         transcript.push_str(
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
@@ -2676,6 +2679,7 @@ where
     let mut record = VerificationRunRecord {
         record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
+        user_verification_result: user_verification_result.map(str::to_owned),
         owner_number,
         execution_binding: execution_binding.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
@@ -3684,6 +3688,7 @@ pub enum VerifyCommand {
         commands: Vec<String>,
         /// Issue #3913: bound on the host admission wait (seconds).
         max_wait_secs: Option<u64>,
+        user_verification_result: Option<String>,
     },
     /// Attach one existing Board decision to one exact failing command in the
     /// latest canonical record. The Board remains the decision audit source;
@@ -3827,6 +3832,7 @@ pub(super) fn run<E: CliEnv>(
         VerifyCommand::Run {
             commands,
             max_wait_secs,
+            user_verification_result,
         } => {
             // Issue #3913: claim host admission (the SPEC #3576 lease plus a
             // quiet host) before anything heavy starts. A budget overrun
@@ -3850,7 +3856,7 @@ pub(super) fn run<E: CliEnv>(
                 &commands,
                 &authority,
                 &prepared_quarantines,
-                &quarantine_diagnostics,
+                user_verification_result.as_deref(),
             );
             // Release the in-process lease before the (lease-free) evidence
             // evaluation so the next claimant starts as soon as the commands
@@ -3885,7 +3891,11 @@ pub(super) fn run<E: CliEnv>(
                     &format!("verify.run {}", record.record_id),
                 );
             }
+            out.push_str(&quarantine_diagnostics);
             out.push_str(&transcript);
+            if let Some(result) = &record.user_verification_result {
+                out.push_str(&format!("User Verification Result: {result}\n"));
+            }
             let command_outcome_accepted =
                 record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
             out.push_str(&format!(
@@ -3948,6 +3958,7 @@ pub(crate) mod tests {
     fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
         VerificationRunRecord {
             record_id: "vr-test".to_string(),
+            user_verification_result: None,
             session_id: session.to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -4475,6 +4486,7 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap(), None);
         let record = VerificationRunRecord {
             record_id: "vrr-test".to_string(),
+            user_verification_result: None,
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -5147,7 +5159,7 @@ mod tests {
             &[failed_command],
             None,
             &[prepared],
-            "",
+            None,
             || {},
         )
         .unwrap();
@@ -5367,7 +5379,7 @@ mod tests {
             &commands,
             None,
             &[],
-            "",
+            None,
             || {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
@@ -5484,7 +5496,7 @@ mod tests {
         .unwrap();
 
         let (record, _) =
-            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], "", || {
+            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], None, || {
                 fs::write(dir.path().join("report.json"), "{}").unwrap();
                 fs::write(dir.path().join("src.txt"), "v2").unwrap();
             })
@@ -5694,6 +5706,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .expect_err("missing GWT_SESSION_ID must fail");
@@ -5760,6 +5773,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .unwrap();
@@ -5794,6 +5808,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .unwrap();
@@ -6295,6 +6310,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect_err("foreign Session must be rejected before command dispatch");
@@ -6434,6 +6450,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect_err("Completed generation must not dispatch verification commands");
@@ -6497,6 +6514,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: commands.clone(),
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect("exact Blocked owner Session may produce recovery evidence");
@@ -6559,6 +6577,7 @@ mod tests {
                 VerifyCommand::Run {
                     commands: commands.clone(),
                     max_wait_secs: None,
+                    user_verification_result: None,
                 },
             )
             .expect("ledgerless verify.run remains compatible")
@@ -6648,6 +6667,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect_err("capability rotation before dispatch must fail closed");
@@ -6697,7 +6717,7 @@ mod tests {
             &commands,
             Some(&authority),
             &[],
-            "",
+            None,
             move || {
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },
