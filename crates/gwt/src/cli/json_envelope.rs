@@ -662,6 +662,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
+                user_verification_result: optional_string(params, "user_verification_result")?,
             })
         }
         "verify.adjudicate" => {
@@ -1741,6 +1742,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                user_verification_result: None,
             })
         );
         assert_eq!(
@@ -1748,6 +1750,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             })
         );
         assert!(matches!(
@@ -1757,6 +1760,41 @@ mod tests {
             ),
             CliParseError::InvalidNumber(_)
         ));
+    }
+
+    #[test]
+    fn verify_run_persists_deferred_user_verification() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let deferred = "deferred (autonomous execution)";
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": deferred
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        let record = verification_record::load(&repo).unwrap().unwrap();
+        let mut serialized = serde_json::to_value(&record).unwrap();
+        assert_eq!(serialized["user_verification_result"], deferred);
+        assert!(String::from_utf8_lossy(&env.stdout).contains(deferred));
+        serialized["user_verification_result"] = json!("confirmed");
+        let tampered = serde_json::from_value(serialized).unwrap();
+        assert!(!verification_record::integrity_ok(&tampered));
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
