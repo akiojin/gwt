@@ -256,6 +256,15 @@ jobs:
       # which asserts a fresh child is Normal but read BelowNormal because a
       # child inherits the priority class of a test binary another test
       # already lowered. Those are reported on #3404 and await their own owner.
+      #
+      # #4210 took stock of that list and closed the lease half of it. Neither
+      # index_coordinator lease test holds a wall-clock deadline any more:
+      # lease_ttl_expires_and_records_the_reason moves the deadline into the
+      # past instead of sleeping up to it, lease_extension_pushes_the_expiry_out
+      # no longer sleeps out the TTL it extended past, and
+      # expired_heavy_reservation_is_swept_and_ignored reserves for zero rather
+      # than reserving for 1ms and sleeping 20ms. The two non-lease failures
+      # still own this target's absence.
       - name: Prove default-parallel Rust suites are stable
         shell: pwsh
         run: |
