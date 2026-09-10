@@ -7190,13 +7190,36 @@ def _scope_status_v2(
     }
 
 
+def _read_issue_repair(db_path: Path) -> Dict[str, Any]:
+    try:
+        payload = json.loads((db_path / "repair.json").read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
+                         error_code: str, actual: int, expected: int) -> dict:
+    payload = {
+        "schema_version": 1, "fingerprint": fingerprint, "failures": 1,
+        "last_error": error_code, "actual_document_count": actual,
+        "expected_document_count": expected, "mode": mode,
+    }
+    _write_json_atomic(db_path / "repair.json", payload)
+    return {"ok": False, "scope": "issues", "error_code": error_code,
+            "error": f"issues rebuild failed: {error_code} ({actual}/{expected})",
+            "repair": payload, "mode": mode}
+
+
 def _issue_status_v2(
     repo_hash: str,
     db_root: Optional[Path] = None,
+    source: Optional[Dict[str, Any]] = None,
+    check_repair: bool = True,
 ) -> Dict[str, Any]:
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
     meta = _read_issue_meta(db_path) or {}
-    source = _issue_cache_source_snapshot(repo_hash)
+    source = source if source is not None else _issue_cache_source_snapshot(repo_hash)
     exists = (resolve_active_store(db_path) / "chroma.sqlite3").exists() or (
         db_path / META_FILENAME
     ).is_file()
@@ -7246,6 +7269,11 @@ def _issue_status_v2(
             repair_required = True
             source_drift = True
 
+    if healthy and document_count == 0:
+        reason = "empty_corpus"
+        healthy = False
+        repair_required = True
+
     status: Dict[str, Any] = {
         "exists": exists,
         "healthy": healthy,
@@ -7277,6 +7305,15 @@ def _issue_status_v2(
             age = (_now_utc() - last).total_seconds()
             ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
             status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
+    status["mode"] = meta.get("mode", "full")
+    repair_state = _read_issue_repair(db_path)
+    if repair_state:
+        status["repair"] = repair_state
+        if check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
+            status.update(reason="repair_stopped", healthy=False, repair_required=True, source_drift=False)
+            status["mode"] = repair_state.get("mode", status["mode"])
+    if (db_path / "cancel-requested").exists():
+        status.update(reason="cancelled", healthy=False, repair_required=True, source_drift=False)
     return status
 
 
@@ -7287,6 +7324,8 @@ def action_index_issues_v2(
     respect_ttl: bool = False,
     ttl_minutes: int = ISSUE_TTL_MINUTES_DEFAULT,
     qos: str = "interactive",
+    mode: str = "full",
+    repair: bool = False,
 ) -> dict:
     """Index GitHub Issues using the v2 layout. Respects TTL on demand.
 
@@ -7298,32 +7337,56 @@ def action_index_issues_v2(
     """
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
 
-    if respect_ttl:
-        meta = _read_issue_meta(db_path)
-        if meta and meta.get("last_full_refresh"):
-            last = _parse_iso(meta["last_full_refresh"])
-            if last is not None:
-                age = (_now_utc() - last).total_seconds()
-                if age < ttl_minutes * 60:
-                    emit_progress(
-                        {
-                            "phase": "skipped",
-                            "scope": "issues",
-                            "reason": "ttl",
-                            "ttl_remaining_seconds": int(ttl_minutes * 60 - age),
-                        }
-                    )
-                    return {
-                        "ok": True,
-                        "skipped": True,
-                        "scope": "issues",
-                        "ttl_remaining_seconds": int(ttl_minutes * 60 - age),
-                    }
+    if repair:
+        for name in ("cancel-requested", "repair.json"):
+            (db_path / name).unlink(missing_ok=True)
+    if (db_path / "cancel-requested").exists():
+        return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
+
+    issues = _load_cached_issue_documents(repo_hash)
+    source = {"fingerprint": _issue_source_fingerprint(issues),
+              "document_count": len(issues),
+              "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
+    fingerprint = source["fingerprint"]
+    previous_failure = _read_issue_repair(db_path)
+    if previous_failure.get("fingerprint") == fingerprint and previous_failure.get("failures", 0):
+        return {"ok": False, "scope": "issues", "error_code": "REPAIR_STOPPED",
+                "error": "issues rebuild stopped after failure for the same source; use explicit repair",
+                "repair": previous_failure, "mode": previous_failure.get("mode", mode)}
+    health = _issue_status_v2(repo_hash, db_root=db_root, source=source)
+    if respect_ttl and not repair and health.get("healthy"):
+        meta = _read_issue_meta(db_path) or {}
+        last = _parse_iso(meta.get("last_full_refresh", ""))
+        if last is not None:
+            age = (_now_utc() - last).total_seconds()
+            if age < ttl_minutes * 60:
+                return {"ok": True, "skipped": True, "scope": "issues",
+                        "mode": meta.get("mode", "full"),
+                        "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
+    if not issues:
+        return _issue_build_failure(db_path, fingerprint, mode, "EMPTY_CORPUS", 0, 0)
+    old_entries = read_manifest(db_path, scope="issues")
+    # Reuse only a self-consistent previous generation; source drift is expected.
+    manifest_valid = (
+        bool(old_entries)
+        and len(old_entries) == health.get("document_count")
+        and all(isinstance(entry, dict) and entry.get("path") and entry.get("content_hash")
+                for entry in old_entries)
+    )
+    if repair or not manifest_valid or not (health.get("healthy") or health.get("source_drift")):
+        mode = "full"
+    new_entries = [{"path": str(issue["number"]),
+                    "content_hash": _issue_source_fingerprint([issue])} for issue in issues]
+
+    # Persist before touching staging so process death cannot restart the
+    # same source indefinitely. Normal yield and verified success clear it.
+    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
 
     emit_progress(
         {
             "phase": "indexing",
             "scope": "issues",
+            "mode": mode,
             "done": 0,
             "total": 0,
         }
@@ -7331,9 +7394,6 @@ def action_index_issues_v2(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    issues = _load_cached_issue_documents(repo_hash)
-    source = _issue_cache_source_snapshot(repo_hash)
-    fingerprint = source["fingerprint"]
     total = len(issues)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
@@ -7341,6 +7401,7 @@ def action_index_issues_v2(
     if continuation is not None and (
         continuation.get("scope") != "issues"
         or continuation.get("fingerprint") != fingerprint
+        or repair
     ):
         # The Issue cache moved since the parked build: restart staging.
         continuation = None
@@ -7351,75 +7412,91 @@ def action_index_issues_v2(
     newly_embedded = 0
     yielded = False
     staged_count = 0
-    with acquire_lock(staging, exclusive=True):
-        client, collection = _make_chroma_collection_repairing(staging, V2_ISSUES_COLLECTION)
-        try:
-            staged_ids: set = set()
-            if continuation is not None:
-                try:
+    try:
+        with acquire_lock(staging, exclusive=True):
+            client, collection = _make_chroma_collection_repairing(staging, V2_ISSUES_COLLECTION)
+            try:
+                staged_ids: set = set()
+                if continuation is None and mode == "incremental":
+                    _copy_unchanged_records(db_path, "issues", collection, V2_ISSUES_COLLECTION,
+                                            {entry["path"]: entry["content_hash"] for entry in new_entries})
                     staged_ids = set(collection.get().get("ids") or [])
-                except Exception:  # pragma: no cover - defensive chroma fallback
-                    staged_ids = set()
-            pending: List[Dict[str, Any]] = [
-                issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
-            ]
-            for start in range(0, len(pending), EMBED_CHECKPOINT_BATCH):
-                batch_issues = pending[start : start + EMBED_CHECKPOINT_BATCH]
-                batch_started = time.monotonic()
-                ids: List[str] = []
-                documents: List[str] = []
-                metadatas: List[Dict[str, Any]] = []
-                for issue in batch_issues:
-                    number = issue.get("number", 0)
-                    title = issue.get("title", "")
-                    body = issue.get("body", "")
-                    state = issue.get("state", "")
-                    labels = issue.get("labels", [])
-                    ids.append(str(number))
-                    documents.append(f"{title}\n{body}")
-                    metadatas.append(
+                if continuation is not None:
+                    try:
+                        staged_ids = set(collection.get().get("ids") or [])
+                    except Exception:  # pragma: no cover - defensive chroma fallback
+                        staged_ids = set()
+                pending: List[Dict[str, Any]] = [
+                    issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
+                ]
+                for start in range(0, len(pending), EMBED_CHECKPOINT_BATCH):
+                    if (db_path / "cancel-requested").exists():
+                        return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
+                    batch_issues = pending[start : start + EMBED_CHECKPOINT_BATCH]
+                    batch_started = time.monotonic()
+                    ids: List[str] = []
+                    documents: List[str] = []
+                    metadatas: List[Dict[str, Any]] = []
+                    for issue in batch_issues:
+                        number = issue.get("number", 0)
+                        title = issue.get("title", "")
+                        body = issue.get("body", "")
+                        state = issue.get("state", "")
+                        labels = issue.get("labels", [])
+                        ids.append(str(number))
+                        documents.append(f"{title}\n{body}")
+                        metadatas.append(
+                            {
+                                "number": number,
+                                "title": title,
+                                "url": "",
+                                "state": state,
+                                "labels": ",".join(labels),
+                            }
+                        )
+                    collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+                    newly_embedded += len(ids)
+                    done = len(staged_ids) + newly_embedded
+                    _write_continuation(
+                        continuation_path,
+                        scope="issues",
+                        fingerprint=fingerprint,
+                        done=done,
+                        total=total,
+                    )
+                    _write_heavy_progress(
+                        heavy_target,
+                        done,
+                        total,
+                        EMBED_CHECKPOINT_BATCH,
+                        int((time.monotonic() - batch_started) * 1000),
+                    )
+                    emit_progress(
                         {
-                            "number": number,
-                            "title": title,
-                            "url": "",
-                            "state": state,
-                            "labels": ",".join(labels),
+                            "phase": "indexing",
+                            "scope": "issues",
+                            "done": done,
+                            "total": total,
                         }
                     )
-                collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-                newly_embedded += len(ids)
-                done = len(staged_ids) + newly_embedded
-                _write_continuation(
-                    continuation_path,
-                    scope="issues",
-                    fingerprint=fingerprint,
-                    done=done,
-                    total=total,
-                )
-                _write_heavy_progress(
-                    heavy_target,
-                    done,
-                    total,
-                    EMBED_CHECKPOINT_BATCH,
-                    int((time.monotonic() - batch_started) * 1000),
-                )
-                emit_progress(
-                    {
-                        "phase": "indexing",
-                        "scope": "issues",
-                        "done": done,
-                        "total": total,
-                    }
-                )
-                remaining = len(pending) - (start + len(batch_issues))
-                if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
-                    yielded = True
-                    break
-            staged_count = len(staged_ids) + newly_embedded
-        finally:
-            _close_chroma_client(client)
+                    if (db_path / "cancel-requested").exists():
+                        return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
+                    remaining = len(pending) - (start + len(batch_issues))
+                    if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
+                        yielded = True
+                        break
+                staged_count = _safe_collection_count(collection)
+                if not yielded and staged_count != total:
+                    return _issue_build_failure(db_path, fingerprint, mode, "COUNT_MISMATCH", staged_count, total)
+            finally:
+                _close_chroma_client(client)
+    except Exception as error:
+        result = _issue_build_failure(db_path, fingerprint, mode, "BUILD_FAILED", staged_count, total)
+        result["error"] = str(error)
+        return result
 
     if yielded:
+        (db_path / "repair.json").unlink(missing_ok=True)
         emit_progress(
             {
                 "phase": "yielded",
@@ -7433,6 +7510,7 @@ def action_index_issues_v2(
             "scope": "issues",
             "yielded": True,
             "resumable": True,
+            "mode": mode,
             "indexed": staged_count,
             "total": total,
             "newly_embedded": newly_embedded,
@@ -7443,37 +7521,71 @@ def action_index_issues_v2(
     except OSError:
         pass
 
-    def _commit_issue_meta():
-        # Meta (TTL / source fingerprint) is only advanced once the new
-        # generation is actually active (FR-390), inside the same
-        # publication lock as the pointer swap.
-        _write_issue_meta(
-            db_path,
-            {
-                "schema_version": INDEX_SCHEMA_VERSION,
-                "last_full_refresh": _now_utc().isoformat(),
-                "ttl_minutes": ttl_minutes,
-                "document_count": len(issues),
-                "source_cache_fingerprint": source["fingerprint"],
-                "source_document_count": source["document_count"],
-                "source_cache_refresh_at": source.get("cache_refresh_at"),
-            },
-        )
+    if (db_path / "cancel-requested").exists():
+        return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
 
-    publish = _publish_generation(
-        db_path,
-        staging,
-        scope="issues",
-        document_count=len(issues),
-        after_publish=_commit_issue_meta,
-    )
-    if not publish.get("ok"):
-        return publish
+    publication_error: Optional[Exception] = None
+
+    def _commit_issue_meta():
+        nonlocal publication_error
+        try:
+            # Meta (TTL / source fingerprint) is only advanced once the new
+            # generation is actually active (FR-390), inside the same
+            # publication lock as the pointer swap.
+            _write_issue_meta(
+                db_path,
+                {
+                    "schema_version": INDEX_SCHEMA_VERSION,
+                    "mode": mode,
+                    "last_full_refresh": _now_utc().isoformat(),
+                    "ttl_minutes": ttl_minutes,
+                    "document_count": len(issues),
+                    "source_cache_fingerprint": source["fingerprint"],
+                    "source_document_count": source["document_count"],
+                    "source_cache_refresh_at": source.get("cache_refresh_at"),
+                },
+            )
+
+            write_manifest(db_path, scope="issues", entries=new_entries)
+        except Exception as error:
+            # The shared publisher suppresses callback errors after swapping
+            # the pointer. Preserve this failure for the issues repair gate.
+            publication_error = error
+
+    try:
+        publish = _publish_generation(
+            db_path,
+            staging,
+            scope="issues",
+            document_count=len(issues),
+            after_publish=_commit_issue_meta,
+        )
+        if publication_error is not None:
+            raise publication_error
+        if not publish.get("ok"):
+            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total)
+
+        # Verify the published generation against the exact source we embedded.
+        # A concurrent cache refresh must not turn this check into source drift.
+        published_health = _issue_status_v2(repo_hash, db_root=db_root, source=source, check_repair=False)
+        if published_health.get("reason") == "cancelled":
+            return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
+        if not published_health.get("healthy"):
+            actual = published_health.get("document_count", 0)
+            error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
+            return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
+    except Exception as error:
+        result = _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total)
+        result["error"] = str(error)
+        return result
+
+    (db_path / "repair.json").unlink(missing_ok=True)
 
     emit_progress(
         {
             "phase": "complete",
             "scope": "issues",
+            "mode": mode,
             "indexed": len(issues),
             "total": len(issues),
         }
@@ -7483,6 +7595,7 @@ def action_index_issues_v2(
         "scope": "issues",
         "indexed": len(issues),
         "newly_embedded": newly_embedded,
+        "mode": mode,
     }
 
 
@@ -9111,6 +9224,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
     parser.add_argument("--respect-ttl", dest="respect_ttl", action="store_true")
+    parser.add_argument("--repair", action="store_true")
     # Phase 70 (Issue #3264): QoS profile for thread caps / process priority.
     parser.add_argument(
         "--qos",
@@ -9158,16 +9272,17 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             if not args.project_root:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
                 return 2
-            emit(
-                action_index_issues_v2(
-                    repo_hash=repo_hash,
-                    project_root=args.project_root,
-                    respect_ttl=args.respect_ttl,
-                    db_root=db_root,
-                    qos=args.qos or default_qos_for_action(action),
-                )
+            result = action_index_issues_v2(
+                repo_hash=repo_hash,
+                project_root=args.project_root,
+                respect_ttl=args.respect_ttl,
+                db_root=db_root,
+                qos=args.qos or default_qos_for_action(action),
+                mode=args.mode,
+                repair=getattr(args, "repair", False),
             )
-            return 0
+            emit(result)
+            return 0 if result.get("ok") else 1
 
         if action in ("index-files", "index-files-docs"):
             if not args.project_root:
