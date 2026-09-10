@@ -669,6 +669,35 @@ mod idle_windows {
         assert!(monitor.queued_issue_numbers().contains(&43));
     }
 
+    /// Issue #4131 (PR #4139 review): the recovery above runs precisely when
+    /// `autonomous_mode` is off, so reporting it through the mode-gated notice
+    /// queue drops every message it produces. An operator who never asked for
+    /// autonomous mode still has to learn that the Monitor took a slot back and
+    /// requeued the Issue behind their back.
+    #[test]
+    fn a_dead_binding_recovery_reports_itself_with_autonomous_mode_off() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.set_autonomous_mode(false);
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        monitor.reconcile_idle_windows(
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            NOW,
+        );
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.issue_number == 43 && notice.message.contains("released idle window")),
+            "the released slot is reported: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.issue_number == 43 && notice.message.contains("requeued")),
+            "the requeue is reported: {notices:?}"
+        );
+    }
+
     #[test]
     fn active_record_with_idle_pane_keeps_its_slot() {
         let mut monitor = launched_with_queue(44, 54, "tab-1::stuck-44");

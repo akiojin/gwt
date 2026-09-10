@@ -10456,11 +10456,12 @@ impl IssueMonitorState {
     }
 
     /// Queue an operator notice that must surface even though autonomous mode is
-    /// already OFF — the kill-switch disarm results. Bypasses the fail-closed
-    /// mode gate deliberately: these notices are feedback ABOUT turning the mode
-    /// off, so gating them on the mode would silence exactly the events the
-    /// operator just asked for.
-    fn push_kill_switch_notice(&mut self, level: &str, issue_number: u64, message: String) {
+    /// already OFF. Bypasses the fail-closed mode gate deliberately, for the two
+    /// cases where the gate would silence the very thing being reported: the
+    /// kill-switch disarm results (feedback ABOUT turning the mode off), and the
+    /// dead-binding recovery of Issue #4131, which by construction runs only
+    /// while the mode is off.
+    fn push_unconditional_notice(&mut self, level: &str, issue_number: u64, message: String) {
         while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
             self.pending_autonomous_notices.pop_front();
         }
@@ -10518,7 +10519,7 @@ impl IssueMonitorState {
                 NeedsHumanKind::UserChoiceRequired,
                 "autonomous mode disabled — delivery halted; auto-merge disarmed",
             );
-            self.push_kill_switch_notice(
+            self.push_unconditional_notice(
                 "warn",
                 issue_number,
                 format!(
@@ -10526,7 +10527,7 @@ impl IssueMonitorState {
                 ),
             );
         } else {
-            self.push_kill_switch_notice(
+            self.push_unconditional_notice(
                 "error",
                 issue_number,
                 format!(
@@ -13379,7 +13380,10 @@ impl IssueMonitorState {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
         }
-        self.push_autonomous_notice(
+        // The mode-gated queue would drop this: the dead-binding recovery that
+        // reaches here runs precisely when autonomous mode is OFF, so an
+        // attended operator would never learn the Monitor requeued the Issue.
+        self.push_unconditional_notice(
             "info",
             issue_number,
             format!(
@@ -13411,7 +13415,10 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.launch_bindings
             .retain(|bound, _| !issue_monitor_window_ids_match(bound, window_id));
-        self.push_autonomous_notice(
+        // Same reason as the requeue notice: a release reached with autonomous
+        // mode off — the dead-binding recovery, or an operator-forced
+        // `release_idle_windows` — must still be reported.
+        self.push_unconditional_notice(
             "info",
             issue_number,
             format!(
