@@ -59916,6 +59916,72 @@ fn repeated_restores_never_accumulate_sessions_without_a_resume_handle() {
 }
 
 #[test]
+fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let runner_bin = write_fixture_runners(temp.path(), &["codex", "npx", "bunx"]);
+
+    for (origin, expected_route) in [
+        (
+            super::startup::RestoreOrigin::Automatic,
+            gwt_agent::LaunchRoute::Autonomous,
+        ),
+        (
+            super::startup::RestoreOrigin::UserRequested,
+            gwt_agent::LaunchRoute::Manual,
+        ),
+    ] {
+        let case_root = temp.path().join(format!("{origin:?}"));
+        let repo = case_root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
+        let mut settings = Settings::default();
+        pin_launch_package_runners(&mut settings, &runner_bin);
+        write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
+        runtime.agent_capability_issuer =
+            Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+                "http://127.0.0.1:43123/internal/hook-live",
+                "ws://127.0.0.1:43124/ws",
+                "ws://127.0.0.1:43123/internal/pane-ws",
+            ));
+        let mut source = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::Codex);
+        source.agent_session_id = Some("conversation-4217-restart".to_string());
+        source.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        source.save(&runtime.sessions_dir).expect("save source");
+
+        runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        });
+        let recorded = recorded_events.lock().expect("event log");
+        let completion = recorded
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::LaunchComplete { result, .. } => Some(result.as_ref()),
+                _ => None,
+            })
+            .expect("launch completion")
+            .as_ref()
+            .expect("successful restore preparation");
+        // Inspect preparation without dispatching the completion into a PTY.
+        let successor =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
+                .expect("load restored Session");
+        assert_eq!(successor.launch_route, expected_route, "{origin:?}");
+    }
+}
+
+#[test]
 fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
     let _env_lock = env_test_lock()
         .lock()
