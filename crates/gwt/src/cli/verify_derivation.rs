@@ -123,7 +123,7 @@ fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
 /// Resolve the integration base the committed span is diffed against.
 /// Fail-closed: without a resolvable base the committed branch work would
 /// silently vanish from the matrix, so derivation refuses instead.
-fn integration_merge_base(worktree: &Path) -> Option<String> {
+pub(crate) fn integration_merge_base(worktree: &Path) -> Option<String> {
     for base_ref in ["origin/develop", "origin/main", "origin/HEAD"] {
         if let Some(base) = git_lines(worktree, &["merge-base", base_ref, "HEAD"])
             .into_iter()

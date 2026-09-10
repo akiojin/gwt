@@ -46,8 +46,10 @@ fn write_meta(index_root: &std::path::Path, repo_hash: &str, minutes_ago: i64) {
         "schema_version": 1,
         "last_full_refresh": now.to_rfc3339(),
         "ttl_minutes": 15,
+        "document_count": 1,
     });
     std::fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+    std::fs::write(dir.join("chroma.sqlite3"), b"fixture").unwrap();
 }
 
 #[tokio::test]
@@ -70,7 +72,15 @@ async fn refresh_kicks_runner_when_ttl_expired() {
         .calls
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(calls.len(), 1, "expected one runner spawn call");
+    assert_eq!(
+        calls.as_slice(),
+        [format!(
+            "{}|{}|false",
+            opts.repo_hash.as_str(),
+            opts.project_root.display()
+        )],
+        "expired TTL must issue exactly one spawn with the requested repository and project root"
+    );
 }
 
 #[tokio::test]
@@ -117,52 +127,17 @@ async fn refresh_kicks_runner_when_meta_missing() {
     assert_eq!(calls.len(), 1, "missing meta means stale");
 }
 
-#[tokio::test]
-async fn refresh_returns_quickly_even_when_runner_runs_long() {
-    use std::time::Instant;
-
-    #[derive(Clone)]
-    struct SlowSpawner;
-
-    impl RunnerSpawner for SlowSpawner {
-        fn spawn_index_issues(
-            &self,
-            _repo_hash: &str,
-            _project_root: &std::path::Path,
-            _respect_ttl: bool,
-        ) -> std::io::Result<()> {
-            // Simulate immediate-return spawn (background tokio task elsewhere).
-            Ok(())
-        }
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
-    let opts = RefreshIssuesOptions {
-        index_root: tmp.path().join("index"),
-        repo_hash: repo,
-        project_root: tmp.path().to_path_buf(),
-        ttl: Duration::from_secs(15 * 60),
-    };
-
-    let start = Instant::now();
-    refresh_issues_if_stale(&opts, &SlowSpawner).await.unwrap();
-    assert!(
-        start.elapsed() < Duration::from_millis(200),
-        "refresh must not block on runner work"
-    );
-}
-
 #[test]
 fn python_runner_spawner_builds_issue_index_command_and_surfaces_spawn_errors() {
     let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
     let spawner = PythonRunnerSpawner {
         python_executable: tmp.path().join("missing-python.exe"),
         runner_script: tmp.path().join("runner.py"),
     };
 
     let error = spawner
-        .spawn_index_issues("repo-hash", tmp.path(), true)
+        .spawn_index_issues_with_coordinator_root("repo-hash", tmp.path(), true, &coordinator_root)
         .expect_err("missing executable should surface the spawn error");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
@@ -193,11 +168,13 @@ fn issue_index_refreshed_since_detects_completed_duplicate() {
             "schema_version": 1,
             "last_full_refresh": now.to_rfc3339(),
             "ttl_minutes": 15,
+            "document_count": 1,
         })
         .to_string(),
     )
     .unwrap();
 
+    std::fs::write(issues_dir.join("chroma.sqlite3"), b"fixture").unwrap();
     assert!(
         issue_index_refreshed_since(
             &index_root,
@@ -226,6 +203,7 @@ fn python_runner_spawner_runs_issue_index_through_the_coordinator() {
     use std::time::Instant;
 
     let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
     let log = tmp.path().join("runner-log.txt");
     let python = tmp.path().join("fake-python.sh");
     std::fs::write(
@@ -240,7 +218,12 @@ fn python_runner_spawner_runs_issue_index_through_the_coordinator() {
         runner_script: tmp.path().join("runner.py"),
     };
     spawner
-        .spawn_index_issues("cafe0123cafe0123", tmp.path(), false)
+        .spawn_index_issues_with_coordinator_root(
+            "cafe0123cafe0123",
+            tmp.path(),
+            false,
+            &coordinator_root,
+        )
         .expect("spawn detaches");
 
     // The detached worker acquires the coordinator lease, runs the runner
@@ -262,6 +245,86 @@ fn python_runner_spawner_runs_issue_index_through_the_coordinator() {
     assert!(contents.contains("cafe0123cafe0123"), "{contents}");
 }
 
+/// Issue #4140 AC-5: while the issues index runner is still running, a
+/// `verify.run`-shaped claimant must get the host-wide heavy lease within a
+/// bounded time. The reported failure held it for the whole 30-minute runner,
+/// so every agent's verification was refused with `host busy`.
+#[cfg(unix)]
+#[test]
+fn coordinated_issue_index_hands_the_heavy_lease_to_a_waiting_verification_run() {
+    use gwt_core::index_coordinator::{
+        IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
+    let started = tmp.path().join("runner-started");
+    let stop = tmp.path().join("runner-stop");
+    let python = tmp.path().join("fake-python.sh");
+    std::fs::write(
+        &python,
+        format!(
+            // Self-limiting: the arena disappears when the test ends, and a
+            // runner that only watched for the stop file would then loop
+            // forever on a path that can never appear.
+            "#!/bin/sh\ntouch \"{}\"\ni=0\nwhile [ ! -f \"{}\" ] && [ $i -lt 600 ]; do sleep 0.05; \
+             i=$((i+1)); done\nexit 0\n",
+            started.display(),
+            stop.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let spawner = PythonRunnerSpawner {
+        python_executable: python,
+        runner_script: tmp.path().join("runner.py"),
+    };
+    spawner
+        .spawn_index_issues_with_coordinator_root(
+            "cafe0123cafe0123",
+            tmp.path(),
+            false,
+            &coordinator_root,
+        )
+        .expect("spawn detaches");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the fake runner never started");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let coordinator = IndexCoordinator::open(&coordinator_root).expect("open coordinator");
+    let key = TargetKey::verification("cafe0123cafe0123", "wt-1");
+    let guard = match coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
+        .expect("request verification job")
+    {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("the index job must not own the verification target"),
+    };
+    let lease = guard
+        .acquire_heavy_with_ttl(Duration::from_secs(20), Duration::from_secs(60))
+        .unwrap_or_else(|err| {
+            let _ = std::fs::write(&stop, b"stop");
+            panic!("the running issue index runner must yield the heavy lease: {err}")
+        });
+
+    assert!(
+        !stop.exists(),
+        "the runner must still be running — the lease was handed over, not waited out"
+    );
+
+    lease.release().expect("release verification lease");
+    guard
+        .complete(JobOutcome::Completed)
+        .expect("complete verification job");
+    std::fs::write(&stop, b"stop").expect("let the fake runner exit");
+}
+
 /// A runner failure is drained and logged without crashing the caller.
 #[cfg(unix)]
 #[test]
@@ -270,6 +333,7 @@ fn python_runner_spawner_survives_runner_failure() {
     use std::time::Instant;
 
     let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
     let marker = tmp.path().join("ran");
     let python = tmp.path().join("fake-python.sh");
     std::fs::write(
@@ -287,7 +351,12 @@ fn python_runner_spawner_survives_runner_failure() {
         runner_script: tmp.path().join("runner.py"),
     };
     spawner
-        .spawn_index_issues("dead0123dead0123", tmp.path(), true)
+        .spawn_index_issues_with_coordinator_root(
+            "dead0123dead0123",
+            tmp.path(),
+            true,
+            &coordinator_root,
+        )
         .expect("spawn detaches");
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -312,6 +381,7 @@ fn python_runner_spawner_coalesces_into_a_running_issue_job() {
     use std::time::Instant;
 
     let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
     let log = tmp.path().join("runner-log.txt");
     let python = tmp.path().join("fake-python.sh");
     std::fs::write(
@@ -321,7 +391,7 @@ fn python_runner_spawner_coalesces_into_a_running_issue_job() {
     .unwrap();
     std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+    let coordinator = IndexCoordinator::open(&coordinator_root).expect("open isolated coordinator");
     let key = TargetKey::repo_shared("beef0123beef0123", "issues");
     let guard = match coordinator
         .request_job(&key, JobPriority::Background, Duration::from_secs(5))
@@ -336,7 +406,12 @@ fn python_runner_spawner_coalesces_into_a_running_issue_job() {
         runner_script: tmp.path().join("runner.py"),
     };
     spawner
-        .spawn_index_issues("beef0123beef0123", tmp.path(), false)
+        .spawn_index_issues_with_coordinator_root(
+            "beef0123beef0123",
+            tmp.path(),
+            false,
+            &coordinator_root,
+        )
         .expect("spawn detaches");
 
     // The worker joins the running job instead of starting a second runner.
@@ -382,6 +457,7 @@ fn python_runner_spawner_publishes_failure_when_spawn_is_impossible() {
     use std::time::Instant;
 
     let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
     // Present but not executable: passes the is_file precheck, fails spawn.
     let python = tmp.path().join("fake-python.sh");
     std::fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
@@ -391,10 +467,15 @@ fn python_runner_spawner_publishes_failure_when_spawn_is_impossible() {
         runner_script: tmp.path().join("runner.py"),
     };
     spawner
-        .spawn_index_issues("f00d0123f00d0123", tmp.path(), false)
+        .spawn_index_issues_with_coordinator_root(
+            "f00d0123f00d0123",
+            tmp.path(),
+            false,
+            &coordinator_root,
+        )
         .expect("spawn detaches");
 
-    let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+    let coordinator = IndexCoordinator::open(&coordinator_root).expect("open isolated coordinator");
     let key = gwt_core::index_coordinator::TargetKey::repo_shared("f00d0123f00d0123", "issues");
     let state_path = coordinator.target_state_path(&key);
     let deadline = Instant::now() + Duration::from_secs(20);

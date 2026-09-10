@@ -77,9 +77,10 @@ export function createLaunchWizardSurface({
       let launchWizardPendingAction = null;
       let launchWizardPendingActionDisconnected = false;
       let launchWizardPendingActionQueued = false;
-      // SPEC-2359 US-80 — Start Work duplicate-work advisory. The intake prompt
-      // is always skippable; these locals drive the debounced query and the
-      // non-blocking results panel. `wizardAdvisoryLatestRequestId` guards
+      // SPEC-2359 US-80 — Plan Agent duplicate-work advisory. The
+      // work-registration prompt is always skippable; these locals drive the
+      // debounced query and non-blocking results panel.
+      // `wizardAdvisoryLatestRequestId` guards
       // against stale responses arriving out of order.
       let wizardPromptDraft = "";
       let wizardPromptBackendValue = "";
@@ -191,6 +192,60 @@ export function createLaunchWizardSurface({
         return button;
       }
 
+      // SPEC-3864 FR-005..FR-007: agent-independent setup affordance. The
+      // backend derives `launchWizard.agent_setup` from the selected agent's
+      // descriptor (install when no Installed / latest route exists,
+      // configure when first-time setup is missing); this renders whatever
+      // it says without any per-agent branch.
+      function appendAgentSetupNote(parent, setup) {
+        if (!setup) return null;
+        const note = createNode("div", "launch-note launch-agent-setup");
+        note.dataset.agentId = setup.agent_id || "";
+        note.dataset.setupKind = setup.kind || "";
+        note.setAttribute("role", "note");
+        note.appendChild(
+          createNode("div", "launch-agent-setup__title", setup.title || ""),
+        );
+        note.appendChild(
+          createNode("div", "launch-agent-setup__detail", setup.detail || ""),
+        );
+        if (setup.action_label) {
+          const button = createNode(
+            "button",
+            "launch-choice-button launch-agent-setup__action",
+            setup.action_label,
+          );
+          button.type = "button";
+          button.addEventListener("click", () =>
+            sendWizardAction({ kind: "run_agent_setup" }),
+          );
+          note.appendChild(button);
+        }
+        parent.appendChild(note);
+        return note;
+      }
+
+      // Issue #4079 AC-2: the Issue Monitor Agent Settings form always writes
+      // candidate 1 of the launch pool, so the backend derives which candidate
+      // that replaces and the pool summary the save will produce. Rendering it
+      // here is what stops a switch from looking like it did nothing when the
+      // chosen agent already sat further down the pool.
+      function appendIssueMonitorPoolImpactNote(parent, impact) {
+        if (!impact) return null;
+        const note = createNode("div", "launch-note launch-pool-impact");
+        note.dataset.poolAction = impact.action || "";
+        note.dataset.agentId = impact.agent_id || "";
+        note.setAttribute("role", "note");
+        note.appendChild(
+          createNode("div", "launch-pool-impact__title", impact.title || ""),
+        );
+        note.appendChild(
+          createNode("div", "launch-pool-impact__detail", impact.detail || ""),
+        );
+        parent.appendChild(note);
+        return note;
+      }
+
       function appendChoiceField(
         parent,
         label,
@@ -276,37 +331,47 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      // SPEC-3152: Hermes provider picker. The choices are enumerated from the
-      // user's own ~/.hermes/config.yaml (model.provider + providers: keys) and
-      // passed in via launchWizard.hermes_provider_options — gwt does not
-      // hardcode a provider list (it would go stale). A leading "use config
-      // default" option and a trailing "Other…" free-text entry cover the
-      // default path and the long tail (built-ins not present in config).
-      function appendHermesProviderField(parent, currentValue, choices, onChange) {
-        const providers = Array.isArray(choices) ? choices : [];
-        const field = createLaunchField("Provider", false);
+      // SPEC-3152 / Issue #3863: Hermes single-choice picker (Provider /
+      // Model / Profile). The choices are enumerated from the user's own
+      // ~/.hermes (config.yaml) and passed in via launchWizard.hermes_*_options
+      // — gwt does not hardcode Hermes lists (they would go stale). A leading
+      // "use config default" option and a trailing "Other…" free-text entry
+      // cover the default path and the long tail (values not present in
+      // config). With no choices the field degrades to default + Other.
+      function appendHermesChoiceField(
+        parent,
+        label,
+        currentValue,
+        choices,
+        onChange,
+        options = {},
+      ) {
+        const known = Array.isArray(choices) ? choices : [];
+        const defaultLabel = options.defaultLabel || "(use config default)";
+        const customLabel = options.customLabel || `Custom ${label.toLowerCase()}`;
+        const field = createLaunchField(label, false);
         const select = createNode("select", "launch-select");
-        select.setAttribute("aria-label", "Provider");
-        const addOption = (value, label) => {
+        select.setAttribute("aria-label", label);
+        const addOption = (value, text) => {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = label;
+          option.textContent = text;
           select.appendChild(option);
         };
-        addOption("", "(use config default)");
-        for (const provider of providers) {
-          addOption(provider, provider);
+        addOption("", defaultLabel);
+        for (const choice of known) {
+          addOption(choice, choice);
         }
         addOption("__other__", "Other…");
-        const isKnown = Boolean(currentValue) && providers.includes(currentValue);
+        const isKnown = Boolean(currentValue) && known.includes(currentValue);
         const isOther = Boolean(currentValue) && !isKnown;
         select.value = currentValue ? (isKnown ? currentValue : "__other__") : "";
 
         const otherInput = document.createElement("input");
         otherInput.type = "text";
         otherInput.className = "launch-input";
-        otherInput.placeholder = "custom provider id";
-        otherInput.setAttribute("aria-label", "Custom provider");
+        otherInput.placeholder = options.otherPlaceholder || "";
+        otherInput.setAttribute("aria-label", customLabel);
         otherInput.value = isOther ? currentValue : "";
         otherInput.style.display = isOther ? "" : "none";
         otherInput.style.marginTop = "6px";
@@ -322,6 +387,81 @@ export function createLaunchWizardSurface({
           }
         });
         field.appendChild(select);
+        field.appendChild(otherInput);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function splitCsvValues(value) {
+        return String(value || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0);
+      }
+
+      // Issue #3863 AC-3/AC-4: Hermes multi-choice picker (Toolsets / Skills).
+      // Known candidates render as checkboxes; an "Other" CSV input carries
+      // values absent from the user's config. The wizard state keeps the
+      // combined CSV string (the Hermes CLI flag format), so this control is
+      // the only place that splits / joins it. With no choices only the CSV
+      // input remains (the pre-#3863 free-text behaviour).
+      function appendHermesMultiChoiceField(
+        parent,
+        label,
+        currentValue,
+        choices,
+        onChange,
+        options = {},
+      ) {
+        const known = Array.isArray(choices) ? choices : [];
+        // Wide: a tall checkbox group must not stretch the sibling column
+        // (a lone select would float mid-row next to it).
+        const field = createLaunchField(label, true);
+        const selected = splitCsvValues(currentValue);
+        const otherInput = document.createElement("input");
+        otherInput.type = "text";
+        otherInput.className = "launch-input";
+        otherInput.placeholder = options.otherPlaceholder || "";
+        otherInput.setAttribute("aria-label", `Other ${label.toLowerCase()}`);
+        otherInput.value = selected.filter((item) => !known.includes(item)).join(",");
+
+        const checkboxes = [];
+        const emit = () => {
+          const values = [];
+          for (const checkbox of checkboxes) {
+            if (checkbox.checked && !values.includes(checkbox.value)) {
+              values.push(checkbox.value);
+            }
+          }
+          for (const extra of splitCsvValues(otherInput.value)) {
+            if (!values.includes(extra)) {
+              values.push(extra);
+            }
+          }
+          onChange(values.join(","));
+        };
+
+        if (known.length > 0) {
+          const list = createNode("div", "launch-multi-choice");
+          list.setAttribute("role", "group");
+          list.setAttribute("aria-label", label);
+          for (const choice of known) {
+            const item = createNode("label", "launch-inline-check");
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.value = choice;
+            checkbox.checked = selected.includes(choice);
+            checkbox.setAttribute("aria-label", `${label}: ${choice}`);
+            checkbox.addEventListener("change", emit);
+            checkboxes.push(checkbox);
+            item.appendChild(checkbox);
+            item.appendChild(createNode("span", "", choice));
+            list.appendChild(item);
+          }
+          field.appendChild(list);
+          otherInput.style.marginTop = "6px";
+        }
+        otherInput.addEventListener("change", emit);
         field.appendChild(otherInput);
         parent.appendChild(field);
         return field;
@@ -450,9 +590,9 @@ export function createLaunchWizardSurface({
         });
       }
 
-      // SPEC-2359 US-80 — is this a Start Work launch (where the work branch is
-      // auto-created)? Start Work hides the branch controls; that is the signal
-      // for showing the optional intake prompt + duplicate-work advisory.
+      // SPEC-2359 US-80 — is this a Plan Agent launch (where the work branch is
+      // auto-created)? Plan Agent hides the branch controls; that is the signal
+      // for showing the optional work-registration prompt and advisory.
       function isStartWorkLaunch() {
         return Boolean(launchWizard) && launchWizard.show_branch_controls === false;
       }
@@ -736,14 +876,6 @@ export function createLaunchWizardSurface({
         renderLaunchWizard();
       }
 
-      function openIntakePendingWizard() {
-        openLaunchPendingWizard({
-          title: "Intake",
-          meta: "Intake session",
-          message: "Preparing Intake session...",
-        });
-      }
-
       // SPEC-3214 T-042: the standalone existing-branch picker keeps the
       // pending-wizard UX the removed Start Work entry used to provide.
       function openExistingBranchPendingWizard() {
@@ -887,7 +1019,7 @@ export function createLaunchWizardSurface({
             wizardFocusTrapRelease = null;
           }
           // SPEC-2356 — restore focus to the trigger that opened the wizard
-          // so keyboard users land back on Start Work / Launch Agent / etc.
+          // so keyboard users land back on Open Workspace / Launch Agent / etc.
           if (wasOpenBeforeClose && wizardFocusReturn && typeof wizardFocusReturn.focus === "function") {
             try { wizardFocusReturn.focus({ preventScroll: true }); }
             catch { wizardFocusReturn.focus(); }
@@ -912,8 +1044,8 @@ export function createLaunchWizardSurface({
         syncWizardDraftState();
         closeModal();
         // Issue #3192 — this derivation runs BEFORE the opening/openError
-        // early returns below, so it is reached for the Start Work /
-        // Launch Agent pending states where `launchWizard` is null
+        // early returns below, so it is reached for generic branch / agent
+        // pending states where `launchWizard` is null
         // (`launchWizardOpening` is set instead). Read the field null-safely:
         // a bare `launchWizard.launch_materialization_pending` throws and
         // renderLaunchWizard() never reaches the `.open` toggle, so the rail
@@ -950,9 +1082,9 @@ export function createLaunchWizardSurface({
 
         if (launchWizardOpening) {
           if (wizardTitle) {
-            wizardTitle.textContent = launchWizardOpening.title || "Start Work";
+            wizardTitle.textContent = launchWizardOpening.title || "Launch Agent";
           }
-          wizardMeta.textContent = launchWizardOpening.meta || "Plan Agent launch";
+          wizardMeta.textContent = launchWizardOpening.meta || "Agent launch";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = true;
           wizardSubmitButton.hidden = true;
@@ -968,7 +1100,7 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              launchWizardOpening.message || "Preparing Plan Agent...",
+              launchWizardOpening.message || "Preparing Launch Agent...",
             ),
           );
           wizardBody.appendChild(openingPanel);
@@ -980,9 +1112,7 @@ export function createLaunchWizardSurface({
             wizardTitle.textContent = launchWizardOpenError.title || "Launch Agent";
           }
           wizardMeta.textContent =
-            launchWizardOpenError.title === "Intake"
-              ? "Curate session"
-              : launchWizardOpenError.title === "Start Work"
+            launchWizardOpenError.title === "Start Work"
               ? "Plan Agent launch"
               : "Launch Agent";
           wizardBackButton.hidden = true;
@@ -1025,12 +1155,9 @@ export function createLaunchWizardSurface({
             );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
-        const isIntakeWizard = launchWizard.mode === "intake";
-        wizardMeta.textContent = isIntakeWizard
-          ? "Curate session"
-          : launchWizard.show_branch_controls === false
-            ? "Plan Agent launch"
-            : `Selected branch · ${
+        wizardMeta.textContent = launchWizard.show_branch_controls === false
+          ? "Plan Agent launch"
+          : `Selected branch · ${
               displayBranchName(
                 launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
               )
@@ -1178,14 +1305,12 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // SPEC-3165 — the prompt is still skippable and still drives the
-        // duplicate-work advisory; Intake keeps its Curate-facing copy.
+        // SPEC-3165 — the generic work-registration prompt stays skippable
+        // and continues to drive the duplicate-work advisory.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
             "Register an Issue",
-            isIntakeWizard
-              ? "Optional — describe the work to turn into an Issue or SPEC. You can skip this."
-              : "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
+            "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
           );
           const textarea = createNode("textarea", "launch-intake-input");
           textarea.placeholder = "e.g. register an issue for the login auth bug";
@@ -1232,10 +1357,8 @@ export function createLaunchWizardSurface({
 
         if (showStartMethods) {
           const section = createLaunchSection(
-            isIntakeWizard ? "Intake setup" : "Start methods",
-            isIntakeWizard
-              ? "Choose how to prepare this intake session."
-              : "Pick the safest next step for this agent on the selected branch.",
+            "Start methods",
+            "Pick the safest next step for this agent on the selected branch.",
           );
 
           const methodList = createNode("div", "start-method-list");
@@ -1248,16 +1371,12 @@ export function createLaunchWizardSurface({
             {
               id: "available",
               title: "Available",
-              copy: isIntakeWizard
-                ? "Other ways to prepare or resume this intake session."
-                : "Other ways to start, resume, or focus this agent.",
+              copy: "Other ways to start, resume, or focus this agent.",
             },
             {
               id: "unavailable",
               title: "Unavailable",
-              copy: isIntakeWizard
-                ? "Requires saved settings, saved sessions, or a running intake session."
-                : "Requires saved settings, saved sessions, or a running agent.",
+              copy: "Requires saved settings, saved sessions, or a running agent.",
             },
           ];
           const methodsByGroup = new Map(
@@ -1574,6 +1693,16 @@ export function createLaunchWizardSurface({
                   }),
               );
             }
+            // Issue #3962 AC-5: a saved model that left the agent's catalog
+            // falls back to the default instead of failing the launch. Say so
+            // next to the Model field so the swap is never silent.
+            if (launchWizard.model_fallback_notice) {
+              const fallback = createLaunchField("Model changed", true);
+              fallback.appendChild(
+                createNode("div", "launch-note", launchWizard.model_fallback_notice),
+              );
+              grid.appendChild(fallback);
+            }
             if (launchWizard.show_reasoning) {
               const reasoningLabel = launchWizard.selected_agent_id === "grok"
                 ? "Effort"
@@ -1615,6 +1744,13 @@ export function createLaunchWizardSurface({
             );
           }
           section.appendChild(grid);
+          if (launchWizard.show_agent_settings) {
+            appendAgentSetupNote(section, launchWizard.agent_setup);
+            appendIssueMonitorPoolImpactNote(
+              section,
+              launchWizard.issue_monitor_pool_impact,
+            );
+          }
           panel.appendChild(section);
         }
 
@@ -1686,19 +1822,12 @@ export function createLaunchWizardSurface({
         if (showSetupForms && launchWizard.show_hermes_options) {
           const section = createLaunchSection(
             "Hermes options",
-            "Provider and optional overrides for the Hermes agent. Blank fields use your hermes setup (config.yaml).",
+            "Provider, model, profile, toolsets and skills for the Hermes agent, listed from your ~/.hermes config. Blank fields use your hermes setup (config.yaml); pick Other… for values not in config.",
           );
-          if (launchWizard.hermes_needs_setup) {
-            const note = createNode(
-              "div",
-              "launch-note",
-              "Hermes is not set up yet (no credentials in ~/.hermes). Run `hermes setup` (or `hermes model`) in a terminal to choose a provider and sign in; gwt will then bridge it into every worktree. You can still launch — Hermes will prompt for setup.",
-            );
-            section.appendChild(note);
-          }
           const grid = createNode("div", "launch-form-grid");
-          appendHermesProviderField(
+          appendHermesChoiceField(
             grid,
+            "Provider",
             launchWizard.hermes_provider,
             launchWizard.hermes_provider_options || [],
             (value) =>
@@ -1707,53 +1836,64 @@ export function createLaunchWizardSurface({
                 field: "provider",
                 value,
               }),
+            { otherPlaceholder: "custom provider id", customLabel: "Custom provider" },
           );
-          appendTextField(
+          // Issue #3863 AC-1: model candidates follow the selected provider
+          // (`providers.<id>.models`); the wizard state stays free-text so
+          // "Other…" still reaches `set_model` unchanged.
+          appendHermesChoiceField(
             grid,
             "Model",
             launchWizard.selected_model,
-            "e.g. anthropic/claude-sonnet-4 (blank = config.yaml)",
+            launchWizard.hermes_model_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_model",
                 model: value,
               }),
+            {
+              otherPlaceholder: "e.g. anthropic/claude-sonnet-4",
+              customLabel: "Custom model",
+            },
           );
-          appendTextField(
+          appendHermesChoiceField(
             grid,
             "Profile",
             launchWizard.hermes_profile,
-            "Hermes profile name (optional)",
+            launchWizard.hermes_profile_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "profile",
                 value,
               }),
+            { otherPlaceholder: "custom profile name", customLabel: "Custom profile" },
           );
-          appendTextField(
+          appendHermesMultiChoiceField(
             grid,
             "Toolsets",
             launchWizard.hermes_toolsets,
-            "comma-separated, e.g. fs,web (optional)",
+            launchWizard.hermes_toolset_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "toolsets",
                 value,
               }),
+            { otherPlaceholder: "other toolsets, comma-separated (optional)" },
           );
-          appendTextField(
+          appendHermesMultiChoiceField(
             grid,
             "Skills",
             launchWizard.hermes_skills,
-            "preloaded skills (optional)",
+            launchWizard.hermes_skill_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "skills",
                 value,
               }),
+            { otherPlaceholder: "other skills, comma-separated (optional)" },
           );
           appendTextField(
             grid,
@@ -1784,34 +1924,16 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // SPEC-3151 FR-008/009/010: OpenCode-specific launch options, rendered
-        // only for the OpenCode agent. OpenCode takes a single free-text
+        // SPEC-3151 FR-008: OpenCode-specific launch options, rendered only
+        // for the OpenCode agent. OpenCode takes a single free-text
         // `provider/model` string (auth is host-global, so no provider bridge
-        // is needed). When no AI provider is configured, a non-blocking note
-        // offers an in-pane setup launcher that runs `opencode auth login`.
+        // is needed). The "not set up" hint and its in-pane launcher moved to
+        // the agent-independent setup affordance (SPEC-3864).
         if (showSetupForms && launchWizard.show_opencode_options) {
           const section = createLaunchSection(
             "OpenCode options",
             "Model and provider sign-in for the OpenCode agent. Blank model uses your OpenCode config.",
           );
-          if (launchWizard.opencode_needs_setup) {
-            const note = createNode(
-              "div",
-              "launch-note",
-              "OpenCode has no AI provider configured yet. Run `/connect` inside OpenCode or `opencode auth login` to sign in. You can still launch — OpenCode will prompt for setup.",
-            );
-            const setupButton = createNode(
-              "button",
-              "launch-choice-button",
-              "Run OpenCode setup",
-            );
-            setupButton.type = "button";
-            setupButton.addEventListener("click", () =>
-              sendWizardAction({ kind: "run_opencode_setup" }),
-            );
-            note.appendChild(setupButton);
-            section.appendChild(note);
-          }
           const grid = createNode("div", "launch-form-grid");
           appendTextField(
             grid,
@@ -2120,7 +2242,6 @@ export function createLaunchWizardSurface({
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openIntakePendingWizard,
         openExistingBranchPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,

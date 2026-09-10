@@ -1137,6 +1137,14 @@ fn launch_env_with_real_gwtd(
         "GWT_BIN_PATH".to_string(),
         env!("CARGO_BIN_EXE_gwtd").to_string(),
     );
+    // This E2E deliberately drives the runner installed on the CI runner, with
+    // package metadata and tarballs pinned to the loopback registry above. It
+    // is the one launch surface that opts in to the real package runner rather
+    // than stubbing it (Issue #3972).
+    env.insert(
+        gwt_core::process_console::ALLOW_REAL_RUNNER_PROBE_MARKER.to_string(),
+        "1".to_string(),
+    );
     env
 }
 

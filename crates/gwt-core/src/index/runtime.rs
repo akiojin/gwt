@@ -12,18 +12,25 @@
 //! never touches sqlite directly.
 
 use std::{
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{GwtError, Result},
+    index::view::{FileIndexGcPinDescriptor, WorktreeViewDescriptor, WorktreeViewHead},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
+
+pub use crate::index::view::FileIndexGcPinKind;
 
 // =====================================================================
 // reconcile_repo
@@ -127,6 +134,561 @@ pub fn remove_worktree_index(
 }
 
 // =====================================================================
+// Phase 71 reachability GC
+// =====================================================================
+
+const FILE_INDEX_V2_DIR: &str = "file-index-v2";
+const GC_LEASES_DIR: &str = "leases";
+const GC_LOCK_FILE: &str = ".lock";
+const GC_PIN_FILE: &str = "pin.json";
+const GC_ORPHAN_MARKER: &str = ".gc-orphaned.json";
+
+/// Deterministic inputs for one repository-scoped file-index v2 sweep.
+#[derive(Debug, Clone)]
+pub struct FileIndexGcOptions {
+    pub index_root: PathBuf,
+    pub repo_hash: RepoHash,
+    pub active_worktree_hashes: Vec<String>,
+    pub now_unix_nanos: u64,
+    pub artifact_ttl: Duration,
+    pub worktree_grace: Duration,
+}
+
+/// Observable outcome of a best-effort sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileIndexGcReport {
+    pub deleted: Vec<PathBuf>,
+    pub retry_pending: Vec<PathBuf>,
+}
+
+/// A cross-process liveness pin held while a reader, migration, or
+/// continuation needs immutable v2 artifacts.
+///
+/// `pin.json` is diagnostic/mark metadata. The sibling kernel-locked `.lock`
+/// file is the liveness source of truth, so process exit releases the pin even
+/// when its directory remains behind.
+pub struct FileIndexGcPin {
+    lock_file: Option<File>,
+    pin_dir: PathBuf,
+    setup_lock_path: PathBuf,
+}
+
+impl FileIndexGcPin {
+    pub fn acquire(
+        v2_root: &Path,
+        kind: FileIndexGcPinKind,
+        repo_hash: &str,
+        worktree_hash: Option<&str>,
+        protected_paths: Vec<PathBuf>,
+    ) -> Result<Self> {
+        let leases_root = v2_root.join(GC_LEASES_DIR);
+        fs::create_dir_all(&leases_root)?;
+        let setup_lock_path = leases_root.join(GC_LOCK_FILE);
+        let setup_lock = open_gc_lock(&setup_lock_path)?;
+        FileExt::lock_exclusive(&setup_lock).map_err(|error| {
+            GwtError::Other(format!(
+                "lock file-index GC lease registry {}: {error}",
+                setup_lock_path.display()
+            ))
+        })?;
+
+        let mut created_pin_dir = None;
+        let result = (|| {
+            let pin_id = uuid::Uuid::new_v4().to_string();
+            let pin_dir = leases_root.join(&pin_id);
+            fs::create_dir(&pin_dir)?;
+            created_pin_dir = Some(pin_dir.clone());
+            let lock_path = pin_dir.join(GC_LOCK_FILE);
+            let lock_file = open_gc_lock(&lock_path)?;
+            FileExt::lock_shared(&lock_file).map_err(|error| {
+                GwtError::Other(format!(
+                    "lock file-index GC pin {}: {error}",
+                    lock_path.display()
+                ))
+            })?;
+
+            let protected_paths = protected_paths
+                .iter()
+                .map(|path| relative_gc_path_to_wire(path))
+                .collect::<Result<Vec<_>>>()?;
+            let marker = FileIndexGcPinDescriptor::new(
+                pin_id,
+                kind,
+                repo_hash.to_string(),
+                worktree_hash.map(str::to_string),
+                protected_paths,
+                std::process::id(),
+                Utc::now().to_rfc3339(),
+            )
+            .map_err(|error| GwtError::Other(format!("create file-index GC pin: {error}")))?;
+            write_json_atomic(&pin_dir.join(GC_PIN_FILE), &marker)?;
+            Ok(Self {
+                lock_file: Some(lock_file),
+                pin_dir,
+                setup_lock_path: setup_lock_path.clone(),
+            })
+        })();
+
+        if result.is_err() {
+            if let Some(pin_dir) = created_pin_dir {
+                let _ = fs::remove_dir_all(pin_dir);
+            }
+        }
+        let _ = FileExt::unlock(&setup_lock);
+        result
+    }
+}
+
+impl Drop for FileIndexGcPin {
+    fn drop(&mut self) {
+        let setup_lock = open_gc_lock(&self.setup_lock_path).ok();
+        let setup_locked = setup_lock
+            .as_ref()
+            .is_some_and(|file| FileExt::lock_exclusive(file).is_ok());
+        if let Some(lock_file) = self.lock_file.take() {
+            let _ = FileExt::unlock(&lock_file);
+            drop(lock_file);
+        }
+        if setup_locked {
+            let _ = fs::remove_dir_all(&self.pin_dir);
+        }
+        if let Some(setup_lock) = setup_lock {
+            let _ = FileExt::unlock(&setup_lock);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorktreeGcGraceMarker {
+    schema_version: u32,
+    first_absent_unix_nanos: u64,
+}
+
+pub fn sweep_file_index_v2(options: &FileIndexGcOptions) -> Result<FileIndexGcReport> {
+    sweep_file_index_v2_with_remover(options, fs::remove_dir_all)
+}
+
+pub fn sweep_file_index_v2_with_remover<F>(
+    options: &FileIndexGcOptions,
+    remover: F,
+) -> Result<FileIndexGcReport>
+where
+    F: FnMut(PathBuf) -> io::Result<()>,
+{
+    sweep_file_index_v2_inner(options, remover)
+}
+
+fn sweep_file_index_v2_inner<F>(
+    options: &FileIndexGcOptions,
+    mut remover: F,
+) -> Result<FileIndexGcReport>
+where
+    F: FnMut(PathBuf) -> io::Result<()>,
+{
+    let v2_root = options
+        .index_root
+        .join(options.repo_hash.as_str())
+        .join(FILE_INDEX_V2_DIR);
+    if !v2_root.is_dir() {
+        return Ok(FileIndexGcReport::default());
+    }
+
+    let leases_root = v2_root.join(GC_LEASES_DIR);
+    fs::create_dir_all(&leases_root)?;
+    let setup_lock_path = leases_root.join(GC_LOCK_FILE);
+    let setup_lock = open_gc_lock(&setup_lock_path)?;
+    FileExt::lock_exclusive(&setup_lock).map_err(|error| {
+        GwtError::Other(format!(
+            "lock file-index GC lease registry {}: {error}",
+            setup_lock_path.display()
+        ))
+    })?;
+
+    let sweep_result = (|| {
+        let mut protected = HashSet::new();
+        let mut candidates = Vec::new();
+        collect_gc_pin_roots(
+            &v2_root,
+            options.repo_hash.as_str(),
+            &mut protected,
+            &mut candidates,
+        )?;
+        collect_worktree_roots(options, &v2_root, &mut protected, &mut candidates)?;
+        collect_expired_gc_artifacts(
+            &v2_root,
+            options.now_unix_nanos,
+            options.artifact_ttl,
+            &mut candidates,
+        )?;
+
+        candidates.sort_by(|left, right| {
+            left.components()
+                .count()
+                .cmp(&right.components().count())
+                .then_with(|| left.cmp(right))
+        });
+        candidates.dedup();
+
+        let mut report = FileIndexGcReport::default();
+        for candidate in candidates {
+            if !candidate.exists() || gc_paths_intersect(&candidate, &protected) {
+                continue;
+            }
+            match remover(candidate.clone()) {
+                Ok(()) => report.deleted.push(candidate),
+                Err(_) => report.retry_pending.push(candidate),
+            }
+        }
+        Ok(report)
+    })();
+
+    let _ = FileExt::unlock(&setup_lock);
+    sweep_result
+}
+
+fn open_gc_lock(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+}
+
+fn relative_gc_path_to_wire(path: &Path) -> Result<String> {
+    if path.is_absolute() {
+        return Err(GwtError::Other(format!(
+            "file-index GC pin path must be relative: {}",
+            path.display()
+        )));
+    }
+    let components = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| GwtError::Other("file-index GC pin path must be UTF-8".to_string())),
+            _ => Err(GwtError::Other(format!(
+                "file-index GC pin path is unsafe: {}",
+                path.display()
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if components.is_empty() {
+        return Err(GwtError::Other(
+            "file-index GC pin path must not be empty".to_string(),
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        GwtError::Other(format!(
+            "file-index GC path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("gc-json"),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|error| GwtError::Other(format!("serialize file-index GC JSON: {error}")))?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        sync_gc_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn sync_gc_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_gc_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn is_gc_lock_contended(error: &io::Error) -> bool {
+    crate::operation_deadline::is_lock_contended(error)
+}
+
+fn collect_gc_pin_roots(
+    v2_root: &Path,
+    expected_repo_hash: &str,
+    protected: &mut HashSet<PathBuf>,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let leases_root = v2_root.join(GC_LEASES_DIR);
+    let mut entries = fs::read_dir(&leases_root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if entry.file_name() == GC_LOCK_FILE || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let pin_dir = entry.path();
+        let lock_path = pin_dir.join(GC_LOCK_FILE);
+        let lock_file = open_gc_lock(&lock_path)?;
+        match FileExt::try_lock_exclusive(&lock_file) {
+            Ok(()) => {
+                let _ = FileExt::unlock(&lock_file);
+                drop(lock_file);
+                candidates.push(pin_dir);
+            }
+            Err(error) if is_gc_lock_contended(&error) => {
+                let marker_path = pin_dir.join(GC_PIN_FILE);
+                let marker_bytes = fs::read(&marker_path).map_err(|error| {
+                    GwtError::Other(format!(
+                        "read live file-index GC pin {}: {error}",
+                        marker_path.display()
+                    ))
+                })?;
+                let marker: FileIndexGcPinDescriptor = serde_json::from_slice(&marker_bytes)
+                    .map_err(|error| {
+                        GwtError::Other(format!(
+                            "invalid live file-index GC pin {}: {error}",
+                            marker_path.display()
+                        ))
+                    })?;
+                let directory_pin_id = entry.file_name().to_string_lossy().into_owned();
+                if marker.pin_id != directory_pin_id || marker.repo_hash != expected_repo_hash {
+                    return Err(GwtError::Other(format!(
+                        "file-index GC pin authority mismatch at {}",
+                        marker_path.display()
+                    )));
+                }
+                for relative in &marker.protected_paths {
+                    protected.insert(v2_root.join(relative));
+                }
+            }
+            Err(error) => {
+                return Err(GwtError::Other(format!(
+                    "probe file-index GC pin {}: {error}",
+                    lock_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_worktree_roots(
+    options: &FileIndexGcOptions,
+    v2_root: &Path,
+    protected: &mut HashSet<PathBuf>,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let worktrees_root = v2_root.join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Ok(());
+    }
+    let active = options
+        .active_worktree_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut entries = fs::read_dir(&worktrees_root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let worktree_root = entry.path();
+        let worktree_hash = entry.file_name().to_string_lossy().to_string();
+        let grace_marker_path = worktree_root.join(GC_ORPHAN_MARKER);
+        let retain_head_closure = if active.contains(worktree_hash.as_str()) {
+            if grace_marker_path.exists() {
+                fs::remove_file(&grace_marker_path)?;
+            }
+            true
+        } else {
+            let marker = if grace_marker_path.exists() {
+                let bytes = fs::read(&grace_marker_path)?;
+                let marker: WorktreeGcGraceMarker =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        GwtError::Other(format!(
+                            "invalid file-index worktree grace marker {}: {error}",
+                            grace_marker_path.display()
+                        ))
+                    })?;
+                if marker.schema_version != 1 {
+                    return Err(GwtError::Other(format!(
+                        "unsupported file-index worktree grace marker {}",
+                        grace_marker_path.display()
+                    )));
+                }
+                marker
+            } else {
+                let marker = WorktreeGcGraceMarker {
+                    schema_version: 1,
+                    first_absent_unix_nanos: options.now_unix_nanos,
+                };
+                write_json_atomic(&grace_marker_path, &marker)?;
+                marker
+            };
+            let elapsed = options
+                .now_unix_nanos
+                .saturating_sub(marker.first_absent_unix_nanos) as u128;
+            if elapsed > options.worktree_grace.as_nanos() {
+                candidates.push(worktree_root.clone());
+                false
+            } else {
+                true
+            }
+        };
+
+        if retain_head_closure {
+            collect_head_file_closure(
+                v2_root,
+                options.repo_hash.as_str(),
+                &worktree_hash,
+                &worktree_root.join("head.json"),
+                protected,
+            )?;
+            collect_head_file_closure(
+                v2_root,
+                options.repo_hash.as_str(),
+                &worktree_hash,
+                &worktree_root.join("head.previous.json"),
+                protected,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_head_file_closure(
+    v2_root: &Path,
+    expected_repo_hash: &str,
+    expected_worktree_hash: &str,
+    head_path: &Path,
+    protected: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    if !head_path.is_file() {
+        return Ok(());
+    }
+    let head_bytes = fs::read(head_path)?;
+    let head: WorktreeViewHead = serde_json::from_slice(&head_bytes).map_err(|error| {
+        GwtError::Other(format!(
+            "invalid file-index WorktreeView head {}: {error}",
+            head_path.display()
+        ))
+    })?;
+    let mut view_ids = vec![head.active_view_id];
+    if let Some(previous) = head.previous_view_id {
+        view_ids.push(previous);
+    }
+    for view_id in view_ids {
+        let view_dir = v2_root
+            .join("worktrees")
+            .join(expected_worktree_hash)
+            .join("views")
+            .join(&view_id);
+        let descriptor_path = view_dir.join("descriptor.json");
+        let descriptor_bytes = fs::read(&descriptor_path).map_err(|error| {
+            GwtError::Other(format!(
+                "read file-index WorktreeView descriptor {}: {error}",
+                descriptor_path.display()
+            ))
+        })?;
+        let descriptor: WorktreeViewDescriptor = serde_json::from_slice(&descriptor_bytes)
+            .map_err(|error| {
+                GwtError::Other(format!(
+                    "invalid file-index WorktreeView descriptor {}: {error}",
+                    descriptor_path.display()
+                ))
+            })?;
+        if descriptor.view_id != view_id
+            || descriptor.repo_hash != expected_repo_hash
+            || descriptor.worktree_hash != expected_worktree_hash
+        {
+            return Err(GwtError::Other(format!(
+                "file-index WorktreeView authority mismatch at {}",
+                descriptor_path.display()
+            )));
+        }
+        protected.insert(view_dir);
+        protected.insert(v2_root.join("bases").join(descriptor.base_generation_id));
+        protected.insert(
+            v2_root
+                .join("worktrees")
+                .join(expected_worktree_hash)
+                .join("overlays")
+                .join(descriptor.overlay_generation_id),
+        );
+    }
+    Ok(())
+}
+
+fn collect_expired_gc_artifacts(
+    root: &Path,
+    now_unix_nanos: u64,
+    ttl: Duration,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(created_at) = gc_artifact_created_at(&name) {
+            let elapsed = now_unix_nanos.saturating_sub(created_at) as u128;
+            if elapsed > ttl.as_nanos() {
+                candidates.push(path);
+                continue;
+            }
+        }
+        collect_expired_gc_artifacts(&path, now_unix_nanos, ttl, candidates)?;
+    }
+    Ok(())
+}
+
+fn gc_artifact_created_at(name: &str) -> Option<u64> {
+    if !name.starts_with('.') {
+        return None;
+    }
+    let (prefix_and_time, pid) = name.rsplit_once('-')?;
+    pid.parse::<u32>().ok()?;
+    let (prefix, created_at) = prefix_and_time.rsplit_once('-')?;
+    if !prefix.ends_with(".staging") && !prefix.ends_with(".quarantine") {
+        return None;
+    }
+    created_at.parse().ok()
+}
+
+fn gc_paths_intersect(candidate: &Path, protected: &HashSet<PathBuf>) -> bool {
+    protected
+        .iter()
+        .any(|root| candidate.starts_with(root) || root.starts_with(candidate))
+}
+
+// =====================================================================
 // refresh_issues_if_stale
 // =====================================================================
 
@@ -135,6 +697,107 @@ struct IssueMetadata {
     schema_version: u32,
     last_full_refresh: String,
     ttl_minutes: u64,
+    #[serde(default)]
+    document_count: u64,
+}
+
+/// Issues runners must terminate before their heavy lease expires.
+pub const ISSUE_INDEX_BUILD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+fn issue_store_exists(repo_dir: &Path) -> bool {
+    let generations = repo_dir.join("issues.gen");
+    let pointer = generations.join("active.json");
+    let store = if pointer.exists() {
+        let generation = fs::read(&pointer)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value.get("generation")?.as_str().map(str::to_owned));
+        let Some(generation) = generation else {
+            return false;
+        };
+        generations.join(generation)
+    } else {
+        repo_dir.join("issues")
+    };
+    store.join("chroma.sqlite3").is_file()
+}
+
+/// Source drift can reuse vectors, but a missing/inconsistent manifest cannot.
+pub fn issue_rebuild_mode(index_root: &Path, repo_hash: &str) -> &'static str {
+    let repo_dir = index_root.join(repo_hash);
+    let read = |path: &Path| -> Option<serde_json::Value> {
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    };
+    let valid = (|| {
+        let count = read(&repo_dir.join("issues/meta.json"))?
+            .get("document_count")?
+            .as_u64()?;
+        let manifest = read(&repo_dir.join("manifest-issues.json"))?;
+        let entries = manifest
+            .as_array()
+            .or_else(|| manifest.get("entries")?.as_array())?;
+        Some(
+            count > 0
+                && count == entries.len() as u64
+                && issue_store_exists(&repo_dir)
+                && entries.iter().all(|entry| {
+                    ["path", "content_hash"].iter().all(|key| {
+                        entry
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                    })
+                }),
+        )
+    })()
+    .unwrap_or(false);
+    if valid {
+        "incremental"
+    } else {
+        "full"
+    }
+}
+
+/// Run the issues child with the shared process-tree deadline enforcement.
+pub fn run_issue_index_command(
+    command: &std::process::Command,
+) -> io::Result<std::process::Output> {
+    use crate::process_console::{ProcessConsoleHub, ProcessKind, SpawnOptions};
+    let deadline = std::time::Instant::now() + ISSUE_INDEX_BUILD_TIMEOUT;
+    let deadline =
+        crate::operation_deadline::current().map_or(deadline, |outer| outer.min(deadline));
+    let mut options = SpawnOptions::new("project index rebuild issues").forward_output(false);
+    options.current_dir = command.get_current_dir().map(Path::to_path_buf);
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => options.envs.push((key.to_owned(), value.to_owned())),
+            None => options.remove_env.push(key.to_owned()),
+        }
+    }
+    let args: Vec<_> = command.get_args().collect();
+    let output = crate::process_console::spawn_logged_blocking_with_deadline(
+        &ProcessConsoleHub::new(),
+        ProcessKind::IndexRunner,
+        command.get_program(),
+        &args,
+        options,
+        deadline,
+    )?;
+    #[cfg(unix)]
+    let status = {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(output.exit_code.unwrap_or(1) << 8)
+    };
+    #[cfg(windows)]
+    let status = {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(output.exit_code.unwrap_or(1) as u32)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: output.stdout.into_bytes(),
+        stderr: output.stderr.into_bytes(),
+    })
 }
 
 /// Trait abstraction over the Python runner spawn so tests can substitute a
@@ -180,20 +843,25 @@ pub async fn refresh_issues_if_stale<S: RunnerSpawner + ?Sized>(
     let mut remaining_seconds: u64 = 0;
     let stale = if meta_path.is_file() {
         match read_issue_meta(&meta_path) {
-            Some(meta) => match DateTime::parse_from_rfc3339(&meta.last_full_refresh) {
-                Ok(dt) => {
-                    let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
-                    let age_std = age.to_std().unwrap_or(Duration::MAX);
-                    if age_std >= opts.ttl {
-                        true
-                    } else {
-                        remaining_seconds = (opts.ttl - age_std).as_secs();
-                        false
+            Some(meta)
+                if meta.document_count > 0
+                    && issues_dir.parent().is_some_and(issue_store_exists) =>
+            {
+                match DateTime::parse_from_rfc3339(&meta.last_full_refresh) {
+                    Ok(dt) => {
+                        let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+                        let age_std = age.to_std().unwrap_or(Duration::MAX);
+                        if age_std >= opts.ttl {
+                            true
+                        } else {
+                            remaining_seconds = (opts.ttl - age_std).as_secs();
+                            false
+                        }
                     }
+                    Err(_) => true,
                 }
-                Err(_) => true,
-            },
-            None => true,
+            }
+            _ => true,
         }
     } else {
         true
@@ -231,6 +899,9 @@ pub fn issue_index_refreshed_since(
     let Some(meta) = read_issue_meta(&meta_path) else {
         return false;
     };
+    if meta.document_count == 0 || !issue_store_exists(&index_root.join(repo_hash)) {
+        return false;
+    }
     let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
         return false;
     };
@@ -250,12 +921,30 @@ pub struct PythonRunnerSpawner {
     pub runner_script: PathBuf,
 }
 
-impl RunnerSpawner for PythonRunnerSpawner {
-    fn spawn_index_issues(
+impl PythonRunnerSpawner {
+    /// Spawn the detached issue index runner with an explicit coordinator
+    /// root. Tests use this seam to avoid sharing host-wide coordinator state.
+    pub fn spawn_index_issues_with_coordinator_root(
         &self,
         repo_hash: &str,
         project_root: &Path,
         respect_ttl: bool,
+        coordinator_root: &Path,
+    ) -> std::io::Result<()> {
+        self.spawn_index_issues_with_coordinator(
+            repo_hash,
+            project_root,
+            respect_ttl,
+            Some(coordinator_root.to_path_buf()),
+        )
+    }
+
+    fn spawn_index_issues_with_coordinator(
+        &self,
+        repo_hash: &str,
+        project_root: &Path,
+        respect_ttl: bool,
+        coordinator_root: Option<PathBuf>,
     ) -> std::io::Result<()> {
         // A missing venv python must surface synchronously to the caller;
         // once the job is detached behind the coordinator only logs would
@@ -316,8 +1005,27 @@ impl RunnerSpawner for PythonRunnerSpawner {
         let repo_hash = repo_hash.to_string();
         std::thread::Builder::new()
             .name("gwt-index-issues".to_string())
-            .spawn(move || run_coordinated_issue_index(&repo_hash, cmd, spawn_id, &label))
+            .spawn(move || {
+                run_coordinated_issue_index(
+                    &repo_hash,
+                    cmd,
+                    spawn_id,
+                    &label,
+                    coordinator_root.as_deref(),
+                );
+            })
             .map(|_| ())
+    }
+}
+
+impl RunnerSpawner for PythonRunnerSpawner {
+    fn spawn_index_issues(
+        &self,
+        repo_hash: &str,
+        project_root: &Path,
+        respect_ttl: bool,
+    ) -> std::io::Result<()> {
+        self.spawn_index_issues_with_coordinator(repo_hash, project_root, respect_ttl, None)
     }
 }
 
@@ -325,18 +1033,32 @@ impl RunnerSpawner for PythonRunnerSpawner {
 const ISSUE_INDEX_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 const ISSUE_INDEX_HEAVY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ISSUE_INDEX_SHARED_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Issue #4140: the longest this job may keep the host-wide heavy lease.
+///
+/// The runner used to hold it for its entire run — 30 minutes and more when a
+/// corrupt index forced a full rebuild — and every agent's `verify.run` was
+/// refused with `host busy` for that whole time. The cap is the backstop for
+/// claimants that never register (a raw `cargo test`); a claimant that does
+/// register is served within one [`ISSUE_INDEX_HEAVY_YIELD_POLL`] instead.
+const ISSUE_INDEX_HEAVY_MAX_HOLD: Duration = ISSUE_INDEX_BUILD_TIMEOUT;
+/// How fast the job notices a verification claimant queueing behind it.
+const ISSUE_INDEX_HEAVY_YIELD_POLL: Duration = Duration::from_millis(200);
 
 fn run_coordinated_issue_index(
     repo_hash: &str,
     mut cmd: std::process::Command,
     spawn_id: u64,
     label: &str,
+    coordinator_root: Option<&Path>,
 ) {
     use crate::index_coordinator::{
         IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
     };
 
-    let coordinator = match IndexCoordinator::open_default() {
+    let coordinator = match coordinator_root
+        .map(IndexCoordinator::open)
+        .unwrap_or_else(IndexCoordinator::open_default)
+    {
         Ok(coordinator) => coordinator,
         Err(err) => {
             tracing::warn!(
@@ -353,6 +1075,10 @@ fn run_coordinated_issue_index(
     let requested_at = Utc::now();
     match coordinator.request_job(&key, JobPriority::Background, ISSUE_INDEX_ADMISSION_TIMEOUT) {
         Ok(JobAdmission::Owner(guard)) => {
+            cmd.arg("--mode").arg(issue_rebuild_mode(
+                &crate::index::paths::gwt_index_root(),
+                repo_hash,
+            ));
             // FR-394 post-lock revalidation: skip the duplicate when an
             // equivalent refresh completed while we queued for the target.
             if issue_index_refreshed_since(
@@ -369,7 +1095,16 @@ fn run_coordinated_issue_index(
                 emit_issue_runner_end(spawn_id, label, true);
                 return;
             }
-            let heavy = match guard.acquire_heavy(ISSUE_INDEX_HEAVY_TIMEOUT) {
+            // The TTL is what makes the hold visible to everyone else: it is
+            // published in the heavy ticket, so `verify.lease.status` and the
+            // `verify.run` refusal can quote a real deadline instead of the
+            // `0s left` an untimed lease used to report (Issue #4140 AC-3).
+            // The cap stays the 10-minute one from #4140 rather than the
+            // generic `INDEX_HEAVY_LEASE_TTL`: this job is the holder that
+            // starved verification, so it gets the tighter bound.
+            let heavy = match guard
+                .acquire_heavy_with_ttl(ISSUE_INDEX_HEAVY_TIMEOUT, ISSUE_INDEX_HEAVY_MAX_HOLD)
+            {
                 Ok(heavy) => heavy,
                 Err(err) => {
                     tracing::warn!(
@@ -385,14 +1120,62 @@ fn run_coordinated_issue_index(
                     return;
                 }
             };
-            let outcome = match cmd.spawn().and_then(|child| child.wait_with_output()) {
-                Ok(output) if output.status.success() => JobOutcome::Completed,
+            // Drain the runner on a worker thread so this thread can keep
+            // watching the lease. `wait_with_output` has to own the child to
+            // pump both pipes, so polling it here instead would risk filling
+            // a pipe and deadlocking the very job we are timing.
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let runner_flag = std::sync::Arc::clone(&running);
+            let runner = std::thread::Builder::new()
+                .name("gwt-index-issues-runner".to_string())
+                .spawn(move || {
+                    let result = run_issue_index_command(&cmd);
+                    runner_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    result
+                });
+            let runner = match runner {
+                Ok(runner) => runner,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        error = %err,
+                        "issue index runner thread spawn failed"
+                    );
+                    drop(heavy);
+                    let _ = guard.complete(JobOutcome::Failed {
+                        message: err.to_string(),
+                    });
+                    emit_issue_runner_end(spawn_id, label, false);
+                    return;
+                }
+            };
+            if let Some(reason) = heavy.hold_while(ISSUE_INDEX_HEAVY_YIELD_POLL, || {
+                running.load(std::sync::atomic::Ordering::SeqCst)
+            }) {
+                // The runner keeps going without the lease: a background index
+                // rebuild must never be the reason an agent cannot verify.
+                tracing::info!(
+                    target: "gwt::index",
+                    spawn_id = spawn_id,
+                    reason = reason.as_str(),
+                    "issue index handed the host heavy lease back while still running"
+                );
+            }
+            let outcome = match runner.join().unwrap_or_else(|_| {
+                Err(std::io::Error::other("issue index runner thread panicked"))
+            }) {
+                Ok(output) if output.status.success() => {
+                    tracing::info!(target: "gwt::index", result = %String::from_utf8_lossy(&output.stdout), "issue index runner completed");
+                    JobOutcome::Completed
+                }
                 Ok(output) => {
                     tracing::warn!(
                         target: "gwt::index",
                         spawn_id = spawn_id,
                         exit_status = %output.status,
                         stderr = %String::from_utf8_lossy(&output.stderr),
+                        stdout = %String::from_utf8_lossy(&output.stdout),
                         "issue index runner failed"
                     );
                     JobOutcome::Failed {
@@ -411,7 +1194,6 @@ fn run_coordinated_issue_index(
                     }
                 }
             };
-            drop(heavy);
             let completed = matches!(outcome, JobOutcome::Completed);
             let _ = guard.complete(outcome);
             tracing::info!(
@@ -491,6 +1273,11 @@ mod tests {
     use super::*;
     use crate::repo_hash::compute_repo_hash;
 
+    #[test]
+    fn gc_recognizes_the_platform_lock_contention_error() {
+        assert!(is_gc_lock_contended(&fs2::lock_contended_error()));
+    }
+
     #[derive(Default, Clone)]
     struct RecordingSpawner {
         calls: Arc<Mutex<Vec<String>>>,
@@ -557,5 +1344,31 @@ mod tests {
         };
         reconcile_repo(&opts).unwrap();
         assert!(!orphan.exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_skip_an_empty_issue_index_within_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = compute_repo_hash("https://github.com/example/empty-issues.git");
+        let issues = tmp.path().join(repo.as_str()).join("issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        std::fs::write(
+            issues.join("meta.json"),
+            serde_json::json!({"schema_version": 2, "ttl_minutes": 15, "last_full_refresh": Utc::now().to_rfc3339(), "document_count": 0}).to_string(),
+        ).unwrap();
+        let spawner = RecordingSpawner::default();
+        let result = refresh_issues_if_stale(
+            &RefreshIssuesOptions {
+                index_root: tmp.path().to_path_buf(),
+                repo_hash: repo,
+                project_root: tmp.path().to_path_buf(),
+                ttl: Duration::from_secs(900),
+            },
+            &spawner,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RefreshDecision::Spawned);
+        assert_eq!(spawner.calls.lock().unwrap().len(), 1);
     }
 }
