@@ -98,7 +98,10 @@ fitting owner. Creating a new SPEC is the last resort, decided through
    changes), `n/a` (no user-visible surface), or `n/a (autonomous)` (an
    unattended gwt Issue Monitor launch, where the handoff is waived and
    `Agent Visual Check: pass` covers any UI surface). Never open a Ready PR on
-   a `pending` verification. For code-changing direct fixes, PR handoff is part
+   a `pending` verification, and never on
+   `deferred (autonomous execution)` — that value means the owner's visual
+   check is still outstanding, so the PR stays Draft and gwt refuses to mark it
+   Ready. For code-changing direct fixes, PR handoff is part
    of completion: a commit hash, branch push, and closure comment are
    push-only evidence, not completion. If no PR URL or PR number exists yet,
    report `PR handoff pending` or `blocked(<reason>)` and keep working through

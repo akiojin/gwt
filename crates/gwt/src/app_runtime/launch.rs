@@ -1849,6 +1849,10 @@ pub(super) fn launch_config_from_persisted_session(
         builder = builder.tool_runtime_provenance(provenance);
     }
     builder = builder.tool_runtime_source_session_id(session.id.clone());
+    // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
+    // originally stamped, so a restored or resumed monitor launch does not
+    // quietly become a human-driven one.
+    builder = builder.launch_route(session.launch_route);
 
     // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
     // any structured `Session` field, so rebuilding a config here used to drop
@@ -4765,6 +4769,7 @@ impl AppRuntime {
             session.docker_service = config.docker_service.clone();
             session.docker_lifecycle_intent = config.docker_lifecycle_intent;
             session.linked_issue_number = config.linked_issue_number;
+            session.launch_route = config.launch_route;
             session.launch_command =
                 durable_tool_runtime_command.unwrap_or_else(|| config.command.clone());
             session.launch_args = config.args.clone();
