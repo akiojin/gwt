@@ -12586,14 +12586,21 @@ exit 1
             "a worker that never established its fence must not create one outside the prefs lock"
         );
 
-        let replacement = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: only the first worker tests an exhausted prefs budget.
+        // After unlocking, establish the replacement independently of that
+        // budget so a retry-pending load cannot masquerade as successful startup.
+        let replacement = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
         assert!(
             !replacement.recovery_blocked,
             "replacement establishes the first lifetime fence after the lock is released"
         );
+        assert!(replacement.authority_lease.is_some());
         let replayed = crate::load_issue_monitor_prefs(&prefs_path).expect("reload replayed prefs");
         assert_eq!(replayed.effect_authority_epoch, 7);
         assert_eq!(
@@ -12684,12 +12691,18 @@ exit 1
         )
         .expect("seed prefs");
 
-        let loaded = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: this test requires a committed fence, not a timed-out
+        // attempt that returns non-blocked with no authority lease.
+        let loaded = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
         assert!(!loaded.recovery_blocked);
+        assert!(loaded.authority_lease.is_some());
         let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
         let fence: serde_json::Value =
             serde_json::from_slice(&fs::read(&marker).expect("read active fence"))
@@ -13194,11 +13207,18 @@ exit 1
         )
         .expect("seed prefs");
 
-        let first = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: overlap requires the first load to own authority.
+        // Scope the success budget to each owner load, leaving the contended
+        // overlap attempt on its own budget.
+        let first = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
         assert!(!first.recovery_blocked);
+        assert!(first.authority_lease.is_some());
 
         let overlap = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
@@ -13213,11 +13233,15 @@ exit 1
         );
 
         drop(first);
-        let replacement = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        let replacement = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
         assert!(!replacement.recovery_blocked);
+        assert!(replacement.authority_lease.is_some());
         assert_eq!(
             replacement.monitor.effect_authority_epoch(),
             8,
@@ -13566,12 +13590,18 @@ exit 1
         super::persist_issue_monitor_shutdown_revoke_marker(&prefs_path)
             .expect("persist shutdown marker");
 
-        let loaded = super::load_issue_monitor_state_for_daemon(
-            &prefs_path,
-            crate::IssueMonitorConfig::default(),
-        );
+        // Issue #4199: revocation and compensation must commit before their
+        // contents are asserted; a retained fence after timeout proves neither.
+        let loaded = {
+            let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+            super::load_issue_monitor_state_for_daemon(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+            )
+        };
 
         assert!(!loaded.recovery_blocked);
+        assert!(loaded.authority_lease.is_some());
         let replayed = crate::load_issue_monitor_prefs(&prefs_path).expect("reload replayed prefs");
         assert_eq!(replayed.effect_authority_epoch, 8);
         assert!(replayed.pending_effects.iter().any(|effect| matches!(
