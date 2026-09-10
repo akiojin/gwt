@@ -3432,8 +3432,16 @@ def _materialize_file_artifact_pair(
                 # a batch that actually loaded the model can yield — a batch
                 # served entirely from the CAS did no heavy work, and yielding
                 # on it would let a resumed build spin without progressing.
+                # The final Base batch also has work remaining when an Overlay
+                # follows; the quantum spans the whole build, not one artifact.
                 if (
-                    stop < len(records)
+                    (
+                        stop < len(records)
+                        or (
+                            progress_total is not None
+                            and progress_offset + stop < progress_total
+                        )
+                    )
                     and batch_computed > 0
                     and qos == "background"
                     and _pending_higher_priority("background")

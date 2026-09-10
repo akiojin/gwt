@@ -360,6 +360,66 @@ fn search_multi_runs_under_an_interactive_heavy_lease() {
 }
 
 #[test]
+fn search_heavy_admission_failure_does_not_spawn_a_runner() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = setup_search_fixture(r#"{"ok": true}"#);
+    gwt_core::runtime::ensure_project_index_runtime().expect("prime runtime");
+    fs::create_dir_all(gwt_core::index_coordinator::coordinator_root().join("heavy.lock"))
+        .expect("make the heavy lock unavailable");
+
+    let error = gwt::search_project_index(
+        &fixture.repo,
+        "unavailable heavy lease",
+        &[IndexSearchScope::Issues],
+        None,
+        IndexSearchMatchMode::Semantic,
+        false,
+    )
+    .expect_err("model work must not run without its heavy lease");
+
+    assert_safe_public_unavailable(&error);
+    assert!(search_invocations(&fixture.runner_log).is_empty());
+}
+
+#[test]
+fn search_heavy_admission_respects_the_remaining_attempt_deadline() {
+    use gwt_core::index_coordinator::{IndexCoordinator, TargetKey};
+
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = setup_search_fixture(r#"{"ok": true}"#);
+    gwt_core::runtime::ensure_project_index_runtime().expect("prime runtime");
+    let coordinator = IndexCoordinator::open_default().expect("coordinator");
+    let _holder = coordinator
+        .acquire_interactive_search_heavy(
+            &TargetKey::search("other-repo", None),
+            Duration::from_secs(1),
+        )
+        .expect("hold the model slot");
+    let started = Instant::now();
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        started + Duration::from_secs(2),
+    );
+
+    let error = gwt::search_project_index(
+        &fixture.repo,
+        "contended heavy lease",
+        &[IndexSearchScope::Issues],
+        None,
+        IndexSearchMatchMode::Semantic,
+        false,
+    )
+    .expect_err("a contended model slot must respect the attempt deadline");
+
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_safe_public_unavailable(&error);
+    assert!(search_invocations(&fixture.runner_log).is_empty());
+}
+
+#[test]
 fn mixed_batch_selects_file_view_and_preserves_public_result_shape() {
     let _env_lock = env_lock()
         .lock()

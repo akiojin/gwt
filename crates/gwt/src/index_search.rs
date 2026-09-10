@@ -925,37 +925,32 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
 
 /// Claim the host-wide heavy lease for one query encode (FR-417).
 ///
-/// Fails open on purpose: the lease governs how much model work runs at
-/// once, and a coordinator that is unreachable — or a holder that overruns
-/// [`INTERACTIVE_SEARCH_ADMISSION_DEADLINE`] — must degrade the guarantee,
-/// never the user's search. A well-behaved background build yields at its
-/// next checkpoint, so the normal path is a fast handover rather than a wait.
+/// Admission shares the search attempt's absolute deadline. If the slot is
+/// unavailable, return the existing retryable error without starting model
+/// work alongside the current holder.
 fn acquire_search_heavy_lease(
     repo_hash: &str,
     worktree_hash: Option<&str>,
-) -> Option<gwt_core::index_coordinator::HeavyLease> {
+) -> Result<gwt_core::index_coordinator::HeavyLease, IndexSearchAttemptError> {
+    let deadline = gwt_core::operation_deadline::ensure_remaining("search heavy admission")
+        .map_err(|_| search_unavailable_error("search admission deadline expired"))?;
+    let timeout = deadline.map_or(INTERACTIVE_SEARCH_ADMISSION_DEADLINE, |deadline| {
+        INTERACTIVE_SEARCH_ADMISSION_DEADLINE
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
     let coordinator = IndexCoordinator::open_default()
-        .inspect_err(|error| {
-            tracing::debug!(
-                target: "gwt::index",
-                %error,
-                "search proceeding without the heavy lease: coordinator unavailable"
-            );
-        })
-        .ok()?;
+        .map_err(|_| search_unavailable_error("search coordinator unavailable"))?;
     let key = TargetKey::search(repo_hash, worktree_hash);
-    match coordinator.acquire_interactive_search_heavy(&key, INTERACTIVE_SEARCH_ADMISSION_DEADLINE)
-    {
-        Ok(lease) => Some(lease),
-        Err(error) => {
+    coordinator
+        .acquire_interactive_search_heavy(&key, timeout)
+        .map_err(|error| {
             tracing::debug!(
                 target: "gwt::index",
                 %error,
-                "search proceeding without the heavy lease: admission deadline lapsed"
+                "search heavy admission failed"
             );
-            None
-        }
-    }
+            search_unavailable_error("search heavy lease unavailable")
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -982,7 +977,7 @@ fn run_batch_scope_search(
     // host-wide heavy lease — not an exception to it. Registering as a
     // pending interactive claimant is also what makes a running background
     // build hand the lease back at its next 16-document checkpoint.
-    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash);
+    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash)?;
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
     // forwarding, one hard deadline, and full process-tree termination and

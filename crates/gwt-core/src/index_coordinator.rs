@@ -14,6 +14,8 @@
 //! process is detected by `try_lock_exclusive` succeeding on its file. This
 //! makes PID reuse (FR-383) harmless by design.
 
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -55,6 +57,13 @@ pub const INTERACTIVE_SEARCH_HEAVY_TTL: Duration = Duration::from_secs(60);
 /// starve background index work indefinitely, because interactive claimants
 /// never defer.
 pub const MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS: u32 = 8;
+/// Issue #4169: how long a target keeps its place in the heavy queue after its
+/// claimant stopped waiting. `verify.run` caps one in-process wait at 1500s and
+/// answers `deferred`; the agent then reruns, and the rerun has to resume the
+/// place the first attempt earned instead of joining at the back. Sized to
+/// cover that gap — the gwt-verify retry cadence is 3 minutes — without letting
+/// a worktree that walked away hold a place for the rest of the day.
+pub const HEAVY_QUEUE_POSITION_TTL: Duration = Duration::from_secs(10 * 60);
 const HEAVY_PROGRESS_FILE: &str = "heavy.progress.json";
 const INTERACTIVE_BURST_FILE: &str = "heavy.burst.json";
 const RESERVATION_PREFIX: &str = "reservation-";
@@ -320,6 +329,8 @@ pub struct HeavyLeaseStatus {
     pub expired: bool,
     /// Live claimants queued behind the current holder, reservations included.
     pub pending: usize,
+    /// Issue #4169 AC-2: those claimants in the order they will be served.
+    pub queue: Vec<HeavyQueueEntry>,
     /// Issue #4086 AC-4: what kind of job holds the lease.
     pub holder_kind: Option<HeavyHolderKind>,
     /// Index holders only: batches left according to the runner's progress.
@@ -377,6 +388,112 @@ struct Registration {
     reserved_until_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Issue #4169: which target this claimant speaks for. The queue is
+    /// ordered per target, not per attempt, so the same worktree retrying is
+    /// one place in line rather than a new one each time. `None` on payloads
+    /// written by older versions and on target-job waiter registrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    /// Issue #4169: when this target first joined the heavy queue, carried
+    /// forward across attempts. Ordering uses this, never `registered_at_ms`,
+    /// which restarts on every attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued_at_ms: Option<u64>,
+    /// Issue #4169: how long the remembered place outlives the attempt that
+    /// earned it. A remembered place never holds anybody up — it only decides
+    /// where its own target rejoins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position_until_ms: Option<u64>,
+}
+
+impl Registration {
+    /// When this target joined the queue. Payloads written before Issue #4169
+    /// only know when their attempt started, which is the same thing for a
+    /// claimant that never retried.
+    fn queued_at(&self) -> u64 {
+        self.queued_at_ms.unwrap_or(self.registered_at_ms)
+    }
+
+    /// Issue #4086: this claimant still holds a turn between its retries, with
+    /// no process of its own behind it.
+    fn has_live_reservation(&self, now: u64) -> bool {
+        self.reserved_until_ms.is_some_and(|at| at > now)
+    }
+
+    /// Anything still worth keeping on disk: a live reservation, or a place
+    /// this target may still come back for.
+    fn outlives(&self, now: u64) -> bool {
+        [self.reserved_until_ms, self.position_until_ms]
+            .into_iter()
+            .flatten()
+            .any(|at| at > now)
+    }
+}
+
+/// One claimant queued for the host-wide heavy lease (Issue #4169 AC-2).
+/// `pending` only ever said how many were waiting; an agent deciding whether
+/// to keep waiting needs to know who is in front of it and for how long.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyQueueEntry {
+    /// Coordinator target stem of the claimant, e.g. `repo--verification--wt`.
+    /// `None` for a registration written before Issue #4169.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub priority: JobPriority,
+    /// When this target joined the queue, preserved across its retries.
+    pub queued_at_ms: u64,
+    /// How long it has been queued, as of the snapshot.
+    pub waiting_ms: u64,
+}
+
+/// A claimant as the queue sees it, before it is published.
+#[derive(Debug, Clone)]
+struct QueueRecord {
+    target: Option<String>,
+    priority: JobPriority,
+    queued_at_ms: u64,
+    /// This claimant wants a turn: a process is polling for it, or a
+    /// reservation (Issue #4086) stands in for it between retries. A record
+    /// that is not waiting only remembers a place.
+    waiting: bool,
+    /// A process is polling for the lease right now.
+    present: bool,
+}
+
+impl QueueRecord {
+    /// Service order: priority first, then arrival, then target so the answer
+    /// is total and every claimant computes the same one.
+    fn rank(&self) -> (JobPriority, u64, Option<&str>) {
+        (self.priority, self.queued_at_ms, self.target.as_deref())
+    }
+
+    /// Whether `me` has to leave a free lease alone because of this claimant.
+    ///
+    /// A reservation blocks only what it outranks outright (Issue #4086: a
+    /// background index job must not slip between a verification claimant's
+    /// retries). Among equals the queue decides, and only against a claimant
+    /// that is actually polling: holding a free lease for a reserved place
+    /// nobody is standing on would trade one worktree's starvation for the
+    /// whole host's. A returning claimant still finds its place — it takes the
+    /// next turn, not an idle host.
+    fn blocks(&self, me: &QueueRecord) -> bool {
+        if !self.waiting {
+            return false;
+        }
+        if self.priority < me.priority {
+            return true;
+        }
+        self.present && self.rank().cmp(&me.rank()) == Ordering::Less
+    }
+
+    fn published(&self, now: u64) -> HeavyQueueEntry {
+        HeavyQueueEntry {
+            target: self.target.clone(),
+            priority: self.priority,
+            queued_at_ms: self.queued_at_ms,
+            waiting_ms: now.saturating_sub(self.queued_at_ms),
+        }
+    }
 }
 
 /// Who holds the host-wide heavy lease (Issue #4086 AC-4), derived from the
@@ -584,6 +701,11 @@ impl IndexCoordinator {
                         registered_at_ms: now_ms(),
                         reserved_until_ms: None,
                         reason: None,
+                        // A target-job waiter queues for one target's build,
+                        // not for the host-wide heavy lease.
+                        target: None,
+                        queued_at_ms: None,
+                        position_until_ms: None,
                     };
                     {
                         let mut handle = &waiter_file;
@@ -615,9 +737,7 @@ impl IndexCoordinator {
     /// is waiting for the heavy lease (FR-389: background claimants must not
     /// re-acquire while higher-priority tickets remain).
     pub fn pending_higher_priority(&self, than: JobPriority) -> Result<bool, CoordinatorError> {
-        Ok(scan_live_pending(&self.heavy_pending_dir())?
-            .into_iter()
-            .any(|priority| priority < than))
+        waiting_above(&self.heavy_pending_dir(), than)
     }
 
     /// Snapshot the host-wide heavy lease without joining the queue
@@ -625,13 +745,15 @@ impl IndexCoordinator {
     /// whether the lease is held, so a ticket left behind by a crashed holder
     /// reads as free.
     pub fn heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
-        let pending = scan_live_pending(&self.heavy_pending_dir())?.len();
+        let queue = published_heavy_queue(&self.heavy_pending_dir())?;
+        let pending = queue.len();
         let probe = open_lock_file(&self.heavy_lock_path())?;
         match fs2::FileExt::try_lock_exclusive(&probe) {
             Ok(()) => {
                 let _ = fs2::FileExt::unlock(&probe);
                 return Ok(HeavyLeaseStatus {
                     pending,
+                    queue,
                     ..HeavyLeaseStatus::default()
                 });
             }
@@ -642,6 +764,7 @@ impl IndexCoordinator {
             return Ok(HeavyLeaseStatus {
                 held: true,
                 pending,
+                queue,
                 ..HeavyLeaseStatus::default()
             });
         };
@@ -675,6 +798,7 @@ impl IndexCoordinator {
             remaining_ms,
             expired: ticket.expires_at_ms.is_some_and(|at| now >= at),
             pending,
+            queue,
             holder_kind: Some(holder_kind),
             remaining_batches,
             estimated_remaining_ms,
@@ -716,8 +840,7 @@ impl IndexCoordinator {
     /// Reservation file for `key` under `heavy.pending/` (Issue #4086). One
     /// per claimant target, so a retry refreshes rather than duplicates it.
     pub fn heavy_reservation_path(&self, key: &TargetKey) -> PathBuf {
-        self.heavy_pending_dir()
-            .join(format!("{RESERVATION_PREFIX}{}.json", key.file_stem()))
+        heavy_queue_entry_path(&self.heavy_pending_dir(), &key.file_stem())
     }
 
     /// Leave a durable pending claim for `key` (Issue #4086 AC-1). Unlike a
@@ -732,15 +855,16 @@ impl IndexCoordinator {
         reason: Option<&str>,
     ) -> Result<HeavyReservation, CoordinatorError> {
         let expires_at_ms = now_ms().saturating_add(ttl.as_millis() as u64);
-        let registration = Registration {
-            schema_version: COORDINATOR_SCHEMA_VERSION,
-            owner: OwnerIdentity::current(),
-            priority,
-            registered_at_ms: now_ms(),
-            reserved_until_ms: Some(expires_at_ms),
-            reason: reason.map(str::to_string),
-        };
-        write_json_atomic(&self.heavy_reservation_path(key), &registration)?;
+        let path = self.heavy_reservation_path(key);
+        // Issue #4169: reserving is the same claimant coming back, so it keeps
+        // the place its earlier attempt earned rather than rejoining at the
+        // back. Reserving never opens a remembered place of its own — that is
+        // the enrolling claimant's business — so a reservation with nothing
+        // behind it still lapses the moment its own TTL does.
+        let mut registration = heavy_queue_entry(&path, &key.file_stem(), priority);
+        registration.reserved_until_ms = Some(expires_at_ms);
+        registration.reason = reason.map(str::to_string).or(registration.reason);
+        write_json_atomic(&path, &registration)?;
         Ok(HeavyReservation {
             target: key.file_stem(),
             priority,
@@ -897,6 +1021,17 @@ fn acquire_heavy_at(
 ) -> Result<HeavyLease, CoordinatorError> {
     let pending_dir = root.join("heavy.pending");
     fs::create_dir_all(&pending_dir)?;
+    // Preserve the target's FIFO position across deferred attempts (#4169).
+    // Enrollment precedes the lock probe so a newcomer cannot skip the queue.
+    let target = key.file_stem();
+    let queued_at_ms = enroll_in_heavy_queue(&pending_dir, &target, priority);
+    let me = QueueRecord {
+        target: Some(target.clone()),
+        priority,
+        queued_at_ms,
+        waiting: true,
+        present: true,
+    };
     let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
     let pending_file = open_lock_file(&pending_path)?;
     let registration = Registration {
@@ -906,6 +1041,9 @@ fn acquire_heavy_at(
         registered_at_ms: now_ms(),
         reserved_until_ms: None,
         reason: None,
+        target: Some(target.clone()),
+        queued_at_ms: Some(queued_at_ms),
+        position_until_ms: None,
     };
     // Payload first, liveness lock second — see the waiter registration
     // above for why a Windows shared lock cannot come first.
@@ -930,38 +1068,38 @@ fn acquire_heavy_at(
         }
     };
     loop {
-        // `scan_live_pending_excluding` still reports the excluded caller's
-        // own registration, so both arms must be phrased against a *strict*
-        // priority comparison — a claimant is never strictly higher or lower
-        // priority than itself.
-        let live = scan_live_pending_excluding(&pending_dir, &pending_path).unwrap_or_default();
-        // Both arms read the same budget, and they must: a spent burst has to
-        // stand the search aside AND stop the queued background claimant from
-        // deferring right back to it. Deferring on only one side livelocks —
-        // the search waits for the build, the build waits for the search, and
-        // the lease sits free until both time out.
+        let queued = heavy_queue(&pending_dir).unwrap_or_default();
+        // Both sides apply the burst exception: the search stands aside and
+        // lower-priority work stops deferring to it. Equal-priority claimants
+        // still follow the FIFO/reservation rules from #4169.
         let burst_spent = read_interactive_burst(root) >= MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
-        let must_defer = if priority == JobPriority::InteractiveSearch {
-            // The cap exists to stop a stream of searches from starving
-            // lower-priority work, so only lower-priority claimants collect
-            // on it. Another queued search would gain nothing from this one
-            // standing aside.
-            burst_spent
-                && live
-                    .iter()
-                    .any(|pending| *pending > JobPriority::InteractiveSearch)
-        } else {
-            live.iter().any(|pending| {
-                *pending < priority && !(burst_spent && *pending == JobPriority::InteractiveSearch)
-            })
-        };
+        let must_defer = queued.iter().any(|other| {
+            if other.target == me.target {
+                return false;
+            }
+            if burst_spent {
+                if priority == JobPriority::InteractiveSearch
+                    && other.priority > JobPriority::InteractiveSearch
+                {
+                    // The burst grants an actual waiter a turn; an absent
+                    // reservation must not leave an otherwise idle host stuck.
+                    return other.present;
+                }
+                if priority != JobPriority::InteractiveSearch
+                    && other.priority == JobPriority::InteractiveSearch
+                {
+                    return false;
+                }
+            }
+            other.blocks(&me)
+        });
         if !must_defer {
             match fs2::FileExt::try_lock_exclusive(&heavy_file) {
                 Ok(()) => {
                     let acquired_at_ms = now_ms();
                     let ticket = Ticket {
                         schema_version: COORDINATOR_SCHEMA_VERSION,
-                        target: key.file_stem(),
+                        target: target.clone(),
                         priority,
                         owner: OwnerIdentity::current(),
                         acquired_at_ms,
@@ -971,11 +1109,9 @@ fn acquire_heavy_at(
                     };
                     let _ = write_json_atomic(&root.join("heavy.ticket.json"), &ticket);
                     cleanup_pending(pending_file, &pending_path);
-                    // The grant consumes the claimant's own reservation
-                    // (Issue #4086): its turn has come.
-                    let _ = fs::remove_file(
-                        pending_dir.join(format!("{RESERVATION_PREFIX}{}.json", key.file_stem())),
-                    );
+                    // Consume both the reservation (#4086) and remembered
+                    // queue position (#4169) once the claimant gets its turn.
+                    let _ = fs::remove_file(heavy_queue_entry_path(&pending_dir, &target));
                     record_interactive_burst_grant(root, priority);
                     let lease = HeavyLease {
                         _lock_file: heavy_file,
@@ -999,6 +1135,8 @@ fn acquire_heavy_at(
             }
         }
         if started.elapsed() >= timeout {
+            // A deferred retry resumes its existing place in the queue.
+            let _ = enroll_in_heavy_queue(&pending_dir, &target, priority);
             cleanup_pending(pending_file, &pending_path);
             return Err(CoordinatorError::Timeout {
                 waited_ms: started.elapsed().as_millis() as u64,
@@ -1147,11 +1285,7 @@ impl HeavyLease {
             if self.is_expired() {
                 return Some(HeavyYieldReason::CapReached);
             }
-            if scan_live_pending(&pending_dir)
-                .unwrap_or_default()
-                .into_iter()
-                .any(|pending| pending < priority)
-            {
+            if waiting_above(&pending_dir, priority).unwrap_or(false) {
                 return Some(HeavyYieldReason::Preempted);
             }
             std::thread::sleep(poll);
@@ -1378,40 +1512,127 @@ fn append_lease_event(root: &Path, event: &LeaseEvent) {
     let _ = fs2::FileExt::unlock(&file);
 }
 
-/// Scan a registration dir, sweep stale entries (their shared lock is gone,
-/// so `try_lock_exclusive` succeeds), and return the live priorities.
-fn scan_live_pending(dir: &Path) -> Result<Vec<JobPriority>, CoordinatorError> {
-    Ok(sweep_live_registrations(dir)?
-        .into_iter()
-        .filter_map(|registration| registration.map(|r| r.priority))
+/// Path of a target's heavy queue entry: one file per claimant target, so a
+/// retry refreshes the same place instead of adding another one.
+fn heavy_queue_entry_path(dir: &Path, target: &str) -> PathBuf {
+    dir.join(format!("{RESERVATION_PREFIX}{target}.json"))
+}
+
+/// This target's queue entry, or a fresh one. An entry that outlived both its
+/// windows is residue, so a place is never revived from a claimant that walked
+/// away long ago.
+fn heavy_queue_entry(path: &Path, target: &str, priority: JobPriority) -> Registration {
+    let now = now_ms();
+    let existing = read_registration(path).filter(|entry| entry.outlives(now));
+    Registration {
+        schema_version: COORDINATOR_SCHEMA_VERSION,
+        owner: OwnerIdentity::current(),
+        priority,
+        registered_at_ms: now,
+        reserved_until_ms: existing.as_ref().and_then(|entry| entry.reserved_until_ms),
+        reason: existing.as_ref().and_then(|entry| entry.reason.clone()),
+        target: Some(target.to_string()),
+        queued_at_ms: Some(existing.as_ref().map_or(now, Registration::queued_at)),
+        position_until_ms: existing.as_ref().and_then(|entry| entry.position_until_ms),
+    }
+}
+
+/// Join the heavy queue for `target` (Issue #4169) and answer with the arrival
+/// time every claimant orders by. Joining twice keeps the first arrival: the
+/// queue is per target, so a `deferred` rerun continues where it left off.
+fn enroll_in_heavy_queue(dir: &Path, target: &str, priority: JobPriority) -> u64 {
+    let path = heavy_queue_entry_path(dir, target);
+    let mut entry = heavy_queue_entry(&path, target, priority);
+    entry.position_until_ms =
+        Some(now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
+    let queued_at_ms = entry.queued_at();
+    let _ = write_json_atomic(&path, &entry);
+    queued_at_ms
+}
+
+/// The heavy queue in service order, one record per claimant target.
+fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
+    let now = now_ms();
+    let mut by_target: BTreeMap<String, QueueRecord> = BTreeMap::new();
+    let mut untargeted: Vec<QueueRecord> = Vec::new();
+    for live in sweep_live_registrations(dir)? {
+        let Some(registration) = live.registration else {
+            // A locked file nobody can parse is still a claimant; it just
+            // cannot say who it is, so it takes the lowest standing.
+            untargeted.push(QueueRecord {
+                target: None,
+                priority: JobPriority::Background,
+                queued_at_ms: now,
+                waiting: true,
+                present: true,
+            });
+            continue;
+        };
+        let record = QueueRecord {
+            target: registration.target.clone(),
+            priority: registration.priority,
+            queued_at_ms: registration.queued_at(),
+            waiting: live.locked || registration.has_live_reservation(now),
+            present: live.locked,
+        };
+        match record.target.clone() {
+            // The same target can show up twice — its own attempt and the
+            // entry that remembers its place — and that is one claimant.
+            Some(target) => {
+                by_target
+                    .entry(target)
+                    .and_modify(|kept| {
+                        kept.queued_at_ms = kept.queued_at_ms.min(record.queued_at_ms);
+                        kept.priority = kept.priority.min(record.priority);
+                        kept.waiting |= record.waiting;
+                        kept.present |= record.present;
+                    })
+                    .or_insert(record);
+            }
+            None => untargeted.push(record),
+        }
+    }
+    let mut queue: Vec<QueueRecord> = by_target.into_values().chain(untargeted).collect();
+    queue.sort_by(|left, right| left.rank().cmp(&right.rank()));
+    Ok(queue)
+}
+
+/// The claimants actually waiting for a turn, as published in status output.
+fn published_heavy_queue(dir: &Path) -> Result<Vec<HeavyQueueEntry>, CoordinatorError> {
+    let now = now_ms();
+    Ok(heavy_queue(dir)?
+        .iter()
+        .filter(|record| record.waiting)
+        .map(|record| record.published(now))
         .collect())
 }
 
-fn scan_live_pending_excluding(
-    dir: &Path,
-    exclude: &Path,
-) -> Result<Vec<JobPriority>, CoordinatorError> {
-    Ok(sweep_live_registrations_excluding(dir, Some(exclude))?
-        .into_iter()
-        .filter_map(|registration| registration.map(|r| r.priority))
-        .collect())
+/// True when a live claimant of strictly higher priority than `than` waits.
+fn waiting_above(dir: &Path, than: JobPriority) -> Result<bool, CoordinatorError> {
+    Ok(heavy_queue(dir)?
+        .iter()
+        .any(|record| record.waiting && record.priority < than))
 }
 
-/// Returns one entry per live registration file (parse failures yield
-/// `None` entries so callers can still count liveness).
-fn sweep_live_registrations(dir: &Path) -> Result<Vec<Option<Registration>>, CoordinatorError> {
-    sweep_live_registrations_excluding(dir, None)
+/// One registration file that survived the sweep.
+struct LiveRegistration {
+    /// `None` when the payload could not be parsed.
+    registration: Option<Registration>,
+    /// A process holds the kernel shared lock on this file right now.
+    locked: bool,
 }
 
-fn sweep_live_registrations_excluding(
-    dir: &Path,
-    exclude: Option<&Path>,
-) -> Result<Vec<Option<Registration>>, CoordinatorError> {
+/// Scan a registration dir, sweep entries nothing keeps alive, and return what
+/// remains. Liveness is the kernel shared lock its claimant holds, or — for a
+/// heavy queue entry, which has no process behind it by design — a window that
+/// has not lapsed.
+fn sweep_live_registrations(dir: &Path) -> Result<Vec<LiveRegistration>, CoordinatorError> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(CoordinatorError::Io(err)),
     };
+    let now = now_ms();
     let mut live = Vec::new();
     for entry in entries {
         let Ok(entry) = entry else { continue };
@@ -1419,37 +1640,38 @@ fn sweep_live_registrations_excluding(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if exclude.is_some_and(|excluded| excluded == path) {
-            live.push(read_registration(&path));
-            continue;
-        }
         let Ok(file) = open_lock_file(&path) else {
             continue;
         };
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
-                // A reservation (Issue #4086) has no holder by design: it is
-                // live until its deadline and residue afterwards. Release the
-                // probe lock before reading: Windows refuses reads through a
-                // second handle while this one holds the exclusive range.
+                // Release the probe lock before reading: Windows refuses reads
+                // through a second handle while this one holds the range.
                 let _ = fs2::FileExt::unlock(&file);
                 let registration = read_registration(&path);
-                if let Some(reserved_until_ms) =
-                    registration.as_ref().and_then(|r| r.reserved_until_ms)
-                {
-                    if reserved_until_ms > now_ms() {
-                        live.push(registration);
-                    } else {
+                if let Some(entry) = &registration {
+                    if entry.outlives(now) {
+                        live.push(LiveRegistration {
+                            registration,
+                            locked: false,
+                        });
+                        continue;
+                    }
+                    if entry
+                        .reserved_until_ms
+                        .or(entry.position_until_ms)
+                        .is_some()
+                    {
                         drop(file);
                         let _ = fs::remove_file(&path);
+                        continue;
                     }
-                    continue;
                 }
-                // No live holder. A freshly created registration is briefly
-                // lockable while its owner writes the payload and then takes
-                // the shared lock — leave it alone so a concurrent sweep
-                // never unlinks a live claimant. Anything still lockable
-                // after the grace window is a real crash residue.
+                // No holder and no window. A freshly created registration is
+                // briefly lockable while its owner writes the payload and then
+                // takes the shared lock — leave it alone so a concurrent sweep
+                // never unlinks a live claimant. Anything still lockable after
+                // the grace window is real crash residue.
                 let age = file
                     .metadata()
                     .ok()
@@ -1462,7 +1684,10 @@ fn sweep_live_registrations_excluding(
                 }
             }
             Err(err) if is_contended(&err) => {
-                live.push(read_registration(&path));
+                live.push(LiveRegistration {
+                    registration: read_registration(&path),
+                    locked: true,
+                });
             }
             Err(_) => {}
         }
@@ -1827,6 +2052,37 @@ mod tests {
     }
 
     #[test]
+    fn spent_search_burst_does_not_wait_for_an_absent_reserved_claimant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let search = TargetKey::search("repo-a", None);
+        for _ in 0..MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS {
+            coordinator
+                .acquire_interactive_search_heavy(&search, Duration::from_secs(1))
+                .expect("spend search burst")
+                .release()
+                .unwrap();
+        }
+        coordinator
+            .reserve_heavy(
+                &verification_key(),
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                None,
+            )
+            .unwrap();
+
+        coordinator
+            .acquire_interactive_search_heavy(&search, Duration::from_millis(200))
+            .expect("an absent reservation must not keep an idle host from serving search")
+            .release()
+            .unwrap();
+        assert!(coordinator
+            .heavy_reservation_path(&verification_key())
+            .exists());
+    }
+
+    #[test]
     fn heavy_reservation_counts_as_live_pending_without_a_holder() {
         let tmp = tempfile::tempdir().unwrap();
         let coordinator = open(tmp.path());
@@ -1922,6 +2178,272 @@ mod tests {
         assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 0);
         drop(heavy);
         guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #4169: a freed heavy lease is handed to the claimant that has
+    // been queued longest, and a claimant that had to give up keeps its
+    // place in the queue.
+    // ------------------------------------------------------------------
+
+    fn wait_until(mut done: impl FnMut() -> bool, context: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < deadline, "{context}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// AC-1 / AC-5: a claimant that never queued must not take a lease a
+    /// waiter has been queued for. Before the queue existed the freed lease
+    /// went to whoever probed the kernel lock first, and a newcomer probes it
+    /// the instant it starts while a waiter is asleep between polls — which is
+    /// how #4119 spent 50 minutes waiting without ever getting a turn.
+    #[test]
+    fn a_newcomer_never_overtakes_a_queued_waiter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let heavy = holder
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+            .unwrap();
+
+        let root = coordinator.root().to_path_buf();
+        let release_waiter = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (granted_tx, granted_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn({
+            let release = std::sync::Arc::clone(&release_waiter);
+            move || {
+                let coordinator = open(&root);
+                let guard = own(
+                    &coordinator,
+                    &TargetKey::verification("repo", "waiter"),
+                    JobPriority::ManualRebuild,
+                );
+                let lease = guard
+                    .acquire_heavy_with_ttl(Duration::from_secs(60), Duration::from_secs(60))
+                    .expect("the queued waiter must be served once the lease frees");
+                granted_tx.send(()).expect("report the grant");
+                while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                lease.release().unwrap();
+                guard.complete(JobOutcome::Completed).unwrap();
+            }
+        });
+        wait_until(
+            || coordinator.heavy_lease_status().unwrap().pending >= 1,
+            "the waiter must become visible in the queue",
+        );
+
+        // The lease frees while the waiter is between polls — the exact
+        // instant a newcomer used to win.
+        drop(heavy);
+        let newcomer = own(
+            &coordinator,
+            &TargetKey::verification("repo", "newcomer"),
+            JobPriority::ManualRebuild,
+        );
+        let refused =
+            newcomer.acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60));
+        assert!(
+            matches!(refused, Err(CoordinatorError::Timeout { .. })),
+            "a newcomer must queue behind the waiter instead of taking the freed lease"
+        );
+        granted_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the earliest waiter must be granted the freed lease");
+
+        release_waiter.store(true, std::sync::atomic::Ordering::SeqCst);
+        waiter.join().unwrap();
+        newcomer.complete(JobOutcome::Completed).unwrap();
+        holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    /// AC-3 / AC-2: a claimant that spent its whole wait budget and gave up
+    /// keeps its arrival time, so its rerun stays ahead of a claimant that
+    /// queued later — and the published queue says so, with an identifier and
+    /// a wait time per entry.
+    #[test]
+    fn a_deferred_claimant_keeps_its_place_and_the_queue_shows_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let heavy = holder
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+            .unwrap();
+
+        // The first claimant runs out of budget and returns `deferred`.
+        let early_key = TargetKey::verification("repo", "early");
+        let early = own(&coordinator, &early_key, JobPriority::ManualRebuild);
+        assert!(
+            matches!(
+                early.acquire_heavy_with_ttl(Duration::from_millis(80), Duration::from_secs(60)),
+                Err(CoordinatorError::Timeout { .. })
+            ),
+            "the held lease must defer the first claimant"
+        );
+
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let claim = |label: &'static str, guard: TargetJobGuard| {
+            let order = std::sync::Arc::clone(&order);
+            std::thread::spawn(move || {
+                let lease = guard
+                    .acquire_heavy_with_ttl(Duration::from_secs(60), Duration::from_secs(60))
+                    .unwrap_or_else(|err| panic!("{label} must be granted the lease: {err}"));
+                order.lock().unwrap().push(label.to_string());
+                lease.release().unwrap();
+                guard.complete(JobOutcome::Completed).unwrap();
+            })
+        };
+
+        // A second claimant queues only after the first one gave up, so wall
+        // clock order and queue order disagree unless the place is kept.
+        let late_key = TargetKey::verification("repo", "late");
+        let late = claim(
+            "late",
+            own(&coordinator, &late_key, JobPriority::ManualRebuild),
+        );
+        wait_until(
+            || coordinator.heavy_lease_status().unwrap().pending >= 1,
+            "the second claimant must become visible in the queue",
+        );
+        let early = claim("early", early);
+        wait_until(
+            || coordinator.heavy_lease_status().unwrap().queue.len() >= 2,
+            "both claimants must be visible in the queue",
+        );
+
+        let queue = coordinator.heavy_lease_status().unwrap().queue;
+        assert_eq!(
+            queue[0].target.as_deref(),
+            Some(early_key.file_stem().as_str()),
+            "the deferred claimant keeps its place: {queue:?}"
+        );
+        assert_eq!(
+            queue[1].target.as_deref(),
+            Some(late_key.file_stem().as_str()),
+            "{queue:?}"
+        );
+        assert!(
+            queue[0].queued_at_ms <= queue[1].queued_at_ms,
+            "the queue is ordered by arrival: {queue:?}"
+        );
+        assert!(
+            queue[0].waiting_ms >= queue[1].waiting_ms,
+            "the earliest entry has waited longest: {queue:?}"
+        );
+
+        drop(heavy);
+        early.join().unwrap();
+        late.join().unwrap();
+        assert_eq!(
+            order.lock().unwrap().clone(),
+            vec!["early".to_string(), "late".to_string()],
+            "the freed lease is handed out in queue order"
+        );
+        holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    /// Every queue record the predicate can be asked about, so the invariants
+    /// below are checked against the whole space rather than a chosen corner.
+    fn every_queue_record() -> Vec<QueueRecord> {
+        let mut records = Vec::new();
+        for priority in [
+            JobPriority::InteractiveSearch,
+            JobPriority::ManualRebuild,
+            JobPriority::Background,
+        ] {
+            for queued_at_ms in [10_u64, 20, 30] {
+                for target in [Some("a"), Some("b"), None] {
+                    for waiting in [false, true] {
+                        for present in [false, true] {
+                            records.push(QueueRecord {
+                                target: target.map(str::to_string),
+                                priority,
+                                queued_at_ms,
+                                waiting,
+                                present,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        records
+    }
+
+    /// Issue #1939 raised this against the queue after its own burst cap
+    /// livelocked: a scheme where claimants defer to one another can reach a
+    /// state where every claimant yields and a free lease is taken by nobody.
+    ///
+    /// It cannot happen here, and the reason is structural rather than lucky.
+    /// `blocks` is derived from `rank`, a strict total order, and only ever
+    /// answers true for a claimant that ranks *strictly* ahead. A strict order
+    /// is asymmetric, so "A defers to B" and "B defers to A" cannot both hold.
+    #[test]
+    fn deferral_is_asymmetric_so_two_claimants_never_defer_to_each_other() {
+        let records = every_queue_record();
+        for left in &records {
+            for right in &records {
+                if left.blocks(right) {
+                    assert!(
+                        !right.blocks(left),
+                        "mutual deferral between {left:?} and {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Asymmetry rules out a two-party standoff; this rules out a deferral
+    /// cycle of any length, which is what a livelock actually is.
+    ///
+    /// `blocks` answers true only when the blocker ranks strictly ahead — the
+    /// priority branch implies it, because `rank` compares priority first, and
+    /// the queue branch requires it outright. A relation contained in a strict
+    /// order cannot contain a cycle, so every queue has a claimant that defers
+    /// to nobody and the chain always terminates.
+    ///
+    /// That head-of-queue claimant may be a reservation with no process behind
+    /// it (Issue #4086 keeps a claimant's turn between its retries). Waiting
+    /// for it is a *bounded* wait, not a livelock: the reservation lapses at
+    /// its TTL and the next claimant is served.
+    #[test]
+    fn deferral_never_forms_a_cycle() {
+        let records = every_queue_record();
+        for left in &records {
+            for right in &records {
+                if left.blocks(right) {
+                    assert!(
+                        left.rank() < right.rank(),
+                        "a blocker must rank strictly ahead: {left:?} blocks {right:?}"
+                    );
+                }
+            }
+        }
+        // The consequence, checked directly: every queue has a head that
+        // defers to nobody, so the chain of deferrals always terminates.
+        for window in records.windows(7) {
+            let head = window
+                .iter()
+                .min_by(|left, right| left.rank().cmp(&right.rank()))
+                .expect("a non-empty window has a lowest-ranked record");
+            assert!(
+                !window
+                    .iter()
+                    .any(|other| other.target != head.target && other.blocks(head)),
+                "the head of the queue must defer to nobody: {head:?} in {window:?}"
+            );
+        }
     }
 
     #[test]

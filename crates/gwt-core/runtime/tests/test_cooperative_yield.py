@@ -486,6 +486,42 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         self.assertEqual(payload.get("computed_embeddings"), TOTAL_DOCS, payload)
         self.assertTrue(self._worktree_head().exists(), payload)
 
+    def test_v2_build_yields_between_base_and_overlay_and_resumes(self):
+        # Commit one batch as the Base; leave two batches as Overlay input.
+        for index in range(TOTAL_DOCS, 3 * CHECKPOINT_BATCH):
+            (self.project_root / "src" / f"module_{index:02}.rs").write_text(
+                f"//! module {index}\nfn feature_{index}() {{}}\n",
+                encoding="utf-8",
+            )
+        for args in (
+            ["init"],
+            ["add", *[f"src/module_{index:02}.rs" for index in range(CHECKPOINT_BATCH)]],
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com",
+             "-c", "commit.gpgsign=false", "commit", "-m", "test: seed base"],
+        ):
+            subprocess.run(
+                ["git", *args], cwd=self.project_root, check=True,
+                capture_output=True,
+            )
+        pending = _write_pending_claimant(self.coordinator_root, "interactive-search")
+
+        first = self._run_v2()
+        self.assertTrue(first.get("yielded"), first)
+        self.assertEqual(first.get("computed_embeddings"), CHECKPOINT_BATCH, first)
+        self.assertFalse(self._worktree_head().exists(), first)
+
+        second = self._run_v2()
+        self.assertTrue(second.get("yielded"), second)
+        self.assertEqual(second.get("computed_embeddings"), CHECKPOINT_BATCH, second)
+        self.assertEqual(second.get("embedding_cache_hits"), CHECKPOINT_BATCH, second)
+        self.assertFalse(self._worktree_head().exists(), second)
+
+        pending.unlink()
+        final = self._run_v2()
+        self.assertFalse(final.get("yielded"), final)
+        self.assertEqual(final.get("computed_embeddings"), CHECKPOINT_BATCH, final)
+        self.assertTrue(self._worktree_head().exists(), final)
+
 
 if __name__ == "__main__":
     unittest.main()
