@@ -59945,6 +59945,14 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
         let mut settings = Settings::default();
         pin_launch_package_runners(&mut settings, &runner_bin);
+        settings
+            .profiles
+            .set_env_var(
+                "default",
+                "CODEX_HOME",
+                case_root.join("codex-home").to_str().expect("Codex home"),
+            )
+            .expect("isolate Codex state and shared spawn pacing");
         write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
         runtime.agent_capability_issuer =
             Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
