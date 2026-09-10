@@ -1236,8 +1236,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let worktree = tmp.path().join("issue-3777");
         std::fs::create_dir_all(&worktree).expect("worktree dir");
-        std::fs::write(worktree.join(".git"), "gitdir: /repo.git/worktrees/issue-3777\n")
-            .expect("gitdir pointer");
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: /repo.git/worktrees/issue-3777\n",
+        )
+        .expect("gitdir pointer");
 
         let before = crate::process::thread_git_spawn_count();
         let resolved = resolve_current_worktree_root(&worktree);
