@@ -721,6 +721,7 @@ fn run_monitor_queue_push<E: CliEnv>(
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
     let queued_expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
+    let mut accepted_numbers = Vec::new();
     // Queue claims are advisory: a GitHub outage must not make the local
     // queue unusable. Active claims remain authoritative and are left alone.
     for number in numbers {
@@ -776,12 +777,15 @@ fn run_monitor_queue_push<E: CliEnv>(
                     },
                 );
             }
+            accepted_numbers.push(*number);
+        } else {
+            accepted_numbers.push(*number);
         }
     }
     let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         let host = crate::process::current_hostname();
         let queue = prefs.terminal_queues.entry(host).or_default();
-        for number in numbers {
+        for number in &accepted_numbers {
             if !queue.entries.iter().any(|entry| entry.number == *number) {
                 queue
                     .entries
@@ -794,7 +798,7 @@ fn run_monitor_queue_push<E: CliEnv>(
         }
         if let Some(pos) = position {
             let mut selected = Vec::new();
-            for number in numbers {
+            for number in &accepted_numbers {
                 if let Some(i) = queue
                     .entries
                     .iter()
