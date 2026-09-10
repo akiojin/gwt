@@ -608,6 +608,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             target: actions_rerun_target(params)?,
         }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
+        "index.cancel" | "index.repair" => {
+            if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
+                return Err(CliParseError::InvalidJson(
+                    "index recovery supports only the issues scope".to_string(),
+                ));
+            }
+            CliCommand::Index(if envelope.operation == "index.cancel" {
+                IndexCommand::Cancel
+            } else {
+                IndexCommand::Repair
+            })
+        }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
             scope: optional_string(params, "scope")?
                 .map(|scope| index_scope(&scope))
@@ -3176,6 +3188,20 @@ mod tests {
                 assert!(message.contains("replace is only valid"), "{message}");
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_issue_recovery_operations_are_reachable() {
+        for operation in ["index.cancel", "index.repair"] {
+            assert!(matches!(
+                ok(operation, json!({"scope": "issues"})),
+                CliCommand::Index(_)
+            ));
+            assert!(matches!(
+                err(operation, json!({"scope": "files"})),
+                CliParseError::InvalidJson(_)
+            ));
         }
     }
 

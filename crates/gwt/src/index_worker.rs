@@ -1137,10 +1137,22 @@ fn run_coordinated_index_job_with_coordinator<T>(
                         index_wait_timeout(INDEX_HEAVY_LEASE_TIMEOUT, "index heavy lease")?;
                     // Issue #4086: index leases carry a TTL horizon so status
                     // output never reports `expires_at_ms=unknown`.
+                    let lease_ttl = if scope_label == "issues" {
+                        gwt_core::index::runtime::ISSUE_INDEX_BUILD_TIMEOUT
+                    } else {
+                        INDEX_HEAVY_LEASE_TTL
+                    };
                     let heavy = guard
-                        .acquire_heavy_with_ttl(heavy_timeout, INDEX_HEAVY_LEASE_TTL)
+                        .acquire_heavy_with_ttl(heavy_timeout, lease_ttl)
                         .map_err(|err| format!("index heavy lease failed: {err}"))?;
-                    let step = build();
+                    let step = {
+                        let _deadline = (scope_label == "issues").then(|| {
+                            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                                Instant::now() + lease_ttl,
+                            )
+                        });
+                        build()
+                    };
                     drop(heavy);
                     match step {
                         Ok(BuildStep::Done(value)) => {
@@ -1306,7 +1318,7 @@ fn run_rebuild_runner_for_target(
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> Result<RebuildRunnerOutput, String> {
-    if gwt_core::operation_deadline::current().is_none() {
+    if action.label == "issues" || gwt_core::operation_deadline::current().is_none() {
         if rebuild_action_uses_file_index_v2(action) {
             let args = protocol_aware_rebuild_runner_args(context, action, qos);
             return gwt_core::process::hidden_command(&context.python)
@@ -3923,6 +3935,31 @@ detached
         )
         .expect_err("build failure propagates");
         assert_eq!(error, "boom");
+    }
+
+    #[test]
+    fn issues_build_has_a_deadline_and_bounded_heavy_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open(temp.path()).unwrap();
+        run_coordinated_index_job_with_coordinator(
+            &coordinator,
+            "issues-deadline",
+            "issues",
+            None,
+            JobPriority::Background,
+            || {
+                let deadline =
+                    gwt_core::operation_deadline::current().expect("issues build deadline");
+                assert!(
+                    deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(600)
+                );
+                let lease = coordinator.heavy_lease_status().unwrap();
+                assert!(lease.remaining_ms.unwrap() <= 600_000);
+                Ok(BuildStep::Done(()))
+            },
+        )
+        .unwrap();
+        assert!(gwt_core::operation_deadline::current().is_none());
     }
 
     #[test]
