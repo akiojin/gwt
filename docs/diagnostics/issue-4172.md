@@ -306,3 +306,55 @@ ambientなGWT/Git環境変数を子環境から除去し、引数にfixture、`1
 永続cacheの失効管理を追加せず、現状のWork別filterを保てる。ただしこれは未実装・未検証であり、
 既存SPECのタスク追加と修正範囲の裁定を要する。全投影時間・子Git数・Board量の比較は依然残る。
 AC-4/6とOverallを完了にせず、既存PR #4189はDraftのままとする。
+
+### 投影ごとの ledger snapshot 実装と量依存の解消（2026-09-10）
+
+上記「次の修正候補」を実装した。`ManagedHookFailureSnapshot::read()` が host error ledger を
+一度だけ読み、`HookFailure` の行を worktree ごとに畳み込む。各 Work 行は
+`snapshot.read_health(&input)` で自分の worktree だけを引く。投影の入口
+（`workspace_views.rs` の Work 反復とその直前の project 用 health）は 1 投影につき
+1 つの snapshot を共有する。永続 cache は追加せず、次の投影は新しい snapshot を取るので、
+新しく記録された失敗は次の更新で表示される。
+
+畳み込みは `fs::canonicalize` も snapshot 時に 1 回だけ実行する。修正前は
+`health.rs` の worktree 照合が ledger の行ごとに canonicalize していたため、
+snapshot を共有しただけでは「行数 × Work 数」の syscall が残っていた。
+
+同一プロセス内 A/B（`per_row` = 修正前の形、`shared_snapshot` = 修正後の形）の実測:
+
+| ledger 条件 | 非空行数 / bytes | 254評価 per_row | 254評価 shared_snapshot |
+| --- | --- | ---: | ---: |
+| 空 | 0 / 0 | 139.9ms | 133.5ms |
+| 一行おき抽出 | 730 / 410,031 | 4,703.2ms | 151.4ms |
+| 実 ledger コピー | 1,452 / 823,407 | 9,118.2ms | 176.9ms |
+
+各値はウォームアップ後の3回の中央値。1評価では両者に差が無く（実 ledger で 34.5ms / 34.0ms）、
+ledger の1回読み込み自体は残る。差は評価回数に比例する部分だけに現れ、実 ledger・254評価で
+9,118.2ms → 176.9ms（約51.5倍、約8.94秒の削減）だった。空 ledger では差が出ない。
+これは削減された処理が ledger 量依存部分であることを示す。
+
+[証拠JSON](issue-4172-health-snapshot-evidence.json) に全54標本、fixture ledger のファイル
+hash・サイズ、source commit、compiler version、harness hash を保全した。採取は
+[計測プログラム](../../scripts/diagnostics/measure-work-health-4172.rs) と
+[driver](../../scripts/diagnostics/measure-work-health-4172.ps1) による。driver は隔離した
+fixture HOME を作り、原本 ledger は読むだけで、実 worktree・実 HOME・GUI には触れない。
+
+前節と同じく、これは全投影の再現ではない。254 は同一 fixture の反復評価であって、
+254 個の異なる Work の投影ではない。実運用 release の約28秒に、この debug 測定値を
+そのまま足し引きしてはならない。全投影時間・子 Git 数・Board 量の比較は本 Issue では
+実施していない。
+
+修正は `crates/gwt/src/cli/hook/health.rs` と `crates/gwt/src/app_runtime/workspace_views.rs`
+の1レイヤに収まったため、AC-6 は本 Issue 内で修正まで行う扱いとする。
+
+| 検証コマンド | 結果 |
+| --- | --- |
+| `cargo test -p gwt --test hook_health_test` | 29PASS / 3FAIL（既存Windows fixture失敗、新規snapshot回帰はPASS） |
+| `cargo test -p gwt --bin gwt managed_hook_health -- --test-threads=1` | 3PASS |
+| `cargo test -p gwt --bin gwt backend_gwt_input_trace_markers_use_stage_local_exact_allowlists -- --test-threads=1` | PASS（PR #4189 のCI失敗に対応） |
+| `cargo clippy -p gwt --all-targets --all-features -- -D warnings` | PASS |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo build -p gwt --lib` | PASS |
+
+`cargo test --workspace --all-features` は Windows で停止するため本 Session でも実行していない
+（#4182）。全体 suite と coverage は CI 側の結果を待つ。

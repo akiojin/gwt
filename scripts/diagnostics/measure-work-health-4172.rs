@@ -2,7 +2,9 @@
 //! Usage: measure-work-health-4172 <fixture-worktree> <1,32,254> <repeats> [expected-bin]
 //! Parent must set HOME and USERPROFILE to the same isolated fixture home.
 //! Run separately with an empty ledger and a copied ledger; this program never writes.
-use gwt::cli::hook::health::{read_managed_hook_health, ManagedHookHealthInput};
+use gwt::cli::hook::health::{
+    read_managed_hook_health, ManagedHookFailureSnapshot, ManagedHookHealthInput,
+};
 use std::{fs, hint::black_box, path::PathBuf, time::Instant};
 
 fn run() -> Result<(), &'static str> {
@@ -79,7 +81,11 @@ fn run() -> Result<(), &'static str> {
         "{{\"ledger_files\":{files},\"ledger_bytes\":{bytes},\"ledger_nonempty_lines\":{lines}}}"
     );
     // These are repeated evaluations of ONE fixture, not distinct Work projections.
+    // `per_row` is the pre-#4172 shape: every evaluation rereads the ledger.
+    // `shared_snapshot` is the fix: one ledger read per projection, reused by
+    // every evaluation, matching what `workspace_views.rs` now does.
     black_box(read_managed_hook_health(&input));
+    black_box(ManagedHookFailureSnapshot::read().read_health(&input));
     for count in counts {
         for repeat in 0..repeats {
             let start = Instant::now();
@@ -89,7 +95,17 @@ fn run() -> Result<(), &'static str> {
                 issues += health.issues.len();
             }
             let elapsed_us = start.elapsed().as_micros();
-            println!("{{\"evaluations\":{count},\"repeat\":{repeat},\"elapsed_us\":{elapsed_us},\"issue_count_sum\":{issues}}}");
+            println!("{{\"mode\":\"per_row\",\"evaluations\":{count},\"repeat\":{repeat},\"elapsed_us\":{elapsed_us},\"issue_count_sum\":{issues}}}");
+
+            let start = Instant::now();
+            let mut issues = 0usize;
+            let snapshot = black_box(ManagedHookFailureSnapshot::read());
+            for _ in 0..count {
+                let health = black_box(snapshot.read_health(black_box(&input)));
+                issues += health.issues.len();
+            }
+            let elapsed_us = start.elapsed().as_micros();
+            println!("{{\"mode\":\"shared_snapshot\",\"evaluations\":{count},\"repeat\":{repeat},\"elapsed_us\":{elapsed_us},\"issue_count_sum\":{issues}}}");
         }
     }
     Ok(())
