@@ -251,7 +251,7 @@ class PublishFailurePropagationTests(unittest.TestCase):
                     self.assertEqual(result, failure)
                 with mock.patch.object(
                     runner, "_publish_generation", return_value=failure
-                ):
+                ) as publish:
                     result = runner.action_index_issues_v2(
                         repo_hash=REPO_HASH,
                         project_root=str(project),
@@ -260,7 +260,11 @@ class PublishFailurePropagationTests(unittest.TestCase):
                     )
                 # The issues scope records the failure in its repair gate
                 # (Issue #4205) instead of returning the publisher dict
-                # verbatim, but the failure must still propagate.
+                # verbatim, but the failure must still propagate. The
+                # EMPTY_CORPUS short-circuit is covered separately in
+                # test_issue_ttl / test_auto_build_fallback; this case must keep
+                # reaching the publisher.
+                publish.assert_called_once()
                 self.assertFalse(result.get("ok"), result)
                 self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
 
