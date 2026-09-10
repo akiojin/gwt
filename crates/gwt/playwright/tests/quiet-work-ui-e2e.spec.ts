@@ -240,6 +240,56 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     }
   });
 
+  // Issue #3697 AC-7: the Work event producer emits pr_number / pr_url /
+  // pr_state, but Linked Work printed the number as plain text and dropped the
+  // URL, so the PR a Work is linked to was unreachable from the detail pane.
+  test("Linked Work opens the PR the Work is linked to", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error: Error) => pageErrors.push(String(error)));
+    page.on("console", (message: any) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
+
+    await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(APP_URL);
+
+    const linkedWork = page.locator(".workspace-detail-section").filter({
+      has: page.locator(".workspace-detail-section-title", {
+        hasText: "Linked Work",
+      }),
+    });
+    await expect(linkedWork).toBeVisible();
+
+    const prLink = linkedWork.locator("a.workspace-pr-link");
+    await expect(prLink).toHaveCount(1);
+    await expect(prLink).toHaveText("PR #2856");
+    await expect(prLink).toHaveAttribute(
+      "href",
+      "https://github.com/akiojin/gwt/pull/2856",
+    );
+    await expect(prLink).toHaveAttribute("target", "_blank");
+    await expect(prLink).toHaveAttribute("rel", "noopener noreferrer");
+
+    // The shared renderer carries the PR state, so the section states it once.
+    await expect(linkedWork).toContainText("open");
+    const stateOccurrences = await linkedWork.evaluate(
+      (node: HTMLElement) => (node.textContent || "").match(/open/g)?.length ?? 0,
+    );
+    expect(stateOccurrences).toBe(1);
+
+    // The link must inherit the theme's text color in both projects rather
+    // than falling back to the user-agent blue.
+    const linkPaint = await prLink.evaluate((node: HTMLElement) => {
+      const style = getComputedStyle(node);
+      const owner = getComputedStyle(node.closest<HTMLElement>("dd")!);
+      return { color: style.color, ownerColor: owner.color };
+    });
+    expect(linkPaint.color).toBe(linkPaint.ownerColor);
+
+    expect(pageErrors).toEqual([]);
+  });
+
   test("Continue work sends opaque intent, ignores stale outcome, and settles on strong fallback", async ({
     page,
   }) => {
@@ -451,6 +501,7 @@ async function installBackend(
             branch: "work/20260521-0234",
             worktree_path: "/repo/work/20260521-0234",
             pr_number: 2856,
+            pr_url: "https://github.com/akiojin/gwt/pull/2856",
             pr_state: "open",
             board_refs: ["board-claim-1", "board-status-2", "board-decision-3"],
             agents: [activeAgent],
