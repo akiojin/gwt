@@ -16,8 +16,6 @@
 //! Future phases (H2-H4) will reuse the same primitive for runtime
 //! status, hook events, and launch lifecycle channels.
 
-#![cfg(unix)]
-
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -337,12 +335,14 @@ mod tests {
         time::Duration,
     };
 
+    #[cfg(unix)]
     use gwt_core::daemon::{
-        ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest, IpcHandshakeResponse,
-        RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+        ClientFrame, IpcHandshakeRequest, IpcHandshakeResponse, DAEMON_PROTOCOL_VERSION,
     };
+    use gwt_core::daemon::{DaemonEndpoint, DaemonFrame, RuntimeScope, RuntimeTarget};
     use serde_json::json;
     use tempfile::TempDir;
+    #[cfg(unix)]
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::UnixListener,
@@ -376,13 +376,7 @@ mod tests {
     }
 
     async fn wait_for_socket(path: &std::path::Path) {
-        for _ in 0..50 {
-            if path.exists() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("daemon socket never appeared at {}", path.display());
+        crate::cli::daemon::transport::wait_until_bound(path).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -520,6 +514,9 @@ mod tests {
         let _ = server_handle.await;
     }
 
+    /// The fake daemon below speaks the wire protocol over a raw Unix
+    /// listener so it can drop the connection mid-session.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn materializer_subscriber_reasserts_role_after_forced_disconnect() {
         let temp = TempDir::new().expect("tempdir");

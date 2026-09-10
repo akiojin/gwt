@@ -8,6 +8,7 @@ pub mod audit;
 pub mod backend;
 pub mod backend_store;
 pub mod claude_capabilities;
+pub mod codex_shared_state;
 pub mod custom;
 pub mod detect;
 pub mod environment;
@@ -35,26 +36,32 @@ pub use claude_capabilities::{
     detect_claude_version_raw, parse_claude_semver, supports_ultracode, workflows_enabled_from,
     ClaudeCapabilitySnapshot,
 };
+pub use codex_shared_state::{
+    codex_shared_state_lock_detail, is_codex_shared_state_lock_failure, pace_shared_codex_spawn,
+    shares_user_codex_state, CodexSpawnPacer, CODEX_SHARED_STATE_SPAWN_GAP,
+};
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::LaunchEnvironment;
 pub use launch::{
     apply_host_bunx_cache_fast_path, canonical_launch_args, normalize_launch_args,
     resolve_host_npx_fallback_executable, resolve_runner, AgentLaunchBuilder,
-    ExecutionLaunchIntent, LaunchConfig, ManualLaunchRuntimeEvidence, ManualLaunchRuntimeProof,
-    ManualLaunchSuccessorPredecessor, ResolvedRunner,
+    ExecutionLaunchIntent, HostBunxCacheFastPath, LaunchConfig, ManualLaunchRuntimeEvidence,
+    ManualLaunchRuntimeProof, ManualLaunchSuccessorPredecessor, ResolvedRunner,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
-    install_launch_gwt_bin_env_with_lookup, pane_websocket_url_for_launch_runtime,
-    prepare_agent_launch, register_codex_managed_hook_trust_in_docker,
-    resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe_and_repair,
-    resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
-    HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
-    PreparedAgentLaunch, PreparedProcessLaunch, ResolvedHostPackagePlan,
-    WindowsNpxCacheRepairCandidate,
+    install_launch_gwt_bin_env_with_lookup, is_transient_launch_failure,
+    local_exact_package_cache_hit, pane_websocket_url_for_launch_runtime, prepare_agent_launch,
+    register_codex_managed_hook_trust_in_docker, resolve_host_runner_health_checked,
+    resolve_host_runner_health_checked_with_probe_and_repair, resolve_launch_worktree,
+    resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup, HookForwardEnv,
+    HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
+    HostRunnerProbeSingleFlight, PreparedAgentLaunch, PreparedProcessLaunch, ProbeShare,
+    ProbeSingleFlightKey, ResolvedHostPackagePlan, WindowsNpxCacheRepairCandidate,
+    TRANSIENT_LAUNCH_RETRY_HINT,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
@@ -90,9 +97,10 @@ pub use session::{
     PendingDiscussionResume, Session, SessionActiveLaunchHandshake, SessionActiveLaunchPhase,
     SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt,
     SessionManualHandoffFence, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
-    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind, GWT_BIN_PATH_ENV,
-    GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
+    EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,
@@ -101,7 +109,7 @@ pub use store::{
 };
 pub use types::{
     builtin_agent_descriptor_for_command, builtin_agent_descriptors, resolve_agent_id, AgentColor,
-    AgentId, AgentInfo, AgentStatus, BuiltinAgentDescriptor, DockerLifecycleIntent,
-    LaunchRuntimeTarget, SessionMode, WindowsShellKind, WorkflowBypass,
+    AgentId, AgentInfo, AgentStatus, BuiltinAgentDescriptor, DistributionRoute,
+    DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode, WindowsShellKind, WorkflowBypass,
 };
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

@@ -199,16 +199,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(issueSurface).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(
-      issueSurface.locator('[data-issue-number="3273"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3273"] .knowledge-row-badge'),
     ).toHaveText("Queued");
     await expect(issueSurface.locator('[data-issue-number="3273"]')).toContainText(
       "Queue 1",
     );
     await expect(
-      issueSurface.locator('[data-issue-number="3096"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3096"] .knowledge-row-badge'),
     ).toHaveText("Needs human");
     await expect(
-      issueSurface.locator('[data-issue-number="3097"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3097"] .knowledge-row-badge'),
     ).toHaveText("On hold");
     await expect(issueSurface.locator('[data-issue-number="3097"]')).toContainText(
       "Excluded by label: hold",
@@ -221,13 +221,59 @@ test.describe("Issue Bridge load recovery", () => {
     await issueSurface
       .locator('[data-issue-number="3273"] [data-action="launch-now"]')
       .click();
-    await issueSurface
-      .locator('[data-issue-number="3095"] [data-action="move-up"]')
-      .click();
+    // SPEC #3885 AC-5: queue reordering lives in the row's overflow menu.
+    const menu3095 = issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu');
+    await menu3095.locator("summary").click();
+    await menu3095.locator('[data-action="move-up"]').click();
+    await expect(
+      issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu'),
+    ).not.toHaveAttribute("open", "");
     await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
     await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
-    await issueSurface.locator('[data-action="monitor-autonomous"]').click();
+    // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
+    // server state only. A click sends the request and nothing moves until an
+    // issue_monitor_status confirms it; the fixture stays silent on purpose.
+    const autonomous = issueSurface.locator('[data-action="monitor-autonomous"]');
+    const autonomousState = autonomous.locator(".knowledge-monitor-switch__state");
+    const autonomousTrack = autonomous.locator(".knowledge-monitor-switch__track");
+    await expect(autonomous).toHaveAttribute("role", "switch");
+    await expect(autonomous).toHaveAttribute("aria-label", "Autonomous mode");
+    await expect(autonomous).toHaveAttribute("aria-checked", "false");
+    await expect(autonomousState).toHaveText("Off");
+    const offTrackColor = await autonomousTrack.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    );
+    await autonomous.click();
+    await expect(autonomous).toHaveAttribute("aria-checked", "false");
+    await expect(autonomousState).toHaveText("Off");
+    await page.evaluate(() => {
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "issue_monitor_status",
+        status: {
+          enabled: false,
+          state: "disabled",
+          queue_len: 3,
+          active_count: 1,
+          max_active_agents: 4,
+          total_candidates: 5,
+          autonomous_mode: true,
+          launch_profile_source: "saved",
+          launch_profile_summary: "codex / host",
+        },
+      });
+    });
+    await expect(autonomous).toHaveAttribute("aria-checked", "true");
+    await expect(autonomousState).toHaveText("On");
+    // The track color animates (motion-fast transition), so poll until the
+    // computed value has left the Off color instead of sampling once.
+    await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
+    // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
+    // toggle and reports the effective value the backend sent.
+    const autoApply = issueSurface.locator('[data-action="monitor-auto-apply"]');
+    await expect(autoApply).toHaveText("Auto-apply updates: OFF");
+    await expect(autoApply).toHaveAttribute("data-enabled", "false");
+    await autoApply.click();
     await issueSurface.locator('[data-action="monitor-settings"]').click();
     await issueSurface.locator(".knowledge-monitor-quick-title").fill(
       "Investigate flaky release gate",
@@ -254,6 +300,10 @@ test.describe("Issue Bridge load recovery", () => {
     });
     expect(messages).toContainEqual({
       kind: "set_issue_monitor_autonomous_mode",
+      enabled: true,
+    });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_auto_apply_updates",
       enabled: true,
     });
     expect(messages).toContainEqual({ kind: "issue_monitor_configure_profile" });

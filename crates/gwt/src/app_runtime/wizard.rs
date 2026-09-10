@@ -65,10 +65,6 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
     vec![launch_wizard_open_error(client_id, "Start Work", message)]
 }
 
-fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
-    vec![launch_wizard_open_error(client_id, "Intake", message)]
-}
-
 fn manual_holder_fingerprint(
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     identity: &gwt_agent::SessionExecutionIdentity,
@@ -130,6 +126,44 @@ fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     }
 }
 
+/// SPEC #3914 FR-007: the profile chosen for one silent launch, plus the
+/// candidates ranked ahead of it that were passed over (empty for the head).
+struct IssueMonitorLaunchProfileChoice {
+    profiles: gwt::LaunchWizardPreviousProfiles,
+    selected_agent_id: Option<String>,
+    skipped: Vec<gwt::LaunchProfileSkip>,
+}
+
+/// SPEC #3914 FR-007: make a non-head selection visible, with the reason each
+/// earlier candidate was passed over. `None` when the pool head launched, so
+/// both the fresh-launch and the exact-Resume paths can append it verbatim.
+fn issue_monitor_non_head_selection_toast(
+    issue_number: u64,
+    selected_agent_id: Option<&str>,
+    skipped_candidates: &[gwt::LaunchProfileSkip],
+) -> Option<OutboundEvent> {
+    let selected_agent_id = selected_agent_id?;
+    if skipped_candidates.is_empty() {
+        return None;
+    }
+    let reasons = skipped_candidates
+        .iter()
+        .map(|skip| skip.reason.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    tracing::info!(
+        issue = issue_number,
+        agent = %selected_agent_id,
+        reasons = %reasons,
+        "Issue Monitor selected a non-head launch candidate"
+    );
+    Some(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        level: "info".to_string(),
+        message: format!("Issue #{issue_number} launches with {selected_agent_id}: {reasons}"),
+        issue_number: Some(issue_number),
+    }))
+}
+
 struct SilentIssueMonitorLaunchRequest {
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
@@ -177,16 +211,82 @@ use super::{
 };
 use crate::usable_worktree_path_for_branch;
 
+/// Issue #4079 AC-2: describe what an Agent Settings save does to the saved
+/// candidate pool.
+///
+/// The save always writes index 0 (the PM ruling: the form is a switch), so the
+/// operator has to see which candidate is being replaced before committing.
+/// The resulting summary is produced by applying the save to a copy of the
+/// pool, so it is the same string `issue.monitor.profiles` reports afterwards.
+fn issue_monitor_pool_impact_view(
+    pool: &[gwt::IssueMonitorLaunchProfile],
+    profile: gwt::IssueMonitorLaunchProfile,
+) -> gwt::LaunchWizardIssueMonitorPoolImpactView {
+    let agent_id = profile.agent_id.clone();
+    let replaced_agent_id = pool
+        .first()
+        .map(|head| head.agent_id.clone())
+        .filter(|head| !head.eq_ignore_ascii_case(&agent_id));
+    let mut prefs = gwt::IssueMonitorPrefs::default();
+    prefs.set_launch_profile_pool(pool.to_vec());
+    prefs.set_head_launch_profile(profile);
+    let resulting_pool = prefs.launch_profile_pool();
+    let resulting_summary = gwt::issue_monitor_launch_profile_pool_summary(&resulting_pool);
+    let title = match (&replaced_agent_id, pool.is_empty()) {
+        (_, true) => "Saves the first launch candidate".to_string(),
+        (Some(replaced), false) => format!("Replaces candidate 1 ({replaced})"),
+        (None, false) => format!("Updates candidate 1 ({agent_id})"),
+    };
+    let detail = if pool.len() > 1 {
+        format!(
+            "Agent Settings always writes candidate 1, the agent Issue Monitor launches first. \
+             The remaining {} candidate(s) are left as they are; add or reorder candidates with \
+             issue.monitor.profiles.set. After saving: {resulting_summary}",
+            resulting_pool.len().saturating_sub(1)
+        )
+    } else {
+        format!(
+            "Agent Settings always writes candidate 1, the agent Issue Monitor launches first. \
+             After saving: {resulting_summary}"
+        )
+    };
+    gwt::LaunchWizardIssueMonitorPoolImpactView {
+        action: "replace_head".to_string(),
+        agent_id,
+        replaced_agent_id,
+        title,
+        detail,
+        resulting_summary,
+    }
+}
+
 impl AppRuntime {
+    /// SPEC-3864 FR-006: feed the host-global "is this agent configured?"
+    /// probes into the wizard. The probes are per-agent (they read that
+    /// agent's own config home); everything downstream — the setup
+    /// affordance and its in-pane launcher — is descriptor-driven.
+    fn apply_agent_configuration_state(wizard: &mut gwt::LaunchWizardState) {
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
+        wizard.set_agent_needs_configuration("hermes", !gwt_skills::hermes_is_configured_global());
+        wizard.set_agent_needs_configuration(
+            "opencode",
+            !gwt_skills::opencode_is_configured_global(),
+        );
+    }
+
     fn launch_wizard_view_for_session(&self, session: &LaunchWizardSession) -> LaunchWizardView {
         let mut view = session.wizard.view();
-        if session.issue_monitor_profile_save.is_some() {
+        if let Some(save_context) = session.issue_monitor_profile_save.as_ref() {
             view.title = "Configure Issue Monitor".to_string();
             if view.primary_action_label == "Create and launch"
                 || view.primary_action_label == "Launch"
             {
                 view.primary_action_label = "Save settings".to_string();
             }
+            view.issue_monitor_pool_impact = session
+                .wizard
+                .preview_launch_profile()
+                .map(|profile| issue_monitor_pool_impact_view(&save_context.pool, profile));
         }
         view
     }
@@ -323,15 +423,12 @@ impl AppRuntime {
                 linked_issue_kind,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         let origin = if workspace_resume_context.is_some() {
             super::LaunchWizardOrigin::WorkspaceResume
@@ -455,16 +552,13 @@ impl AppRuntime {
                 linked_issue_kind: Some(linked_issue_kind),
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             base_branch_name,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -522,54 +616,6 @@ impl AppRuntime {
             }
             Err(error) => launch_agent_open_error(client_id, error),
         }
-    }
-
-    /// SPEC-3214 Phase 3: open the Launch Wizard for an **intake session** — the
-    /// agent/profile picker is reused, but the resulting launch is ephemeral
-    /// (detached `.intake-*` worktree on the base ref, no branch). This is the
-    /// primary "start new work" entry that replaces Start Work.
-    pub(crate) fn open_intake_session(&mut self, client_id: &str) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return intake_open_error(
-                client_id,
-                "Open a project before starting an intake session",
-            );
-        };
-        let Some(tab) = self.tab(&tab_id) else {
-            return intake_open_error(client_id, "Project tab not found");
-        };
-        if tab.kind != gwt::ProjectKind::Git {
-            return intake_open_error(client_id, "An intake session requires a Git project");
-        }
-        if tab.migration_pending {
-            return intake_open_error(
-                client_id,
-                "Complete the project migration before starting an intake session",
-            );
-        }
-
-        let project_root = tab.project_root.clone();
-        match self.open_intake_session_for_project(&tab_id, &project_root) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => intake_open_error(client_id, error),
-        }
-    }
-
-    fn open_intake_session_for_project(
-        &mut self,
-        tab_id: &str,
-        project_root: &Path,
-    ) -> Result<(), String> {
-        // Reuse the Start Work wizard opener (agent/profile picker + quick-start
-        // branch fetch), then convert it to an ephemeral intake: clear the
-        // reserved branch and flag the context so `build_launch_config` yields a
-        // detached, branchless launch on the base ref.
-        self.open_start_work_for_project(tab_id, project_root)?;
-        let base_ref = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
-        if let Some(session) = self.launch_wizard.as_mut() {
-            session.wizard.mark_as_ephemeral_intake(base_ref);
-        }
-        Ok(())
     }
 
     pub(crate) fn open_start_work_in_agent_kanban(
@@ -685,9 +731,7 @@ impl AppRuntime {
         if tab_changed {
             let _ = self.persist();
             events.push(self.workspace_state_broadcast());
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         events.push(self.launch_wizard_state_outbound());
         events
@@ -1494,16 +1538,13 @@ impl AppRuntime {
                 linked_issue_kind: None,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             base_branch,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -1804,10 +1845,12 @@ impl AppRuntime {
         ) {
             return events;
         }
+        let pool = self.issue_monitor_saved_pool(project_root);
         if let Some(session) = self.launch_wizard.as_mut() {
             session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: Some(issue_number),
+                pool,
             });
             session
                 .wizard
@@ -1881,6 +1924,7 @@ impl AppRuntime {
         let project_root = tab.project_root.clone();
         let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        let pool = self.issue_monitor_saved_pool(&project_root);
         let quick_start_root = project_root;
         let quick_start_entries = Vec::new();
         let agent_options = self.launch_wizard_cache.agent_options();
@@ -1900,16 +1944,13 @@ impl AppRuntime {
                 linked_issue_kind: None,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
-                ephemeral_base_ref: None,
             },
             base_branch_name,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
-        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
-        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
         wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -1924,6 +1965,7 @@ impl AppRuntime {
             issue_monitor_profile_save: Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: None,
+                pool,
             }),
             issue_monitor_launch_issue_number: None,
             origin: super::LaunchWizardOrigin::IssueMonitor,
@@ -1947,18 +1989,81 @@ impl AppRuntime {
         &self,
         project_root: &Path,
     ) -> gwt::LaunchWizardPreviousProfiles {
+        self.issue_monitor_launch_profile_choice(project_root, None)
+            .profiles
+    }
+
+    /// Issue #4079 AC-2: the saved candidate pool, read once when the Agent
+    /// Settings form opens so the wizard can preview the save's effect on it.
+    pub(super) fn issue_monitor_saved_pool(
+        &self,
+        project_root: &Path,
+    ) -> Vec<gwt::IssueMonitorLaunchProfile> {
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+            .map(|prefs| prefs.launch_profile_pool())
+            .unwrap_or_default()
+    }
+
+    /// SPEC #3914 FR-007: choose the launch candidate for one Issue Monitor
+    /// launch. A non-empty pool goes through [`gwt::select_launch_profile`]
+    /// (usage telemetry arrives in Phase 2); an empty pool keeps the
+    /// pre-#3914 Last-settings fallback from the Launch Wizard cache.
+    ///
+    /// When every candidate is held the head still launches: the daemon gate
+    /// already withholds launch requests in that state, so this only happens
+    /// on a race, and the existing limit-notice path re-holds the provider.
+    fn issue_monitor_launch_profile_choice(
+        &self,
+        project_root: &Path,
+        avoid_provider: Option<&str>,
+    ) -> IssueMonitorLaunchProfileChoice {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
-            if let Some(profile) = prefs.launch_profile {
-                return gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.into()));
+            let pool = prefs.launch_profile_pool();
+            if !pool.is_empty() {
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let selection = gwt::select_launch_profile(
+                    &pool,
+                    &prefs.provider_quota_holds,
+                    &[],
+                    prefs.launch_usage_threshold_percent,
+                    &[],
+                    avoid_provider,
+                    &now,
+                );
+                let (index, skipped) = match selection.selected {
+                    Some(index) => (index, selection.skipped),
+                    None => {
+                        tracing::warn!(
+                            project_root = %project_root.display(),
+                            skipped = ?selection.skipped,
+                            "every Issue Monitor launch candidate is held; launching the pool head"
+                        );
+                        (0, Vec::new())
+                    }
+                };
+                let profile = pool[index].clone();
+                return IssueMonitorLaunchProfileChoice {
+                    profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
+                        profile.clone().into(),
+                    )),
+                    selected_agent_id: Some(profile.agent_id),
+                    skipped,
+                };
             }
         }
         let profiles = self.launch_wizard_cache.previous_profiles(project_root);
-        if profiles.repo_local().is_some() {
-            return profiles;
+        let profiles = if profiles.repo_local().is_some() {
+            profiles
+        } else {
+            let fallback_profile = profiles.preferred_profile().cloned();
+            profiles.with_repo_local(fallback_profile)
+        };
+        IssueMonitorLaunchProfileChoice {
+            profiles,
+            selected_agent_id: None,
+            skipped: Vec::new(),
         }
-        let fallback_profile = profiles.preferred_profile().cloned();
-        profiles.with_repo_local(fallback_profile)
     }
 
     #[cfg(test)]
@@ -2022,8 +2127,19 @@ impl AppRuntime {
                     started_at,
                 }) => {
                     let window_exists = self.tracked_window_exists(&window_id);
+                    // Issue #3851: the TTL bounds pre-PTY materialization only.
+                    // Once a runtime exists, SessionStart may legitimately wait
+                    // for terminal input; runtime status owns exit recovery.
+                    let live_runtime = self.runtimes.contains_key(&window_id)
+                        && self.window_status(&window_id).is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        });
                     if window_exists
-                        && started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL
+                        && (live_runtime
+                            || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         return Vec::new();
                     }
@@ -2396,7 +2512,16 @@ impl AppRuntime {
         }
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
-        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        let IssueMonitorLaunchProfileChoice {
+            profiles: previous_profiles,
+            selected_agent_id,
+            skipped: skipped_candidates,
+        } = self.issue_monitor_launch_profile_choice(&project_root, None);
+        let non_head_selection_toast = issue_monitor_non_head_selection_toast(
+            issue_number,
+            selected_agent_id.as_deref(),
+            &skipped_candidates,
+        );
         let Some(profile_agent_id) = previous_profiles
             .preferred_profile()
             .map(|profile| profile.agent_id.clone())
@@ -2452,7 +2577,13 @@ impl AppRuntime {
                 delivery_id.clone(),
                 &profile_agent_id,
             )?;
-            if let Some(events) = events {
+            if let Some(mut events) = events {
+                // SPEC #3914 FR-007: a resumed launch reports its skipped
+                // candidates like a fresh one. An empty vector means the
+                // delivery stays pending, so nothing launched to report on.
+                if !events.is_empty() {
+                    events.extend(non_head_selection_toast);
+                }
                 return Ok(Some(events));
             }
             holder_window_id
@@ -2516,10 +2647,11 @@ impl AppRuntime {
         // SPEC-3248 P8a: the independent review agent is subordinate to the
         // implementing session's execution — it must not take over (or be
         // gated by) the Execution Control Record for the linked owner.
+        // Issue #3984: the same decision is published into the review agent's
+        // environment so its hooks apply the review contract instead of the
+        // producing-session gates it can never satisfy.
         if review_prompt.is_some() {
-            if let LaunchWizardLaunchRequest::Agent(config) = &mut launch_request {
-                config.suppress_execution_control = true;
-            }
+            launch_request.set_review_dispatch_context();
         }
         let launch_index = self
             .tab(&session.tab_id)
@@ -2546,6 +2678,9 @@ impl AppRuntime {
             issue_monitor_session_mode,
             issue_monitor_autonomous_handoff: None,
             issue_monitor_autonomous_submit_started: false,
+            // Issue #4041: the review window observes the Issue; it never
+            // owns the launch binding the implementation window holds.
+            issue_monitor_review_dispatch: review_prompt.is_some(),
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -2569,6 +2704,7 @@ impl AppRuntime {
                 issue_number: Some(issue_number),
             }));
         }
+        events.extend(non_head_selection_toast);
         let message = if review_prompt.is_some() {
             "Issue Monitor independent review launched".to_string()
         } else {
@@ -2917,6 +3053,7 @@ impl AppRuntime {
             issue_monitor_session_mode: Some(config.session_mode),
             issue_monitor_autonomous_handoff: autonomous_delivery_attempt.clone(),
             issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
         };
         let launch = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
@@ -3409,7 +3546,9 @@ impl AppRuntime {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
                 Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
             }
-            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
+            // Issue #3934: a dead Host leaves no fenced proof to carry.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead
+            | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
         let intent = super::ManualLaunchHolderIntent {
@@ -3427,9 +3566,8 @@ impl AppRuntime {
                 super::ManualLaunchGenerationDisposition::ConfirmLive(intent),
             ),
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(_) => {
-                if !matches!(
+                if !gwt::cli::execution_state::holder_status_permits_generation_reclaim(
                     holder.status,
-                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
                 ) {
                     return Ok(super::ManualLaunchGenerationDisposition::Unknown(
                         "The exact runtime is terminal but the holder Session is not durably stopped"
@@ -3451,6 +3589,14 @@ impl AppRuntime {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
                 super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
             ),
+            // Issue #3934: every Host that wrote a sidecar for the holder is
+            // gone, but this route needs a proof to hand the successor. The
+            // scan reaper terminalizes such a generation under its own leases.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead => {
+                Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                    "The holder's Hosts are all gone but left no runtime exit proof".to_string(),
+                ))
+            }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {
                 Ok(super::ManualLaunchGenerationDisposition::Unknown(
                     "The holder has no exact runtime exit proof or liveness proof".to_string(),
@@ -3860,9 +4006,7 @@ impl AppRuntime {
                 let _ = self.persist();
                 let mut events = vec![self.workspace_state_broadcast()];
                 if tab_changed {
-                    if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                        events.push(event);
-                    }
+                    events.extend(self.active_project_snapshot_broadcasts());
                 }
                 events.push(self.launch_wizard_state_broadcast(None));
                 events
@@ -4000,6 +4144,7 @@ impl AppRuntime {
                             issue_monitor_session_mode: Some(config.session_mode),
                             issue_monitor_autonomous_handoff: None,
                             issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
                         });
                     if let Some(target) = session.agent_kanban_target.clone() {
                         runtime.spawn_agent_window_in_agent_kanban(
@@ -4336,6 +4481,7 @@ impl AppRuntime {
         let IssueMonitorProfileSaveContext {
             client_id,
             issue_number,
+            pool: _,
         } = save_context;
         let LaunchWizardLaunchRequest::Agent(config) = config else {
             session.wizard.error =
@@ -4361,7 +4507,13 @@ impl AppRuntime {
             &gwt::IssueMonitorPrefs::recovery_default(),
             |prefs| {
                 if prefs.advance_effect_authority_epoch().is_some() {
-                    prefs.launch_profile = Some(launch_profile);
+                    // SPEC #3914 FR-003 / Issue #4079 AC-1: an Agent Settings
+                    // save is a switch, so it writes the pool head (and the
+                    // `launch_profile` mirror the Monitor launches from).
+                    // Upserting by provider left the head — and therefore the
+                    // effective agent — untouched whenever the chosen provider
+                    // already sat further down the pool.
+                    prefs.set_head_launch_profile(launch_profile);
                     true
                 } else {
                     false

@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 
 const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 2;
+/// Issue #3941 AC-4: concurrent Start Work launches fetch the same
+/// repository at once. Each attempt restarts the fetch from fresh state; the
+/// short delay lets the competing fetch finish before the retry re-reads refs.
+const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 3;
+const REMOTE_TRACKING_FETCH_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +136,7 @@ fn run_remote_tracking_fetch_with_retry(
         if attempt + 1 < REMOTE_TRACKING_FETCH_MAX_ATTEMPTS
             && is_remote_tracking_ref_cas_conflict(&stderr)
         {
+            thread::sleep(REMOTE_TRACKING_FETCH_RETRY_DELAY * (attempt as u32 + 1));
             continue;
         }
         return Err(GwtError::Git(format!("{context}: {stderr}")));
@@ -140,11 +145,21 @@ fn run_remote_tracking_fetch_with_retry(
     unreachable!("remote tracking fetch attempts are non-zero")
 }
 
-fn is_remote_tracking_ref_cas_conflict(stderr: &str) -> bool {
+/// Whether git rejected a remote-tracking ref update because another process
+/// moved the same ref between read and commit.
+///
+/// Two message families exist: the classic per-ref lock line
+/// (`cannot lock ref 'refs/remotes/...': is at X but expected Y`) and, since
+/// git 2.50 commits fetched refs in one batched transaction, the rejection
+/// line `fetching ref refs/remotes/... failed: incorrect old value provided`
+/// (Issue #3941 AC-4). Both are transient races, not fetch failures.
+pub fn is_remote_tracking_ref_cas_conflict(stderr: &str) -> bool {
     stderr.lines().any(|line| {
-        line.contains("cannot lock ref 'refs/remotes/")
+        (line.contains("cannot lock ref 'refs/remotes/")
             && line.contains(" is at ")
-            && line.contains(" but expected ")
+            && line.contains(" but expected "))
+            || (line.contains("fetching ref refs/remotes/")
+                && line.contains("incorrect old value provided"))
     })
 }
 
@@ -1473,6 +1488,48 @@ mod tests {
     }
 
     #[test]
+    fn remote_tracking_fetch_retries_git_batched_update_rejection() {
+        // Issue #3941 AC-4: git >= 2.50 commits fetched refs in one batched
+        // transaction and reports a concurrent update of the same tracking
+        // ref as "incorrect old value provided" instead of the classic
+        // "cannot lock ref ... is at ... but expected" line. Two Start Work
+        // launches fetching the same repository at once must recover from it.
+        let mut attempts = 0;
+
+        run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            if attempts == 1 {
+                return Ok(git_output(
+                    false,
+                    b"error: fetching ref refs/remotes/origin/develop failed: incorrect old value provided\n\
+                      ! [rejected]   develop -> origin/develop (unable to update local ref)\n"
+                        .to_vec(),
+                ));
+            }
+            Ok(git_output(true, Vec::new()))
+        })
+        .expect("a batched-update rejection is a transient ref race");
+
+        assert_eq!(attempts, 2, "the rejected fetch must be restarted once");
+    }
+
+    #[test]
+    fn remote_tracking_ref_cas_conflict_detects_both_git_message_families() {
+        assert!(is_remote_tracking_ref_cas_conflict(
+            "error: cannot lock ref 'refs/remotes/origin/develop': is at abc but expected def"
+        ));
+        assert!(is_remote_tracking_ref_cas_conflict(
+            "error: fetching ref refs/remotes/origin/develop failed: incorrect old value provided"
+        ));
+        assert!(!is_remote_tracking_ref_cas_conflict(
+            "fatal: could not read Username for 'https://github.com'"
+        ));
+        assert!(!is_remote_tracking_ref_cas_conflict(
+            "error: fetching ref refs/remotes/origin/develop failed: reference already exists"
+        ));
+    }
+
+    #[test]
     fn remote_tracking_fetch_does_not_retry_non_cas_failure() {
         let mut attempts = 0;
 
@@ -1507,9 +1564,10 @@ mod tests {
         })
         .expect_err("a persistent race must remain a bounded failure");
 
-        assert_eq!(attempts, 2);
-        assert!(error.to_string().contains("new-2"), "{error}");
-        assert!(error.to_string().contains("old-2"), "{error}");
+        assert_eq!(attempts, REMOTE_TRACKING_FETCH_MAX_ATTEMPTS);
+        assert_eq!(REMOTE_TRACKING_FETCH_MAX_ATTEMPTS, 3);
+        assert!(error.to_string().contains("new-3"), "{error}");
+        assert!(error.to_string().contains("old-3"), "{error}");
     }
 
     #[test]

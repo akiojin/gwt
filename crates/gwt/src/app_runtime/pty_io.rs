@@ -470,10 +470,10 @@ impl AppRuntime {
             .iter()
             .filter_map(|id| {
                 let runtime = self.runtimes.get(id)?;
-                let snapshot = runtime
+                let (snapshot, seq) = runtime
                     .pane
                     .lock()
-                    .map(|pane| pane.snapshot_bytes())
+                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then(|| {
                     OutboundEvent::reply(
@@ -483,6 +483,7 @@ impl AppRuntime {
                             data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
                         },
                     )
+                    .with_terminal_stream_seq(Some(seq))
                 })
             })
             .collect()
@@ -531,6 +532,10 @@ impl AppRuntime {
         window_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
+        // Issue #4145 AC-1: `pane.send` writes a whole prompt and submits it,
+        // so this is the prompt-send route for capability callers, alongside
+        // the WebSocket submit path in `embedded_server`.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PromptSend);
         let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
             Some(runtime) => write_pane_input_then_submit(&runtime.pane, text),
@@ -851,6 +856,7 @@ impl AppRuntime {
         let sessions_dir = self.sessions_dir.clone();
         let proxy = self.proxy.clone();
         let window_lifecycle_generations = Arc::clone(&self.window_lifecycle_generations);
+        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let window_id = window_id.to_string();
         let scheduler_window_id = window_id.clone();
         let task: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
@@ -1207,6 +1213,7 @@ impl AppRuntime {
                         Self::finalize_issue_monitor_window_close_in_background(
                             project_root,
                             &target,
+                            fallback_commit_timeout,
                         )
                     }
                     (_, Ok(_)) => WindowCloseMonitorResult::Noop,
@@ -1733,10 +1740,12 @@ impl AppRuntime {
                     Ok(read) => {
                         let chunk = buffer[..read].to_vec();
                         let lock_started = Instant::now();
+                        let mut seq = 0;
                         if let Ok(mut pane) = pane.lock() {
                             let lock_wait_us = lock_started.elapsed().as_micros() as u64;
                             let parse_started = Instant::now();
                             pane.process_bytes(&chunk);
+                            seq = pane.output_seq();
                             let parse_us = parse_started.elapsed().as_micros() as u64;
                             // Log only when the contention window is large enough
                             // to plausibly starve a concurrent `write_input`. The
@@ -1758,6 +1767,7 @@ impl AppRuntime {
                             id: id.clone(),
                             incarnation,
                             data: chunk,
+                            seq,
                         });
                     }
                     Err(error) => {

@@ -88,7 +88,7 @@ fn handle_session_start(
         super::runtime_state::session_start_agent_session_diagnostic(input)
     });
     run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward(input)
+        crate::daemon_runtime::handle_forward_for_event(event, input)
     })?;
     // SPEC-2359: register the running session into `projection.agents[]`
     // before any further coordination CLI runs so JSON `workspace.update`
@@ -410,7 +410,7 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
     run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward(input)
+        crate::daemon_runtime::handle_forward_for_event(event, input)
     })?;
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
@@ -432,7 +432,7 @@ fn handle_post_tool_use(event: &str, input: &str) -> Result<HookOutput, HookErro
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
     run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward(input)
+        crate::daemon_runtime::handle_forward_for_event(event, input)
     })?;
     Ok(HookOutput::Silent)
 }
@@ -450,7 +450,7 @@ fn handle_stop(
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
     run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward(input)
+        crate::daemon_runtime::handle_forward_for_event(event, input)
     })?;
     run_step(event, "coordination-event", || {
         crate::daemon_runtime::handle_coordination_event(event, input)
@@ -473,7 +473,13 @@ fn handle_stop(
         ),
         (
             "skill-discussion-stop-check",
-            Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
+            Box::new(|| {
+                skill_discussion_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
         ),
         (
             "skill-plan-spec-stop-check",
@@ -567,7 +573,9 @@ fn run_step<T>(
         started.elapsed(),
         if result.is_ok() { "ok" } else { "error" },
     );
-    result
+    // Issue #3541: keep the failing handler's identity on the error so the
+    // durable diagnostic and the user-visible line can name it.
+    result.map_err(|error| error.handler_failure(event, handler))
 }
 
 fn run_value<T>(event: &str, handler: &str, operation: impl FnOnce() -> T) -> T {
@@ -1572,10 +1580,6 @@ mod tests {
                 "only the uniform obligation gate may block here: {reason}"
             );
         }
-        assert!(
-            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
-            "no auto-capture side effect may fire for the removed gate"
-        );
     }
 
     // SPEC-3248 P8a (T-108/T-116 subset): a launch-written Execution Control

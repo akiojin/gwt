@@ -31,6 +31,11 @@
 //   (pan / zoom / framing tween / server restore).
 
 // The camera frame occupies this fraction of the minimap's limiting dimension.
+// Issue #3884 AC-1: a window whose placement keeps it off the canvas (SPEC-3671
+// `issue_preview`, Agent Kanban card) has geometry but no canvas rectangle, so it
+// must not get a radar cell either — an orphan cell reads as a vanished window.
+import { isOffCanvasPlacement } from "./agent-kanban-surface.js";
+
 const FRAME_FRACTION_DEFAULT = 0.45;
 const FRAME_FRACTION_MIN = 0.15;
 const FRAME_FRACTION_MAX = 0.9;
@@ -143,7 +148,7 @@ export function createFleetMinimap({
   // Absolute world→radar positions inside the world layer; panning only
   // translates the layer, never these.
   function positionCells(scale) {
-    const windows = (getWindows() || []).filter((windowData) => windowData?.geometry);
+    const windows = canvasWindows();
     for (const windowData of windows) {
       const cell = cellMap.get(windowData.id);
       if (!cell) continue;
@@ -167,8 +172,15 @@ export function createFleetMinimap({
     }
   }
 
+  // The windows the radar draws: laid-out canvas windows only.
+  function canvasWindows() {
+    return (getWindows() || []).filter(
+      (windowData) => windowData?.geometry && !isOffCanvasPlacement(windowData),
+    );
+  }
+
   function renderCells() {
-    const windows = (getWindows() || []).filter((windowData) => windowData?.geometry);
+    const windows = canvasWindows();
     hasWindows = windows.length > 0;
     container.dataset.empty = hasWindows ? "false" : "true";
 

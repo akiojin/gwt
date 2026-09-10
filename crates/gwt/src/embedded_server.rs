@@ -191,12 +191,19 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// event participates in at most one role, so attachment progress can coalesce
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
-struct PreparedOutbound {
+pub(super) struct PreparedOutbound {
     payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
     class: QueueClass,
+    /// Terminal pane a `terminal_output` / `terminal_snapshot` belongs to
+    /// (Issue #4095), paired with `stream_seq`.
+    terminal_pane: Option<String>,
+    /// Pane stream position: the chunk's own position for `terminal_output`,
+    /// the serialization position for `terminal_snapshot`. `None` for events
+    /// produced outside the PTY reader (launch mirror, daemon replay).
+    stream_seq: Option<u64>,
 }
 
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
@@ -204,13 +211,15 @@ const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
     gwt::error_report::record_backend_event(event);
     let kind = event.event_kind();
-    let (coalesce_key, repair_pane_id) = match event {
-        gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone())),
-        gwt::BackendEvent::TerminalSnapshot { id, .. } => (Some(id.clone()), None),
-        gwt::BackendEvent::AttachmentProgress { operation_id, .. } => {
-            (Some(operation_id.clone()), None)
+    let (coalesce_key, repair_pane_id, terminal_pane) = match event {
+        gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone()), Some(id.clone())),
+        gwt::BackendEvent::TerminalSnapshot { id, .. } => {
+            (Some(id.clone()), None, Some(id.clone()))
         }
-        _ => (None, None),
+        gwt::BackendEvent::AttachmentProgress { operation_id, .. } => {
+            (Some(operation_id.clone()), None, None)
+        }
+        _ => (None, None, None),
     };
     PreparedOutbound {
         payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
@@ -218,13 +227,16 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         coalesce_key,
         repair_pane_id,
         class: queue_class_for_kind(kind),
+        terminal_pane,
+        stream_seq: None,
     }
 }
 
 /// Serialize private Knowledge wire metadata without changing the public
 /// `BackendEvent` construction/destructuring shape.
-fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
+pub(super) fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
     let mut prepared = prepare_outbound(&outbound.event);
+    prepared.stream_seq = outbound.terminal_stream_seq;
     let Some(metadata) = outbound.knowledge_wire_metadata.as_ref() else {
         return prepared;
     };
@@ -276,12 +288,18 @@ struct QueuedOutbound {
     payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
+    terminal_pane: Option<String>,
+    stream_seq: Option<u64>,
 }
 
 #[derive(Default)]
 struct ClientQueueState {
     entries: std::collections::VecDeque<QueuedOutbound>,
     dirty_panes: std::collections::HashSet<String>,
+    /// Issue #4095: highest pane stream position a queued or delivered
+    /// `terminal_snapshot` was serialized at, per pane. A `terminal_output`
+    /// at or below it is already part of that snapshot and must not follow it.
+    snapshot_stream_seq: HashMap<String, u64>,
     dropped_lossy: u64,
     dead: bool,
     close_frame: Option<ClientCloseFrame>,
@@ -319,13 +337,16 @@ pub(super) struct ClientQueue {
 impl ClientQueue {
     /// Enqueue one prepared event. Returns `true` when the client crossed
     /// the lossless hard cap and must be unregistered by the caller.
-    fn enqueue(&self, message: &PreparedOutbound) -> bool {
+    pub(super) fn enqueue(&self, message: &PreparedOutbound) -> bool {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.dead {
             return true;
+        }
+        if Self::superseded_by_snapshot(&state, message) {
+            return false;
         }
         // Snapshot-class kinds without a coalesce key (file trees, resume acks,
         // release notes) must not replace each other by kind alone — different
@@ -348,10 +369,12 @@ impl ClientQueue {
                 }
             }
             QueueClass::SnapshotLatest => {
+                Self::record_snapshot_position(&mut state, message);
                 if let Some(entry) = state.entries.iter_mut().find(|entry| {
                     entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
                 }) {
                     entry.payload = message.payload.clone();
+                    entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
                         state.dead = true;
@@ -392,7 +415,47 @@ impl ClientQueue {
             payload: message.payload.clone(),
             kind: message.kind,
             coalesce_key: message.coalesce_key.clone(),
+            terminal_pane: message.terminal_pane.clone(),
+            stream_seq: message.stream_seq,
         }
+    }
+
+    /// Issue #4095: a streamed chunk whose pane stream position is at or
+    /// below a snapshot this queue already holds is reproduced by that
+    /// snapshot; delivering it afterwards would re-apply its cursor moves.
+    fn superseded_by_snapshot(state: &ClientQueueState, message: &PreparedOutbound) -> bool {
+        if message.kind != "terminal_output" {
+            return false;
+        }
+        let (Some(pane), Some(seq)) = (&message.terminal_pane, message.stream_seq) else {
+            return false;
+        };
+        state
+            .snapshot_stream_seq
+            .get(pane)
+            .is_some_and(|snapshot_seq| seq <= *snapshot_seq)
+    }
+
+    /// Issue #4095: remember the snapshot's stream position and drop every
+    /// queued chunk of the same pane it already contains — including chunks
+    /// queued after an older snapshot whose slot this one is about to reuse.
+    fn record_snapshot_position(state: &mut ClientQueueState, message: &PreparedOutbound) {
+        if message.kind != "terminal_snapshot" {
+            return;
+        }
+        let (Some(pane), Some(seq)) = (&message.terminal_pane, message.stream_seq) else {
+            return;
+        };
+        let position = state.snapshot_stream_seq.entry(pane.clone()).or_insert(0);
+        *position = (*position).max(seq);
+        let position = *position;
+        state.entries.retain(|entry| {
+            !(entry.kind == "terminal_output"
+                && entry.terminal_pane.as_deref() == Some(pane.as_str())
+                && entry
+                    .stream_seq
+                    .is_some_and(|chunk_seq| chunk_seq <= position))
+        });
     }
 
     /// Pop the next message without waiting. `None` means the queue is
@@ -505,9 +568,14 @@ pub struct ClientHubHealthStats {
     pub dead_clients: usize,
 }
 
+#[cfg(test)]
+type ClientHubDispatchHook = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+    #[cfg(test)]
+    before_dispatch_enqueue: Arc<Mutex<Option<ClientHubDispatchHook>>>,
 }
 
 #[derive(Clone)]
@@ -517,6 +585,14 @@ struct ClientRegistration {
 }
 
 impl ClientHub {
+    #[cfg(test)]
+    fn set_before_dispatch_enqueue_hook(&self, hook: ClientHubDispatchHook) {
+        *self
+            .before_dispatch_enqueue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
         self.register_with_broadcasts(client_id, true)
     }
@@ -624,6 +700,20 @@ impl ClientHub {
                 .collect()
         };
 
+        // The test barrier intentionally sits after the registry snapshot
+        // guard is dropped and before serialization or per-client enqueue.
+        // This makes the lock boundary observable without relying on a
+        // scheduler-sensitive latency assertion.
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_dispatch_enqueue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
+
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
             let prepared = prepare_outbound_event(&outbound);
@@ -700,6 +790,10 @@ impl ClientHub {
             coalesce_key: None,
             repair_pane_id: None,
             class: queue_class_for_kind(kind),
+            // Not a PTY event: it belongs to no terminal pane and carries no
+            // position in a pane's output stream (Issue #4095).
+            terminal_pane: None,
+            stream_seq: None,
         };
         let mut dead_clients = Vec::new();
         for (client_id, queue, receives_broadcasts) in snapshot {
@@ -2087,6 +2181,25 @@ impl AgentCapabilityRegistry {
         Self::grant_is_current_in_state(&state, grant)
     }
 
+    /// Accept an operation from the exact current grant and return its
+    /// authenticated principal without carrying the registry lock into the
+    /// operation itself.
+    ///
+    /// This is the linearization boundary for an operation that may mutate a
+    /// different capability while it runs. Rotation before this snapshot is
+    /// rejected; rotation after it does not cancel the accepted operation.
+    fn accept_current_grant(&self, grant: &AgentCapabilityGrant) -> Option<AgentSessionPrincipal> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return None;
+        }
+
+        Some(grant.principal().clone())
+    }
+
     fn grant_is_current_in_state(
         state: &AgentCapabilityRegistryState,
         grant: &AgentCapabilityGrant,
@@ -2359,6 +2472,13 @@ impl AgentCapabilityIssuer {
 
     pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         self.registry.grant_is_current(grant)
+    }
+
+    pub(crate) fn accept_current_grant(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentSessionPrincipal> {
+        self.registry.accept_current_grant(grant)
     }
 
     /// Linearize one operation commit against capability rotation/revocation
@@ -4201,6 +4321,13 @@ fn handle_frontend_message(
         }
     };
 
+    // Issue #4145 AC-1: the prompt-send route is the submit reaching the PTY,
+    // covering both the WebSocket fast path and the event-loop fallback below.
+    // Only a submit is timed — Issue #3611 is the reminder that per-keystroke
+    // work on this path is exactly what must not be added.
+    let _perf_route = (data.contains('\n') || data.contains('\r'))
+        .then(|| gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PromptSend));
+
     let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     tracing::debug!(
         target: "gwt_input_trace",
@@ -5959,6 +6086,8 @@ mod tests {
                 coalesce_key: None,
                 repair_pane_id: None,
                 class: QueueClass::IdempotentLatest,
+                terminal_pane: None,
+                stream_seq: None,
             }));
             let workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
                 .await
@@ -6146,6 +6275,8 @@ mod tests {
                 coalesce_key: None,
                 repair_pane_id: None,
                 class: QueueClass::IdempotentLatest,
+                terminal_pane: None,
+                stream_seq: None,
             }));
             let _workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
                 .await
@@ -6410,6 +6541,8 @@ mod tests {
                 coalesce_key: None,
                 repair_pane_id: None,
                 class: QueueClass::IdempotentLatest,
+                terminal_pane: None,
+                stream_seq: None,
             }));
             let _workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
                 .await
@@ -7203,6 +7336,7 @@ mod tests {
                 missing_verification: None,
                 launched_at: completed_at,
                 settled_at: Some(completed_at),
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
@@ -8271,10 +8405,10 @@ mod tests {
     fn index_status(message: &str) -> BackendEvent {
         BackendEvent::ProjectIndexStatus {
             project_root: "/tmp/project".to_string(),
-            status: gwt::ProjectIndexStatusView::new(
+            status: Box::new(gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 message,
-            ),
+            )),
         }
     }
 
@@ -8345,6 +8479,8 @@ mod tests {
             coalesce_key: None,
             repair_pane_id: None,
             class: QueueClass::IdempotentLatest,
+            terminal_pane: None,
+            stream_seq: None,
         };
 
         assert!(!queue.enqueue(&prepared));
@@ -8559,6 +8695,7 @@ mod tests {
             knowledge_wire_metadata: Some(
                 crate::app_runtime::KnowledgeWireMetadata::SemanticRetry(semantic_retry_directive()),
             ),
+            terminal_stream_seq: None,
         };
         let prepared = prepare_outbound_event(&outbound);
         let value: serde_json::Value =
@@ -8740,6 +8877,95 @@ mod tests {
         assert!(
             queue.len() < DRAIN_LOW_WATER,
             "repair fires only below the low-water mark"
+        );
+    }
+
+    fn terminal_output_at(pane: &str, data: &str, seq: u64) -> PreparedOutbound {
+        prepare_outbound_event(
+            &OutboundEvent::broadcast(terminal_output(pane, data))
+                .with_terminal_stream_seq(Some(seq)),
+        )
+    }
+
+    fn terminal_snapshot_at(pane: &str, data: &str, seq: u64) -> PreparedOutbound {
+        prepare_outbound_event(
+            &OutboundEvent::reply("client-1", terminal_snapshot(pane, data))
+                .with_terminal_stream_seq(Some(seq)),
+        )
+    }
+
+    fn drained_terminal_events(queue: &ClientQueue) -> Vec<String> {
+        let (payloads, _) = drain_all(queue);
+        payloads
+            .iter()
+            .filter_map(|payload| {
+                let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+                let kind = value.get("kind")?.as_str()?;
+                if !kind.starts_with("terminal_") {
+                    return None;
+                }
+                let data = value.get("data_base64")?.as_str()?;
+                Some(format!("{kind}:{data}"))
+            })
+            .collect()
+    }
+
+    // Issue #4095: a repair / reconnect snapshot is serialized on the event
+    // loop from a pane the reader thread may already have advanced past the
+    // last dispatched chunk. Chunks the snapshot already contains must not
+    // follow it to the client, or their cursor-up / erase-line redraws land on
+    // a screen that already moved.
+    #[test]
+    fn client_queue_never_replays_output_a_queued_snapshot_already_contains() {
+        let queue = ClientQueue::default();
+        let pane = "tab-1::agent-7";
+        queue.enqueue(&terminal_output_at(pane, "chunk-1", 1));
+        queue.enqueue(&terminal_output_at(pane, "chunk-2", 2));
+        // Event loop: snapshot taken while the reader had parsed chunks 3-4.
+        queue.enqueue(&terminal_snapshot_at(pane, "snapshot-4", 4));
+        queue.enqueue(&terminal_output_at(pane, "chunk-3", 3));
+        queue.enqueue(&terminal_output_at(pane, "chunk-4", 4));
+        queue.enqueue(&terminal_output_at(pane, "chunk-5", 5));
+        // Another pane and an un-sequenced legacy chunk are untouched.
+        queue.enqueue(&terminal_output_at("tab-1::agent-8", "other-1", 1));
+        queue.enqueue(&prepare_outbound(&terminal_output(pane, "unsequenced")));
+
+        assert_eq!(
+            drained_terminal_events(&queue),
+            vec![
+                "terminal_snapshot:snapshot-4".to_string(),
+                "terminal_output:chunk-5".to_string(),
+                "terminal_output:other-1".to_string(),
+                "terminal_output:unsequenced".to_string(),
+            ]
+        );
+        assert_eq!(
+            queue.dropped_lossy(),
+            0,
+            "superseded chunks are not queue-pressure drops"
+        );
+    }
+
+    // Issue #4095: SnapshotLatest keeps the older queue slot when a newer
+    // snapshot replaces it, so chunks queued between the two would otherwise
+    // be delivered after a snapshot that already contains them.
+    #[test]
+    fn client_queue_coalesced_snapshot_purges_output_it_already_contains() {
+        let queue = ClientQueue::default();
+        let pane = "tab-1::agent-7";
+        queue.enqueue(&terminal_snapshot_at(pane, "snapshot-1", 1));
+        queue.enqueue(&terminal_output_at(pane, "chunk-2", 2));
+        queue.enqueue(&terminal_output_at("tab-1::agent-8", "other-2", 2));
+        queue.enqueue(&terminal_snapshot_at(pane, "snapshot-2", 2));
+        queue.enqueue(&terminal_output_at(pane, "chunk-3", 3));
+
+        assert_eq!(
+            drained_terminal_events(&queue),
+            vec![
+                "terminal_snapshot:snapshot-2".to_string(),
+                "terminal_output:other-2".to_string(),
+                "terminal_output:chunk-3".to_string(),
+            ]
         );
     }
 
@@ -9130,41 +9356,50 @@ mod tests {
     #[test]
     fn client_hub_dispatch_releases_lock_before_serializing_and_sending() {
         let hub = ClientHub::default();
-        let _receivers: Vec<_> = (0..200)
-            .map(|i| hub.register(format!("client-{i}")))
-            .collect();
-
-        let events: Vec<OutboundEvent> = (0..1000)
-            .map(|i| {
-                OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                    message: format!("event-{i}"),
-                })
-            })
-            .collect();
-
+        let _receiver = hub.register("busy-client".to_string());
+        let (dispatch_paused_tx, dispatch_paused_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_dispatch_tx, release_dispatch_rx) = std::sync::mpsc::sync_channel(1);
+        let release_dispatch_rx = Arc::new(Mutex::new(release_dispatch_rx));
+        hub.set_before_dispatch_enqueue_hook(Arc::new(move || {
+            dispatch_paused_tx
+                .send(())
+                .expect("report dispatch enqueue phase");
+            release_dispatch_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv()
+                .expect("release dispatch enqueue phase");
+        }));
         let dispatch_hub = hub.clone();
-        let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let started_flag_for_thread = started_flag.clone();
         let dispatch_handle = std::thread::spawn(move || {
-            started_flag_for_thread.store(true, std::sync::atomic::Ordering::Release);
-            dispatch_hub.dispatch(events);
+            dispatch_hub.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::ProjectOpenError {
+                    message: "blocked enqueue".to_string(),
+                },
+            )]);
         });
 
-        while !started_flag.load(std::sync::atomic::Ordering::Acquire) {
-            std::thread::yield_now();
+        let dispatch_paused = dispatch_paused_rx.recv_timeout(Duration::from_secs(5));
+        if dispatch_paused.is_err() {
+            let _ = release_dispatch_tx.send(());
         }
-        std::thread::sleep(std::time::Duration::from_micros(200));
+        dispatch_paused.expect("dispatch should pause after releasing the client registry lock");
 
-        let register_start = std::time::Instant::now();
-        let _intruder_rx = hub.register("intruder".to_string());
-        let register_elapsed = register_start.elapsed();
+        let register_hub = hub.clone();
+        let (register_done_tx, register_done_rx) = std::sync::mpsc::sync_channel(1);
+        let register_handle = std::thread::spawn(move || {
+            let queue = register_hub.register("intruder".to_string());
+            register_done_tx
+                .send(queue)
+                .expect("report concurrent registration");
+        });
 
+        let registered = register_done_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_dispatch_tx.send(());
+        let _intruder_rx =
+            registered.expect("register must complete while dispatch enqueue work is paused");
+        register_handle.join().expect("register thread joins");
         dispatch_handle.join().expect("dispatch thread joins");
-
-        assert!(
-            register_elapsed < std::time::Duration::from_millis(20),
-            "register must not wait for dispatch's serialize+send loop; waited {register_elapsed:?}"
-        );
     }
 
     #[test]
