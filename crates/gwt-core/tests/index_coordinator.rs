@@ -242,6 +242,29 @@ fn run_helper_role(role: &str) {
             }
             let _ = guard.complete(JobOutcome::Completed);
         }
+        "queue-for-heavy" => {
+            // Issue #4169: one worktree queueing for the host-wide lease. It
+            // records the moment it is granted and then parks, so the parent
+            // decides when the lease moves on and can observe who is next.
+            let key = verification_target_from_env();
+            let label = required_env("GWT_COORD_LABEL");
+            let order = PathBuf::from(required_env("GWT_COORD_ORDER"));
+            let release = PathBuf::from(required_env("GWT_COORD_SIGNAL"));
+            let admission = coordinator
+                .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(20))
+                .expect("helper: request verification job");
+            let guard = expect_owner(admission);
+            let lease = guard
+                .acquire_heavy_with_ttl(Duration::from_secs(120), Duration::from_secs(300))
+                .expect("helper: acquire queued heavy lease");
+            locked_append_line(&order, &label);
+            poll_until(Duration::from_secs(120), || release.exists());
+            lease.release().expect("helper: release queued heavy lease");
+            guard
+                .complete(JobOutcome::Completed)
+                .expect("helper: complete");
+            write_result("done");
+        }
         "hold-heavy-and-park" => {
             let key = target_from_env();
             let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
@@ -333,6 +356,32 @@ fn locked_counter_add(path: &Path, delta: i64) {
     file.write_all(format!("{{\"current\":{current},\"max\":{max}}}").as_bytes())
         .expect("write counter");
     fs2::FileExt::unlock(&file).expect("unlock counter");
+}
+
+/// fs2-locked append-only log of grant order (Issue #4169), so several
+/// processes can record who was served without interleaving a line.
+fn locked_append_line(path: &Path, line: &str) {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .expect("open order log");
+    file.lock_exclusive().expect("lock order log");
+    let mut handle = &file;
+    handle
+        .write_all(format!("{line}\n").as_bytes())
+        .expect("write order log");
+    handle.flush().expect("flush order log");
+    fs2::FileExt::unlock(&file).expect("unlock order log");
+}
+
+fn read_lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn read_counter(path: &Path) -> (i64, i64) {
@@ -514,6 +563,105 @@ fn heavy_lease_is_host_wide_exclusive_across_processes() {
         max, 1,
         "heavy lease must never be held by more than one process host-wide"
     );
+}
+
+/// Issue #4169 AC-4: several worktrees wait for the same host-wide lease, and
+/// the freed lease travels down the queue in arrival order. A worktree that
+/// starts only after the lease was freed queues behind the ones already
+/// waiting instead of overtaking them — the handoff that starved #4119.
+///
+/// The three worktree hashes sort in the opposite order to the expected
+/// handoff, so neither an alphabetical tiebreak nor a race can pass this.
+#[test]
+fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let order = arena.path("order.log");
+    let queued = |worktree: &str| {
+        let stem = TargetKey::verification("repo", worktree).file_stem();
+        coordinator
+            .heavy_lease_status()
+            .expect("read lease status")
+            .queue
+            .iter()
+            .any(|entry| entry.target.as_deref() == Some(stem.as_str()))
+    };
+    let spawn_queued = |label: &'static str, worktree: &'static str| {
+        spawn_helper(
+            label,
+            &[
+                ("GWT_COORD_ROLE", "queue-for-heavy".to_string()),
+                arena.coord_env(),
+                ("GWT_COORD_VERIFY_TARGET", format!("repo|{worktree}")),
+                ("GWT_COORD_LABEL", label.to_string()),
+                ("GWT_COORD_ORDER", order.to_string_lossy().into_owned()),
+                (
+                    "GWT_COORD_SIGNAL",
+                    arena
+                        .path(&format!("release-{label}"))
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "GWT_COORD_RESULT",
+                    arena
+                        .path(&format!("result-{label}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        )
+    };
+
+    // This process holds the lease while the first two worktrees queue.
+    let holder_key = TargetKey::verification("repo", "holder");
+    let holder = expect_owner(
+        coordinator
+            .request_job(
+                &holder_key,
+                JobPriority::ManualRebuild,
+                Duration::from_secs(20),
+            )
+            .expect("request holder job"),
+    );
+    let heavy = holder
+        .acquire_heavy_with_ttl(Duration::from_secs(20), Duration::from_secs(300))
+        .expect("hold the host-wide lease");
+
+    let first = spawn_queued("first", "wt-c");
+    poll_until(Duration::from_secs(60), || queued("wt-c"));
+    let second = spawn_queued("second", "wt-b");
+    poll_until(Duration::from_secs(60), || queued("wt-b"));
+
+    // Free the lease: the earliest waiter must be served.
+    drop(heavy);
+    poll_until(Duration::from_secs(60), || read_lines(&order) == ["first"]);
+
+    // A worktree that never waited starts now, while `second` is still queued.
+    let third = spawn_queued("third", "wt-a");
+    poll_until(Duration::from_secs(60), || queued("wt-a"));
+
+    fs::write(arena.path("release-first"), b"go").expect("release first");
+    poll_until(Duration::from_secs(60), || {
+        read_lines(&order) == ["first", "second"]
+    });
+    assert_eq!(
+        read_lines(&order),
+        ["first", "second"],
+        "the newcomer must not overtake the queued worktree"
+    );
+
+    fs::write(arena.path("release-second"), b"go").expect("release second");
+    poll_until(Duration::from_secs(60), || {
+        read_lines(&order) == ["first", "second", "third"]
+    });
+    fs::write(arena.path("release-third"), b"go").expect("release third");
+
+    for child in [first, second, third] {
+        wait_success(child, Duration::from_secs(120));
+    }
+    holder.complete(JobOutcome::Completed).expect("complete");
+    assert_eq!(read_lines(&order), ["first", "second", "third"]);
 }
 
 #[test]
