@@ -66111,6 +66111,32 @@ fn continue_work_durable_seed_with_foreign_owner_resolves_to_work_owner() {
     );
 }
 
+#[test]
+fn continue_work_from_autonomous_session_uses_manual_launch_route() {
+    let mut seed = issue_3489_durable_seed(Some(4217));
+    let ContinueWorkLaunchSeed::DurableSession(session) = &mut seed else {
+        unreachable!("durable fixture");
+    };
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    // Restoring the same launch must retain its route; an explicit Continue
+    // work action starts a new manual launch from that conversation.
+    assert_eq!(
+        super::launch_config_from_persisted_session(session).launch_route,
+        gwt_agent::LaunchRoute::Autonomous
+    );
+    let (config, _) = continuation_launch_config(
+        &seed,
+        Path::new("/tmp/gwt-issue-3489/work"),
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4217,
+        },
+        None,
+    );
+
+    assert_eq!(config.launch_route, gwt_agent::LaunchRoute::Manual);
+}
+
 /// Issue #3489 AC-2: the Work projection seed keeps the same single source of
 /// owner truth, so both seeds stay interchangeable for the binding install.
 #[test]
