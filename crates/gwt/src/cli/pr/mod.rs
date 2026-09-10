@@ -3435,7 +3435,14 @@ mod tests {
             review_status: "REVIEW_REQUIRED".to_string(),
         }));
 
-        let mut current = WorkspaceProjection::default_for_project(&repo);
+        // The producer resolves the project state root through
+        // `resolve_current_worktree_root`, so the transaction rewrites
+        // `project_root` into git's own spelling (`C:/...` on Windows) even
+        // when nothing else changes. Seed the fixture with the same resolver
+        // so the whole-struct comparison below stays a PR-metadata assertion
+        // instead of a path-spelling one.
+        let project_state_root = gwt_core::paths::resolve_current_worktree_root(&repo);
+        let mut current = WorkspaceProjection::default_for_project(&project_state_root);
         current.id = "foreign-current".to_string();
         current.git_details = Some(GitDetails {
             branch: Some("work/foreign-current".to_string()),
