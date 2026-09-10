@@ -2993,6 +2993,10 @@ export function createKnowledgeKanbanSurface({
           label: "Settings",
           aria: "Project Agent settings for",
         }),
+        "queue-remove": Object.freeze({
+          label: "Remove from queue",
+          aria: "Remove from queue",
+        }),
         "move-up": Object.freeze({ label: "↑ Move up", aria: "Move up" }),
         "move-down": Object.freeze({ label: "↓ Move down", aria: "Move down" }),
         "continue-work": Object.freeze({ label: "Continue work", aria: "Continue work on" }),
@@ -3037,6 +3041,12 @@ export function createKnowledgeKanbanSurface({
               kind: "issue_monitor_configure_issue",
               issue_number: entry.number,
               linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "queue-remove":
+            send({
+              kind: "issue_monitor_queue_remove",
+              issue_numbers: [entry.number],
             });
             return;
           case "move-up":

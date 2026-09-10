@@ -643,6 +643,15 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
     issue_number: 42,
     linked_issue_kind: "spec",
   });
+  const remove42 = row42.querySelector('[data-action="queue-remove"]');
+  assert.equal(remove42.textContent, "Remove from queue");
+  assert.equal(remove42.getAttribute("aria-label"), "Remove from queue Issue #42");
+  const beforeRemove = fixture.sent.length;
+  remove42.click();
+  assert.deepEqual(fixture.sent.slice(beforeRemove), [{
+    kind: "issue_monitor_queue_remove",
+    issue_numbers: [42],
+  }]);
   assert.equal(
     fixture.sent.filter((message) => message.kind === "select_knowledge_bridge_entry").length,
     0,
