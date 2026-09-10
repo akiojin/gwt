@@ -4267,6 +4267,28 @@ def resolve_active_store(db_path: Path) -> Path:
     return db_path
 
 
+def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
+    """Documents in the store readers currently resolve to, or None when that
+    cannot be determined.
+
+    Unlike `_scope_document_count` this takes no lock: callers run inside the
+    exclusive target lock, and `acquire_lock` is not reentrant.
+    """
+    store = resolve_active_store(db_path)
+    if not (store / "chroma.sqlite3").exists():
+        return None
+    try:
+        client, collection = _open_chroma_collection(
+            store, _scope_collection_name(scope)
+        )
+        try:
+            return _safe_collection_count(collection)
+        finally:
+            _close_chroma_client(client)
+    except Exception:
+        return None
+
+
 def _publish_generation(
     db_path: Path,
     staging: Path,
@@ -4283,6 +4305,14 @@ def _publish_generation(
     been abandoned for more than 24 hours (keeping the previous active one).
     Any OS failure returns a typed `PUBLISH_FAILED` payload — the previous
     active generation stays untouched.
+
+    Issue #4205 AC-11: a build that staged zero documents is refused before
+    anything is replaced when the active store still holds documents. Such a
+    publish is doubly destructive — it promotes the empty generation *and*
+    runs the lazy-migration cleanup that drops the legacy in-place store — and
+    it emptied `specs` (500 -> 0) and `board` (51 -> 0) in production. A scope
+    that is legitimately empty (no active store yet, or an active store that
+    is already empty) still publishes.
     """
     gen_root = generations_root(db_path)
     generation_name = f"gen-{int(time.time() * 1000)}-{os.getpid()}"
@@ -4290,6 +4320,20 @@ def _publish_generation(
         gen_root.mkdir(parents=True, exist_ok=True)
         with acquire_lock(db_path, exclusive=True):
             previous = _read_active_pointer(db_path)
+            if document_count == 0:
+                active_documents = _active_store_document_count(db_path, scope)
+                if active_documents:
+                    return {
+                        "ok": False,
+                        "error_code": "EMPTY_CORPUS",
+                        "error": (
+                            f"refusing to publish an empty {scope} generation over "
+                            f"{active_documents} live document(s)"
+                        ),
+                        "scope": scope,
+                        "active_document_count": active_documents,
+                        "retryable": True,
+                    }
             generation_dir = gen_root / generation_name
             os.replace(staging, generation_dir)
             for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
