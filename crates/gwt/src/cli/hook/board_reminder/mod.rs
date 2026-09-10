@@ -683,7 +683,7 @@ pub fn compute_plan(
     // summary) fire for every session — the intake lane suppression is gone.
     // Only a terminal delivery settlement still quiets them.
     let suppress_work_state_reminders =
-        terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
+        terminal_work_state_reminders_suppressed(context.audience_root(), &session.id);
     // SPEC-3431 FR-064: the resident PM owns no Work item, its window title is
     // fixed, and `workspace.update` cannot even succeed from its detached
     // worktree (#3477). Suppress separately from the terminal-settlement path
@@ -785,14 +785,13 @@ fn preserve_board_diff_cursor_after_failed_read(
     plan.next_reminders.last_injected_at = previous_last_injected_at;
 }
 
-fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -> bool {
-    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    match crate::cli::verification_record::load_work_event_settlement_record(&resolved) {
+fn terminal_work_state_reminders_suppressed(resolved_worktree: &Path, session_id: &str) -> bool {
+    match crate::cli::verification_record::load_work_event_settlement_record(resolved_worktree) {
         Ok(Some(record)) if record.session_id == session_id => return true,
         Err(_) => return true,
         Ok(Some(_)) | Ok(None) => {}
     }
-    crate::cli::execution_state::load(&resolved)
+    crate::cli::execution_state::load(resolved_worktree)
         .ok()
         .flatten()
         .is_some_and(|record| {

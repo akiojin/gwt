@@ -1,6 +1,9 @@
 //! Prepared immutable state shared by one hook invocation.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gwt_agent::Session;
 use gwt_core::workspace_projection::{load_workspace_projection_from_path, WorkspaceProjection};
@@ -8,6 +11,7 @@ use gwt_core::workspace_projection::{load_workspace_projection_from_path, Worksp
 use super::HookError;
 
 pub struct HookContext {
+    audience_root: PathBuf,
     audience_projection: Option<Arc<WorkspaceProjection>>,
     canonical_project_projection: Option<Arc<WorkspaceProjection>>,
 }
@@ -36,9 +40,14 @@ impl HookContext {
             load(&canonical_root)?.map(Arc::new)
         };
         Ok(Self {
+            audience_root,
             audience_projection,
             canonical_project_projection,
         })
+    }
+
+    pub fn audience_root(&self) -> &Path {
+        &self.audience_root
     }
 
     pub fn audience_projection(&self) -> Option<&WorkspaceProjection> {
@@ -60,4 +69,58 @@ fn load_hook_workspace_projection(
     // consumes only the canonical projection and treats absence as no scope.
     let path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(repo_path);
     load_workspace_projection_from_path(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gwt_agent::AgentId;
+
+    #[test]
+    fn issue_3777_same_audience_and_canonical_root_loads_projection_once() {
+        let root = tempfile::tempdir().expect("project root");
+        let mut session = Session::new(root.path(), "work/issue-3777", AgentId::Codex);
+        session.project_state_root = Some(root.path().to_path_buf());
+        let mut loaded = Vec::new();
+
+        let context = HookContext::for_board_reminder_with_loader(&session, |path| {
+            loaded.push(path.to_path_buf());
+            Ok(Some(WorkspaceProjection::default_for_project(path)))
+        })
+        .expect("prepare hook context");
+
+        assert_eq!(loaded.len(), 1);
+        assert!(Arc::ptr_eq(
+            context.audience_projection.as_ref().expect("audience"),
+            context
+                .canonical_project_projection
+                .as_ref()
+                .expect("canonical"),
+        ));
+    }
+
+    #[test]
+    fn issue_3777_distinct_audience_and_canonical_roots_load_each_once() {
+        let audience = tempfile::tempdir().expect("audience root");
+        let canonical = tempfile::tempdir().expect("canonical root");
+        let mut session = Session::new(audience.path(), "work/issue-3777", AgentId::Codex);
+        session.project_state_root = Some(canonical.path().to_path_buf());
+        let mut loaded = Vec::new();
+
+        let context = HookContext::for_board_reminder_with_loader(&session, |path| {
+            loaded.push(path.to_path_buf());
+            Ok(Some(WorkspaceProjection::default_for_project(path)))
+        })
+        .expect("prepare hook context");
+
+        assert_eq!(loaded.len(), 2);
+        assert_ne!(loaded[0], loaded[1]);
+        assert!(!Arc::ptr_eq(
+            context.audience_projection.as_ref().expect("audience"),
+            context
+                .canonical_project_projection
+                .as_ref()
+                .expect("canonical"),
+        ));
+    }
 }

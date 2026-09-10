@@ -4013,6 +4013,10 @@ impl AppRuntime {
                 format!("{} active agents", projection.active_agents)
             };
         }
+        drop(cache);
+        self.active_work_projection_payload_cache
+            .borrow_mut()
+            .remove(tab_id);
     }
 
     /// Merge one disk-watcher payload into the already materialized Active
@@ -4036,23 +4040,33 @@ impl AppRuntime {
         let mut cache = self.active_work_projection_cache.borrow_mut();
         if let Some(projection) = cache.get_mut(&tab_id) {
             merge_workspace_projection_membership_cache_only(projection, project_root, fresh);
-            return;
+        } else {
+            // A watcher can win the race with the first full background
+            // materialization. Seed the cache from its authoritative current-state
+            // membership instead of falling back to possibly stale live-session
+            // bookkeeping. `WorkspaceProjection` contains no historical Session,
+            // Work, or journal vectors, so this cold-cache construction is bounded
+            // by visible membership.
+            let mut projection = active_work_projection_from_saved_with_journal(
+                fresh.clone(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            assign_and_merge_workspace_groups_cache_only(
+                &mut projection.active_works,
+                project_root,
+            );
+            cache.insert(tab_id.clone(), projection);
         }
-
-        // A watcher can win the race with the first full background
-        // materialization. Seed the cache from its authoritative current-state
-        // membership instead of falling back to possibly stale live-session
-        // bookkeeping. `WorkspaceProjection` contains no historical Session,
-        // Work, or journal vectors, so this cold-cache construction is bounded
-        // by visible membership.
-        let mut projection = active_work_projection_from_saved_with_journal(
-            fresh.clone(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-        assign_and_merge_workspace_groups_cache_only(&mut projection.active_works, project_root);
-        cache.insert(tab_id, projection);
+        drop(cache);
+        // The prepared payload is an immutable serialization of the previous
+        // structured snapshot. Keep the two caches coherent: until the latest
+        // background generation commits, FrontendReady/tab-change must use the
+        // bounded structured fallback instead of replaying pre-patch bytes.
+        self.active_work_projection_payload_cache
+            .borrow_mut()
+            .remove(&tab_id);
     }
 
     /// Rebuild the cache for the project whose background completion just

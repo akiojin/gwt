@@ -2481,6 +2481,7 @@ pub fn persist_session_hook_metadata_with_wait(
     session_id: &str,
     event: &str,
     agent_session_id: Option<&str>,
+    project_state_root: Option<&Path>,
     wait: Duration,
 ) -> io::Result<Session> {
     let agent_session_id = agent_session_id
@@ -2489,6 +2490,9 @@ pub fn persist_session_hook_metadata_with_wait(
     update_session_with_wait(sessions_dir, session_id, wait, |session| {
         if let Some(agent_session_id) = agent_session_id {
             apply_agent_session_id(session, agent_session_id);
+        }
+        if session.project_state_root.is_none() {
+            session.project_state_root = project_state_root.map(Path::to_path_buf);
         }
         session.record_hook_event(event);
         Ok(())
@@ -2615,6 +2619,46 @@ mod tests {
         assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn hook_metadata_backfills_project_state_root_without_overwriting_authority() {
+        let sessions = tempfile::tempdir().expect("sessions dir");
+        let worktree = sessions.path().join("worktree");
+        let canonical = sessions.path().join("canonical");
+        let replacement = sessions.path().join("replacement");
+        let session = Session::new(&worktree, "work/issue-3777", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(sessions.path()).expect("save Session");
+
+        let updated = persist_session_hook_metadata_with_wait(
+            sessions.path(),
+            &session_id,
+            "UserPromptSubmit",
+            None,
+            Some(&canonical),
+            Duration::from_millis(25),
+        )
+        .expect("backfill canonical root");
+        assert_eq!(
+            updated.project_state_root.as_deref(),
+            Some(canonical.as_path())
+        );
+
+        let preserved = persist_session_hook_metadata_with_wait(
+            sessions.path(),
+            &session_id,
+            "UserPromptSubmit",
+            None,
+            Some(&replacement),
+            Duration::from_millis(25),
+        )
+        .expect("preserve canonical root");
+        assert_eq!(
+            preserved.project_state_root.as_deref(),
+            Some(canonical.as_path()),
+            "later hook observations must not replace the launch authority"
+        );
     }
 
     #[test]

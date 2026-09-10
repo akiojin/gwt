@@ -265,6 +265,14 @@ pub(crate) fn handle_with_input_prepared(
         hook_event.as_ref(),
     )?;
     if session.is_some() {
+        let legacy_project_state_root = session.as_ref().and_then(|session| {
+            session.project_state_root.is_none().then(|| {
+                crate::agent_project_state::canonical_project_state_root_for_session(
+                    session,
+                    &session.worktree_path,
+                )
+            })
+        });
         let agent_session_id_to_sync = agent_session_id.as_ref().filter(|agent_session_id| {
             agent_session_id_needs_sync(session.as_ref(), agent_session_id)
         });
@@ -273,6 +281,7 @@ pub(crate) fn handle_with_input_prepared(
             gwt_session_id.as_str(),
             event,
             agent_session_id_to_sync.map(HookSessionId::as_str),
+            legacy_project_state_root.as_deref(),
             HOOK_SESSION_METADATA_LEASE_WAIT,
         ) {
             Ok(updated) => session = Some(updated),

@@ -135,6 +135,7 @@ fn normalized_handler(value: &str) -> &'static str {
         "discussion-goal-start" => "discussion-goal-start",
         "workflow-policy" => "workflow-policy",
         "autonomous-question-guard" => "autonomous-question-guard",
+        "autonomous-answer-receipt" => "autonomous-answer-receipt",
         "session-start-session-id-diagnostic" => "session-start-session-id-diagnostic",
         "blocked-stop-runtime-state" => "blocked-stop-runtime-state",
         "completed-stop" => "completed-stop",

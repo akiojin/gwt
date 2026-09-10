@@ -47965,8 +47965,20 @@ fn cached_close_preserves_blocked_peer_and_active_lifecycle() {
         .active_work_projection_cache
         .borrow_mut()
         .insert("tab-1".to_string(), view);
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), Arc::from("pre-close-payload"));
 
     runtime.mark_cached_active_work_session_stopped("tab-1", "session-1", &window_id);
+
+    assert!(
+        !runtime
+            .active_work_projection_payload_cache
+            .borrow()
+            .contains_key("tab-1"),
+        "a cache-only lifecycle patch must invalidate the older wire payload"
+    );
 
     let cache = runtime.active_work_projection_cache.borrow();
     let view = cache.get("tab-1").expect("cached projection");
@@ -60564,6 +60576,45 @@ fn issue_3777_frontend_ready_reuses_background_serialized_projection() {
     };
     assert!(matches!(target, DispatchTarget::Client(id) if id == "client-1"));
     assert!(Arc::ptr_eq(&payload, &dispatched));
+}
+
+#[test]
+fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let stale_payload: Arc<str> = Arc::from("stale-before-watcher-patch");
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), stale_payload);
+    runtime.active_work_projection_cache.borrow_mut().insert(
+        "tab-1".to_string(),
+        active_work_projection_from_saved(
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+        ),
+    );
+    let mut fresh = gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    fresh.title = "Fresh watcher state".to_string();
+
+    runtime.merge_workspace_projection_into_cached_active_work(&repo, &fresh);
+
+    assert!(
+        !runtime
+            .active_work_projection_payload_cache
+            .borrow()
+            .contains_key("tab-1"),
+        "a cache-only structured mutation must invalidate the older wire payload"
+    );
+    assert!(runtime.active_work_projection_reply("client-1").is_some());
+    assert!(
+        recorded_events.lock().expect("recorded events").is_empty(),
+        "FrontendReady must not replay a payload serialized before the watcher patch"
+    );
 }
 
 #[test]

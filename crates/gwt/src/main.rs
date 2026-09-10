@@ -77,7 +77,7 @@ pub(crate) use app_runtime::{
     ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
     AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch,
     DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
-    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
