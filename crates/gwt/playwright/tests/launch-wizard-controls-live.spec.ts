@@ -17,6 +17,7 @@ import {
   acquireLiveGwtBackendLock,
   clearLiveLaunchWizard,
   gotoLiveGwt,
+  openLiveLaunchWizardForBranch,
   openLiveGwtProject,
   sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
@@ -28,8 +29,10 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test.setTimeout(120_000);
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
+  let cleanupLaunchFixture: (() => Promise<void>) | undefined;
 
   test.beforeEach(async ({ page }, testInfo) => {
+    cleanupLaunchFixture = undefined;
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
@@ -39,8 +42,14 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
 
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
+    const cleanup = cleanupLaunchFixture;
+    cleanupLaunchFixture = undefined;
     try {
-      await clearLiveLaunchWizard(page);
+      try {
+        await clearLiveLaunchWizard(page);
+      } finally {
+        await cleanup?.();
+      }
     } finally {
       await releaseBackendLock();
       releaseBackendLock = undefined;
@@ -50,10 +59,10 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Target is a segmented radiogroup that toggles agent settings", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await enterIntakeSettings(page);
+    await enterLaunchSettings(page);
 
     const target = wizard.getByRole("radiogroup", { name: "Target" });
     await expect(target).toBeVisible();
@@ -80,9 +89,9 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
     const wizard = page.locator("#wizard-modal");
-    await enterIntakeSettings(page);
+    await enterLaunchSettings(page);
 
     const agentField = wizard.getByLabel("Agent", { exact: true });
     const tag = await agentField.evaluate((node) => node.tagName.toLowerCase());
@@ -264,10 +273,10 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Reasoning renders as a slider with a separate Auto toggle", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await enterIntakeSettings(page);
+    await enterLaunchSettings(page);
 
     await selectWizardAgent(page, "claude");
     // Pin an effort-capable model so the reasoning control is shown
@@ -362,7 +371,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   await blurActiveElement(page);
 }
 
-async function enterIntakeSettings(page: Page): Promise<void> {
+async function enterLaunchSettings(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const target = wizard.getByRole("radiogroup", { name: "Target" });
   if (await target.isVisible().catch(() => false)) {

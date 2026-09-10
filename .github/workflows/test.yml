@@ -8,17 +8,34 @@ jobs:
   test:
     name: Test (Rust)
     runs-on: ubuntu-latest
-    # Issue #4055: the step budgets below are the operative limits; this cap
-    # only bounds the job as a whole and must cover their sum (5+25+10+10)
-    # plus checkout / toolchain / cache setup.
-    timeout-minutes: 60
+    # Issue #4055 / #4191: the step budgets below are the operative limits;
+    # this cap only bounds the job as a whole and must cover their sum
+    # (5+18+25+10+10) plus checkout / toolchain / cache setup.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
-      - name: Install tray + GTK dependencies (Linux)
-        run: |
-          sudo bash scripts/ci-apt.sh update
-          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+      # Issue #4191 AC-2: restoring the .deb archive before the install means a
+      # warm cache installs without touching a mirror at all. The key hashes
+      # scripts/ci-apt.sh because that script owns the package list, so a
+      # changed package set can never be served the previous archive.
+      - name: Cache Linux GTK dependency packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/gwt-apt-archives
+          key: gwt-apt-gtk-xvfb-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
         timeout-minutes: 5
+      # Issue #4191: measured over the last 60 green runs this step takes p50
+      # 29s, p90 48s, p95 60s, max 106s, so the previous 5-minute cap sat at
+      # ~3x the worst healthy run. Hitting it therefore meant a stalled mirror,
+      # not a slow one, and the job reported FAILURE having executed zero
+      # tests. scripts/ci-apt.sh now owns the deadline (900s) and retries
+      # inside it; this cap is only the outer net and must stay above that,
+      # because a step GitHub kills cannot report the failure as a dependency
+      # failure rather than a test failure. Pinned by
+      # crates/gwt/tests/ci_linux_dependency_install_contract_test.rs.
+      - name: Install tray + GTK dependencies (Linux)
+        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb
+        timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
@@ -169,6 +186,18 @@ jobs:
           cargo test -p gwt --lib process::tests -- --test-threads=1
           cargo test -p gwt-core --lib daemon_pipe_name -- --test-threads=1
         timeout-minutes: 20
+      # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
+      # can tell the Issue Monitor its silence is a wait rather than a stall.
+      # Both the acceptance of a declaration and its durable prefs fallback are
+      # host-state contracts, so they are pinned on the Windows job rather than
+      # inferred from the Linux run.
+      - name: Run Issue Monitor wait declaration contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --lib cli::issue::tests::monitor_wait_ -- --test-threads=1
+          cargo test -p gwt --lib issue_monitor::tests::wait_declaration_ -- --test-threads=1
+          cargo test -p gwt --lib issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1
+        timeout-minutes: 15
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15

@@ -108,7 +108,11 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
 };
 
 /// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
-const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this from here rather than recovering it
+/// out of the persisted `launch_args`.
+pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
 /// SPEC-3431 T-093 (FR-012): a wake the monitor-event path decided on — which
 /// pane receives the prompt and what it says. The window id is only ever the
@@ -377,8 +381,13 @@ impl AppRuntime {
         if let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) {
             if session.worktree_path.exists() {
                 let before = self.pm_window_ids(tab_id);
-                let events =
-                    self.spawn_restored_agent_session(tab_id, session, None, PM_WINDOW_GEOMETRY);
+                let events = self.spawn_restored_agent_session(
+                    tab_id,
+                    session,
+                    None,
+                    PM_WINDOW_GEOMETRY,
+                    crate::app_runtime::startup::RestoreOrigin::Automatic,
+                );
                 self.mark_new_pm_windows(tab_id, &before, &project_root);
                 return events;
             }

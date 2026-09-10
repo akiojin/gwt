@@ -601,6 +601,19 @@ fn reject_pm_managed_asset_indirection(path: &Path, metadata: &fs::Metadata) -> 
     Ok(())
 }
 
+/// What one managed-asset materialization committed to disk that a caller
+/// still has to agree with afterwards.
+///
+/// #3967: `hook_bin` is the fallback binary the regenerated hook commands
+/// embed. It is resolved once, here, and pinned into the environment only for
+/// the duration of the generation call — so Codex trust pre-registration, which
+/// must match those command strings byte for byte, reads it from this value
+/// instead of re-deriving a second answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManagedAssetMaterialization {
+    pub hook_bin: Option<String>,
+}
+
 pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId) -> io::Result<()> {
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         worktree,
@@ -608,6 +621,7 @@ pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId)
         MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )
+    .map(|_| ())
 }
 
 pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
@@ -615,12 +629,10 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     agent_id: &AgentId,
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
     is_ephemeral: bool,
-) -> io::Result<()> {
+) -> io::Result<ManagedAssetMaterialization> {
     with_managed_asset_lock(worktree, || {
-        let targets = managed_targets_for_agent(agent_id)
-            .into_iter()
-            .collect::<Vec<_>>();
-        materialize_managed_gwt_assets_for_targets(
+        let targets = refresh_targets_for_agent(worktree, agent_id);
+        let hook_bin = materialize_managed_gwt_assets_for_targets(
             worktree,
             &targets,
             codex_hook_discovery_mode,
@@ -630,7 +642,7 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
             io::Error::other(format!("failed to update gwt managed excludes: {error}"))
         })?;
-        Ok(())
+        Ok(ManagedAssetMaterialization { hook_bin })
     })
 }
 
@@ -661,12 +673,14 @@ fn worktree_is_ephemeral(worktree: &Path) -> bool {
     crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
+/// Materialize managed assets, returning the fallback binary the regenerated
+/// hook commands were pinned to (`None` when no hook config was generated).
 fn materialize_managed_gwt_assets_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
     is_ephemeral: bool,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     // Fail fast with a clear, attributed error when the worktree was not
     // properly created (e.g. branch/worktree materialization failed). Without
     // this guard, distribution would silently `create_dir_all` a phantom tree
@@ -695,7 +709,7 @@ fn materialize_managed_gwt_assets_for_targets(
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
     })?;
     if targets.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     // SPEC-3431 T-052: gwt-pm is generated, not bundled, so the prune above
     // deletes it like any other unknown `gwt-*` skill. Regenerating here — the
@@ -704,7 +718,8 @@ fn materialize_managed_gwt_assets_for_targets(
     // structural (canonical PM worktree path), so no other worktree can be
     // handed the PM contract by an ambient value.
     let is_pm = crate::pm_registry::is_pm_worktree(worktree);
-    regenerate_managed_hook_configs_for_targets(worktree, targets, codex_hook_discovery_mode)?;
+    let hook_bin =
+        regenerate_managed_hook_configs_for_targets(worktree, targets, codex_hook_discovery_mode)?;
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         generate_coordination_guidance_for_claude(worktree).map_err(|error| {
             io::Error::other(format!(
@@ -729,7 +744,7 @@ fn materialize_managed_gwt_assets_for_targets(
             })?;
         }
     }
-    Ok(())
+    Ok(hook_bin)
 }
 
 pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<()> {
@@ -740,18 +755,21 @@ pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<(
             &targets,
             MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         )
+        .map(|_| ())
     })
 }
 
+/// Regenerate the managed hook configs, returning the fallback binary they were
+/// generated with (`None` when there was nothing to generate).
 fn regenerate_managed_hook_configs_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     if targets.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let _hook_bin_guard = install_hook_bin_override()?;
+    let (_hook_bin_guard, hook_bin) = install_hook_bin_override()?;
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         generate_settings_local(worktree).map_err(|error| {
             io::Error::other(format!(
@@ -785,7 +803,7 @@ fn regenerate_managed_hook_configs_for_targets(
             ))
         })?;
     }
-    Ok(())
+    Ok(Some(hook_bin))
 }
 
 fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
@@ -798,6 +816,24 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
         AgentId::GrokBuild => Some(ManagedAssetTarget::ClaudeCode),
         AgentId::Antigravity | AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
     }
+}
+
+/// Targets a launch refresh must write: the launched provider plus every
+/// managed provider surface the worktree already carries (#3233). Writing only
+/// the launched provider left an existing mirror (e.g. `.codex/skills`) frozen
+/// at whatever the previous build materialized, so a bundle asset added since
+/// then appeared on one side only and broke `.claude` / `.codex` parity.
+fn refresh_targets_for_agent(worktree: &Path, agent_id: &AgentId) -> Vec<ManagedAssetTarget> {
+    // An agent with no managed surface of its own (Gemini, Copilot, …) still
+    // launches inside a worktree whose existing `.claude` / `.codex` surfaces
+    // must not be left frozen, so start from the optional primary instead of
+    // returning early.
+    let mut targets: Vec<ManagedAssetTarget> =
+        managed_targets_for_agent(agent_id).into_iter().collect();
+    for existing in detect_existing_managed_asset_targets(worktree) {
+        push_existing_target(&mut targets, true, existing);
+    }
+    targets
 }
 
 fn detect_existing_managed_asset_targets(worktree: &Path) -> Vec<ManagedAssetTarget> {
@@ -845,18 +881,61 @@ fn push_existing_target(
     }
 }
 
-fn install_hook_bin_override() -> io::Result<EnvVarGuard> {
+/// Where the managed hook binary came from, which decides whether generation
+/// still has to publish it to the environment.
+enum HookBinPin {
+    /// Already answered for this thread or process; the generator will read it
+    /// without help.
+    Ambient(String),
+    /// Resolved here, so generation has to publish it for the duration of the
+    /// materialization.
+    Resolved(String),
+}
+
+/// The fallback binary a managed hook command embeds when a launch did not
+/// inject `GWT_BIN_PATH`.
+///
+/// #3967: this is the one answer generation and Codex trust pre-registration
+/// must share. It is published to the environment only while materialization
+/// runs, so anything that needs it afterwards asks here rather than deriving a
+/// second answer of its own — gwt-skills' library fallback resolves a gwt
+/// started from a checkout build to `target/debug/gwtd`, which
+/// `sanitize_hook_bin_for_config_path` then reduces to the bare `gwtd`, while
+/// this resolver skips build outputs and pins the installed absolute path.
+pub fn managed_hook_bin() -> io::Result<String> {
+    Ok(match managed_hook_bin_pin()? {
+        HookBinPin::Ambient(hook_bin) | HookBinPin::Resolved(hook_bin) => hook_bin,
+    })
+}
+
+fn managed_hook_bin_pin() -> io::Result<HookBinPin> {
     // #4057: a thread-local test pin already answers the generator, so leave
     // the process environment alone — mutating it here would leak this
     // thread's binary into every other materialization in the process.
-    if gwt_skills::settings_local::hook_bin_override().is_some() {
-        return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
+    if let Some(hook_bin) = gwt_skills::settings_local::hook_bin_override() {
+        return Ok(HookBinPin::Ambient(hook_bin));
     }
-    if std::env::var_os("GWT_HOOK_BIN").is_some_and(|value| !value.is_empty()) {
-        return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
+    if let Some(hook_bin) = std::env::var_os("GWT_HOOK_BIN")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy().into_owned())
+    {
+        return Ok(HookBinPin::Ambient(hook_bin));
     }
-    let hook_bin = resolve_public_gwt_bin_path()?;
-    Ok(EnvVarGuard::set("GWT_HOOK_BIN", hook_bin))
+    Ok(HookBinPin::Resolved(
+        resolve_public_gwt_bin_path()?
+            .to_string_lossy()
+            .into_owned(),
+    ))
+}
+
+/// Pin the fallback binary generated hook commands embed, and report it.
+fn install_hook_bin_override() -> io::Result<(EnvVarGuard, String)> {
+    match managed_hook_bin_pin()? {
+        HookBinPin::Ambient(hook_bin) => Ok((EnvVarGuard::noop("GWT_HOOK_BIN"), hook_bin)),
+        HookBinPin::Resolved(hook_bin) => {
+            Ok((EnvVarGuard::set("GWT_HOOK_BIN", &hook_bin), hook_bin))
+        }
+    }
 }
 
 pub fn resolve_public_gwt_bin_path() -> io::Result<PathBuf> {

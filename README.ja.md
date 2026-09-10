@@ -311,6 +311,13 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
 `autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
+`review_verdict_published` / `execution_settled` / `binding_dead` /
+`stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
+前 3 種は Issue を requeue せずに解放して pane を閉じます。実行レコードが Active の
+まま idle な `stuck_unknown` だけは人の判断に残り、stuck タイムアウトの 2 倍を超えると
+判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
+または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
 プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
 で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
@@ -320,6 +327,21 @@ settings で別 provider を保存すると同じプールに追加されます�
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
+
+ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
+`disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
+空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が
+`No space left on device` で落ちる前にディスク枯渇が見えます。空き容量の回収は
+`worktree.gc_build_artifacts` operation が行います。HEAD が `origin/<base>`
+（`base` の既定は `develop`）にマージ済みで、稼働中プロセスも live な gwt launch も
+無い worktree の `target/` ビルドキャッシュを削除します。引数無しの呼び出しは dry run
+で、候補とそのサイズ、および除外した worktree とその理由（`active process …` /
+`tracked launch …` / `not merged …`）を報告します。削除するには `dry_run: false`
+を、未マージの idle worktree も対象にするには `include_unmerged: true` を渡します。
+共有の base ブランチ workspace（`develop` / `main`）は、リビルド代償を次に触る人が
+負うことになるため既定で除外され、`include_protected_workspaces: true` を明示した
+場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
+実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
 ### Autonomous モード（opt-in）
 
@@ -675,8 +697,10 @@ gwt が対処メッセージを表示）。
 - `Tile` で表示中のウィンドウをグリッド整列
 - `Stack` でタイトルバーを残したまま重ねて表示
 - `Align` でウィンドウサイズを変えずにグリッド整列
-- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` でフォーカス切替
-  - フォーカスされたウィンドウは中央へ寄ります
+- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で Canvas 上の Agent を
+  状態順（running/starting → waiting/idle → その他）に切り替え
+  - Agent 以外はスキップし、非表示の Agent タブは選択時に表示して、対象の
+    Agent を中央へ寄せます
 
 ## Operator デザイン言語 (SPEC-2356)
 
@@ -885,6 +909,13 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+
+Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
+closing keyword は書きません。`main` は default branch なので、そこに
+`Closes #N` があると受け入れ基準が未消化の Issue まで閉じてしまうためです。
+Issue の決着は work ブランチが `develop` に merge された時点で行われます
+（前述）。merge 後は `release.yml` が `scripts/release_close_guard.py` を実行し、
+Release PR の merge 自体が閉じた Issue を reopen してマーカー付きコメントを残します。
 
 ### Release Asset Contract
 

@@ -56,6 +56,23 @@ pub struct IssueCacheSyncOutcome {
     pub after: Option<IssueCacheSourceFingerprint>,
 }
 
+/// Issue #4087 AC-1: the full-refresh cadence of one Issue cache, projected
+/// for `issue.monitor.status`. A stopped refresh used to be visible only as
+/// Issues that never arrived; this states it directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueCacheRefreshStatus {
+    /// `refresh-meta.json`'s stamp, or `None` when no full refresh completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_full_refresh: Option<String>,
+    pub ttl_minutes: u64,
+    /// True when the next consumer would run a full refresh.
+    pub stale: bool,
+    /// Seconds elapsed past the TTL deadline; `None` when not stale or when
+    /// no refresh ever completed (there is no deadline to measure from).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_by_secs: Option<u64>,
+}
+
 #[derive(Debug)]
 struct IssueCacheSourceDocument {
     number: u64,
@@ -269,7 +286,22 @@ pub fn sync_issue_cache_from_remote_with_fingerprint(
 }
 
 pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Result<(), String> {
-    sync_issue_cache_from_remote_with_wait(repo_path, cache_root, &mut std::thread::sleep)
+    sync_issue_cache_from_remote_with_wait(repo_path, cache_root, &mut std::thread::sleep).map_err(
+        |error| {
+            // Issue #4087 AC-2: every full-refresh caller used to downgrade this
+            // to a log line, so a refresh that had stopped for hours was only
+            // discoverable through the Issues it failed to deliver.
+            gwt_core::error_ledger::record_fail_open(
+                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+                format!("issue cache full refresh: {error}"),
+                gwt_core::error_ledger::ErrorTarget {
+                    project_root: Some(repo_path.display().to_string()),
+                    ..gwt_core::error_ledger::ErrorTarget::default()
+                },
+            );
+            error
+        },
+    )
 }
 
 /// [`sync_issue_cache_from_remote`] with the pacing wait injected.
@@ -301,7 +333,7 @@ pub fn sync_issue_cache_from_remote_with_wait(
 
     let cache = Cache::new(cache_root.to_path_buf());
     let ledger = BudgetLedger::global();
-    let policy = ThrottlePolicy::default();
+    let policy = ThrottlePolicy::current();
     for listed_snapshot in &snapshots {
         let snapshot = if is_spec_issue(listed_snapshot) {
             if cache
@@ -409,19 +441,41 @@ fn write_issue_cache_refresh_meta(cache_root: &Path, ttl: Duration) -> Result<()
 }
 
 fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
-    if !issue_cache_has_entries(cache_root) {
-        return true;
+    issue_cache_refresh_status(cache_root, ttl, Utc::now()).stale
+}
+
+/// Issue #4087 AC-1: the full-refresh cadence of `cache_root` at `now`. The
+/// staleness decision every refresh caller makes and the projection the PM
+/// reads are the same computation, so they cannot disagree.
+pub fn issue_cache_refresh_status(
+    cache_root: &Path,
+    ttl: Duration,
+    now: DateTime<Utc>,
+) -> IssueCacheRefreshStatus {
+    let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
+    let meta = read_issue_cache_refresh_meta(cache_root);
+    let last_full_refresh = meta.as_ref().map(|meta| meta.last_full_refresh.clone());
+    let deadline = meta
+        .as_ref()
+        .and_then(|meta| DateTime::parse_from_rfc3339(&meta.last_full_refresh).ok())
+        .map(|last| {
+            last.with_timezone(&Utc)
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::zero())
+        });
+    let stale_by_secs = deadline.and_then(|deadline| {
+        now.signed_duration_since(deadline)
+            .to_std()
+            .ok()
+            .map(|overrun| overrun.as_secs())
+    });
+    let stale =
+        !issue_cache_has_entries(cache_root) || deadline.is_none() || stale_by_secs.is_some();
+    IssueCacheRefreshStatus {
+        last_full_refresh,
+        ttl_minutes,
+        stale,
+        stale_by_secs,
     }
-    let Some(meta) = read_issue_cache_refresh_meta(cache_root) else {
-        return true;
-    };
-    let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
-        return true;
-    };
-    Utc::now()
-        .signed_duration_since(last.with_timezone(&Utc))
-        .to_std()
-        .map_or(true, |age| age >= ttl)
 }
 
 /// SPEC-2017 US-8 — Apply label add / remove operations to a GitHub
@@ -550,23 +604,15 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
     Some(payload)
 }
 
+/// The full Issue enumeration, as a paged REST read (SPEC #4093 FR-002):
+/// `GET /repos/{owner}/{repo}/issues?state=all`, newest update first, at most
+/// `REST_MAX_PAGES_PER_READ` requests on the `core` budget and no GraphQL.
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
-    let stdout = run_gh_issue_command(
-        repo_path,
-        &[
-            "issue",
-            "list",
-            "--state",
-            "all",
-            "--limit",
-            ISSUE_CACHE_REFRESH_LIMIT,
-            "--json",
-            "number,title,body,labels,state,url,updatedAt",
-        ],
-        "gh issue list",
+    let pages = gwt_git::gh_rest::read_pages_with(
+        "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc",
+        |path| run_gh_issue_command(repo_path, &["api", path], "gh api issues"),
     )?;
-
-    parse_issue_list_snapshots(&stdout)
+    Ok(issue_list_snapshots(&pages.rows))
 }
 
 fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSnapshot, String> {
@@ -688,41 +734,28 @@ fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot
     })
 }
 
+#[cfg(test)]
 fn parse_issue_list_snapshots(json: &str) -> Result<Vec<IssueSnapshot>, String> {
     let raw: Vec<Value> = serde_json::from_str(json).map_err(|err| err.to_string())?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|issue| {
-            let number = issue.get("number")?.as_u64()?;
-            let title = issue
-                .get("title")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let body = issue
-                .get("body")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let labels = parse_issue_labels(&issue);
-            let state = parse_issue_state(issue.get("state").and_then(|value| value.as_str()));
-            let updated_at = issue
-                .get("updatedAt")
-                .and_then(|value| value.as_str())
-                .unwrap_or("1970-01-01T00:00:00Z")
-                .to_string();
+    Ok(issue_list_snapshots(&raw))
+}
 
-            Some(IssueSnapshot {
-                number: IssueNumber(number),
-                title,
-                body,
-                labels,
-                state,
-                updated_at: UpdatedAt::new(updated_at),
-                comments: vec![],
-            })
+fn issue_list_snapshots(rows: &[Value]) -> Vec<IssueSnapshot> {
+    gwt_git::gh_rest::parse_issue_rows(rows)
+        .into_iter()
+        .map(|row| IssueSnapshot {
+            number: IssueNumber(row.number),
+            title: row.title,
+            body: row.body.unwrap_or_default(),
+            labels: row.labels,
+            state: parse_issue_state(Some(row.state.as_str())),
+            updated_at: UpdatedAt::new(
+                row.updated_at
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
+            ),
+            comments: vec![],
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -873,6 +906,10 @@ mod tests {
     #[test]
     fn issue_cache_refresh_limit_is_high_enough_for_large_repositories() {
         assert_eq!(ISSUE_CACHE_REFRESH_LIMIT, "1000");
+        assert_eq!(
+            ISSUE_CACHE_REFRESH_LIMIT.parse::<usize>().unwrap(),
+            gwt_git::gh_rest::REST_MAX_PAGES_PER_READ * gwt_git::gh_rest::REST_PAGE_SIZE
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -942,7 +979,7 @@ exit /b 0\r\n",
 
         env::set_var("FAKE_GH_MODE", "fail");
         let err = sync_issue_cache_from_remote(&repo_path, &cache_root).unwrap_err();
-        assert!(err.contains("gh issue list: gh api down"));
+        assert!(err.contains("gh api issues: gh api down"), "{err}");
 
         match old_gh {
             Some(value) => env::set_var("GWT_TEST_GH", value),
@@ -971,11 +1008,15 @@ exit /b 0\r\n",
         fs::write(
             &fake_gh,
             "@echo off\r\n\
-if /I \"%1 %2\"==\"issue list\" (\r\n\
+set \"gwt_arg1=%~1\"\r\n\
+set \"gwt_arg2=%~2\"\r\n\
+if /I \"%gwt_arg1%\"==\"api\" set \"GWT_FAKE_LIST=1\"\r\n\
+if /I \"%gwt_arg1% %gwt_arg2%\"==\"issue list\" set \"GWT_FAKE_LIST=1\"\r\n\
+if /I \"%GWT_FAKE_LIST%\"==\"1\" (\r\n\
   echo [{\"number\":7,\"title\":\"Cached spec\",\"body\":\"<!-- gwt-spec id=7 version=1 -->\\n<!-- sections:\\nplan=comment:700\\nspec=body\\ntasks=body\\n-->\\n\\n<!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n<!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
   exit /b 0\r\n\
 )\r\n\
-if /I \"%1 %2\"==\"issue view\" (\r\n\
+if /I \"%gwt_arg1% %gwt_arg2%\"==\"issue view\" (\r\n\
   echo {\"number\":7,\"title\":\"Cached spec\",\"body\":\"<!-- gwt-spec id=7 version=1 -->\\n<!-- sections:\\nplan=comment:700\\nspec=body\\ntasks=body\\n-->\\n\\n<!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n<!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"updatedAt\":\"2026-04-20T00:00:00Z\",\"comments\":[{\"id\":\"IC_kwDOExample\",\"url\":\"https://github.com/example/repo/issues/7#issuecomment-700\",\"body\":\"<!-- artifact:plan BEGIN -->\\nPlan body\\n<!-- artifact:plan END -->\",\"createdAt\":\"2026-04-20T00:00:00Z\"}]}\r\n\
   exit /b 0\r\n\
 )\r\n\
@@ -1045,7 +1086,7 @@ exit /b 1\r\n",
         let fake_gh = repo_path.join("fake-gh");
         let script = format!(
             "#!/bin/sh\n\
-if [ \"$1 $2\" = \"issue list\" ]; then\n\
+if [ \"$1 $2\" = \"issue list\" ] || [ \"$1\" = \"api\" ]; then\n\
   cat <<'JSON'\n\
 {list_json}\n\
 JSON\n\
@@ -1330,7 +1371,7 @@ if [ \"$PWD\" != '{}' ]; then\n\
   printf '%s\\n' \"wrong cwd: $PWD\" >&2\n\
   exit 1\n\
 fi\n\
-if [ \"$1 $2\" = \"issue list\" ]; then\n\
+if [ \"$1 $2\" = \"issue list\" ] || [ \"$1\" = \"api\" ]; then\n\
   printf '%s\\n' '[{{\"number\":43,\"title\":\"Workspace issue\",\"body\":\"Body\",\"labels\":[{{\"name\":\"bug\"}}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-05-23T00:00:00Z\"}}]'\n\
   exit 0\n\
 fi\n\
@@ -1391,6 +1432,92 @@ exit 1\n",
         assert!(
             issue_cache_refresh_is_stale(&cache_root, ISSUE_CACHE_TTL),
             "expired refresh metadata should mark cache stale",
+        );
+    }
+
+    /// Issue #4087 AC-1: the PM reads, from one projection, whether the full
+    /// refresh has run and how far past its TTL it is.
+    #[test]
+    fn issue_cache_refresh_status_reports_ttl_overrun() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(cache_root.join("7")).expect("create issue cache entry");
+        let now = Utc::now();
+
+        let missing = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, now);
+        assert!(
+            missing.stale,
+            "a cache that never completed a full refresh is stale"
+        );
+        assert_eq!(missing.last_full_refresh, None);
+        assert_eq!(missing.stale_by_secs, None);
+        assert_eq!(missing.ttl_minutes, 15);
+
+        let stale_meta = IssueCacheRefreshMeta {
+            last_full_refresh: (now - chrono::Duration::minutes(65)).to_rfc3339(),
+            ttl_minutes: 15,
+        };
+        let bytes = serde_json::to_vec_pretty(&stale_meta).expect("serialize stale meta");
+        write_atomic(&issue_cache_refresh_meta_path(&cache_root), &bytes)
+            .expect("write stale refresh meta");
+        let stale = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, now);
+        assert!(stale.stale);
+        assert_eq!(
+            stale.last_full_refresh.as_deref(),
+            Some(stale_meta.last_full_refresh.as_str())
+        );
+        assert_eq!(stale.stale_by_secs, Some(50 * 60));
+
+        write_issue_cache_refresh_meta(&cache_root, ISSUE_CACHE_TTL).expect("write fresh meta");
+        let fresh = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now());
+        assert!(!fresh.stale);
+        assert_eq!(fresh.stale_by_secs, None);
+        assert!(fresh.last_full_refresh.is_some());
+    }
+
+    /// Issue #4087 AC-2: a failed full refresh used to be a `tracing::warn`
+    /// nobody reads. It is now a ledger row `errors.list` returns, carrying the
+    /// refusal text and the project it was refreshing.
+    #[test]
+    fn full_refresh_failure_is_recorded_in_the_error_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _markers = clear_gh_sandbox_markers();
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let error = sync_issue_cache_from_remote(&repo_path, &cache_root)
+            .expect_err("the unsandboxed gh guard refuses the list call");
+
+        let rows = gwt_core::error_ledger::list_since(None).expect("read ledger");
+        assert_eq!(rows.len(), 1, "one full refresh failure, one row: {rows:?}");
+        assert_eq!(
+            rows[0].kind,
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+        );
+        assert!(
+            rows[0].message.contains("issue cache full refresh")
+                && rows[0].message.contains("gh api issues"),
+            "the row names the stage and carries the refusal: {}",
+            rows[0].message
+        );
+        assert!(
+            error.contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE)
+                && rows[0]
+                    .message
+                    .contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE),
+            "the ledger row carries the same cause the caller saw"
+        );
+        assert_eq!(
+            rows[0].target.project_root.as_deref(),
+            Some(repo_path.display().to_string().as_str())
         );
     }
 
@@ -1603,7 +1730,7 @@ mod rate_limit_tests {
 printf '%s\n' "$*" >> '{log}'
 updated_43="${{FAKE_UPDATED_43:-{v1}}}"
 case "$1 $2" in
-  "issue list")
+  "issue list" | "api repos/"*)
     printf '[{{"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
     exit 0
     ;;
@@ -1637,6 +1764,10 @@ exit 1
             .expect("git init");
         assert!(init.status.success());
     }
+
+    /// The REST issue list as [`invocations`] journals it.
+    const LIST_CALL: &str =
+        "api repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1";
 
     fn invocations(log: &Path) -> Vec<String> {
         fs::read_to_string(log)
@@ -1692,7 +1823,7 @@ exit 1
         sync_issue_cache_from_remote(&repo_path, &cache_root).expect("first sync");
         assert_eq!(
             invocations(&log),
-            vec!["issue list --state", "issue view 42", "issue view 43"],
+            vec![LIST_CALL, "issue view 42", "issue view 43"],
             "a cold cache views every SPEC once"
         );
 
@@ -1700,7 +1831,7 @@ exit 1
         sync_issue_cache_from_remote(&repo_path, &cache_root).expect("second sync");
         assert_eq!(
             invocations(&log),
-            vec!["issue list --state"],
+            vec![LIST_CALL],
             "unchanged SPECs cost one list call and no views"
         );
 
@@ -1709,7 +1840,7 @@ exit 1
         sync_issue_cache_from_remote(&repo_path, &cache_root).expect("third sync");
         assert_eq!(
             invocations(&log),
-            vec!["issue list --state", "issue view 43"],
+            vec![LIST_CALL, "issue view 43"],
             "only the SPEC whose live generation moved is viewed again"
         );
         let entry = Cache::new(cache_root)
@@ -1747,7 +1878,7 @@ exit 1
 
         assert_eq!(
             invocations(&log),
-            vec!["issue list --state", "issue view 42", "issue view 43"],
+            vec![LIST_CALL, "issue view 42", "issue view 43"],
             "the resync still completes"
         );
         assert_eq!(
