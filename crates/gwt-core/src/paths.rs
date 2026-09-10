@@ -629,8 +629,14 @@ pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
     // a fifth of the whole 250ms prompt budget) to learn nothing. A
     // subdirectory has no `.git` of its own and still asks git, so the case
     // this resolver exists for is untouched.
+    //
+    // Canonicalize rather than echoing the caller's spelling: git reports the
+    // long Windows form, and callers compare these roots against each other
+    // (and against `resolve_main_worktree_root`, which still shells out). An
+    // 8.3 short path like `AKIOJI~1` names the same directory but is not
+    // string-equal, so skipping this would silently split those comparisons.
     if repo_path.join(".git").exists() {
-        return repo_path.to_path_buf();
+        return dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
@@ -1210,7 +1216,10 @@ mod tests {
         let before = crate::process::thread_git_spawn_count();
         let resolved = resolve_current_worktree_root(&worktree);
 
-        assert_eq!(resolved, worktree);
+        assert_eq!(
+            comparable_path(&resolved),
+            comparable_path(&dunce::canonicalize(&worktree).expect("canonical worktree"))
+        );
         assert_eq!(
             crate::process::thread_git_spawn_count(),
             before,
@@ -1233,7 +1242,10 @@ mod tests {
         let before = crate::process::thread_git_spawn_count();
         let resolved = resolve_current_worktree_root(&worktree);
 
-        assert_eq!(resolved, worktree);
+        assert_eq!(
+            comparable_path(&resolved),
+            comparable_path(&dunce::canonicalize(&worktree).expect("canonical worktree"))
+        );
         assert_eq!(
             crate::process::thread_git_spawn_count(),
             before,
