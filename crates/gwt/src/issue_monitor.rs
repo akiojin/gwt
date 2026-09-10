@@ -842,6 +842,10 @@ pub struct IssueMonitorPrefs {
     pub priority_order: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
+    #[serde(default)]
+    pub terminal_queue_auto_refill: bool,
+    #[serde(default)]
+    pub terminal_queue_auto_refill_limit: usize,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1050,6 +1054,8 @@ impl Default for IssueMonitorPrefs {
             max_active_agents: 1,
             priority_order: Vec::new(),
             terminal_queues: BTreeMap::new(),
+            terminal_queue_auto_refill: false,
+            terminal_queue_auto_refill_limit: 0,
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -2785,6 +2791,8 @@ pub struct IssueMonitorState {
     priority_order: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
+    terminal_queue_auto_refill: bool,
+    terminal_queue_auto_refill_limit: usize,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -4551,6 +4559,8 @@ impl IssueMonitorState {
             active_launches: Vec::new(),
             priority_order: Vec::new(),
             terminal_queues: BTreeMap::new(),
+            terminal_queue_auto_refill: false,
+            terminal_queue_auto_refill_limit: 0,
             launch_profiles: Vec::new(),
             launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
@@ -4604,6 +4614,8 @@ impl IssueMonitorState {
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.priority_order = prefs.priority_order;
         state.terminal_queues = prefs.terminal_queues;
+        state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
+        state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
         state.last_scan_at = prefs.last_scan_at;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
         state.provider_quota_hold_evidence =
@@ -4797,6 +4809,8 @@ impl IssueMonitorState {
             max_active_agents: self.config.max_active.max(1),
             priority_order: self.priority_order.clone(),
             terminal_queues: self.terminal_queues.clone(),
+            terminal_queue_auto_refill: self.terminal_queue_auto_refill,
+            terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -9153,6 +9167,62 @@ impl IssueMonitorState {
         queue.entries.insert(target, entry);
         queue.last_seen_at = Some(now.to_string());
         true
+    }
+
+    pub fn terminal_queue_orphans(&self) -> Vec<String> {
+        let host = crate::process::current_hostname();
+        self.terminal_queues
+            .keys()
+            .filter(|terminal| *terminal != &host)
+            .cloned()
+            .collect()
+    }
+
+    pub fn adopt_terminal_queue(&mut self, terminal: &str, now: &str) -> usize {
+        let Some(orphan) = self.terminal_queues.remove(terminal) else {
+            return 0;
+        };
+        let host = crate::process::current_hostname();
+        let queue = self.terminal_queues.entry(host).or_default();
+        let mut adopted = 0;
+        for entry in orphan.entries {
+            if !queue
+                .entries
+                .iter()
+                .any(|existing| existing.number == entry.number)
+            {
+                queue.entries.push(entry);
+                adopted += 1;
+            }
+        }
+        queue.last_seen_at = Some(now.to_string());
+        adopted
+    }
+
+    pub fn auto_refill_terminal_queue(&mut self, candidates: &[u64], now: &str) -> usize {
+        if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
+            return 0;
+        }
+        let host = crate::process::current_hostname();
+        let queue = self.terminal_queues.entry(host).or_default();
+        let mut added = 0;
+        for number in candidates {
+            if added >= self.terminal_queue_auto_refill_limit {
+                break;
+            }
+            if !queue.entries.iter().any(|entry| entry.number == *number) {
+                queue.entries.push(IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: now.to_string(),
+                    queued_by: "auto-refill".to_string(),
+                });
+                added += 1;
+            }
+        }
+        if added > 0 {
+            queue.last_seen_at = Some(now.to_string());
+        }
+        added
     }
 
     fn apply_priority_order_to_queue(&mut self) {
@@ -23007,6 +23077,32 @@ mod tests {
         assert_eq!(status.terminal_queue_len, 1);
         assert_eq!(status.unqueued_open_count, 1);
         assert_eq!(status.other_terminal_queue_count, 1);
+    }
+
+    #[test]
+    fn auto_refill_is_off_by_default_and_orphan_can_be_adopted() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(
+            monitor.auto_refill_terminal_queue(&[1, 2], "2026-09-10T00:00:00Z"),
+            0
+        );
+        monitor.terminal_queues.insert(
+            "old-host".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 7,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: None,
+            },
+        );
+        assert_eq!(monitor.terminal_queue_orphans(), vec!["old-host"]);
+        assert_eq!(
+            monitor.adopt_terminal_queue("old-host", "2026-09-10T00:01:00Z"),
+            1
+        );
+        assert!(monitor.terminal_queue_orphans().is_empty());
     }
 
     fn autonomous_state() -> IssueMonitorState {
