@@ -58942,16 +58942,6 @@ fn pm_refresh_resolves_managed_asset_collisions_from_old_head() {
 
 #[test]
 fn pm_refresh_restores_old_checkout_and_assets_when_regeneration_fails() {
-    assert_pm_refresh_failure_restores_old_checkout_and_assets(false);
-}
-
-#[cfg(unix)]
-#[test]
-fn pm_refresh_restores_old_checkout_when_post_checkout_hook_fails() {
-    assert_pm_refresh_failure_restores_old_checkout_and_assets(true);
-}
-
-fn assert_pm_refresh_failure_restores_old_checkout_and_assets(fail_checkout_hook: bool) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -58959,9 +58949,29 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(fail_checkout_hook
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
-    let repo = temp.path().join("repo");
+    assert_pm_refresh_failure_restores_old_checkout_and_assets(temp.path(), false);
+}
+
+#[cfg(unix)]
+#[test]
+fn pm_refresh_restores_old_checkout_when_post_checkout_hook_fails() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    assert_pm_refresh_failure_restores_old_checkout_and_assets(temp.path(), true);
+}
+
+fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
+    temp: &Path,
+    fail_checkout_hook: bool,
+) {
+    let repo = temp.join("repo");
     let origin = init_git_clone_with_origin(&repo);
-    let seed = temp.path().join("seed");
+    let seed = temp.join("seed");
     let pm_worktree = create_detached_pm_worktree_fixture(&repo);
     let old_head = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
     let relative = ".claude/skills/gwt-agent/SKILL.md";
