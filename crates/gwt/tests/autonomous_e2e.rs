@@ -685,9 +685,8 @@ mod idle_windows {
         );
         let notices = monitor.take_autonomous_notices();
         assert!(
-            notices
-                .iter()
-                .any(|notice| notice.issue_number == 43 && notice.message.contains("released idle window")),
+            notices.iter().any(|notice| notice.issue_number == 43
+                && notice.message.contains("released idle window")),
             "the released slot is reported: {notices:?}"
         );
         assert!(
