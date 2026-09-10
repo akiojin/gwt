@@ -437,21 +437,10 @@ impl QueueRecord {
 
     /// Whether `me` has to leave a free lease alone because of this claimant.
     ///
-    /// A reservation blocks only what it outranks outright (Issue #4086: a
-    /// background index job must not slip between a verification claimant's
-    /// retries). Among equals the queue decides, and only against a claimant
-    /// that is actually polling: holding a free lease for a reserved place
-    /// nobody is standing on would trade one worktree's starvation for the
-    /// whole host's. A returning claimant still finds its place — it takes the
-    /// next turn, not an idle host.
+    /// Live reservations keep their FIFO turn between retries. Their existing
+    /// TTL bounds how long a departed claimant can hold up the next one.
     fn blocks(&self, me: &QueueRecord) -> bool {
-        if !self.waiting {
-            return false;
-        }
-        if self.priority < me.priority {
-            return true;
-        }
-        self.present && self.rank().cmp(&me.rank()) == Ordering::Less
+        self.waiting && self.rank().cmp(&me.rank()) == Ordering::Less
     }
 
     fn published(&self, now: u64) -> HeavyQueueEntry {
@@ -993,6 +982,16 @@ impl TargetJobGuard {
                 // that answers `deferred` and reruns resumes from here instead
                 // of queueing again behind everyone who arrived meanwhile.
                 let _ = enroll_in_heavy_queue(&pending_dir, &target, self.priority);
+                if self.key.is_verification() {
+                    // Keep the claim live before removing this poll's registration.
+                    // Both verify.run and manual acquire retry after this returns.
+                    let path = heavy_queue_entry_path(&pending_dir, &target);
+                    let mut entry = heavy_queue_entry(&path, &target, self.priority);
+                    entry.reserved_until_ms = Some(
+                        now_ms().saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64),
+                    );
+                    let _ = write_json_atomic(&path, &entry);
+                }
                 cleanup_pending(pending_file, &pending_path);
                 return Err(CoordinatorError::Timeout {
                     waited_ms: started.elapsed().as_millis() as u64,
@@ -2183,6 +2182,69 @@ mod tests {
             "the freed lease is handed out in queue order"
         );
         holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn reserved_waiter_blocks_equal_priority_newcomer_between_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let early_key = TargetKey::verification("repo", "early");
+        coordinator
+            .reserve_heavy(
+                &early_key,
+                JobPriority::ManualRebuild,
+                Duration::from_secs(60),
+                None,
+            )
+            .unwrap();
+        let late = own(
+            &coordinator,
+            &TargetKey::verification("repo", "late"),
+            JobPriority::ManualRebuild,
+        );
+        assert!(
+            matches!(
+                late.acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60)),
+                Err(CoordinatorError::Timeout { .. })
+            ),
+            "a newcomer must wait even while the first claimant is between retries"
+        );
+        coordinator.clear_heavy_reservation(&early_key).unwrap();
+        let lease = late
+            .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+            .expect("clearing the reservation lets the next claimant proceed");
+        lease.release().unwrap();
+    }
+
+    #[test]
+    fn verification_poll_timeout_keeps_a_live_reservation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let lease = holder.acquire_heavy(Duration::ZERO).unwrap();
+        let key = TargetKey::verification("repo", "waiter");
+        let waiter = own(&coordinator, &key, JobPriority::ManualRebuild);
+        for _ in 0..2 {
+            assert!(matches!(
+                waiter.acquire_heavy(Duration::ZERO),
+                Err(CoordinatorError::Timeout { .. })
+            ));
+            assert_eq!(
+                coordinator.heavy_lease_status().unwrap().queue.len(),
+                1,
+                "the waiter must remain pending between bounded polling calls"
+            );
+        }
+        lease.release().unwrap();
+        waiter
+            .acquire_heavy(Duration::ZERO)
+            .unwrap()
+            .release()
+            .unwrap();
     }
 
     /// Every queue record the predicate can be asked about, so the invariants
