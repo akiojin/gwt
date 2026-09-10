@@ -543,6 +543,29 @@ mod tests {
         publish_issue_monitor_control_with_timeout_and_liveness,
     };
 
+    /// The publish budget for tests whose subject is the retry *behaviour*
+    /// rather than the size of the budget.
+    ///
+    /// Issue #3921: both busy-control tests ran on the production 200-500 ms
+    /// budget, which has to cover scope resolution, endpoint readback, runtime
+    /// construction and at least one socket round trip. On a host that is also
+    /// compiling several other worktrees it does not, and the budget then
+    /// expires at a different point in the exchange than the test is about:
+    /// the retried publish never reaches its ACK, and the exhaustion test
+    /// reports `OutcomeUnknown("budget exhausted during scope/bootstrap
+    /// resolution")` instead of the explicit `Busy` it exists to pin. Both
+    /// subjects survive a budget this size - the fixture daemon in the
+    /// exhaustion test never ACKs, so the budget still expires - while the
+    /// runner can no longer decide which outcome appears.
+    ///
+    /// Unlike a hang guard on an awaited event, this one is *spent*: the
+    /// exhaustion test retries until it expires, so the number is real suite
+    /// time rather than a ceiling that is never reached. Five seconds buys
+    /// roughly twenty-five times the margin those failures needed while costing
+    /// the suite five seconds once. The retry test returns on its ACK and costs
+    /// nothing.
+    const PUBLISH_HANG_GUARD: Duration = Duration::from_secs(5);
+
     #[test]
     fn publish_returns_error_when_no_daemon_registered() {
         let _env_lock = crate::env_test_lock()
@@ -1226,7 +1249,7 @@ mod tests {
         publish_issue_monitor_control_with_timeout(
             project.path(),
             payload.clone(),
-            Duration::from_millis(500),
+            PUBLISH_HANG_GUARD,
         )
         .expect("explicit Busy is safely retried");
         server.join().expect("test daemon joins");
@@ -1337,7 +1360,7 @@ mod tests {
         let error = publish_issue_monitor_control_with_timeout(
             project.path(),
             json!({"enabled": false}),
-            super::DEFAULT_TIMEOUT,
+            PUBLISH_HANG_GUARD,
         )
         .expect_err("Busy must remain explicit when its retry budget expires");
         stop.store(true, Ordering::Release);
