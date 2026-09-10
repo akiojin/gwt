@@ -254,6 +254,23 @@ fn run_helper_role(role: &str) {
                 .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(20))
                 .expect("helper: request verification job");
             let guard = expect_owner(admission);
+            if label != "first" {
+                // Retry while the earlier reservations have no live process.
+                let probe = guard
+                    .acquire_heavy_with_ttl(Duration::from_millis(100), Duration::from_secs(300));
+                let deferred = matches!(
+                    probe,
+                    Err(gwt_core::index_coordinator::CoordinatorError::Timeout { .. })
+                );
+                fs::write(
+                    PathBuf::from(required_env("GWT_COORD_MARKER")),
+                    if deferred { "deferred" } else { "overtook" },
+                )
+                .expect("helper: report retry outcome");
+                if !deferred {
+                    return;
+                }
+            }
             let lease = guard
                 .acquire_heavy_with_ttl(Duration::from_secs(120), Duration::from_secs(300))
                 .expect("helper: acquire queued heavy lease");
@@ -565,27 +582,14 @@ fn heavy_lease_is_host_wide_exclusive_across_processes() {
     );
 }
 
-/// Issue #4169 AC-4: several worktrees wait for the same host-wide lease, and
-/// the freed lease travels down the queue in arrival order. A worktree that
-/// starts only after the lease was freed queues behind the ones already
-/// waiting instead of overtaking them — the handoff that starved #4119.
-///
-/// The three worktree hashes sort in the opposite order to the expected
-/// handoff, so neither an alphabetical tiebreak nor a race can pass this.
+/// Issue #4169 AC-4: deferred worktrees keep FIFO order even when they
+/// restart in reverse order while earlier claimants are between retries.
+/// Worktree hashes also sort opposite to the required grant order.
 #[test]
 fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
     let arena = TestArena::new();
     let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
     let order = arena.path("order.log");
-    let queued = |worktree: &str| {
-        let stem = TargetKey::verification("repo", worktree).file_stem();
-        coordinator
-            .heavy_lease_status()
-            .expect("read lease status")
-            .queue
-            .iter()
-            .any(|entry| entry.target.as_deref() == Some(stem.as_str()))
-    };
     let spawn_queued = |label: &'static str, worktree: &'static str| {
         spawn_helper(
             label,
@@ -595,6 +599,10 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
                 ("GWT_COORD_VERIFY_TARGET", format!("repo|{worktree}")),
                 ("GWT_COORD_LABEL", label.to_string()),
                 ("GWT_COORD_ORDER", order.to_string_lossy().into_owned()),
+                (
+                    "GWT_COORD_MARKER",
+                    arena.path(&format!("retry-{label}")).display().to_string(),
+                ),
                 (
                     "GWT_COORD_SIGNAL",
                     arena
@@ -613,7 +621,7 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
         )
     };
 
-    // This process holds the lease while the first two worktrees queue.
+    // This process holds the lease while three worktrees reserve their turns.
     let holder_key = TargetKey::verification("repo", "holder");
     let holder = expect_owner(
         coordinator
@@ -628,18 +636,38 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
         .acquire_heavy_with_ttl(Duration::from_secs(20), Duration::from_secs(300))
         .expect("hold the host-wide lease");
 
-    let first = spawn_queued("first", "wt-c");
-    poll_until(Duration::from_secs(60), || queued("wt-c"));
-    let second = spawn_queued("second", "wt-b");
-    poll_until(Duration::from_secs(60), || queued("wt-b"));
-
-    // Free the lease: the earliest waiter must be served.
+    for worktree in ["wt-c", "wt-b", "wt-a"] {
+        coordinator
+            .reserve_heavy(
+                &TargetKey::verification("repo", worktree),
+                JobPriority::ManualRebuild,
+                Duration::from_secs(300),
+                Some("deferred verification"),
+            )
+            .expect("reserve the deferred claimant's turn");
+        std::thread::sleep(POLL);
+    }
+    let queue = coordinator.heavy_lease_status().unwrap().queue;
+    assert_eq!(queue.len(), 3);
+    assert!(queue
+        .windows(2)
+        .all(|pair| pair[0].queued_at_ms < pair[1].queued_at_ms));
     drop(heavy);
-    poll_until(Duration::from_secs(60), || read_lines(&order) == ["first"]);
 
-    // A worktree that never waited starts now, while `second` is still queued.
+    // Reverse retry order deliberately exposes the former present-only check:
+    // third must defer even though neither earlier claimant is polling yet.
     let third = spawn_queued("third", "wt-a");
-    poll_until(Duration::from_secs(60), || queued("wt-a"));
+    let third_retry = arena.path("retry-third");
+    wait_for_file(&third_retry, Duration::from_secs(20));
+    assert_eq!(fs::read_to_string(third_retry).unwrap(), "deferred");
+    let second = spawn_queued("second", "wt-b");
+    let second_retry = arena.path("retry-second");
+    wait_for_file(&second_retry, Duration::from_secs(20));
+    assert_eq!(fs::read_to_string(second_retry).unwrap(), "deferred");
+    assert!(read_lines(&order).is_empty());
+
+    let first = spawn_queued("first", "wt-c");
+    poll_until(Duration::from_secs(60), || read_lines(&order) == ["first"]);
 
     fs::write(arena.path("release-first"), b"go").expect("release first");
     poll_until(Duration::from_secs(60), || {
@@ -648,7 +676,7 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
     assert_eq!(
         read_lines(&order),
         ["first", "second"],
-        "the newcomer must not overtake the queued worktree"
+        "reverse retries must preserve reservation order"
     );
 
     fs::write(arena.path("release-second"), b"go").expect("release second");
