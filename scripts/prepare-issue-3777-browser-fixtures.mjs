@@ -52,6 +52,7 @@ const pmPreferencesPath = join(
   "project-state",
   "pm.json",
 );
+const primaryWorkItemsPath = join(dirname(pmPreferencesPath), "works.json");
 const workItemsPath = join(fixtureDirectory, "works.fixture.json");
 const hookProfilePath = join(checkHome, ".gwt", "issue-3777-hook-profile.jsonl");
 await mkdir(dirname(boardPath), { recursive: true });
@@ -90,6 +91,14 @@ await writeFile(
   }, null, 2)}\n`,
   "utf8",
 );
+await writeFile(
+  primaryWorkItemsPath,
+  `${JSON.stringify({
+    updated_at: "2026-08-29T00:00:00Z",
+    work_items: [],
+  })}\n`,
+  "utf8",
+);
 await writeFile(hookProfilePath, "", "utf8");
 
 const cacheRoot = join(checkHome, ".gwt", "cache", "issues", repoHash);
@@ -102,6 +111,14 @@ await writeIssueFixture(
   cacheRoot,
   controlIssueNumber,
   "Issue #3777 browser-check control fixture",
+);
+await writeFile(
+  join(cacheRoot, "refresh-meta.json"),
+  `${JSON.stringify({
+    last_full_refresh: new Date().toISOString(),
+    ttl_minutes: 15,
+  }, null, 2)}\n`,
+  "utf8",
 );
 process.stdout.write(
   [
@@ -220,6 +237,7 @@ async function writeIssueFixture(cacheRoot, number, title) {
     join(directory, "meta.json"),
     `${JSON.stringify({
       comment_ids: [],
+      generation: `issue-3777-browser-fixture-${number}`,
       labels: ["bug"],
       number,
       state: "open",

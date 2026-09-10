@@ -3534,6 +3534,15 @@ fn mark_playwright_work_items_decode_started(path: &Path) {
         return;
     }
     let _ = fs::write(directory.join("started"), b"started\n");
+    let release_path = directory.join("release");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !release_path.is_file() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let _ = fs::write(directory.join("resumed"), b"resumed\n");
 }
 
 pub fn load_or_synthesize_workspace_work_items(repo_path: &Path) -> Result<WorkItemsProjection> {
