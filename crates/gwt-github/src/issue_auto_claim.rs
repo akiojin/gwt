@@ -13,6 +13,7 @@ const CLAIM_END: &str = "<!-- /gwt-auto-improve-claim -->";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimStatus {
+    Queued,
     Active,
     Released,
     Completed,
@@ -564,5 +565,43 @@ fn fetch_claims<C: IssueClient + ?Sized>(
     match client.fetch(issue_number, None)? {
         FetchResult::Updated(snapshot) => Ok(extract_claim_comments(&snapshot.comments)),
         FetchResult::NotModified => Ok(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claim(owner: &str) -> ClaimComment {
+        ClaimComment {
+            comment_id: None,
+            claim_id: "same-claim".to_string(),
+            owner: owner.to_string(),
+            issue_number: 42,
+            status: ClaimStatus::Active,
+            heartbeat_at: "2026-09-10T00:00:00Z".to_string(),
+            expires_at: "2026-09-10T01:00:00Z".to_string(),
+            launched_work_id: None,
+        }
+    }
+
+    #[test]
+    fn same_username_and_pid_on_different_hosts_are_distinct_owners() {
+        let requested = claim("macbook:akiojin:40272");
+        let other_host = claim("studio:akiojin:40272");
+        assert!(!claim_identity_matches(
+            &other_host,
+            &requested,
+            IssueNumber(42)
+        ));
+        assert!(matches!(
+            classify_claim_resolution(
+                &[other_host],
+                &requested,
+                IssueNumber(42),
+                "2026-09-10T00:00:01Z"
+            ),
+            ClaimResolution::Blocked(_)
+        ));
     }
 }

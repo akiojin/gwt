@@ -209,8 +209,15 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             issue_numbers,
             position,
-            force: _,
-        } => run_monitor_queue_push(env, project_root.as_deref(), &issue_numbers, position, out)?,
+            force,
+        } => run_monitor_queue_push(
+            env,
+            project_root.as_deref(),
+            &issue_numbers,
+            position,
+            force,
+            out,
+        )?,
         IssueCommand::MonitorQueueRemove {
             project_root,
             issue_numbers,
@@ -707,11 +714,48 @@ fn run_monitor_queue_push<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     numbers: &[u64],
     position: Option<usize>,
+    force: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
+    // Queue claims are advisory: a GitHub outage must not make the local
+    // queue unusable. Active claims remain authoritative and are left alone.
+    for number in numbers {
+        if let Ok(gwt_github::client::FetchResult::Updated(snapshot)) =
+            env.client().fetch(IssueNumber(*number), None)
+        {
+            let claims = gwt_github::issue_auto_claim::extract_claim_comments(&snapshot.comments);
+            if !force
+                && claims.iter().any(|claim| {
+                    claim.issue_number == *number
+                        && matches!(
+                            claim.status,
+                            gwt_github::issue_auto_claim::ClaimStatus::Active
+                                | gwt_github::issue_auto_claim::ClaimStatus::Queued
+                        )
+                        && claim.owner != crate::process::current_claim_owner()
+                })
+            {
+                continue;
+            }
+            let claim = gwt_github::issue_auto_claim::ClaimComment {
+                comment_id: None,
+                claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
+                owner: crate::process::current_hostname(),
+                issue_number: *number,
+                status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
+                heartbeat_at: now.clone(),
+                expires_at: now.clone(),
+                launched_work_id: None,
+            };
+            let _ = env.client().create_comment(
+                IssueNumber(*number),
+                &gwt_github::issue_auto_claim::render_claim_comment(&claim),
+            );
+        }
+    }
     let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         let host = crate::process::current_hostname();
         let queue = prefs.terminal_queues.entry(host).or_default();
