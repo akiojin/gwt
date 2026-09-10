@@ -17,7 +17,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -52,6 +52,11 @@ const RESERVATION_PREFIX: &str = "reservation-";
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
 const LEASE_EVENT_LOG_NAME: &str = "lease-events.jsonl";
+/// Issue #4210: the arrival counter every heavy claimant draws from. It is
+/// deliberately not a `.json` file, so the registration sweep never mistakes
+/// it for a claimant of its own.
+const HEAVY_QUEUE_SEQUENCE_FILE: &str = "queue.sequence";
+
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long a lockable registration file is treated as "still being
 /// registered" rather than crash residue.
@@ -367,6 +372,12 @@ struct Registration {
     /// which restarts on every attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     queued_at_ms: Option<u64>,
+    /// Issue #4210: this claimant's arrival as a strictly increasing number,
+    /// handed out with `queued_at_ms` under one lock. Milliseconds tie; this
+    /// does not. `None` on payloads written before Issue #4210 and whenever the
+    /// counter could not be reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue_seq: Option<u64>,
     /// Issue #4169: how long the remembered place outlives the attempt that
     /// earned it. A remembered place never holds anybody up — it only decides
     /// where its own target rejoins.
@@ -420,6 +431,11 @@ struct QueueRecord {
     target: Option<String>,
     priority: JobPriority,
     queued_at_ms: u64,
+    /// Issue #4210: arrival as a number rather than a millisecond, so two
+    /// claimants that joined inside the same millisecond still have an order.
+    /// `None` sorts first: a claimant nobody numbered was already in line when
+    /// numbering started.
+    queue_seq: Option<u64>,
     /// This claimant wants a turn: a process is polling for it, or a
     /// reservation (Issue #4086) stands in for it between retries. A record
     /// that is not waiting only remembers a place.
@@ -431,8 +447,18 @@ struct QueueRecord {
 impl QueueRecord {
     /// Service order: priority first, then arrival, then target so the answer
     /// is total and every claimant computes the same one.
-    fn rank(&self) -> (JobPriority, u64, Option<&str>) {
-        (self.priority, self.queued_at_ms, self.target.as_deref())
+    ///
+    /// Issue #4210: arrival is the millisecond *and* the number behind it. The
+    /// millisecond alone let two claimants that joined within the same one
+    /// compare equal, and the name then decided — which is how a newcomer took
+    /// a lease a queued waiter was owed whenever its target sorted earlier.
+    fn rank(&self) -> (JobPriority, u64, Option<u64>, Option<&str>) {
+        (
+            self.priority,
+            self.queued_at_ms,
+            self.queue_seq,
+            self.target.as_deref(),
+        )
     }
 
     /// Whether `me` has to leave a free lease alone because of this claimant.
@@ -673,6 +699,7 @@ impl IndexCoordinator {
                         // not for the host-wide heavy lease.
                         target: None,
                         queued_at_ms: None,
+                        queue_seq: None,
                         position_until_ms: None,
                     };
                     {
@@ -797,7 +824,8 @@ impl IndexCoordinator {
         // back. Reserving never opens a remembered place of its own — that is
         // the enrolling claimant's business — so a reservation with nothing
         // behind it still lapses the moment its own TTL does.
-        let mut registration = heavy_queue_entry(&path, &key.file_stem(), priority);
+        let mut registration =
+            heavy_queue_entry(&self.heavy_pending_dir(), &key.file_stem(), priority);
         registration.reserved_until_ms = Some(expires_at_ms);
         registration.reason = reason.map(str::to_string).or(registration.reason);
         write_json_atomic(&path, &registration)?;
@@ -899,11 +927,12 @@ impl TargetJobGuard {
         // the instant the lease frees, while everyone who did queue is asleep
         // between polls.
         let target = self.key.file_stem();
-        let queued_at_ms = enroll_in_heavy_queue(&pending_dir, &target, self.priority);
+        let (queued_at_ms, queue_seq) = enroll_in_heavy_queue(&pending_dir, &target, self.priority);
         let me = QueueRecord {
             target: Some(target.clone()),
             priority: self.priority,
             queued_at_ms,
+            queue_seq,
             waiting: true,
             present: true,
         };
@@ -918,6 +947,7 @@ impl TargetJobGuard {
             reason: None,
             target: Some(target.clone()),
             queued_at_ms: Some(queued_at_ms),
+            queue_seq,
             position_until_ms: None,
         };
         // Payload first, liveness lock second — see the waiter registration
@@ -1381,12 +1411,71 @@ fn heavy_queue_entry_path(dir: &Path, target: &str) -> PathBuf {
     dir.join(format!("{RESERVATION_PREFIX}{target}.json"))
 }
 
+/// Hand out an arrival: the millisecond it happened and the number that orders
+/// it (Issue #4210).
+///
+/// A millisecond is not an order. Two claimants that join inside the same one
+/// compare equal on `queued_at_ms`, and the tie then falls through to the
+/// target name — so whichever name sorted earlier took a lease the other one
+/// had already queued for, however much earlier that one actually arrived.
+/// The number is drawn under an exclusive lock, and the timestamp is read
+/// inside that same critical section, so "joined first" ranks first no matter
+/// how coarse the clock is or how close together two claimants land.
+///
+/// A host that cannot reach the counter still gets a timestamp. An arrival
+/// nobody could number orders exactly as it did before this existed, which is
+/// worse than a number and far better than refusing to queue at all.
+fn allocate_queue_arrival(dir: &Path) -> (u64, Option<u64>) {
+    let path = dir.join(HEAVY_QUEUE_SEQUENCE_FILE);
+    let Ok(file) = open_lock_file(&path) else {
+        return (now_ms(), None);
+    };
+    if fs2::FileExt::lock_exclusive(&file).is_err() {
+        return (now_ms(), None);
+    }
+    let mut handle = &file;
+    let mut raw = String::new();
+    let arrival = handle
+        .read_to_string(&mut raw)
+        .ok()
+        .and_then(|_| raw.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    // Read the clock while the counter is still held, so the two halves of an
+    // arrival can never disagree about who came first.
+    let stamped_at_ms = now_ms();
+    let rendered = arrival.to_string();
+    let stored = handle
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| handle.write_all(rendered.as_bytes()))
+        .and_then(|()| file.set_len(rendered.len() as u64))
+        .and_then(|()| handle.flush())
+        .is_ok();
+    let _ = fs2::FileExt::unlock(&file);
+    // A number the counter did not keep would be handed out twice, so an
+    // unwritten counter answers with no number rather than a duplicate one.
+    (stamped_at_ms, stored.then_some(arrival))
+}
+
 /// This target's queue entry, or a fresh one. An entry that outlived both its
 /// windows is residue, so a place is never revived from a claimant that walked
 /// away long ago.
-fn heavy_queue_entry(path: &Path, target: &str, priority: JobPriority) -> Registration {
+fn heavy_queue_entry(dir: &Path, target: &str, priority: JobPriority) -> Registration {
     let now = now_ms();
-    let existing = read_registration(path).filter(|entry| entry.outlives(now));
+    let path = heavy_queue_entry_path(dir, target);
+    let existing = read_registration(&path).filter(|entry| entry.outlives(now));
+    // A place already earned keeps the arrival it was earned with, number
+    // included; only a claimant joining for the first time draws a new one.
+    let (queued_at_ms, queue_seq) = match &existing {
+        // A place earned before arrivals were numbered cannot be ordered
+        // against anything sharing its millisecond, so it draws a number the
+        // first time its claimant comes back for it.
+        Some(entry) => (
+            entry.queued_at(),
+            entry.queue_seq.or_else(|| allocate_queue_arrival(dir).1),
+        ),
+        None => allocate_queue_arrival(dir),
+    };
     Registration {
         schema_version: COORDINATOR_SCHEMA_VERSION,
         owner: OwnerIdentity::current(),
@@ -1395,22 +1484,22 @@ fn heavy_queue_entry(path: &Path, target: &str, priority: JobPriority) -> Regist
         reserved_until_ms: existing.as_ref().and_then(|entry| entry.reserved_until_ms),
         reason: existing.as_ref().and_then(|entry| entry.reason.clone()),
         target: Some(target.to_string()),
-        queued_at_ms: Some(existing.as_ref().map_or(now, Registration::queued_at)),
+        queued_at_ms: Some(queued_at_ms),
+        queue_seq,
         position_until_ms: existing.as_ref().and_then(|entry| entry.position_until_ms),
     }
 }
 
 /// Join the heavy queue for `target` (Issue #4169) and answer with the arrival
-/// time every claimant orders by. Joining twice keeps the first arrival: the
-/// queue is per target, so a `deferred` rerun continues where it left off.
-fn enroll_in_heavy_queue(dir: &Path, target: &str, priority: JobPriority) -> u64 {
-    let path = heavy_queue_entry_path(dir, target);
-    let mut entry = heavy_queue_entry(&path, target, priority);
+/// every claimant orders by. Joining twice keeps the first arrival: the queue
+/// is per target, so a `deferred` rerun continues where it left off.
+fn enroll_in_heavy_queue(dir: &Path, target: &str, priority: JobPriority) -> (u64, Option<u64>) {
+    let mut entry = heavy_queue_entry(dir, target, priority);
     entry.position_until_ms =
         Some(now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
-    let queued_at_ms = entry.queued_at();
-    let _ = write_json_atomic(&path, &entry);
-    queued_at_ms
+    let arrival = (entry.queued_at(), entry.queue_seq);
+    let _ = write_json_atomic(&heavy_queue_entry_path(dir, target), &entry);
+    arrival
 }
 
 /// The heavy queue in service order, one record per claimant target.
@@ -1426,6 +1515,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                 target: None,
                 priority: JobPriority::Background,
                 queued_at_ms: now,
+                queue_seq: None,
                 waiting: true,
                 present: true,
             });
@@ -1435,6 +1525,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
             target: registration.target.clone(),
             priority: registration.priority,
             queued_at_ms: registration.queued_at(),
+            queue_seq: registration.queue_seq,
             waiting: live.locked || registration.has_live_reservation(now),
             present: live.locked,
         };
@@ -1446,6 +1537,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                     .entry(target)
                     .and_modify(|kept| {
                         kept.queued_at_ms = kept.queued_at_ms.min(record.queued_at_ms);
+                        kept.queue_seq = kept.queue_seq.min(record.queue_seq);
                         kept.priority = kept.priority.min(record.priority);
                         kept.waiting |= record.waiting;
                         kept.present |= record.present;
@@ -1792,7 +1884,12 @@ mod tests {
             "extend must move the expiry forward ({first} -> {extended})"
         );
 
-        std::thread::sleep(Duration::from_millis(70));
+        // Issue #4210 AC-4: this used to sleep out the original 50ms TTL.
+        // Expiry is a `now >= expires_at` comparison — `lease_ttl_expires_and_
+        // records_the_reason` proves that by moving the deadline instead of
+        // waiting for one — so sleeping past a deadline that has already been
+        // pushed 120s out checked nothing the assertions below do not, and
+        // spent wall-clock time to do it.
         assert!(!lease.is_expired(), "an extended lease must not expire");
         assert_eq!(
             coordinator.heavy_lease_status().unwrap().expires_at_ms,
@@ -1966,11 +2063,15 @@ mod tests {
             .reserve_heavy(
                 &verification_key(),
                 JobPriority::ManualRebuild,
-                Duration::from_millis(1),
+                // Issue #4210 AC-4: a reservation whose TTL is zero is already
+                // past its deadline when it is written, so the sweep below is
+                // the first scan to see it. This used to reserve for 1ms and
+                // sleep 20ms, which asked a runner to keep a deadline rather
+                // than asking the coordinator a question about state.
+                Duration::ZERO,
                 None,
             )
             .unwrap();
-        std::thread::sleep(Duration::from_millis(20));
         assert!(!coordinator
             .pending_higher_priority(JobPriority::Background)
             .unwrap());
@@ -2026,15 +2127,57 @@ mod tests {
         }
     }
 
-    /// AC-1 / AC-5: a claimant that never queued must not take a lease a
-    /// waiter has been queued for. Before the queue existed the freed lease
-    /// went to whoever probed the kernel lock first, and a newcomer probes it
-    /// the instant it starts while a waiter is asleep between polls — which is
-    /// how #4119 spent 50 minutes waiting without ever getting a turn.
-    #[test]
-    fn a_newcomer_never_overtakes_a_queued_waiter() {
+    /// Plant a queue place for `target` that arrived at `queued_at_ms`, with no
+    /// arrival number, exactly as a claimant of an older build would have left
+    /// one. Seeding the millisecond is what lets a test decide the thing CI
+    /// could only stumble into: whether two claimants share one.
+    fn seed_queue_place(dir: &Path, target: &str, queued_at_ms: u64) {
+        fs::create_dir_all(dir).unwrap();
+        write_json_atomic(
+            &heavy_queue_entry_path(dir, target),
+            &Registration {
+                schema_version: COORDINATOR_SCHEMA_VERSION,
+                owner: OwnerIdentity::current(),
+                priority: JobPriority::ManualRebuild,
+                registered_at_ms: queued_at_ms,
+                reserved_until_ms: None,
+                reason: None,
+                target: Some(target.to_string()),
+                queued_at_ms: Some(queued_at_ms),
+                queue_seq: None,
+                position_until_ms: Some(
+                    now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64),
+                ),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A holder frees the heavy lease while a waiter is queued for it and a
+    /// newcomer walks up at that exact instant. The newcomer must not be
+    /// served; the waiter must.
+    ///
+    /// `share_one_arrival_millisecond` decides whether the two claimants are
+    /// recorded as having arrived at the same millisecond — the state a loaded
+    /// runner reaches by chance and the only state this scenario ever failed
+    /// in (Issue #4210).
+    fn a_newcomer_queues_behind_the_waiter(share_one_arrival_millisecond: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let coordinator = open(tmp.path());
+        let waiter_key = TargetKey::verification("repo", "waiter");
+        let newcomer_key = TargetKey::verification("repo", "newcomer");
+        if share_one_arrival_millisecond {
+            // The tie used to fall through to the target name, and this is the
+            // direction that decided it wrongly.
+            assert!(
+                newcomer_key.file_stem() < waiter_key.file_stem(),
+                "the newcomer must be the one a name-ordered tie would favour"
+            );
+            let arrived_at_ms = now_ms();
+            let pending_dir = coordinator.heavy_pending_dir();
+            seed_queue_place(&pending_dir, &waiter_key.file_stem(), arrived_at_ms);
+            seed_queue_place(&pending_dir, &newcomer_key.file_stem(), arrived_at_ms);
+        }
         let holder = own(
             &coordinator,
             &TargetKey::verification("repo", "holder"),
@@ -2049,13 +2192,10 @@ mod tests {
         let (granted_tx, granted_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn({
             let release = std::sync::Arc::clone(&release_waiter);
+            let waiter_key = waiter_key.clone();
             move || {
                 let coordinator = open(&root);
-                let guard = own(
-                    &coordinator,
-                    &TargetKey::verification("repo", "waiter"),
-                    JobPriority::ManualRebuild,
-                );
+                let guard = own(&coordinator, &waiter_key, JobPriority::ManualRebuild);
                 let lease = guard
                     .acquire_heavy_with_ttl(Duration::from_secs(60), Duration::from_secs(60))
                     .expect("the queued waiter must be served once the lease frees");
@@ -2067,6 +2207,10 @@ mod tests {
                 guard.complete(JobOutcome::Completed).unwrap();
             }
         });
+        // A queue place on its own is not a claimant standing in line: it
+        // carries no reservation, so it is never counted as pending. Reaching
+        // one pending claimant therefore means the waiter has taken its
+        // liveness lock, and so that it enrolled before anything below runs.
         wait_until(
             || coordinator.heavy_lease_status().unwrap().pending >= 1,
             "the waiter must become visible in the queue",
@@ -2075,11 +2219,7 @@ mod tests {
         // The lease frees while the waiter is between polls — the exact
         // instant a newcomer used to win.
         drop(heavy);
-        let newcomer = own(
-            &coordinator,
-            &TargetKey::verification("repo", "newcomer"),
-            JobPriority::ManualRebuild,
-        );
+        let newcomer = own(&coordinator, &newcomer_key, JobPriority::ManualRebuild);
         let refused =
             newcomer.acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60));
         assert!(
@@ -2094,6 +2234,66 @@ mod tests {
         waiter.join().unwrap();
         newcomer.complete(JobOutcome::Completed).unwrap();
         holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    /// AC-1 / AC-5: a claimant that never queued must not take a lease a
+    /// waiter has been queued for. Before the queue existed the freed lease
+    /// went to whoever probed the kernel lock first, and a newcomer probes it
+    /// the instant it starts while a waiter is asleep between polls — which is
+    /// how #4119 spent 50 minutes waiting without ever getting a turn.
+    #[test]
+    fn a_newcomer_never_overtakes_a_queued_waiter() {
+        a_newcomer_queues_behind_the_waiter(false);
+    }
+
+    /// Issue #4210: the same scenario with the two claimants recorded as having
+    /// arrived in the same millisecond.
+    ///
+    /// That is the whole of the flake that stopped every Linux job on `develop`.
+    /// Arrival was kept in milliseconds, so two claimants that joined inside
+    /// one compared equal and service order fell through to the target name —
+    /// and `repo--verification--newcomer` sorts before `repo--verification--waiter`.
+    /// An instrumented sweep of 160 runs measured it exactly: 9 runs recorded
+    /// the same millisecond and all 9 failed; the other 151 recorded different
+    /// milliseconds and all 151 passed. The test above can only reach that
+    /// state by luck, which is why it read as a wall-clock flake. This one puts
+    /// the coordinator in it deliberately, so the outcome turns on the ordering
+    /// mechanism and not on how fast the machine happens to be.
+    #[test]
+    fn a_newcomer_never_overtakes_a_waiter_that_queued_in_the_same_millisecond() {
+        a_newcomer_queues_behind_the_waiter(true);
+    }
+
+    /// Issue #4210 AC-3: the ordering itself, stated without a clock. Claimants
+    /// that join one after another are served in that order however many of
+    /// them a single millisecond holds, because each draws a number and the
+    /// numbers, unlike the milliseconds, are strictly increasing.
+    #[test]
+    fn arrivals_that_share_a_millisecond_are_still_strictly_ordered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("heavy.pending");
+        let joined: Vec<(u64, Option<u64>)> = (0..8)
+            .map(|slot| {
+                enroll_in_heavy_queue(
+                    &dir,
+                    &format!("repo--verification--wt{slot}"),
+                    JobPriority::ManualRebuild,
+                )
+            })
+            .collect();
+        for (earlier, later) in joined.iter().zip(joined.iter().skip(1)) {
+            assert!(
+                (earlier.0, earlier.1) < (later.0, later.1),
+                "a claimant that joined first must rank first: {earlier:?} vs {later:?}"
+            );
+        }
+
+        // Coming back for a place already earned keeps the arrival that earned
+        // it, so a claimant that gave up and reran does not fall behind the
+        // claimants that queued while it was away.
+        let rejoined =
+            enroll_in_heavy_queue(&dir, "repo--verification--wt0", JobPriority::ManualRebuild);
+        assert_eq!(rejoined, joined[0]);
     }
 
     /// AC-3 / AC-2: a claimant that spent its whole wait budget and gave up
@@ -2195,16 +2395,22 @@ mod tests {
             JobPriority::Background,
         ] {
             for queued_at_ms in [10_u64, 20, 30] {
-                for target in [Some("a"), Some("b"), None] {
-                    for waiting in [false, true] {
-                        for present in [false, true] {
-                            records.push(QueueRecord {
-                                target: target.map(str::to_string),
-                                priority,
-                                queued_at_ms,
-                                waiting,
-                                present,
-                            });
+                // Issue #4210 widened arrival with a number, including the
+                // `None` an older payload carries, so the invariants below
+                // still cover the whole space the predicate can be asked about.
+                for queue_seq in [None, Some(1_u64), Some(2)] {
+                    for target in [Some("a"), Some("b"), None] {
+                        for waiting in [false, true] {
+                            for present in [false, true] {
+                                records.push(QueueRecord {
+                                    target: target.map(str::to_string),
+                                    priority,
+                                    queued_at_ms,
+                                    queue_seq,
+                                    waiting,
+                                    present,
+                                });
+                            }
                         }
                     }
                 }
