@@ -4254,7 +4254,8 @@ impl AppRuntime {
         project_root: &Path,
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
-        let events = self.apply_workspace_projection_title_sync_cache_only(project_root, projection);
+        let events =
+            self.apply_workspace_projection_title_sync_cache_only(project_root, projection);
         // Issue #3777 AC-3: the cache-only merge above is the non-blocking half
         // of this path — it must stay on the Tao loop, so it republishes the
         // last materialized view with the watcher payload merged in rather than
