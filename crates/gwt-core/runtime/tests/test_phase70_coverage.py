@@ -232,14 +232,16 @@ class PublishFailurePropagationTests(unittest.TestCase):
                     self.assertEqual(result, failure)
                 with mock.patch.object(
                     runner, "_publish_generation", return_value=failure
-                ):
+                ) as publish:
                     result = runner.action_index_issues_v2(
                         repo_hash=REPO_HASH,
                         project_root=str(project),
                         db_root=db_root,
                         respect_ttl=False,
                     )
-                self.assertEqual(result, failure)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error_code"], "EMPTY_CORPUS")
+                publish.assert_not_called()
 
 
 class SearchClassificationBranchTests(unittest.TestCase):
