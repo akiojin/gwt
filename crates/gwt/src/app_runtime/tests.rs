@@ -4204,9 +4204,26 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
         );
     }
     let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
-    let initial_projection = runtime
-        .active_work_projection_for_tab("tab-project", &runtime.tabs[0])
-        .expect("materialize initial active Work cache");
+    // Issue #3777 AC-3: `active_work_projection_for_tab` no longer decodes the
+    // projection inline — it schedules the background prepare and returns
+    // `None`, so the cache this test needs is only populated once that task has
+    // run and its completion has been committed. The spawner here is queued, so
+    // drive both explicitly rather than expecting a synchronous value.
+    assert!(
+        runtime
+            .active_work_projection_for_tab("tab-project", &runtime.tabs[0])
+            .is_none(),
+        "the tab accessor must schedule the rebuild instead of decoding inline"
+    );
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    let initial_projection = wait_for_active_work_projection(&mut runtime);
     assert_eq!(initial_projection.active_agents, window_ids.len());
 
     super::workspace_views::reset_full_active_work_projection_builds();
@@ -36908,14 +36925,27 @@ fn late_runtime_hook_stop_preserves_same_session_successor_generation() {
     assert!(runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.runtimes.contains_key(&window_id));
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    assert_eq!(
-        finalizers
+    // A Stop legitimately queues one blocking task now: Issue #3777 AC-3 moves
+    // the Active Work projection rebuild off the Tao loop, so reaching a
+    // terminal state schedules that background refresh. Counting queued tasks
+    // therefore no longer distinguishes "scheduled a projection rebuild" from
+    // "scheduled a window teardown". Run whatever was queued and re-assert the
+    // window instead: a destructive finalizer would tear it down here, so this
+    // tests the contract in the assertion's name directly rather than by proxy.
+    let queued = std::mem::take(
+        &mut *finalizers
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        0,
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
         "a generationless Stop must not queue a destructive finalizer"
     );
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
     assert!(
         pty.try_wait().expect("probe child").is_none(),
         "hook dispatch must not kill the PTY inline"
