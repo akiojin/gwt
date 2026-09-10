@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     launch::{normalize_launch_args, LaunchConfig, ManualLaunchRuntimeProof},
     types::{
-        AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode,
+        AgentId, AgentStatus, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
         WindowsShellKind, WorkflowBypass,
     },
 };
@@ -410,6 +410,12 @@ pub struct Session {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
     pub linked_issue_number: Option<u64>,
+    /// Issue #4217 FR-002: who started this session. Stamped by the launcher,
+    /// which is the only party that knows; every gate that used to sniff
+    /// `GWT_AUTONOMOUS_EXECUTION` reads this instead. Absent in legacy records,
+    /// which therefore keep the human-gated `Manual` behavior.
+    #[serde(default)]
+    pub launch_route: LaunchRoute,
     #[serde(default)]
     pub workflow_bypass: Option<WorkflowBypass>,
     /// When the bypass was armed. Consumers treat a bypass without a fresh
@@ -558,6 +564,7 @@ impl Session {
             execution_binding: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
+            launch_route: LaunchRoute::Manual,
             workflow_bypass: None,
             workflow_bypass_armed_at: None,
             launch_command: String::new(),
@@ -603,6 +610,7 @@ impl Session {
         session.docker_service = config.docker_service.clone();
         session.docker_lifecycle_intent = config.docker_lifecycle_intent;
         session.linked_issue_number = config.linked_issue_number;
+        session.launch_route = config.launch_route;
         session.launch_command = durable_session_launch_command(config);
         session.launch_args = config.args.clone();
         session.windows_shell = config.windows_shell;
@@ -5892,6 +5900,55 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+    }
+
+    /// Issue #4217 AC-2: the launch route reaches the durable Session, which
+    /// is the record every downstream gate reads. An unstamped launch is
+    /// `Manual`, so the human-gated behavior is what a caller gets by default.
+    #[test]
+    fn session_carries_the_launch_route_the_launcher_stamped() {
+        let autonomous = crate::AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .launch_route(LaunchRoute::Autonomous)
+            .build();
+        assert_eq!(autonomous.launch_route, LaunchRoute::Autonomous);
+        let session = Session::from_launch_config("/tmp/wt", "work/issue-4217", &autonomous);
+        assert_eq!(session.launch_route, LaunchRoute::Autonomous);
+        assert!(!session.launch_route.is_attended());
+
+        let default = crate::AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        assert_eq!(default.launch_route, LaunchRoute::Manual);
+        let manual = Session::from_launch_config("/tmp/wt", "work/issue-4217", &default);
+        assert_eq!(manual.launch_route, LaunchRoute::Manual);
+        assert!(manual.launch_route.is_attended());
+    }
+
+    /// AC-2: the route survives persistence, and a legacy record written
+    /// before the field existed reads back as the attended route.
+    #[test]
+    fn launch_route_roundtrips_and_defaults_to_manual_for_legacy_records() {
+        let config = crate::AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .launch_route(LaunchRoute::Autonomous)
+            .build();
+        let session = Session::from_launch_config("/tmp/wt", "work/issue-4217", &config);
+        let encoded = toml::to_string(&session).expect("serialize autonomous session");
+        assert!(
+            encoded.contains("launch_route = \"autonomous\""),
+            "the route must be legible in the durable record: {encoded}"
+        );
+        let decoded: Session = toml::from_str(&encoded).expect("deserialize autonomous session");
+        assert_eq!(decoded.launch_route, LaunchRoute::Autonomous);
+
+        let legacy = encoded
+            .lines()
+            .filter(|line| !line.starts_with("launch_route"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let restored: Session = toml::from_str(&legacy).expect("deserialize legacy session");
+        assert_eq!(
+            restored.launch_route,
+            LaunchRoute::Manual,
+            "a record with no route recorded must not be treated as unattended"
+        );
     }
 
     #[test]
