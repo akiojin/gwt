@@ -1301,6 +1301,7 @@ impl AppRuntime {
             ));
         }
         let mut config = super::launch_config_from_persisted_session(&session);
+        config.launch_route = gwt_agent::LaunchRoute::Manual;
         if !session.worktree_path.as_path().exists() {
             config.working_dir = None;
         }

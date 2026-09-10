@@ -151,6 +151,19 @@ Rows carry `deferred_user_verification`: `true` is waiting on the owner,
 `false` is settled, and **absent means the read did not hydrate bodies** —
 pass `include: ["body"]` or the answer is unknown, not negative.
 
+Record the same result in the tool-generated execution evidence: pass
+`params.user_verification_result` to `verify.run` with the exact
+`User Verification Result` value used in the report and PR body. The result
+is persisted in the integrity-protected Verification Run Record and printed
+in the run output. An omitted value remains unknown; it never means
+`confirmed` or `n/a`. Automated command success does not confirm a human check.
+
+For an autonomous run with a UI surface, for example:
+
+```json
+{"schema_version":1,"operation":"verify.run","params":{"commands":["<planned command>"],"user_verification_result":"deferred (autonomous execution)"}}
+```
+
 ## Agent Visual Check (the agent's own browser-check)
 
 The agent's own headed run is evidence the **agent** produced. It is recorded
