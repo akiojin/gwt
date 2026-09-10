@@ -1115,7 +1115,10 @@ impl AppRuntime {
                 return Vec::new();
             }
         }
-        let config = launch_config_from_persisted_session(&session);
+        let mut config = launch_config_from_persisted_session(&session);
+        if origin == RestoreOrigin::UserRequested {
+            config.launch_route = gwt_agent::LaunchRoute::Manual;
+        }
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id)
             .unwrap_or(fallback_geometry);
