@@ -1,5 +1,7 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -110,40 +112,511 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
 /// provider-specific workspace-home discovery; safe-boundary refreshes are
 /// confined to the canonical PM checkout.
 pub fn refresh_managed_gwt_assets_for_pm_worktree(worktree: &Path) -> io::Result<()> {
+    with_managed_asset_lock(worktree, || {
+        refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
+    })
+}
+
+/// Caller holds the managed-assets lock through repoint and regeneration.
+pub(crate) fn refresh_managed_gwt_assets_for_pm_worktree_locked(worktree: &Path) -> io::Result<()> {
     if !crate::pm_registry::is_pm_worktree(worktree) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("not a canonical PM worktree: {}", worktree.display()),
         ));
     }
+    let snapshot = PmManagedAssetSnapshot::capture(worktree)?;
+    let refresh = (|| {
+        materialize_managed_gwt_assets_for_targets(
+            worktree,
+            &ManagedAssetTarget::ALL,
+            CodexHookDiscoveryMode::WorktreeLocal,
+            false,
+        )?;
+        update_git_exclude(worktree).map_err(|error| {
+            io::Error::other(format!("failed to update PM managed excludes: {error}"))
+        })
+    })();
+    match refresh {
+        Ok(()) => {
+            snapshot.discard();
+            crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
+            crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
+            Ok(())
+        }
+        Err(error) => match snapshot.restore() {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(io::Error::other(format!(
+                "{error}; restoring prior PM managed assets also failed: {restore_error}"
+            ))),
+        },
+    }
+}
+
+/// Preserve only untracked gwt-owned collisions before the non-force Git
+/// repoint. The same lock also covers the caller's checkout and regeneration.
+/// Backups remain outside the checkout after success and after rollback.
+pub(crate) fn with_pm_repoint_transaction<T>(
+    worktree: &Path,
+    target: &str,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     with_managed_asset_lock(worktree, || {
-        let snapshot = PmManagedAssetSnapshot::capture(worktree)?;
-        let refresh = (|| {
-            materialize_managed_gwt_assets_for_targets(
-                worktree,
-                &ManagedAssetTarget::ALL,
-                CodexHookDiscoveryMode::WorktreeLocal,
-                false,
-            )?;
-            update_git_exclude(worktree).map_err(|error| {
-                io::Error::other(format!("failed to update PM managed excludes: {error}"))
-            })
-        })();
-        match refresh {
-            Ok(()) => {
-                snapshot.discard();
-                crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
-                crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
-                Ok(())
+        let tree = pm_repoint_target_tree(worktree, target)?;
+        let tracked = pm_repoint_git(worktree, &["ls-files", "-z"])?;
+        let tracked = std::str::from_utf8(&tracked)
+            .map_err(|_| io::Error::other("user-owned changes: non-UTF8 index path"))?
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect::<BTreeSet<_>>();
+        let index_owns = |path: &Path| {
+            path.ancestors().any(|entry| tracked.contains(entry))
+                || tracked
+                    .range(path.to_path_buf()..)
+                    .next()
+                    .is_some_and(|entry| entry.starts_with(path))
+        };
+        let mut candidates = Vec::new();
+        let mut protected = Vec::new();
+        for (path, (mode, _)) in &tree {
+            if index_owns(path) {
+                continue;
             }
-            Err(error) => match snapshot.restore() {
-                Ok(()) => Err(error),
-                Err(restore_error) => Err(io::Error::other(format!(
-                    "{error}; restoring prior PM managed assets also failed: {restore_error}"
-                ))),
-            },
+            match pm_repoint_existing_file(worktree, path) {
+                Ok(false) => continue,
+                Ok(true) if matches!(mode.as_str(), "100644" | "100755") => {}
+                _ => {
+                    protected.push(path.clone());
+                    continue;
+                }
+            }
+            if gwt_skills::is_gwt_managed_skill_or_command_path(path)
+                || pm_repoint_work_history_path(path)
+            {
+                candidates.push(path.clone());
+            } else {
+                protected.push(path.clone());
+            }
+        }
+        if !protected.is_empty() {
+            return Err(io::Error::other(format!(
+                "user-owned changes: {} incoming path collision(s): {}",
+                protected.len(),
+                protected
+                    .iter()
+                    .take(5)
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if candidates.is_empty() {
+            return operation();
+        }
+
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| io::Error::other("managed artifacts: PM has no project-state root"))?
+            .join("project-state");
+        let backup_root = project_state
+            .join("pm-repoint-backups")
+            .join(uuid::Uuid::new_v4().to_string());
+        pm_repoint_create_dir(&backup_root)?;
+        let mut entries = Vec::new();
+        let result = (|| {
+            for relative in candidates {
+                entries.push(PmRepointBackup::capture(worktree, &backup_root, relative)?);
+            }
+            let incoming_history = validate_pm_repoint_incoming_history(worktree, &tree, &entries)?;
+            let history = entries
+                .iter()
+                .filter(|entry| pm_repoint_work_history_path(&entry.relative))
+                .map(|entry| entry.relative.clone())
+                .collect::<Vec<_>>();
+            for relative in history {
+                validate_pm_repoint_history_name(worktree, &relative)?;
+                let paths =
+                    gwt_core::workspace_projection::preserve_workspace_work_event_log_as_shards(
+                        &worktree.join(&relative),
+                        &worktree.join(".gwt/work/events"),
+                    )
+                    .map_err(|error| io::Error::other(format!("Work history: {error}")))?;
+                for path in paths {
+                    let relative = path.strip_prefix(worktree).map_err(|_| {
+                        io::Error::other("Work history: preserved shard escaped checkout")
+                    })?;
+                    let Some((mode, _)) = tree.get(relative) else {
+                        continue;
+                    };
+                    if !matches!(mode.as_str(), "100644" | "100755")
+                        || incoming_history.get(relative) != Some(&fs::read(&path)?)
+                    {
+                        return Err(io::Error::other(format!(
+                            "Work history: incoming shard differs from preserved event: {}",
+                            relative.display()
+                        )));
+                    }
+                    if !index_owns(relative)
+                        && !entries.iter().any(|entry| entry.relative == relative)
+                    {
+                        entries.push(PmRepointBackup::capture(
+                            worktree,
+                            &backup_root,
+                            relative.to_path_buf(),
+                        )?);
+                    }
+                }
+            }
+            for entry in &mut entries {
+                let path = worktree.join(&entry.relative);
+                if !pm_repoint_existing_file(worktree, &entry.relative)?
+                    || fs::read(&path)? != entry.bytes
+                {
+                    return Err(io::Error::other(format!(
+                        "managed artifacts: source changed before repoint: {}",
+                        entry.relative.display()
+                    )));
+                }
+                fs::remove_file(&path)?;
+                entry.displaced = true;
+                pm_repoint_sync_dir(path.parent().expect("collision has parent"))?;
+            }
+            operation()
+        })();
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let mut failures = Vec::new();
+                for entry in entries.iter().filter(|entry| entry.displaced) {
+                    if let Err(restore) = entry.restore(worktree) {
+                        failures.push(format!("{}: {restore}", entry.relative.display()));
+                    }
+                }
+                Err(io::Error::other(format!(
+                    "{error}; managed artifacts / Work history backup retained at {}{}",
+                    backup_root.display(),
+                    if failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {} restore failure(s): {}",
+                            failures.len(),
+                            failures.into_iter().take(5).collect::<Vec<_>>().join(", ")
+                        )
+                    }
+                )))
+            }
         }
     })
+}
+
+fn pm_repoint_git(worktree: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
+    let output = gwt_core::process::run_git_logged(args, Some(worktree))?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "managed artifacts: git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
+                .trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn pm_repoint_target_tree(
+    worktree: &Path,
+    target: &str,
+) -> io::Result<BTreeMap<PathBuf, (String, String)>> {
+    let output = pm_repoint_git(worktree, &["ls-tree", "-r", "-z", "--full-tree", target])?;
+    let text = std::str::from_utf8(&output)
+        .map_err(|_| io::Error::other("user-owned changes: non-UTF8 incoming tree path"))?;
+    text.split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (metadata, path) = entry
+                .split_once('\t')
+                .ok_or_else(|| io::Error::other("managed artifacts: invalid Git tree entry"))?;
+            let fields = metadata.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 3
+                || !Path::new(path)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(io::Error::other("managed artifacts: invalid Git tree path"));
+            }
+            Ok((
+                PathBuf::from(path),
+                (fields[0].to_string(), fields[2].to_string()),
+            ))
+        })
+        .collect()
+}
+
+/// Inspect every managed parent without following symlinks/reparse points.
+fn pm_repoint_existing_file(worktree: &Path, relative: &Path) -> io::Result<bool> {
+    let mut path = worktree.to_path_buf();
+    for part in relative.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return Err(io::Error::other(
+                "user-owned changes: noncanonical collision path",
+            ));
+        }
+        path.push(part);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        reject_pm_managed_asset_indirection(&path, &metadata)?;
+        let valid = if path == worktree.join(relative) {
+            metadata.is_file()
+        } else {
+            metadata.is_dir()
+        };
+        if !valid {
+            return Err(io::Error::other(format!(
+                "user-owned changes: unsupported collision node: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(true)
+}
+
+fn pm_repoint_work_history_path(relative: &Path) -> bool {
+    if relative == Path::new(".gwt/work/events.jsonl") {
+        return true;
+    }
+    let Ok(tail) = relative.strip_prefix(".gwt/work/events") else {
+        return false;
+    };
+    let Some(name) = tail
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    if name.len() != 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    tail == Path::new(&format!("{name}.jsonl"))
+        || tail == Path::new(&format!("{}/{name}.jsonl", &name[..2]))
+}
+
+fn validate_pm_repoint_history_name(worktree: &Path, relative: &Path) -> io::Result<()> {
+    if relative == Path::new(".gwt/work/events.jsonl") {
+        return Ok(());
+    }
+    let bytes = fs::read(worktree.join(relative))?;
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
+    let value: serde_json::Value = serde_json::from_slice(lines.next().unwrap_or_default())
+        .map_err(|error| io::Error::other(format!("Work history: invalid shard: {error}")))?;
+    let id = value["id"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Work history: shard lacks event id"))?;
+    let canonical = gwt_core::paths::gwt_work_event_shard_path(Path::new(".gwt/work/events"), id);
+    if lines.next().is_some() || canonical.file_name() != relative.file_name() {
+        return Err(io::Error::other(format!(
+            "Work history: shard path does not match event id: {}",
+            relative.display()
+        )));
+    }
+    Ok(())
+}
+
+fn pm_repoint_event_lines(bytes: &[u8]) -> io::Result<BTreeMap<String, &[u8]>> {
+    let mut events = BTreeMap::new();
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let value: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+            io::Error::other(format!("Work history: invalid incoming event: {error}"))
+        })?;
+        let id = value["id"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("Work history: event lacks id"))?;
+        if events
+            .insert(id.to_string(), line)
+            .is_some_and(|previous| previous != line)
+        {
+            return Err(io::Error::other(
+                "Work history: divergent duplicate event id",
+            ));
+        }
+    }
+    Ok(events)
+}
+
+fn validate_pm_repoint_incoming_history(
+    worktree: &Path,
+    tree: &BTreeMap<PathBuf, (String, String)>,
+    entries: &[PmRepointBackup],
+) -> io::Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut preserved = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| pm_repoint_work_history_path(&entry.relative))
+    {
+        for (id, bytes) in pm_repoint_event_lines(&entry.bytes)? {
+            if preserved
+                .insert(id, bytes)
+                .is_some_and(|previous| previous != bytes)
+            {
+                return Err(io::Error::other("Work history: divergent source event id"));
+            }
+        }
+    }
+    let mut incoming_blobs = BTreeMap::new();
+    if preserved.is_empty() {
+        return Ok(incoming_blobs);
+    }
+    let incoming = tree
+        .iter()
+        .filter(|(path, _)| pm_repoint_work_history_path(path))
+        .collect::<Vec<_>>();
+    // Bound stdin below a pipe buffer: the existing batch helper writes its
+    // requests before draining stdout, which may contain a large legacy log.
+    for chunk in incoming.chunks(32) {
+        if chunk
+            .iter()
+            .any(|(_, (mode, _))| !matches!(mode.as_str(), "100644" | "100755"))
+        {
+            return Err(io::Error::other(
+                "Work history: incoming history is not a regular file",
+            ));
+        }
+        let oids = chunk
+            .iter()
+            .map(|(_, (_, oid))| oid.clone())
+            .collect::<Vec<_>>();
+        let blobs = gwt_git::blob::read_blob_bytes_batch(worktree, &oids).map_err(|error| {
+            io::Error::other(format!(
+                "Work history: {}",
+                error.to_string().chars().take(400).collect::<String>()
+            ))
+        })?;
+        for ((path, _), blob) in chunk.iter().zip(blobs) {
+            for (id, bytes) in pm_repoint_event_lines(&blob)? {
+                if preserved
+                    .get(&id)
+                    .is_some_and(|original| *original != bytes)
+                {
+                    return Err(io::Error::other(format!(
+                        "Work history: incoming event differs from preserved history: {}",
+                        path.display()
+                    )));
+                }
+            }
+            incoming_blobs.insert((*path).clone(), blob);
+        }
+    }
+    Ok(incoming_blobs)
+}
+
+struct PmRepointBackup {
+    relative: PathBuf,
+    backup: PathBuf,
+    bytes: Vec<u8>,
+    permissions: fs::Permissions,
+    displaced: bool,
+}
+
+impl PmRepointBackup {
+    fn capture(worktree: &Path, backup_root: &Path, relative: PathBuf) -> io::Result<Self> {
+        if !pm_repoint_existing_file(worktree, &relative)? {
+            return Err(io::Error::other(
+                "managed artifacts: collision disappeared before backup",
+            ));
+        }
+        let source = worktree.join(&relative);
+        let bytes = fs::read(&source)?;
+        let permissions = fs::metadata(&source)?.permissions();
+        let backup = backup_root.join(&relative);
+        pm_repoint_create_dir(backup.parent().expect("backup parent"))?;
+        pm_repoint_write_new(&backup, &bytes, &permissions)?;
+        if fs::read(&backup)? != bytes {
+            return Err(io::Error::other(
+                "managed artifacts: backup verification failed",
+            ));
+        }
+        Ok(Self {
+            relative,
+            backup,
+            bytes,
+            permissions,
+            displaced: false,
+        })
+    }
+
+    fn restore(&self, worktree: &Path) -> io::Result<()> {
+        if pm_repoint_existing_file(worktree, &self.relative)? {
+            if fs::read(worktree.join(&self.relative))? == self.bytes {
+                return Ok(());
+            }
+            return Err(io::Error::other(
+                "user-owned changes: refusing to overwrite current file",
+            ));
+        }
+        let path = worktree.join(&self.relative);
+        pm_repoint_create_dir(path.parent().expect("restore parent"))?;
+        let bytes = fs::read(&self.backup)?;
+        if bytes != self.bytes {
+            return Err(io::Error::other(
+                "backup verification failed during restore",
+            ));
+        }
+        pm_repoint_write_new(&path, &bytes, &self.permissions)
+    }
+}
+
+fn pm_repoint_write_new(
+    path: &Path,
+    bytes: &[u8],
+    permissions: &fs::Permissions,
+) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.set_permissions(permissions.clone())?;
+    file.sync_all()?;
+    pm_repoint_sync_dir(path.parent().expect("written file parent"))
+}
+
+fn pm_repoint_create_dir(path: &Path) -> io::Result<()> {
+    if !pm_managed_asset_node_exists(path)? {
+        if let Some(parent) = path.parent() {
+            pm_repoint_create_dir(parent)?;
+        }
+    }
+    ensure_real_pm_managed_asset_directory(path)?;
+    pm_repoint_sync_dir(path)?;
+    if let Some(parent) = path.parent() {
+        pm_repoint_sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn pm_repoint_sync_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 const PM_MANAGED_ASSET_TRANSACTION_ROOTS: &[&str] = &[
@@ -1119,6 +1592,297 @@ mod tests {
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn repoint_git(root: &Path, args: &[&str]) -> String {
+        let output = gwt_core::process::run_git_logged(args, Some(root)).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn repoint_fixture(incoming: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("pm/worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        repoint_git(&worktree, &["init", "--quiet"]);
+        repoint_git(&worktree, &["config", "user.name", "Test"]);
+        repoint_git(&worktree, &["config", "user.email", "test@example.com"]);
+        repoint_git(
+            &worktree,
+            &["commit", "--quiet", "--allow-empty", "-m", "base"],
+        );
+        let base = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        for (path, bytes) in incoming {
+            let path = worktree.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        repoint_git(&worktree, &["add", "."]);
+        repoint_git(&worktree, &["commit", "--quiet", "-m", "incoming"]);
+        let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
+        (temp, worktree, target)
+    }
+
+    fn seed_repoint_collision(worktree: &Path, path: &str, bytes: &str) {
+        let path = worktree.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn pm_repoint_transaction_preserves_ignored_managed_bytes_outside_checkout() {
+        let asset = ".claude/skills/gwt-execute/SKILL.md";
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "old generated bytes");
+        seed_repoint_collision(&worktree, "user.txt", "user work");
+        std::fs::write(worktree.join(".git/info/exclude"), ".claude/\n").unwrap();
+        super::with_pm_repoint_transaction(&worktree, &target, || {
+            assert!(!worktree.join(asset).exists());
+            repoint_git(&worktree, &["checkout", "--quiet", "--detach", &target]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "incoming"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("user.txt")).unwrap(),
+            "user work"
+        );
+        let backups = temp.path().join("project-state/pm-repoint-backups");
+        let backup = std::fs::read_dir(backups)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read_to_string(backup.join(asset)).unwrap(),
+            "old generated bytes"
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_restores_on_callback_failure_without_overwriting_new_content() {
+        let asset = ".codex/skills/gwt-execute/SKILL.md";
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "original");
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            Err(std::io::Error::other("repoint rejected"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("repoint rejected"));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "original"
+        );
+
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            std::fs::write(worktree.join(asset), "concurrent user edit")?;
+            Err(std::io::Error::other("repoint rejected"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("backup"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "concurrent user edit"
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_rejects_user_collision_before_displacing_managed_files() {
+        let asset = ".claude/commands/gwt-execute.md";
+        let user = ".claude/skills/user/SKILL.md";
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming"), (user, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "generated");
+        seed_repoint_collision(&worktree, user, "user owned");
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject before checkout")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user-owned changes"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "generated"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(user)).unwrap(),
+            "user owned"
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_preserves_unknown_work_history_and_rejects_divergent_incoming_event()
+    {
+        let legacy = ".gwt/work/events.jsonl";
+        let original = " {\"id\":\"event-future\",\"work_item_id\":\"work-future\",\"kind\":\"future-kind\",\"updated_at\":\"2026-09-10T00:00:00Z\",\"extra\":true}\n";
+        let (_temp, worktree, target) = repoint_fixture(&[(legacy, "")]);
+        seed_repoint_collision(&worktree, legacy, original);
+        super::with_pm_repoint_transaction(&worktree, &target, || {
+            repoint_git(&worktree, &["checkout", "--quiet", "--detach", &target]);
+            Ok(())
+        })
+        .unwrap();
+        let shard = gwt_core::paths::gwt_work_event_shard_path(
+            &worktree.join(".gwt/work/events"),
+            "event-future",
+        );
+        assert_eq!(std::fs::read_to_string(shard).unwrap(), original);
+
+        let relative_shard = gwt_core::paths::gwt_work_event_shard_path(
+            Path::new(".gwt/work/events"),
+            "event-future",
+        );
+        let divergent = original.replace("true", "false");
+        let (_temp, worktree, target) =
+            repoint_fixture(&[(legacy, ""), (relative_shard.to_str().unwrap(), &divergent)]);
+        seed_repoint_collision(&worktree, legacy, original);
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject divergent incoming event")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(legacy)).unwrap(),
+            original
+        );
+
+        let (_temp, worktree, target) = repoint_fixture(&[(legacy, &divergent)]);
+        seed_repoint_collision(&worktree, legacy, original);
+        let mut called = false;
+        let error = super::with_pm_repoint_transaction(&worktree, &target, || {
+            called = true;
+            Ok(())
+        })
+        .expect_err("must reject divergent incoming legacy event before preservation");
+        assert!(!called);
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(legacy)).unwrap(),
+            original
+        );
+        let canonical = gwt_core::paths::gwt_work_event_shard_path(
+            &worktree.join(".gwt/work/events"),
+            "event-future",
+        );
+        assert!(
+            !canonical.exists(),
+            "divergence must be rejected before publication"
+        );
+
+        let flat_shard = Path::new(".gwt/work/events").join(relative_shard.file_name().unwrap());
+        let (_temp, worktree, target) =
+            repoint_fixture(&[(legacy, ""), (flat_shard.to_str().unwrap(), &divergent)]);
+        seed_repoint_collision(&worktree, legacy, original);
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject divergent incoming flat shard")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(legacy)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_holds_materializer_lock_through_callback() {
+        let asset = ".claude/commands/gwt-execute.md";
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "original");
+        let (entered, receiver) = std::sync::mpsc::channel();
+        let mut worker = None;
+        super::with_pm_repoint_transaction(&worktree, &target, || {
+            let other = worktree.clone();
+            worker = Some(std::thread::spawn(move || {
+                super::with_managed_asset_lock(&other, || {
+                    entered.send(()).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            }));
+            assert!(matches!(
+                receiver.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert!(!worktree.join(asset).exists());
+            Ok(())
+        })
+        .unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        worker.unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn pm_repoint_transaction_rejects_work_shard_with_mismatched_event_id() {
+        let shard = gwt_core::paths::gwt_work_event_shard_path(
+            Path::new(".gwt/work/events"),
+            "expected-id",
+        );
+        let relative = shard.to_str().unwrap();
+        let (_temp, worktree, target) = repoint_fixture(&[(relative, "")]);
+        let original = "{\"id\":\"different-id\",\"work_item_id\":\"work-future\",\"kind\":\"future-kind\",\"updated_at\":\"2026-09-10T00:00:00Z\"}\n";
+        seed_repoint_collision(&worktree, relative, original);
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject mismatched shard identity")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(relative)).unwrap(),
+            original
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_repoint_transaction_rejects_symlinked_managed_parent_and_incoming_asset() {
+        let asset = ".codex/skills/gwt-execute/SKILL.md";
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let outside = temp.path().join("outside");
+        seed_repoint_collision(
+            &outside,
+            "skills/gwt-execute/SKILL.md",
+            "outside user bytes",
+        );
+        std::os::unix::fs::symlink(&outside, worktree.join(".codex")).unwrap();
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject symlink")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user-owned changes"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("skills/gwt-execute/SKILL.md")).unwrap(),
+            "outside user bytes"
+        );
+
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let base = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        repoint_git(&worktree, &["checkout", "--quiet", "--detach", &target]);
+        std::fs::remove_file(worktree.join(asset)).unwrap();
+        std::os::unix::fs::symlink("outside-file", worktree.join(asset)).unwrap();
+        repoint_git(&worktree, &["add", asset]);
+        repoint_git(&worktree, &["commit", "--quiet", "-m", "incoming symlink"]);
+        let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
+        seed_repoint_collision(&worktree, asset, "original");
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject incoming symlink")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user-owned changes"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "original"
+        );
+    }
 
     #[test]
     fn materialize_into_missing_worktree_fails_with_clear_attribution() {
