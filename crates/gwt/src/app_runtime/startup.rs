@@ -381,22 +381,14 @@ fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
     session.status != gwt_agent::AgentStatus::Stopped
 }
 
-/// Issue #3934: read the holder's durable state to decide whether the reaper
-/// is even allowed to consider it. Unreadable and missing records answer
-/// `false` so this can only ever widen what the exact stage revalidates.
-///
-/// Issue #3964 AC-2: a durably `Running` holder is admitted too. A launch that
-/// died before its agent ever ran leaves exactly that record with no runtime
-/// sidecar anywhere, and only the exact stage can tell that apart from a live
-/// agent — it answers `Unchanged` for a live one.
-fn durable_holder_status_admits_exact_stage(sessions_dir: &Path, session_id: &str) -> bool {
-    match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
-        gwt_agent::SessionPathState::Present(session) => {
-            gwt::cli::execution_state::holder_status_permits_generation_reclaim(session.status)
-                || session.status == gwt_agent::AgentStatus::Running
-        }
-        gwt_agent::SessionPathState::Missing | gwt_agent::SessionPathState::Error(_) => false,
-    }
+/// A durable status is not process evidence. Even Waiting/Unknown holders
+/// must reach the exact stage, which protects live runtimes and in-flight
+/// launches. Missing or unreadable records still fail closed.
+fn durable_holder_admits_exact_stage(sessions_dir: &Path, session_id: &str) -> bool {
+    matches!(
+        gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))),
+        gwt_agent::SessionPathState::Present(_)
+    )
 }
 
 /// How the reaper reports owner ledgers it cannot inspect.
@@ -895,7 +887,7 @@ pub(super) fn reap_defunct_active_generations(
         // so admit every durable state the exact stage is allowed to
         // reclaim and let that stage make the decision.
         if !matches!(liveness, ActiveOwnerLiveness::Stale(_))
-            && !durable_holder_status_admits_exact_stage(sessions_dir, &candidate.session_id)
+            && !durable_holder_admits_exact_stage(sessions_dir, &candidate.session_id)
         {
             summary.unchanged += 1;
             continue;

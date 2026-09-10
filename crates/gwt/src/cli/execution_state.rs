@@ -724,6 +724,10 @@ pub enum ExactSessionRuntimeDisposition {
     /// sidecar itself was never completed: it carries no exit record and no
     /// handoff fence, so it proves only that its writer is gone.
     HostDead,
+    /// The exact PTY child and its process group exited while the GUI Host
+    /// remains alive. No exit record or manual handoff proof was published;
+    /// the generation reaper must revalidate this observation under leases.
+    ChildExited,
     Unknown,
 }
 
@@ -923,6 +927,7 @@ pub fn classify_exact_session_runtime(
     let mut saw_unknown = false;
     let mut saw_sidecar = false;
     let mut saw_dead_host = false;
+    let mut saw_exited_child = false;
     // Issue #3934: an exact proof is only usable while it names one
     // incarnation, but whether the Host that wrote it is still around is a
     // separate fact that survives the proof becoming ambiguous.
@@ -1030,10 +1035,14 @@ pub fn classify_exact_session_runtime(
                 }
                 continue;
             };
-            if crate::process::host_process_start_time(host_pid) == Some(host_started_at)
-                || crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
-            {
+            if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at) {
                 return Ok(ExactSessionRuntimeDisposition::Live);
+            }
+            if host_alive {
+                // Issue #4131: one GUI Host owns many independent PTYs. Its
+                // survival says nothing about this exact child's survival.
+                saw_exited_child = true;
+                continue;
             }
             let handoff = fs::read(gwt_agent::manual_handoff_path(
                 sessions_dir,
@@ -1068,6 +1077,11 @@ pub fn classify_exact_session_runtime(
     }
     if saw_unknown {
         return Ok(ExactSessionRuntimeDisposition::Unknown);
+    }
+    if saw_exited_child {
+        // Reaping needs no unique handoff proof: every namespace was checked
+        // for a surviving child above, and the transaction checks again.
+        return Ok(ExactSessionRuntimeDisposition::ChildExited);
     }
     if conflicting_proof || (terminal.is_some() && defunct.is_some()) {
         // Issue #3934: more than one exact record cannot name the single
@@ -1198,6 +1212,7 @@ pub fn unreachable_current_generation_holder(
             // terminalizes the generation under its own leases instead, and
             // the next launch takes the Blocked successor route.
             ExactSessionRuntimeDisposition::HostDead
+            | ExactSessionRuntimeDisposition::ChildExited
             | ExactSessionRuntimeDisposition::Live
             | ExactSessionRuntimeDisposition::Unknown => None,
         },
@@ -1826,6 +1841,10 @@ pub fn reap_startup_defunct_active_generation(
                     // durably Running record only means nobody wrote the end.
                     ExactSessionRuntimeDisposition::HostDead => (
                         "startup recovery found only dead Hosts for the Active holder",
+                        true,
+                    ),
+                    ExactSessionRuntimeDisposition::ChildExited => (
+                        "startup recovery found an exited exact PTY child for the Active holder",
                         true,
                     ),
                     ExactSessionRuntimeDisposition::Defunct(_) => (
@@ -2651,6 +2670,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
             Some(ExactSessionRuntimeDisposition::Terminal(_)) => "terminal",
             Some(ExactSessionRuntimeDisposition::Defunct(_)) => "defunct",
             Some(ExactSessionRuntimeDisposition::HostDead) => "host_dead",
+            Some(ExactSessionRuntimeDisposition::ChildExited) => "child_exited",
             Some(ExactSessionRuntimeDisposition::Absent) => "absent",
             Some(ExactSessionRuntimeDisposition::Unknown) => "unknown",
             None => "not_evaluated",
@@ -2682,6 +2702,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
                     ExactSessionRuntimeDisposition::Absent
                         | ExactSessionRuntimeDisposition::Defunct(_)
                         | ExactSessionRuntimeDisposition::HostDead
+                        | ExactSessionRuntimeDisposition::ChildExited
                 )
             ) || (holder_permits
                 && matches!(runtime, Some(ExactSessionRuntimeDisposition::Terminal(_))));
@@ -16398,6 +16419,52 @@ mod tests {
 
         assert_eq!(released.ecr_status, Some(ExecutionControlStatus::Blocked));
         assert!(!released.reclaimable);
+        assert_eq!(released.recommended_recovery, "gwt-execute");
+    }
+
+    #[test]
+    fn startup_reaper_reclaims_dead_child_while_host_remains_live() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-live-host-dead-child";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let host_started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            221,
+            host_started_at,
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        let held = diagnose_owner(worktree.path(), owner);
+        assert!(
+            held.reclaimable,
+            "a living GUI host does not keep its dead child alive"
+        );
+        assert_eq!(held.recommended_recovery, "generation-reaper");
+
+        reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
+        let released = diagnose_owner(worktree.path(), owner);
+        assert_eq!(released.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(released.ecr_settled_by_host_reaper);
         assert_eq!(released.recommended_recovery, "gwt-execute");
     }
 

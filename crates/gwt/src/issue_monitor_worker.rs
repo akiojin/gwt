@@ -315,7 +315,12 @@ pub fn read_execution_settlements(
                 },
             );
             let settlement = match diagnosis.ecr_status {
-                Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Active,
+                Some(ExecutionControlStatus::Active) if diagnosis.reclaimable => {
+                    IssueMonitorExecutionSettlement::Active
+                }
+                // A missing pane is not exit proof: a headless or detached
+                // exact process can still own this generation.
+                Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Unknown,
                 Some(ExecutionControlStatus::Completed) => {
                     IssueMonitorExecutionSettlement::Completed
                 }
@@ -342,7 +347,8 @@ pub fn reconcile_issue_monitor_idle_windows(
     project_root: &Path,
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
-    let settlements = read_execution_settlements(project_root, &monitor.active_issue_numbers());
+    let settlements =
+        read_execution_settlements(project_root, &monitor.execution_settlement_issue_numbers());
     let outcome = monitor.reconcile_idle_windows(&settlements, now);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(
@@ -3094,6 +3100,32 @@ mod tests {
             identity: binding,
             capability_generation: 1,
         });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            started_at,
+            std::process::id(),
+            started_at,
+        )
+        .save(&runtime_path)
+        .unwrap();
+        assert_eq!(
+            read_execution_settlements(worktree.path(), &[owner.number])
+                .get(&owner.number)
+                .copied(),
+            Some(IssueMonitorExecutionSettlement::Unknown),
+            "an exact live process must not permit recovery even without a pane"
+        );
+        std::fs::remove_file(runtime_path).unwrap();
+
         // What an auto-update restart leaves behind: the holder is gone and
         // settled nothing.
         session.update_status(gwt_agent::AgentStatus::Interrupted);

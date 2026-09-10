@@ -3548,6 +3548,7 @@ impl AppRuntime {
             }
             // Issue #3934: a dead Host leaves no fenced proof to carry.
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead
+            | gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
             | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
@@ -3595,6 +3596,12 @@ impl AppRuntime {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead => {
                 Ok(super::ManualLaunchGenerationDisposition::Unknown(
                     "The holder's Hosts are all gone but left no runtime exit proof".to_string(),
+                ))
+            }
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited => {
+                Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                    "The holder's PTY process has exited. The next Issue Monitor scan releases its generation; retry after that scan."
+                        .to_string(),
                 ))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {

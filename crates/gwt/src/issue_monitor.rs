@@ -5877,6 +5877,8 @@ impl IssueMonitorState {
             .get(&issue_number)
             .map(|message| format!("issue #{issue_number}: {message}"));
         self.clear_active_tracking(issue_number);
+        self.launch_bindings
+            .retain(|_, bound_issue| *bound_issue != issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.inbox.retain(|item| item.issue.number != issue_number);
         self.failed_issues.remove(&issue_number);
@@ -7461,6 +7463,19 @@ impl IssueMonitorState {
 
     pub fn active_issue_numbers(&self) -> Vec<u64> {
         self.active_launches.clone()
+    }
+
+    /// Include untracked Launched rows whose execution may have been interrupted.
+    pub fn execution_settlement_issue_numbers(&self) -> Vec<u64> {
+        self.active_launches
+            .iter()
+            .copied()
+            .chain(self.inbox.iter().filter_map(|item| {
+                (item.state == MonitorInboxState::Launched).then_some(item.issue.number)
+            }))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub fn active_count(&self) -> usize {
@@ -13241,6 +13256,66 @@ impl IssueMonitorState {
             idle_windows: classified,
             ..IssueMonitorIdleReconciliation::default()
         };
+        // A lost tracking row has no bound window for the classifier to visit.
+        // The fresh canvas and unsettled execution together distinguish it
+        // from a normal terminal delivery, which also leaves a Launched row.
+        let orphaned = self
+            .fresh_window_snapshot(now)
+            .map(|snapshot| {
+                self.inbox
+                    .iter()
+                    .filter(|item| {
+                        let number = item.issue.number;
+                        item.issue.state == IssueMonitorIssueState::Open
+                            && item.state == MonitorInboxState::Launched
+                            && !self.active_launches.contains(&number)
+                            && !self.launched_windows.contains_key(&number)
+                            && !self.merged_issues.contains(&number)
+                            && !self.failed_issues.contains_key(&number)
+                            && !self
+                                .pending_launch_deliveries
+                                .iter()
+                                .any(|delivery| delivery.issue_number == number)
+                            && !self
+                                .pending_launches
+                                .iter()
+                                .any(|launch| launch.issue_number == number)
+                            && item.launched_window_id.as_ref().is_none_or(|bound| {
+                                issue_monitor_qualified_window_id(bound)
+                                    .is_some_and(|(tab, _)| tab == snapshot.project_tab_id)
+                            })
+                            && !self.launch_bindings.iter().any(|(bound, owner)| {
+                                *owner == number
+                                    && (issue_monitor_qualified_window_id(bound)
+                                        .is_none_or(|(tab, _)| tab != snapshot.project_tab_id)
+                                        || snapshot.windows.iter().any(|window| {
+                                            issue_monitor_window_ids_match(bound, &window.window_id)
+                                        }))
+                            })
+                            && !snapshot.windows.iter().any(|window| {
+                                window.issue_number == Some(number)
+                                    || item.launched_window_id.as_ref().is_some_and(|bound| {
+                                        issue_monitor_window_ids_match(bound, &window.window_id)
+                                    })
+                            })
+                            && matches!(
+                                settlements.get(&number),
+                                Some(
+                                    IssueMonitorExecutionSettlement::Active
+                                        | IssueMonitorExecutionSettlement::Interrupted
+                                )
+                            )
+                    })
+                    .map(|item| item.issue.number)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for issue_number in orphaned {
+            self.launch_bindings
+                .retain(|_, owner| *owner != issue_number);
+            self.requeue_released_launch(issue_number);
+            outcome.requeued.push(issue_number);
+        }
         match self.pending_idle_release.take() {
             Some(request) => {
                 self.apply_idle_release(
@@ -17971,6 +18046,31 @@ mod tests {
             "another tab's window is invisible from here, not dead (#3627)"
         );
         assert_eq!(foreign.prefs().launch_bindings.len(), 1);
+    }
+
+    #[test]
+    fn restoring_a_closed_issue_removes_its_stale_launch_binding() {
+        // Issue #4131: #4195 retained a binding after complete Live absence
+        // closed it, even though its active launch had already disappeared.
+        let prefs = IssueMonitorPrefs {
+            launch_bindings: BTreeMap::from([("project-a::agent-54".to_string(), 4195)]),
+            closure_records: vec![IssueClosureRecord {
+                issue_number: 4195,
+                generation: 6,
+                state: IssueClosureState::Closed,
+                evidence: IssueClosureEvidence::CompleteLiveAbsence,
+                issue_updated_at: Some("2026-09-10T02:52:14Z".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+
+        assert!(restored.prefs().launch_bindings.is_empty());
+        assert!(restored.active_issue_numbers().is_empty());
+        assert!(restored
+            .readopt_live_launch_bindings(&live_windows(&["project-a::agent-54"]))
+            .is_empty());
+        assert!(restored.active_issue_numbers().is_empty());
     }
 
     /// Issue #3883 AC-1: the reported reproduction — a restart taken while a
@@ -27209,6 +27309,65 @@ mod tests {
                 "{settlement:?}"
             );
             assert!(monitor.prefs().failed_issues.is_empty(), "{settlement:?}");
+        }
+    }
+
+    #[test]
+    fn an_untracked_launched_issue_is_requeued_only_for_an_unsettled_execution() {
+        // Issue #4131: a Launched projection can outlive all launch tracking.
+        // Settled executions have the same projection, so absence alone is
+        // not permission to relaunch completed or deliberately blocked work.
+        for settlement in [
+            IssueMonitorExecutionSettlement::Active,
+            IssueMonitorExecutionSettlement::Interrupted,
+            IssueMonitorExecutionSettlement::Completed,
+            IssueMonitorExecutionSettlement::Blocked,
+            IssueMonitorExecutionSettlement::Unknown,
+        ] {
+            let mut monitor = launched_cohort(&[(43, "tab-1::dead-43")]);
+            let target = IssueMonitorStopTarget {
+                issue_number: 43,
+                claim_id: monitor.live_claim_id(43),
+                delivery_id: monitor.pending_launch_delivery_id(43),
+                window_id: Some("tab-1::dead-43".to_string()),
+            };
+            assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(43));
+            assert!(monitor.execution_settlement_issue_numbers().contains(&43));
+            monitor.record_window_snapshot(idle_snapshot(
+                IDLE_NOW,
+                vec![idle_observation(
+                    "tab-1::live-43",
+                    Some(43),
+                    WindowState::Running,
+                    false,
+                )],
+            ));
+            assert!(monitor
+                .reconcile_idle_windows(&settlements(&[(43, settlement)]), IDLE_NOW)
+                .requeued
+                .is_empty());
+            monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+
+            let outcome =
+                monitor.reconcile_idle_windows(&settlements(&[(43, settlement)]), IDLE_NOW);
+
+            let unfinished = matches!(
+                settlement,
+                IssueMonitorExecutionSettlement::Active
+                    | IssueMonitorExecutionSettlement::Interrupted
+            );
+            assert_eq!(outcome.requeued.contains(&43), unfinished, "{settlement:?}");
+            assert_eq!(
+                monitor.inbox_item(43).map(|item| item.state),
+                Some(if unfinished {
+                    MonitorInboxState::Queued
+                } else {
+                    MonitorInboxState::Launched
+                }),
+                "{settlement:?}"
+            );
+            assert_eq!(monitor.queued_issue_numbers().contains(&43), unfinished);
+            assert!(monitor.active_issue_numbers().is_empty());
         }
     }
 
