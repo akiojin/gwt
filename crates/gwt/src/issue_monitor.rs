@@ -2168,6 +2168,12 @@ pub struct IssueMonitorStatusView {
     pub enabled: bool,
     pub state: String,
     pub queue_len: usize,
+    #[serde(default)]
+    pub terminal_queue_len: usize,
+    #[serde(default)]
+    pub unqueued_open_count: usize,
+    #[serde(default)]
+    pub other_terminal_queue_count: usize,
     pub active_count: usize,
     pub max_active_agents: usize,
     pub total_candidates: usize,
@@ -7952,6 +7958,30 @@ impl IssueMonitorState {
                     .next()
                     .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
             });
+        let host = crate::process::current_hostname();
+        let local_entries = self.terminal_queues.get(&host).map(|queue| {
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<BTreeSet<_>>()
+        });
+        let terminal_queue_len = local_entries.as_ref().map_or(0, BTreeSet::len);
+        let unqueued_open_count = local_entries.as_ref().map_or(0, |entries| {
+            self.inbox
+                .iter()
+                .filter(|item| {
+                    item.issue.state == IssueMonitorIssueState::Open
+                        && !entries.contains(&item.issue.number)
+                })
+                .count()
+        });
+        let other_terminal_queue_count = self
+            .terminal_queues
+            .iter()
+            .filter(|(terminal, _)| *terminal != &host)
+            .map(|(_, queue)| queue.entries.len())
+            .sum();
         IssueMonitorStatusView {
             enabled: self.config.enabled,
             state: if !self.config.enabled {
@@ -7983,6 +8013,9 @@ impl IssueMonitorState {
                 "idle".to_string()
             },
             queue_len: self.queue.len(),
+            terminal_queue_len,
+            unqueued_open_count,
+            other_terminal_queue_count,
             active_count: self.active_launches.len(),
             max_active_agents: self.config.max_active,
             total_candidates: self.inbox.len(),
@@ -22951,6 +22984,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
+    }
+
+    #[test]
+    fn status_projects_terminal_queue_counts() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[1], "test", "2026-09-10T00:00:00Z");
+        monitor.record_candidate(auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        monitor.record_candidate(auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        monitor.terminal_queues.insert(
+            "other-host".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 9,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: None,
+            },
+        );
+        let status = monitor.status_view_at("2026-09-10T00:01:00Z");
+        assert_eq!(status.terminal_queue_len, 1);
+        assert_eq!(status.unqueued_open_count, 1);
+        assert_eq!(status.other_terminal_queue_count, 1);
     }
 
     fn autonomous_state() -> IssueMonitorState {
