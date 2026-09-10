@@ -259,7 +259,7 @@ use launch::{
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     effective_host_codex_config_path, issue_monitor_trust_candidate_from_feedback,
     maybe_register_codex_managed_hook_trust_for_launch,
-    register_codex_managed_project_trust_for_resolved_launch,
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context,
     validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
 pub(crate) use launch::{

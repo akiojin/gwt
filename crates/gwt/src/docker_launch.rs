@@ -318,7 +318,7 @@ fn docker_codex_project_trust_registration_args(
         env_vars,
         None,
         "register-codex-managed-project-trust",
-        std::iter::empty(),
+        ["--runtime-target".to_string(), "docker".to_string()],
     )
 }
 
@@ -1454,6 +1454,9 @@ fi
                     "--project-root".to_string(),
                 ]
         }));
+        assert!(project_args
+            .windows(2)
+            .any(|pair| { pair == ["--runtime-target".to_string(), "docker".to_string()] }));
         assert!(hook_args.contains(&format!("GWT_HOOK_BIN={hook_bin}")));
         assert!(hook_args.windows(3).any(|triple| {
             triple

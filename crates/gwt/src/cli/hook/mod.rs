@@ -566,13 +566,55 @@ pub fn run_daemon_hook<E: CliEnv>(
             let project_root = option_value(rest, "--project-root")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| env.repo_path().to_path_buf());
-            let Some(codex_config_path) = option_value(rest, "--codex-config")
-                .map(std::path::PathBuf::from)
-                .or_else(default_codex_config_path)
-            else {
+            let explicit_config =
+                option_value(rest, "--codex-config").map(std::path::PathBuf::from);
+            let docker_local = option_value(rest, "--runtime-target") == Some("docker");
+            let codex_config_path = if docker_local {
+                if explicit_config.is_some() {
+                    return Err(io_as_api_error(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Docker-local project trust derives its config from the effective environment; --codex-config is not accepted",
+                    )));
+                }
+                default_codex_config_path()
+            } else {
+                let stable_config =
+                    crate::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                        &project_root,
+                        std::env::var_os("CODEX_HOME").as_deref(),
+                        dirs::home_dir().as_deref(),
+                    );
+                if let Some(explicit_config) = explicit_config {
+                    if !explicit_config.is_absolute() {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    let Some(stable_config) = stable_config else {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    };
+                    if !crate::managed_assets::codex_config_paths_equivalent(
+                        &explicit_config,
+                        &stable_config,
+                    ) {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    Some(stable_config)
+                } else {
+                    stable_config
+                }
+            };
+            let Some(codex_config_path) = codex_config_path else {
                 let _ = writeln!(
                     env.stderr(),
-                    "hook.register_codex_managed_project_trust: missing --codex-config and home directory is unavailable"
+                    "hook.register_codex_managed_project_trust: process-stable/default Codex config is unavailable"
                 );
                 return Ok(2);
             };

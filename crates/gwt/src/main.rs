@@ -6983,8 +6983,13 @@ mod tests {
     fn prune_orphan_intake_worktrees_removes_clean_keeps_dirty_and_is_bounded() {
         // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
         // are reaped — clean ones removed, dirty ones kept, capped per run.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -7014,6 +7019,18 @@ mod tests {
             .expect("intake worktree");
         gwt_skills::generate_settings_local(&generated_hook).expect("generate hook config");
 
+        let codex_config_path = temp.path().join(".codex/config.toml");
+        let trusted_projects = [&clean_a, &clean_b, &dirty, &branch_named, &generated_hook]
+            .into_iter()
+            .map(|path| {
+                gwt_skills::register_codex_managed_project_trust(path, &codex_config_path)
+                    .expect("seed Codex project trust")
+                    .project_path
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+
         let removed = super::prune_orphan_intake_worktrees(&repo, 10);
         assert_eq!(
             removed, 3,
@@ -7035,6 +7052,35 @@ mod tests {
             branch_named.exists(),
             "a real branch worktree named .intake-* is never reaped"
         );
+        let config: toml::Value = toml::from_str(
+            &fs::read_to_string(&codex_config_path).expect("read Codex config after prune"),
+        )
+        .expect("parse Codex config after prune");
+        let projects = config
+            .get("projects")
+            .and_then(toml::Value::as_table)
+            .expect("remaining project table");
+        for removed_project in [
+            &trusted_projects[0],
+            &trusted_projects[1],
+            &trusted_projects[4],
+        ] {
+            assert!(
+                !projects.contains_key(removed_project),
+                "pruned worktree trust must be revoked: {removed_project}"
+            );
+        }
+        for retained_project in [&trusted_projects[2], &trusted_projects[3]] {
+            assert_eq!(
+                projects
+                    .get(retained_project)
+                    .and_then(toml::Value::as_table)
+                    .and_then(|project| project.get("trust_level"))
+                    .and_then(toml::Value::as_str),
+                Some("trusted"),
+                "retained worktree trust must remain: {retained_project}"
+            );
+        }
 
         // Bounded: a second batch of clean intakes is capped at the limit.
         let clean_c = temp.path().join(".intake-c");
@@ -7046,6 +7092,39 @@ mod tests {
         }
         let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
         assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let orphan = temp.path().join(".intake-invalid-codex-config");
+        gwt_git::WorktreeManager::new(&repo)
+            .create_detached("HEAD", &orphan)
+            .expect("create orphan intake worktree");
+        let config_path = temp.path().join(".codex/config.toml");
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config parent");
+        fs::write(&config_path, "projects = [\n").expect("write malformed Codex config");
+
+        let removed = super::prune_orphan_intake_worktrees(&repo, 10);
+
+        assert_eq!(removed, 0, "failed trust revocation is not a removal");
+        assert!(
+            orphan.exists(),
+            "trust revocation failure must keep the orphan worktree"
+        );
+        assert_eq!(
+            fs::read_to_string(config_path).expect("malformed config remains"),
+            "projects = [\n"
+        );
     }
 
     #[test]

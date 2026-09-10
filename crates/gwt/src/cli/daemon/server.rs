@@ -5256,7 +5256,7 @@ mod tests {
         ));
 
         fs::remove_file(&endpoint_path).expect("simulate descriptor loss");
-        let restored = tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
+        let restored = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 if let Ok(payload) = fs::read(&endpoint_path) {
                     if let Ok(candidate) = serde_json::from_slice::<DaemonEndpoint>(&payload) {

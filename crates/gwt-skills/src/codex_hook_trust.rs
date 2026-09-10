@@ -403,17 +403,105 @@ pub fn register_codex_managed_project_trust(
     register_codex_managed_project_trust_with_writer(worktree, config_path, write_text_atomically)
 }
 
+/// Remove only the `trusted` value gwt owns for one managed worktree.
+///
+/// This is deliberately narrower than registration: explicit `untrusted` and
+/// future string values belong to the user and remain byte-for-byte untouched.
+/// Existing worktrees are canonicalized. A missing absolute path is accepted
+/// for prune recovery so stale trust can still be removed after an external
+/// filesystem deletion.
+pub fn revoke_codex_managed_project_trust(
+    worktree: &Path,
+    config_path: &Path,
+) -> io::Result<CodexProjectTrustReport> {
+    revoke_codex_managed_project_trust_with_writer(worktree, config_path, write_text_atomically)
+}
+
+/// Revoke project trust and complete the caller's filesystem cleanup while
+/// holding the same config-scoped lock used by project and hook registration.
+///
+/// Keeping the lock through `cleanup` prevents a registrar that observed the
+/// path before deletion from publishing `trusted` after the path disappears.
+/// A cleanup error is returned after the trust write, leaving an existing
+/// worktree untrusted so a later managed launch can safely register it again.
+pub fn revoke_codex_managed_project_trust_with_cleanup<T>(
+    worktree: &Path,
+    config_path: &Path,
+    cleanup: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_codex_config_lock(config_path, || {
+        let project_path = codex_project_path_for_revocation(worktree)?;
+        revoke_codex_managed_project_trust_under_lock(
+            &project_path,
+            config_path,
+            write_text_atomically,
+        )?;
+        cleanup()
+    })
+}
+
+fn revoke_codex_managed_project_trust_with_writer(
+    worktree: &Path,
+    config_path: &Path,
+    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<CodexProjectTrustReport> {
+    with_codex_config_lock(config_path, || {
+        let project_path = codex_project_path_for_revocation(worktree)?;
+        revoke_codex_managed_project_trust_under_lock(&project_path, config_path, write_config)?;
+        Ok(CodexProjectTrustReport {
+            config_path: config_path.to_path_buf(),
+            project_path,
+        })
+    })
+}
+
+fn codex_project_path_for_revocation(worktree: &Path) -> io::Result<PathBuf> {
+    match fs::canonicalize(worktree) {
+        Ok(canonical) => Ok(gwt_core::paths::normalize_windows_child_process_path(
+            &canonical,
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && worktree.is_absolute() => Ok(
+            gwt_core::paths::normalize_windows_child_process_path(worktree),
+        ),
+        Err(error) => Err(error),
+    }
+}
+
+fn revoke_codex_managed_project_trust_under_lock(
+    project_path: &Path,
+    config_path: &Path,
+    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut root = read_codex_config(config_path)?;
+    let root_table = root.as_table_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Codex config root must be a TOML table",
+        )
+    })?;
+    if revoke_codex_project_trust_level(root_table, project_path)? == 0 {
+        return Ok(());
+    }
+
+    let rendered = toml::to_string_pretty(&root)
+        .map_err(|err| io::Error::other(format!("Codex config TOML serialize failed: {err}")))?;
+    write_config(config_path, &rendered)
+}
+
 fn register_codex_managed_project_trust_with_writer(
     worktree: &Path,
     config_path: &Path,
     write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
 ) -> io::Result<CodexProjectTrustReport> {
-    let canonical_worktree = fs::canonicalize(worktree)?;
-    let project_path = gwt_core::paths::normalize_windows_child_process_path(&canonical_worktree);
-
-    update_codex_config_with_writer(
+    let project_path = update_codex_config_with_writer(
         config_path,
-        |root_table| ensure_codex_project_trust_level(root_table, &project_path),
+        |root_table| {
+            let canonical_worktree = fs::canonicalize(worktree)?;
+            let project_path =
+                gwt_core::paths::normalize_windows_child_process_path(&canonical_worktree);
+            ensure_codex_project_trust_level(root_table, &project_path)?;
+            Ok(project_path)
+        },
         write_config,
     )?;
 
@@ -533,6 +621,73 @@ fn ensure_codex_project_trust_level(
     Ok(())
 }
 
+fn revoke_codex_project_trust_level(
+    root_table: &mut toml::Table,
+    project_path: &Path,
+) -> io::Result<usize> {
+    let project_key = project_path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "gwt-managed Codex worktree path is not valid UTF-8: {}",
+                project_path.display()
+            ),
+        )
+    })?;
+    let Some(projects) = root_table.get_mut("projects") else {
+        return Ok(0);
+    };
+    let projects = projects.as_table_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Codex config key `projects` must be a TOML table",
+        )
+    })?;
+
+    // Validate every equivalent alias before mutating any of them. A malformed
+    // alias therefore fails closed without producing a partly edited document.
+    let mut trusted_keys = Vec::new();
+    for (key, value) in projects.iter() {
+        if !codex_project_keys_equivalent(key, project_key) {
+            continue;
+        }
+        let project = value.as_table().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Codex project alias `{key}` must be a TOML table"),
+            )
+        })?;
+        match project.get("trust_level") {
+            Some(toml::Value::String(level)) if level == "trusted" => {
+                trusted_keys.push(key.clone());
+            }
+            Some(toml::Value::String(_)) | None => {}
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Codex project trust level for alias `{key}` must be a string"),
+                ));
+            }
+        }
+    }
+
+    let removed = trusted_keys.len();
+    for key in trusted_keys {
+        let remove_project = {
+            let project = projects
+                .get_mut(&key)
+                .and_then(toml::Value::as_table_mut)
+                .expect("validated Codex project table remains present");
+            project.remove("trust_level");
+            project.is_empty()
+        };
+        if remove_project {
+            projects.remove(&key);
+        }
+    }
+    Ok(removed)
+}
+
 fn codex_project_keys_equivalent(candidate: &str, project_key: &str) -> bool {
     let normalized_candidate =
         gwt_core::paths::normalize_windows_child_process_path_text(candidate);
@@ -624,11 +779,11 @@ fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'
         .then(|| &value[prefix.len()..])
 }
 
-fn update_codex_config_with_writer(
+fn update_codex_config_with_writer<T>(
     config_path: &Path,
-    update: impl FnOnce(&mut toml::Table) -> io::Result<()>,
+    update: impl FnOnce(&mut toml::Table) -> io::Result<T>,
     write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<T> {
     with_codex_config_lock(config_path, || {
         let mut root = read_codex_config(config_path)?;
         let root_table = root.as_table_mut().ok_or_else(|| {
@@ -637,12 +792,13 @@ fn update_codex_config_with_writer(
                 "Codex config root must be a TOML table",
             )
         })?;
-        update(root_table)?;
+        let result = update(root_table)?;
 
         let rendered = toml::to_string_pretty(&root).map_err(|err| {
             io::Error::other(format!("Codex config TOML serialize failed: {err}"))
         })?;
-        write_config(config_path, &rendered)
+        write_config(config_path, &rendered)?;
+        Ok(result)
     })
 }
 
@@ -1495,6 +1651,666 @@ mod tests {
                 Some("trusted")
             );
         }
+    }
+
+    // SPEC #1921 T528 / FR-244..FR-246: pre-delete revocation owns only the
+    // exact managed project's `trusted` value and shares the config RMW lock.
+    #[test]
+    fn managed_project_trust_revocation_removes_only_trusted_and_preserves_unrelated_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let project_key = project_path.to_string_lossy().into_owned();
+        let config_path = dir.path().join("config.toml");
+
+        let mut target = toml::Table::new();
+        target.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        target.insert(
+            "sandbox_mode".to_string(),
+            toml::Value::String("workspace-write".to_string()),
+        );
+        let mut metadata = toml::Table::new();
+        metadata.insert(
+            "owner".to_string(),
+            toml::Value::String("user-value".to_string()),
+        );
+        target.insert("metadata".to_string(), toml::Value::Table(metadata));
+
+        let other_project_key = "/repo/work/other";
+        let mut other_project = toml::Table::new();
+        other_project.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(project_key.clone(), toml::Value::Table(target));
+        projects.insert(
+            other_project_key.to_string(),
+            toml::Value::Table(other_project.clone()),
+        );
+
+        let hook_key = "/repo/.codex/hooks.json:stop:0:0";
+        let mut hook_entry = toml::Table::new();
+        hook_entry.insert("enabled".to_string(), toml::Value::Boolean(true));
+        hook_entry.insert(
+            "trusted_hash".to_string(),
+            toml::Value::String("sha256:user-hook-state".to_string()),
+        );
+        let mut hook_state = toml::Table::new();
+        hook_state.insert(hook_key.to_string(), toml::Value::Table(hook_entry));
+        let mut hooks = toml::Table::new();
+        hooks.insert("state".to_string(), toml::Value::Table(hook_state));
+
+        let mut root = toml::Table::new();
+        root.insert(
+            "model".to_string(),
+            toml::Value::String("gpt-6-astra".to_string()),
+        );
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        root.insert("hooks".to_string(), toml::Value::Table(hooks));
+        fs::write(
+            &config_path,
+            toml::to_string_pretty(&toml::Value::Table(root)).unwrap(),
+        )
+        .unwrap();
+
+        revoke_codex_managed_project_trust(&worktree, &config_path).unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let target = config["projects"][&project_key].as_table().unwrap();
+        assert!(!target.contains_key("trust_level"));
+        assert_eq!(
+            target.get("sandbox_mode").and_then(toml::Value::as_str),
+            Some("workspace-write")
+        );
+        assert_eq!(target["metadata"]["owner"].as_str(), Some("user-value"));
+        assert_eq!(
+            config["projects"][other_project_key].as_table().unwrap(),
+            &other_project
+        );
+        assert_eq!(config["model"].as_str(), Some("gpt-6-astra"));
+        assert_eq!(
+            config["hooks"]["state"][hook_key]["trusted_hash"].as_str(),
+            Some("sha256:user-hook-state")
+        );
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_removes_the_target_table_only_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let project_key = project_path.to_string_lossy().into_owned();
+        let config_path = dir.path().join("config.toml");
+
+        let mut target = toml::Table::new();
+        target.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut other = toml::Table::new();
+        other.insert(
+            "trust_level".to_string(),
+            toml::Value::String("untrusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(project_key.clone(), toml::Value::Table(target));
+        projects.insert("/repo/work/other".to_string(), toml::Value::Table(other));
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        fs::write(
+            &config_path,
+            toml::to_string_pretty(&toml::Value::Table(root)).unwrap(),
+        )
+        .unwrap();
+
+        revoke_codex_managed_project_trust(&worktree, &config_path).unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let projects = config["projects"].as_table().unwrap();
+        assert!(!projects.contains_key(&project_key));
+        assert_eq!(
+            projects["/repo/work/other"]["trust_level"].as_str(),
+            Some("untrusted")
+        );
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_preserves_user_owned_levels_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let project_key = project_path.to_string_lossy().into_owned();
+        let config_path = dir.path().join("config.toml");
+
+        for level in ["untrusted", "ask"] {
+            let mut target = toml::Table::new();
+            target.insert(
+                "trust_level".to_string(),
+                toml::Value::String(level.to_string()),
+            );
+            let mut projects = toml::Table::new();
+            projects.insert(project_key.clone(), toml::Value::Table(target));
+            let mut root = toml::Table::new();
+            root.insert("projects".to_string(), toml::Value::Table(projects));
+            let original = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+            fs::write(&config_path, &original).unwrap();
+
+            revoke_codex_managed_project_trust_with_writer(
+                &worktree,
+                &config_path,
+                |_path, _rendered| panic!("{level} is user-owned and must not trigger a write"),
+            )
+            .unwrap();
+
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_is_idempotent_for_missing_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let project_key = project_path.to_string_lossy().into_owned();
+
+        let missing_config = dir.path().join("missing/config.toml");
+        for _ in 0..2 {
+            revoke_codex_managed_project_trust_with_writer(
+                &worktree,
+                &missing_config,
+                |_path, _rendered| panic!("an absent config is an idempotent no-op"),
+            )
+            .unwrap();
+        }
+        assert!(!missing_config.exists());
+
+        let no_projects_config = dir.path().join("no-projects.toml");
+        let no_projects_original = "model = \"gpt-6-astra\"\n";
+        fs::write(&no_projects_config, no_projects_original).unwrap();
+        for _ in 0..2 {
+            revoke_codex_managed_project_trust_with_writer(
+                &worktree,
+                &no_projects_config,
+                |_path, _rendered| panic!("a missing projects table must not trigger a write"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(&no_projects_config).unwrap(),
+            no_projects_original
+        );
+
+        let missing_entry_config = dir.path().join("missing-entry.toml");
+        let mut other = toml::Table::new();
+        other.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert("/repo/work/other".to_string(), toml::Value::Table(other));
+        assert!(!projects.contains_key(&project_key));
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        let missing_entry_original = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+        fs::write(&missing_entry_config, &missing_entry_original).unwrap();
+        for _ in 0..2 {
+            revoke_codex_managed_project_trust_with_writer(
+                &worktree,
+                &missing_entry_config,
+                |_path, _rendered| panic!("an absent project entry must not trigger a write"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(&missing_entry_config).unwrap(),
+            missing_entry_original
+        );
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_rejects_malformed_and_wrongly_typed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let project_key = project_path.to_string_lossy().into_owned();
+        let config_path = dir.path().join("config.toml");
+
+        let mut scalar_project_entries = toml::Table::new();
+        scalar_project_entries.insert(
+            project_key.clone(),
+            toml::Value::String("scalar project entry".to_string()),
+        );
+        let mut scalar_project_root = toml::Table::new();
+        scalar_project_root.insert(
+            "projects".to_string(),
+            toml::Value::Table(scalar_project_entries),
+        );
+
+        let mut typed_trust = toml::Table::new();
+        typed_trust.insert("trust_level".to_string(), toml::Value::Boolean(true));
+        let mut typed_trust_projects = toml::Table::new();
+        typed_trust_projects.insert(project_key, toml::Value::Table(typed_trust));
+        let mut typed_trust_root = toml::Table::new();
+        typed_trust_root.insert(
+            "projects".to_string(),
+            toml::Value::Table(typed_trust_projects),
+        );
+
+        let cases = [
+            "model = [\n".to_string(),
+            "projects = \"legacy scalar\"\n".to_string(),
+            toml::to_string_pretty(&toml::Value::Table(scalar_project_root)).unwrap(),
+            toml::to_string_pretty(&toml::Value::Table(typed_trust_root)).unwrap(),
+        ];
+        for original in cases {
+            fs::write(&config_path, &original).unwrap();
+
+            let error = revoke_codex_managed_project_trust(&worktree, &config_path).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{original:?}");
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_matches_windows_aliases_and_preserves_user_choices() {
+        let project_path = Path::new(r"E:\GWT\Work\issue-3729");
+        let empty_trusted_alias = r"e:/gwt/work/ISSUE-3729";
+        let retained_trusted_alias = r"\\?\E:\GWT\Work\issue-3729";
+        let untrusted_alias = r"Microsoft.PowerShell.Core\FileSystem::E:\gwt\work\ISSUE-3729";
+        let unsupported_alias = r"Microsoft.PowerShell.Core\FileSystem:://?/e:/gwt/work/issue-3729";
+
+        let mut empty_trusted = toml::Table::new();
+        empty_trusted.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut retained_trusted = empty_trusted.clone();
+        retained_trusted.insert(
+            "owner".to_string(),
+            toml::Value::String("keep-me".to_string()),
+        );
+        let mut untrusted = toml::Table::new();
+        untrusted.insert(
+            "trust_level".to_string(),
+            toml::Value::String("untrusted".to_string()),
+        );
+        let mut unsupported = toml::Table::new();
+        unsupported.insert(
+            "trust_level".to_string(),
+            toml::Value::String("ask".to_string()),
+        );
+
+        let mut projects = toml::Table::new();
+        projects.insert(
+            empty_trusted_alias.to_string(),
+            toml::Value::Table(empty_trusted),
+        );
+        projects.insert(
+            retained_trusted_alias.to_string(),
+            toml::Value::Table(retained_trusted),
+        );
+        projects.insert(
+            untrusted_alias.to_string(),
+            toml::Value::Table(untrusted.clone()),
+        );
+        projects.insert(
+            unsupported_alias.to_string(),
+            toml::Value::Table(unsupported.clone()),
+        );
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+
+        revoke_codex_project_trust_level(&mut root, project_path).unwrap();
+
+        let projects = root["projects"].as_table().unwrap();
+        assert!(!projects.contains_key(empty_trusted_alias));
+        assert_eq!(
+            projects[retained_trusted_alias]["owner"].as_str(),
+            Some("keep-me")
+        );
+        assert!(projects[retained_trusted_alias]
+            .as_table()
+            .is_some_and(|project| !project.contains_key("trust_level")));
+        assert_eq!(
+            projects.get(untrusted_alias),
+            Some(&toml::Value::Table(untrusted))
+        );
+        assert_eq!(
+            projects.get(unsupported_alias),
+            Some(&toml::Value::Table(unsupported))
+        );
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_write_failure_preserves_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let config_path = dir.path().join("config.toml");
+
+        let mut target = toml::Table::new();
+        target.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(
+            project_path.to_string_lossy().into_owned(),
+            toml::Value::Table(target),
+        );
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        let original = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+        fs::write(&config_path, &original).unwrap();
+
+        let error = revoke_codex_managed_project_trust_with_writer(
+            &worktree,
+            &config_path,
+            |_path, _rendered| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected config write failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_lock_setup_failure_preserves_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let blocked_parent = dir.path().join("codex-home-is-a-file");
+        let original = "do not replace this file\n";
+        fs::write(&blocked_parent, original).unwrap();
+        let config_path = blocked_parent.join("config.toml");
+
+        revoke_codex_managed_project_trust(&worktree, &config_path)
+            .expect_err("lock parent creation must fail closed");
+
+        assert_eq!(fs::read_to_string(&blocked_parent).unwrap(), original);
+        assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn managed_project_trust_revocation_waits_for_the_shared_config_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let project_path = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let config_path = dir.path().join("config.toml");
+
+        let mut target = toml::Table::new();
+        target.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(
+            project_path.to_string_lossy().into_owned(),
+            toml::Value::Table(target),
+        );
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        fs::write(
+            &config_path,
+            toml::to_string_pretty(&toml::Value::Table(root)).unwrap(),
+        )
+        .unwrap();
+
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(codex_config_lock_path(&config_path))
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let revoke_worktree = worktree.clone();
+        let revoke_config = config_path.clone();
+        let revoke_thread = thread::spawn(move || {
+            tx.send(revoke_codex_managed_project_trust(
+                &revoke_worktree,
+                &revoke_config,
+            ))
+            .unwrap();
+        });
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lock);
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("revocation should resume after shared lock release")
+            .unwrap();
+        revoke_thread.join().unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(!config["projects"]
+            .as_table()
+            .unwrap()
+            .contains_key(project_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn concurrent_project_revocation_registration_and_hook_registration_preserve_all_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let revoked_worktree = dir.path().join("revoked-worktree");
+        let registered_worktree = dir.path().join("registered-worktree");
+        let hook_worktree = dir.path().join("hook-worktree");
+        fs::create_dir_all(&revoked_worktree).unwrap();
+        fs::create_dir_all(&registered_worktree).unwrap();
+        fs::create_dir_all(&hook_worktree).unwrap();
+        generate_codex_hooks_for_mode(&hook_worktree, CodexHookDiscoveryMode::WorktreeLocal)
+            .unwrap();
+
+        let revoked_project = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&revoked_worktree).unwrap(),
+        );
+        let registered_project = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&registered_worktree).unwrap(),
+        );
+        let config_path = dir.path().join("config.toml");
+        let mut revoked = toml::Table::new();
+        revoked.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(
+            revoked_project.to_string_lossy().into_owned(),
+            toml::Value::Table(revoked),
+        );
+        let mut root = toml::Table::new();
+        root.insert(
+            "model".to_string(),
+            toml::Value::String("gpt-6-astra".to_string()),
+        );
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        fs::write(
+            &config_path,
+            toml::to_string_pretty(&toml::Value::Table(root)).unwrap(),
+        )
+        .unwrap();
+
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(codex_config_lock_path(&config_path))
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let revoke_tx = tx.clone();
+        let revoke_path = revoked_worktree.clone();
+        let revoke_config = config_path.clone();
+        let revoke_thread = thread::spawn(move || {
+            revoke_tx
+                .send(
+                    revoke_codex_managed_project_trust(&revoke_path, &revoke_config)
+                        .map(|_report| ()),
+                )
+                .unwrap();
+        });
+        let register_tx = tx.clone();
+        let register_path = registered_worktree.clone();
+        let register_config = config_path.clone();
+        let register_thread = thread::spawn(move || {
+            register_tx
+                .send(
+                    register_codex_managed_project_trust(&register_path, &register_config)
+                        .map(|_report| ()),
+                )
+                .unwrap();
+        });
+        let hook_tx = tx.clone();
+        let hook_path = hook_worktree.clone();
+        let hook_config = config_path.clone();
+        let hook_thread = thread::spawn(move || {
+            hook_tx
+                .send(
+                    register_codex_managed_hook_trust_for_mode(
+                        &hook_path,
+                        &hook_config,
+                        CodexHookDiscoveryMode::WorktreeLocal,
+                    )
+                    .map(|_report| ()),
+                )
+                .unwrap();
+        });
+        drop(tx);
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lock);
+        for _ in 0..3 {
+            rx.recv_timeout(Duration::from_secs(3))
+                .expect("all config operations should resume after shared lock release")
+                .unwrap();
+        }
+        revoke_thread.join().unwrap();
+        register_thread.join().unwrap();
+        hook_thread.join().unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let projects = config["projects"].as_table().unwrap();
+        assert!(!projects.contains_key(revoked_project.to_string_lossy().as_ref()));
+        assert_eq!(
+            projects[registered_project.to_string_lossy().as_ref()]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert!(config["hooks"]["state"]
+            .as_table()
+            .is_some_and(|state| !state.is_empty()));
+        assert_eq!(config["model"].as_str(), Some("gpt-6-astra"));
+    }
+
+    #[test]
+    fn managed_project_trust_same_path_registration_cannot_outlive_locked_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let config_path = dir.path().join("config.toml");
+        let project_path = register_codex_managed_project_trust(&worktree, &config_path)
+            .expect("seed project trust")
+            .project_path;
+
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cleanup_worktree = worktree.clone();
+        let cleanup_config = config_path.clone();
+        let cleanup = thread::spawn(move || {
+            revoke_codex_managed_project_trust_with_cleanup(
+                &cleanup_worktree,
+                &cleanup_config,
+                || {
+                    fs::remove_dir_all(&cleanup_worktree)?;
+                    removed_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+        removed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleanup must remove the worktree while holding the config lock");
+
+        let (registered_tx, registered_rx) = mpsc::channel();
+        let register_worktree = worktree.clone();
+        let register_config = config_path.clone();
+        let registration = thread::spawn(move || {
+            registered_tx
+                .send(register_codex_managed_project_trust(
+                    &register_worktree,
+                    &register_config,
+                ))
+                .unwrap();
+        });
+
+        assert!(matches!(
+            registered_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_tx.send(()).unwrap();
+        cleanup.join().unwrap().expect("cleanup transaction");
+        let registration_error = registered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("registration must finish after cleanup releases the lock")
+            .expect_err("deleted worktree must not be trusted again");
+        registration.join().unwrap();
+        assert_eq!(registration_error.kind(), io::ErrorKind::NotFound);
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            config
+                .get("projects")
+                .and_then(toml::Value::as_table)
+                .is_none_or(|projects| {
+                    !projects.contains_key(project_path.to_string_lossy().as_ref())
+                }),
+            "the deleted path must remain untrusted after the waiting registrar exits"
+        );
     }
 
     #[test]

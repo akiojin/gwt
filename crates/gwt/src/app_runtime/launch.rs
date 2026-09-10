@@ -24,6 +24,7 @@
 //! `AppRuntime::new` stay in `mod.rs` and are reached via `super`.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -3055,10 +3056,28 @@ pub(super) fn validate_issue_monitor_managed_codex_worktree(
 }
 
 pub(super) fn register_codex_managed_project_trust_for_resolved_launch(
+    profile_config_path: &Path,
+    managed_worktree: &ManagedCodexWorktree,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
+) -> Result<Option<gwt_skills::CodexProjectTrustReport>, String> {
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        profile_config_path,
+        managed_worktree,
+        config,
+        docker_binding,
+        std::env::var_os("CODEX_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+pub(super) fn register_codex_managed_project_trust_for_resolved_launch_with_host_context(
     _profile_config_path: &Path,
     managed_worktree: &ManagedCodexWorktree,
     config: &gwt_agent::LaunchConfig,
     docker_binding: Option<&DockerLaunchBinding>,
+    process_codex_home: Option<&OsStr>,
+    os_user_home: Option<&Path>,
 ) -> Result<Option<gwt_skills::CodexProjectTrustReport>, String> {
     match config.runtime_target {
         gwt_agent::LaunchRuntimeTarget::Host => {
@@ -3068,11 +3087,11 @@ pub(super) fn register_codex_managed_project_trust_for_resolved_launch(
                     managed_worktree.path().display()
                 )
             })?;
-            let codex_config_path = effective_host_codex_config_path(
+            let child_codex_config_path = effective_host_codex_config_path(
                 child_cwd,
                 &config.env_vars,
                 HostEnvKeySemantics::native(),
-                dirs::home_dir().as_deref(),
+                os_user_home,
             )
             .map_err(|error| {
                 format!(
@@ -3080,6 +3099,25 @@ pub(super) fn register_codex_managed_project_trust_for_resolved_launch(
                     managed_worktree.path().display()
                 )
             })?;
+            let Some(codex_config_path) =
+                gwt::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                    managed_worktree.path(),
+                    process_codex_home,
+                    os_user_home,
+                )
+            else {
+                return Ok(None);
+            };
+            if !gwt::managed_assets::codex_config_paths_equivalent(
+                &child_codex_config_path,
+                &codex_config_path,
+            ) {
+                tracing::info!(
+                    worktree = %managed_worktree.path().display(),
+                    "skipping project trust for a profile-owned Codex config"
+                );
+                return Ok(None);
+            }
             gwt_skills::register_codex_managed_project_trust(
                 managed_worktree.path(),
                 &codex_config_path,
@@ -5828,11 +5866,17 @@ impl AppRuntime {
             }
         }
 
-        if let Err(error) = manager.remove_force(worktree_path) {
+        if let Err(error) =
+            gwt::managed_assets::cleanup_worktree_with_codex_project_trust(worktree_path, || {
+                manager
+                    .remove_force(worktree_path)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            })
+        {
             tracing::warn!(
                 worktree_path = %worktree_path.display(),
                 error = %error,
-                "failed to remove clean ephemeral worktree"
+                "failed to revoke Codex project trust and remove clean ephemeral worktree"
             );
         }
     }
