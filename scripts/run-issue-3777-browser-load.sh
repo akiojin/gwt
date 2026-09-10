@@ -52,7 +52,7 @@ rm -f "$hook_dispatcher_rendezvous" "$hook_completion_rendezvous"
     GWT_PLAYWRIGHT_HOOK_DISPATCHER_RENDEZVOUS="$hook_dispatcher_rendezvous" \
     "$gwtd_path" hook event UserPromptSubmit \
       > "$hook_stdout" 2> "$hook_stderr" <<JSON
-{"prompt":"continue","cwd":"$GWT_PLAYWRIGHT_PROJECT_ROOT"}
+{"prompt":"進めて","cwd":"$GWT_PLAYWRIGHT_PROJECT_ROOT"}
 JSON
   hook_status=$?
   printf '%s\n' "$hook_status" > "$hook_completion_rendezvous"

@@ -842,7 +842,7 @@ mod tests {
         let _forward_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
         let input = serde_json::json!({
-            "prompt": "continue",
+            "prompt": "進めて",
             "session_id": "agent-degraded-prompt",
             "cwd": worktree,
         })
@@ -965,13 +965,18 @@ mod tests {
         gwt_core::coordination::post_entry(&worktree, entry).expect("seed 4 MiB Board history");
 
         let input = serde_json::json!({
-            "prompt": "continue",
+            "prompt": "進めて",
             "session_id": "agent-large-history",
             "cwd": worktree,
         })
         .to_string();
         handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
             .expect("warm prompt read");
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(&worktree, &session.id),
+            vec![crate::cli::action_obligation::ObligationKind::Implementation],
+            "the measured warm path must include action-producing prompt bookkeeping"
+        );
         assert!(
             Session::load(&sessions_dir.join(format!("{}.toml", session.id)))
                 .expect("reload warmed Session")
