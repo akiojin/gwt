@@ -1,0 +1,147 @@
+name: Cache Warm
+
+# Issue #4133. `Swatinem/rust-cache` writes only into the scope of the branch
+# that ran it, and test.yml / build.yml / lint.yml fire on `pull_request` alone.
+# Nothing ever populated the develop or main scope, so every PR's first Rust job
+# logged `No cache found.`, compiled 377 crates instead of 13, saved 540 MB, and
+# had that cache discarded when the PR closed — ~52 machine-min burned per PR.
+#
+# This workflow writes those same cache keys from develop and main, which is
+# where PR runs can restore from: a `pull_request` run may restore caches from
+# its base branch and from the default branch (main), and from nowhere else.
+#
+# The key is `{prefix-key}-{shared-key}-{os}-{arch}-{toolchain hash}-{lock
+# hash}`. Matching it is the whole contract, so the jobs below mirror the PR
+# jobs' `shared-key`, `runs-on`, and `dtolnay/rust-toolchain@stable`. The
+# pairing is pinned by crates/gwt/tests/ci_cache_warm_contract_test.rs, because
+# a drifted key produces a cache nobody restores and no CI run reports that as
+# a failure.
+#
+# Cache budget (AC-3): three shared keys — linux-workspace, windows-workspace,
+# macos-workspace — at ~540 MB each, held for the develop and main scopes, is
+# ~3.2 GB of the repository's 10 GB ceiling. coverage.yml and release.yml keep
+# their own job-id keys and fit in the remainder. A fourth shared key has to be
+# argued against that budget; consolidating by OS is the reason there are three.
+#
+# When the cache legitimately misses (AC-4): the key changes whenever Cargo.lock
+# or a manifest changes, or when the stable toolchain moves — `rustc -vV` is
+# hashed into it. The first case is a push this workflow reacts to; the second
+# has no commit behind it, which is what the weekly schedule is for. GitHub also
+# evicts a cache that goes 7 days unrestored, and the schedule re-warms that
+# too. A miss only costs the old full compile: the PR jobs still build from
+# source and stay correct, which is why every rust-cache step remains
+# `continue-on-error: true`.
+
+on:
+  push:
+    branches: [develop, main]
+    # The cache key does not depend on workspace sources, so warming on every
+    # push would recompile for a key that already exists. These are the inputs
+    # that can actually change the key.
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/*/Cargo.toml'
+      - 'rust-toolchain'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/cache-warm.yml'
+      - '.github/workflows/test.yml'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/lint.yml'
+  schedule:
+    # Monday 03:00 UTC. Covers a stable-toolchain bump and the 7-day eviction of
+    # a scope no PR happened to restore.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: cache-warm-${{ github.ref }}
+  # Never cancel: a cancelled job saves nothing, and the push that would have
+  # re-triggered this workflow has already happened. The queued run instead
+  # restores whatever the previous one saved and finishes quickly.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  warm-linux:
+    name: Warm cargo cache (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A scheduled run fires on the default branch, but PRs are cut from
+          # develop and compute develop's lock hash. Checking out develop while
+          # the run still writes into the default-branch scope puts the key PRs
+          # need where every run in the repository can restore it.
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
+      - name: Install tray + GTK dependencies (Linux)
+        run: |
+          sudo bash scripts/ci-apt.sh update
+          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+        timeout-minutes: 5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+      # rust-cache prunes the workspace crates' own artifacts before saving, so
+      # only dependency builds survive — the 364 crates that separate a cold
+      # 377-crate compile from a warm 13-crate one. `--no-run` reaches every one
+      # of them without paying to execute the suite a second time.
+      - name: Build the Linux dependency graph
+        run: cargo test --workspace --all-features --no-run
+        timeout-minutes: 35
+
+  warm-windows:
+    name: Warm cargo cache (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
+      # The package set the Windows PR jobs compile between them
+      # (test-windows-rust, test-windows-default-parallel,
+      # test-windows-agent-launch-e2e, check-windows, lint-windows). Deliberately
+      # not `--workspace`: no CI path builds the remaining crates' test targets
+      # on Windows, and rust-cache skips its save when the job fails, so an
+      # untested target here would quietly leave the scope cold.
+      - name: Build the Windows dependency graph
+        run: cargo test -p gwt -p gwt-core -p gwt-agent -p gwt-terminal --all-features --no-run
+        timeout-minutes: 60
+
+  warm-macos:
+    name: Warm cargo cache (macOS)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
+      # Mirrors build.yml's check-macos: the pre-installed Rust on macOS runners
+      # is broken, and the reset has to happen before the toolchain action so
+      # both jobs hash the same `rustc -vV`.
+      - name: Reset broken pre-installed Rust on macOS runners
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-workspace
+      # check-macos is the only macOS PR job, and it only checks. Building more
+      # than it consumes would pay a 10x-billed runner for artifacts nothing
+      # restores.
+      - name: Build the macOS dependency graph
+        run: cargo check -p gwt-core -p gwt
+        timeout-minutes: 35

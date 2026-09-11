@@ -37,7 +37,14 @@ jobs:
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
+      # Issue #4133: naming the scope is what lets cache-warm.yml populate it
+      # from develop/main. Without `shared-key` the key embeds GITHUB_JOB, so
+      # only a job with this exact id could ever write a cache this job reads —
+      # and no push-triggered workflow did, which is why every PR's first Rust
+      # job rebuilt 377 crates.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       # Issue #4055: 21 green runs measured this step at 500–725s (p95 ~660s)
       # and a slow runner crossed the old 15-minute cap with every suite ok
@@ -87,6 +94,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       - uses: actions/setup-python@v7
         with:
@@ -118,6 +127,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Run managed hook self-heal regressions
         shell: bash
@@ -220,6 +231,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       # Compiling inside the timed loop would charge the first iteration for the
       # build and let a slow compile read as an unstable suite — the exact
@@ -292,6 +305,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Run credential-free deterministic Windows agent launch E2E
         env:
