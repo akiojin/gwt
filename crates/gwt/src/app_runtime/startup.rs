@@ -417,21 +417,80 @@ pub(super) enum GenerationReaperFailureLog {
 /// value is never overridden and a settled config is never rewritten. Failures
 /// (unparseable config, permission) never block startup: they are logged and
 /// appended to the host error ledger so `errors.list` shows the path and cause.
-pub(super) fn ensure_codex_recommended_config_at_startup() {
-    let config_path = codex_home_for_startup(std::env::var_os("CODEX_HOME")).join("config.toml");
-    ensure_codex_recommended_config_at_path(&config_path);
+///
+/// Issue #4229: the key is shaped for the `codex` on `PATH`, which is what the
+/// user runs (`codex login` included) and may be older than the codex gwt
+/// launches. Probing it spawns `codex --version`, so callers run this off the
+/// startup path.
+pub(super) fn ensure_codex_recommended_config_at_startup(config_path: &Path) {
+    let path_codex = gwt_agent::AgentDetector::detect_by_command("codex");
+    let schema = codex_features_schema_for_path_codex(path_codex.as_ref());
+    tracing::debug!(
+        path_codex_version = ?path_codex.as_ref().and_then(|codex| codex.version.as_deref()),
+        ?schema,
+        "Codex features schema resolved from the PATH codex"
+    );
+    ensure_codex_recommended_config_at_path(config_path, schema);
 }
 
-pub(super) fn ensure_codex_recommended_config_at_path(config_path: &Path) {
-    match gwt_skills::ensure_codex_context_management_experimental_mode(config_path) {
-        Ok(report) => {
-            tracing::debug!(
-                config = %report.config_path.display(),
-                outcome = ?report.outcome,
-                key = gwt_skills::CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
-                "Codex managed config key ensured at startup"
-            );
-        }
+pub(super) fn codex_config_path_for_startup() -> PathBuf {
+    codex_home_for_startup(std::env::var_os("CODEX_HOME")).join("config.toml")
+}
+
+/// Issue #4229: the `features` schema of the `codex` on `PATH`, which is not
+/// necessarily the codex gwt launches.
+///
+/// No codex on `PATH` leaves only the gwt launch target reading the config, so
+/// tables are fine. A codex whose version cannot be read is treated as too old:
+/// writing the table would risk making its whole config unloadable.
+pub(super) fn codex_features_schema_for_path_codex(
+    path_codex: Option<&gwt_agent::DetectedAgent>,
+) -> gwt_skills::CodexFeaturesSchema {
+    let Some(path_codex) = path_codex else {
+        return gwt_skills::CodexFeaturesSchema::AcceptsTables;
+    };
+    let min = semver::Version::parse(gwt_skills::CODEX_FEATURE_TABLE_MIN_VERSION)
+        .expect("valid Codex feature table boundary");
+    let accepts_tables = path_codex
+        .version
+        .as_deref()
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .find_map(|token| semver::Version::parse(token.trim_start_matches('v')).ok())
+        .is_some_and(|version| version >= min);
+    if accepts_tables {
+        gwt_skills::CodexFeaturesSchema::AcceptsTables
+    } else {
+        gwt_skills::CodexFeaturesSchema::BooleansOnly
+    }
+}
+
+pub(super) fn ensure_codex_recommended_config_at_path(
+    config_path: &Path,
+    schema: gwt_skills::CodexFeaturesSchema,
+) {
+    match gwt_skills::ensure_codex_context_management_experimental_mode(config_path, schema) {
+        Ok(report) => match report.outcome {
+            gwt_skills::CodexManagedConfigOutcome::Skipped
+            | gwt_skills::CodexManagedConfigOutcome::Repaired => {
+                tracing::info!(
+                    config = %report.config_path.display(),
+                    outcome = ?report.outcome,
+                    key = gwt_skills::CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+                    min_codex = gwt_skills::CODEX_FEATURE_TABLE_MIN_VERSION,
+                    "Codex managed config key withheld: the codex on PATH cannot load a features table"
+                );
+            }
+            gwt_skills::CodexManagedConfigOutcome::Written
+            | gwt_skills::CodexManagedConfigOutcome::Preserved => {
+                tracing::debug!(
+                    config = %report.config_path.display(),
+                    outcome = ?report.outcome,
+                    key = gwt_skills::CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+                    "Codex managed config key ensured at startup"
+                );
+            }
+        },
         Err(error) => {
             tracing::warn!(
                 config = %config_path.display(),
@@ -492,8 +551,16 @@ impl AppRuntime {
             .collect::<Vec<_>>();
         self_heal_managed_hooks_in_worktrees(startup_worktrees.iter().map(PathBuf::as_path));
 
-        // Issue #4075: managed Codex config keys, fail-open.
-        ensure_codex_recommended_config_at_startup();
+        // Issue #4075: managed Codex config keys, fail-open. Issue #4229: the
+        // pass probes `codex --version` (~0.6s), so it runs off the startup
+        // path; the config path is resolved here, under the current home.
+        let codex_config_path = codex_config_path_for_startup();
+        if let Err(error) = self
+            .blocking_tasks
+            .try_spawn(move || ensure_codex_recommended_config_at_startup(&codex_config_path))
+        {
+            tracing::warn!(%error, "Codex managed config pass could not be scheduled");
+        }
 
         // Fresh linked-owner launch authority is durable in the Session and
         // owner ledger, while readiness capabilities are intentionally
