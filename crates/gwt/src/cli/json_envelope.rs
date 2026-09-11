@@ -608,6 +608,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             target: actions_rerun_target(params)?,
         }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
+        "index.cancel" | "index.repair" => {
+            if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
+                return Err(CliParseError::InvalidJson(
+                    "index recovery supports only the issues scope".to_string(),
+                ));
+            }
+            CliCommand::Index(if envelope.operation == "index.cancel" {
+                IndexCommand::Cancel
+            } else {
+                IndexCommand::Repair
+            })
+        }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
             scope: optional_string(params, "scope")?
                 .map(|scope| index_scope(&scope))
@@ -621,6 +633,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
             hook_register_codex_trust(params)?
         }
+        "hook.register_codex_managed_project_trust"
+        | "hook.register-codex-managed-project-trust" => hook_register_codex_project_trust(params)?,
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
@@ -650,6 +664,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
+                user_verification_result: optional_string(params, "user_verification_result")?,
             })
         }
         "verify.adjudicate" => {
@@ -1108,6 +1123,24 @@ fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, 
     }
     Ok(CliCommand::Hook(HookCommand::Run {
         name: "register-codex-managed-hook-trust".to_string(),
+        rest,
+    }))
+}
+
+fn hook_register_codex_project_trust(
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    let mut rest = Vec::new();
+    if let Some(project_root) = optional_string(params, "project_root")? {
+        rest.push("--project-root".to_string());
+        rest.push(project_root);
+    }
+    if let Some(codex_config) = optional_string(params, "codex_config")? {
+        rest.push("--codex-config".to_string());
+        rest.push(codex_config);
+    }
+    Ok(CliCommand::Hook(HookCommand::Run {
+        name: "register-codex-managed-project-trust".to_string(),
         rest,
     }))
 }
@@ -1746,6 +1779,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                user_verification_result: None,
             })
         );
         assert_eq!(
@@ -1753,6 +1787,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             })
         );
         assert!(matches!(
@@ -1762,6 +1797,41 @@ mod tests {
             ),
             CliParseError::InvalidNumber(_)
         ));
+    }
+
+    #[test]
+    fn verify_run_persists_deferred_user_verification() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let deferred = "deferred (autonomous execution)";
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": deferred
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        let record = verification_record::load(&repo).unwrap().unwrap();
+        let mut serialized = serde_json::to_value(&record).unwrap();
+        assert_eq!(serialized["user_verification_result"], deferred);
+        assert!(String::from_utf8_lossy(&env.stdout).contains(deferred));
+        serialized["user_verification_result"] = json!("confirmed");
+        let tampered = serde_json::from_value(serialized).unwrap();
+        assert!(!verification_record::integrity_ok(&tampered));
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
@@ -3249,6 +3319,20 @@ mod tests {
     }
 
     #[test]
+    fn index_issue_recovery_operations_are_reachable() {
+        for operation in ["index.cancel", "index.repair"] {
+            assert!(matches!(
+                ok(operation, json!({"scope": "issues"})),
+                CliCommand::Index(_)
+            ));
+            assert!(matches!(
+                err(operation, json!({"scope": "files"})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
     fn issue_spec_create_variants() {
         assert!(matches!(
             ok("issue.spec.create", json!({"title": "t", "body": "b"})),
@@ -3952,6 +4036,24 @@ mod tests {
             ),
             CliCommand::Hook(_)
         ));
+        assert_eq!(
+            ok(
+                "hook.register_codex_managed_project_trust",
+                json!({
+                    "project_root": "/repo",
+                    "codex_config": "/cfg",
+                })
+            ),
+            CliCommand::Hook(HookCommand::Run {
+                name: "register-codex-managed-project-trust".to_string(),
+                rest: vec![
+                    "--project-root".to_string(),
+                    "/repo".to_string(),
+                    "--codex-config".to_string(),
+                    "/cfg".to_string(),
+                ],
+            })
+        );
     }
 
     #[test]

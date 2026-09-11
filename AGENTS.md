@@ -134,7 +134,11 @@
 - 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。
 - Draft PR は CI / 共有 / 早期レビュー用とし、PR 本文に未完了項目、既知 blocker、Remaining acceptance を明記する。Draft PR で完了や配信可能性を主張しない。
 - Ready 化前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了、既知 blocker なしを確認する。
-- **自動実行（Issue Monitor による autonomous launch。`GWT_AUTONOMOUS_EXECUTION` が設定されている）では、ユーザーによる視覚確認を要求しない。** `User Verification Result: n/a (autonomous)` を記録して Ready 化してよい。GUI / フロントエンド変更の品質は、agent 自身が verify 内で実行する自動 headed E2E（実 Chromium、dark / light 両テーマ、console / page error ゼロ）で担保し、その結果は `Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` として **`User Verification Result` とは別の行に**記録する。agent の自己 browser-check をユーザーの確認結果として扱ってはならない。
+- **起動経路は実行記録から判定する（Issue #4217 FR-002）。** `execution.status` の `launch_route` が `autonomous` なら自動実行、`manual` または不明なら手動起動として扱う。`GWT_AUTONOMOUS_EXECUTION` は legacy シグナルであり、**設定されていることは autonomous の証拠になるが、設定されていないことは manual の証拠にならない**。この env は「プロジェクトが unattended mode を opt-in したか」でのみ書かれるため、Issue Monitor 起動でも未設定になり、実際に 2 窓が「手動起動」と誤判定して視覚検証待ちで停止した（#3777 / #3697）。
+- **自動実行（`launch_route: autonomous`）では、ユーザーによる視覚確認を PR 作成の前提条件にしない。** 実装と自動検証が完了した時点で **Draft PR** を作成し、実行を settle してスロットを解放する。UI surface がある場合は `User Verification Result: deferred (autonomous execution)` を、無い場合は `n/a` を記録する（`n/a (autonomous)` は両者の旧表記で、既存 PR では引き続き有効）。**`confirmed` と偽ってはならない。**
+- **`deferred (autonomous execution)` の PR は Ready にしない。** Draft のまま残り、`draft == false` を条件とする `auto-merge.yml` の対象にならない。gwt 自身が `pr.ready` と非 draft の `pr.create` を拒否する。**自動化するのは PR 作成までで、マージ判断はオーナーに残す。** オーナーは `pr.list`（`include: ["body"]`、`deferred_user_verification` フィールド）で後からまとめて視覚確認する。
+- **自動実行では、視覚検証待ちを理由に `execution.blocked` を打ってはならない。** `execution.blocked` は一時停止ではなく terminal であり、open obligation を全て defer し `pr.edit` を失効させるため、脱出経路が閉路になる（#4214）。gwt は autonomous route でのこの settle を拒否する。Draft PR を渡して通常どおり settle する。
+- GUI / フロントエンド変更の品質は、agent 自身が verify 内で実行する自動 headed E2E（実 Chromium、dark / light 両テーマ、console / page error ゼロ）で担保し、その結果は `Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` として **`User Verification Result` とは別の行に**記録する。agent の自己 browser-check をユーザーの確認結果として扱ってはならない。
 - Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
 
 ## 開発ワークフロー
@@ -236,7 +240,7 @@
 > 🚨 **手動起動（ユーザーが自分で始めた作業）では、エージェントは、ユーザーの視覚検証結果が `confirmed` になる前に PR を `create` / `update` してはならない。自動実行（autonomous launch）では、以下の「自動実行時の扱い」に従い視覚検証を要求しない。**
 
 - `gwt-verify --mode pre-pr` の **`User Verification Result`** が `confirmed` または `n/a`（UI 影響が無い変更で視覚検証不要な場合に限る）のいずれかになるまで PR 作成・更新を行わない。`pending` / 未確認のまま JSON operations `pr.create` / `pr.edit` を呼ばない。
-- **自動実行時の扱い（ユーザー裁定 2026-09-06、Issue #4001）:** `GWT_AUTONOMOUS_EXECUTION` が設定された自動実行では、ユーザーへ視覚確認を依頼しない（URL も出さない）。`User Verification Result: n/a (autonomous)` を記録して PR 作成・Ready 化まで進める。自動実行のセッションで質問ツールを呼ぶと owner Issue が needs_human で park され実行が終了するため、視覚確認の依頼は「待ち」ではなく「停止」になる。GUI 変更の品質は agent 自身の自動 headed E2E（`Agent Visual Check`）で担保する。`n/a (autonomous)` は launch mode によって決まる事実であり、判断に迷って倒す `skipped(<reason>)` の言い換えとして使ってはならない。
+- **自動実行時の扱い（ユーザー裁定 2026-09-06 Issue #4001、Issue #4217 で起動経路判定と deferred 値を追加）:** `execution.status` の `launch_route` が `autonomous` の自動実行では、ユーザーへ視覚確認を依頼しない（URL も出さない）。UI surface があれば `User Verification Result: deferred (autonomous execution)`、無ければ `n/a` を記録して **Draft PR 作成まで**進める（`n/a (autonomous)` は旧表記）。`deferred` の PR は Ready 化しない。自動実行のセッションで質問ツールを呼ぶと owner Issue が needs_human で park され実行が終了するため、視覚確認の依頼は「待ち」ではなく「停止」になる。GUI 変更の品質は agent 自身の自動 headed E2E（`Agent Visual Check`）で担保する。これらの値は launch mode によって決まる事実であり、判断に迷って倒す `skipped(<reason>)` の言い換えとして使ってはならない。
 - （手動起動時）ユーザーが視覚検証できない状態（例: Open Project picker のクリックがブロックされている、splash から進めない、サーバーが起動しない 等）に遭遇した場合、エージェントの独断で `skipped(<reason>)` に倒さない。**まずブロッカーの根本原因を特定して解消し、ユーザーが実際に視覚確認できる状態を再現してから verification を依頼する**。
 - `skipped(<reason>)` を許容するのは、ユーザーが `AskUserQuestion` 等で明示的に "Skip — proceed to PR" を選択した場合のみ。エージェントが「自動テスト全 PASS だから skip 妥当」と判断して skip するのは禁止。
 - 「進めて」「OK」等の承認指示は、**既に verification 結果を持つ作業**を完了まで進める指示であり、verification 自体の skip 承認ではない。verification 動線がブロックされている時に「進めて」と言われた場合は、ブロッカー解消の作業を進める指示として解釈する。
