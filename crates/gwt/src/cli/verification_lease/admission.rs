@@ -730,12 +730,15 @@ pub(crate) fn admit<E: CliEnv>(
                         VERIFICATION_RESERVATION_TTL,
                         Some("verify.run deferred"),
                     );
-                    return Err(deferred(
-                        started,
-                        max_wait,
-                        &holder.detail,
-                        holder.retry_after,
-                    ));
+                    let mut detail = holder.detail;
+                    if let Ok(status) = coordinator.heavy_lease_status() {
+                        if let Some(position) = status.queue.iter().position(|entry| {
+                            entry.target.as_deref() == Some(key.file_stem().as_str())
+                        }) {
+                            detail.push_str(&format!("; queue_position: {}", position + 1));
+                        }
+                    }
+                    return Err(deferred(started, max_wait, &detail, holder.retry_after));
                 }
                 notice.maybe_post(env, started, max_wait, &holder.detail);
             }
@@ -1460,6 +1463,7 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("deferred"), "{message}");
         assert!(message.contains("rerun `verify.run`"), "{message}");
+        assert!(message.contains("queue_position: 1"), "{message}");
         assert!(
             message.contains(&other.file_stem()),
             "the refusal must name the holder: {message}"
