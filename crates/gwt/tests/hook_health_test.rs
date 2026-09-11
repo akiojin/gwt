@@ -1386,6 +1386,118 @@ fn tracked_canonical_hook_config_is_not_reported_as_binary_skew() {
     );
 }
 
+/// Issue #4257: a bare fallback such as `gwtd` is resolved by walking the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH), and the answer depends
+/// only on process-wide state. One projection build audits every Work row, so
+/// a shared cache must resolve each distinct binary once per build instead of
+/// once per command per event per row.
+#[test]
+fn shared_hook_binary_cache_resolves_each_bare_fallback_once() {
+    use gwt::cli::hook::health::{read_managed_hook_health_with_cache, HookBinaryResolutionCache};
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _no_hook_bin = ScopedEnvVar::remove("GWT_HOOK_BIN");
+    let bare_fallback_hooks = {
+        let command = |event: &str| {
+            format!(
+                "gwt_bin=\"${{GWT_BIN_PATH:-}}\"; if [ -z \"$gwt_bin\" ]; then gwt_bin='gwtd'; fi; \
+                 if command -v \"$gwt_bin\" >/dev/null 2>&1; then \"$gwt_bin\" hook event {event}; \
+                 else true; fi"
+            )
+        };
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "PreToolUse",
+            "PostToolUse",
+            "SessionStart",
+            "Stop",
+            "UserPromptSubmit",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": command(event) }] }]),
+            );
+        }
+        serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap()
+    };
+    let worktrees = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    for worktree in &worktrees {
+        fs::create_dir_all(worktree.path().join(".codex")).unwrap();
+        fs::write(
+            worktree.path().join(".codex/hooks.json"),
+            &bare_fallback_hooks,
+        )
+        .unwrap();
+    }
+
+    let cache = HookBinaryResolutionCache::default();
+    for worktree in &worktrees {
+        let mut input = ManagedHookHealthInput::new(worktree.path());
+        input.runtime_state_path = None;
+        let cached = read_managed_hook_health_with_cache(&input, &cache);
+        let uncached = read_managed_hook_health(&input);
+        assert_eq!(cached.status, uncached.status);
+        assert_eq!(cached.issues, uncached.issues);
+    }
+
+    assert_eq!(
+        cache.resolved_binaries(),
+        1,
+        "10 bare `gwtd` commands across two worktrees must resolve once"
+    );
+}
+
+/// Issue #4257: the GUI builds the active Work projection on its event loop
+/// and audits hook health once per Work row. With no expected hook binary the
+/// tracked/untracked expectation cannot change the verdict, so the audit must
+/// not spawn `git ls-files` per config — ~200ms each on Windows, which held
+/// the event loop for a minute on a home with 278 worktree rows and starved
+/// every `pane.*` reply.
+#[cfg(unix)]
+#[test]
+fn hook_health_without_expected_binary_spawns_no_git() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    {
+        let _hook_bin = stable_hook_bin_guard();
+        gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
+        gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
+    }
+    let _no_hook_bin = ScopedEnvVar::remove("GWT_HOOK_BIN");
+    let fake_bin = tempfile::tempdir().expect("fake git dir");
+    let fake_git = fake_bin.path().join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GWT_FAKE_GIT_LOG\"\nexit 1\n",
+    )
+    .expect("write fake git");
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).expect("chmod fake git");
+    let mut paths = vec![fake_bin.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let _path = ScopedEnvVar::set("PATH", std::env::join_paths(paths).expect("join PATH"));
+    let git_log = fake_bin.path().join("git.log");
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let mut input = ManagedHookHealthInput::new(worktree.path());
+    input.runtime_state_path = None;
+    let health = read_managed_hook_health(&input);
+
+    assert_ne!(health.status, ManagedHookHealthStatus::Inactive);
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "hook health without an expected binary must not spawn git; invocations:\n{invocations}"
+    );
+}
+
 /// Issue #3541 AC-2 / AC-5: a handler failure must surface in `hook.health`,
 /// and a later successful event must turn it into "recovered" evidence
 /// instead of erasing it back to an empty `issues` list.

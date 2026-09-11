@@ -337,14 +337,35 @@ fn managed_hook_health_view_for_project(
     project_root: &Path,
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
+    hook_binaries: &gwt::cli::hook::health::HookBinaryResolutionCache,
 ) -> Option<gwt::ManagedHookHealthView> {
-    managed_hook_health_view_for_worktree(project_root, sessions_dir, sessions)
+    managed_hook_health_view_for_worktree_with_cache(
+        project_root,
+        sessions_dir,
+        sessions,
+        hook_binaries,
+    )
 }
 
+#[cfg(test)]
 pub(super) fn managed_hook_health_view_for_worktree(
     worktree: &Path,
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
+) -> Option<gwt::ManagedHookHealthView> {
+    managed_hook_health_view_for_worktree_with_cache(
+        worktree,
+        sessions_dir,
+        sessions,
+        &gwt::cli::hook::health::HookBinaryResolutionCache::default(),
+    )
+}
+
+fn managed_hook_health_view_for_worktree_with_cache(
+    worktree: &Path,
+    sessions_dir: &Path,
+    sessions: &[&ActiveAgentSession],
+    hook_binaries: &gwt::cli::hook::health::HookBinaryResolutionCache,
 ) -> Option<gwt::ManagedHookHealthView> {
     let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(worktree);
     input.runtime_state_path = None;
@@ -368,7 +389,7 @@ pub(super) fn managed_hook_health_view_for_worktree(
     if let Some(runtime_state_path) = selected_runtime_state {
         input = input.with_runtime_state_path(runtime_state_path);
     }
-    let health = gwt::cli::hook::health::read_managed_hook_health(&input);
+    let health = gwt::cli::hook::health::read_managed_hook_health_with_cache(&input, hook_binaries);
     let should_show = health.status != gwt::cli::hook::health::ManagedHookHealthStatus::Inactive
         || health.pending_discussion.is_some()
         || health.pending_goal.is_some()
@@ -381,6 +402,7 @@ fn attach_managed_hook_health_to_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
+    hook_binaries: &gwt::cli::hook::health::HookBinaryResolutionCache,
 ) {
     for work in active_works {
         let Some(worktree) = work.worktree_path.as_deref().map(Path::new) else {
@@ -391,8 +413,12 @@ fn attach_managed_hook_health_to_active_works(
             .copied()
             .filter(|session| projection_worktree_paths_match(&session.worktree_path, worktree))
             .collect::<Vec<_>>();
-        work.managed_hook_health =
-            managed_hook_health_view_for_worktree(worktree, sessions_dir, &matching_sessions);
+        work.managed_hook_health = managed_hook_health_view_for_worktree_with_cache(
+            worktree,
+            sessions_dir,
+            &matching_sessions,
+            hook_binaries,
+        );
     }
 }
 
@@ -3612,6 +3638,9 @@ impl AppRuntime {
             .values()
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
+        // Issue #4257: every Work row audits hook health; resolve each hook
+        // binary once for the whole build, not once per command and row.
+        let hook_binaries = gwt::cli::hook::health::HookBinaryResolutionCache::default();
         let saved_projection =
             gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
                 .ok()
@@ -3705,6 +3734,7 @@ impl AppRuntime {
                 &tab.project_root,
                 &self.sessions_dir,
                 &sessions,
+                &hook_binaries,
             );
             // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
             // branch into one Workspace row before the ledger attach, so the
@@ -3724,6 +3754,7 @@ impl AppRuntime {
                 &mut view.active_works,
                 &self.sessions_dir,
                 &sessions,
+                &hook_binaries,
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background merge-scan cache plus the recorded PR state.
@@ -3773,13 +3804,19 @@ impl AppRuntime {
             tab_id,
             tab,
             &sessions,
-            managed_hook_health_view_for_project(&tab.project_root, &self.sessions_dir, &sessions),
+            managed_hook_health_view_for_project(
+                &tab.project_root,
+                &self.sessions_dir,
+                &sessions,
+                &hook_binaries,
+            ),
         );
         if let Some(view) = view.as_mut() {
             attach_managed_hook_health_to_active_works(
                 &mut view.active_works,
                 &self.sessions_dir,
                 &sessions,
+                &hook_binaries,
             );
         }
         let mut cache = self.active_work_projection_cache.borrow_mut();

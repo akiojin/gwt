@@ -1,6 +1,8 @@
 //! Managed hook health read model.
 
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -113,7 +115,47 @@ struct RuntimeStateReadModel {
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
 
+/// Memo of hook-binary resolvability for one audit pass.
+///
+/// Issue #4257: resolving a bare fallback such as `gwtd` walks the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH), and the answer
+/// depends only on process-wide state. The GUI audits every Work row while
+/// it builds the active Work projection on its event loop, so it shares one
+/// cache across the build instead of resolving once per command, event, and
+/// row. Scoped to the caller: nothing is remembered past the pass.
+#[derive(Debug, Default)]
+pub struct HookBinaryResolutionCache {
+    bare_resolvable: RefCell<HashMap<String, bool>>,
+}
+
+impl HookBinaryResolutionCache {
+    /// Number of distinct bare binaries this pass actually resolved.
+    pub fn resolved_binaries(&self) -> usize {
+        self.bare_resolvable.borrow().len()
+    }
+
+    fn bare_hook_binary_is_resolvable(&self, actual: &str) -> bool {
+        if let Some(resolvable) = self.bare_resolvable.borrow().get(actual) {
+            return *resolvable;
+        }
+        let resolvable = bare_hook_binary_is_resolvable(actual);
+        self.bare_resolvable
+            .borrow_mut()
+            .insert(actual.to_string(), resolvable);
+        resolvable
+    }
+}
+
 pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHealth {
+    read_managed_hook_health_with_cache(input, &HookBinaryResolutionCache::default())
+}
+
+/// [`read_managed_hook_health`] sharing `cache` with the caller's other
+/// audits in the same pass (Issue #4257).
+pub fn read_managed_hook_health_with_cache(
+    input: &ManagedHookHealthInput,
+    cache: &HookBinaryResolutionCache,
+) -> ManagedHookHealth {
     let mut health = ManagedHookHealth {
         status: ManagedHookHealthStatus::Ready,
         last_event: None,
@@ -133,7 +175,7 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         issues: Vec::new(),
     };
 
-    audit_managed_hook_configs(input, &mut health);
+    audit_managed_hook_configs(input, cache, &mut health);
     audit_hook_profile(input, &mut health);
     audit_hook_failures(input, &mut health);
 
@@ -352,7 +394,11 @@ fn comparable_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
+fn audit_managed_hook_configs(
+    input: &ManagedHookHealthInput,
+    cache: &HookBinaryResolutionCache,
+    health: &mut ManagedHookHealth,
+) {
     let worktree = &input.worktree_root;
     let claude_dir = worktree.join(".claude");
     let claude_settings = worktree.join(".claude/settings.local.json");
@@ -408,17 +454,27 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
     }
 
     if claude_settings.exists() {
-        audit_hook_json_config(&claude_settings, input.expected_hook_bin.as_deref(), health);
+        audit_hook_json_config(
+            &claude_settings,
+            input.expected_hook_bin.as_deref(),
+            cache,
+            health,
+        );
     }
     for hooks in &codex_hooks_paths {
         if hooks.exists() {
-            audit_hook_json_config(hooks, input.expected_hook_bin.as_deref(), health);
+            audit_hook_json_config(hooks, input.expected_hook_bin.as_deref(), cache, health);
         }
     }
 
     for (root, artifact) in provider_hooks {
         if artifact.exists() {
-            audit_provider_hook_config(&artifact, input.expected_hook_bin.as_deref(), health);
+            audit_provider_hook_config(
+                &artifact,
+                input.expected_hook_bin.as_deref(),
+                cache,
+                health,
+            );
         } else if root.exists() {
             needs_attention(
                 health,
@@ -440,15 +496,20 @@ fn expected_hook_bin_for_config_path<'a>(
     path: &Path,
     configured: Option<&'a str>,
 ) -> Option<&'a str> {
+    // #4257: without an expected binary the answer is `None` either way, so
+    // skip the per-config `git ls-files` spawn. The GUI audits every Work row
+    // on its event loop, where that spawn held the loop for a minute.
+    let configured = configured?;
     if gwt_skills::managed_hook_config_is_git_tracked(path) {
-        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
+        return Some(gwt_skills::CANONICAL_HOOK_BIN);
     }
-    configured
+    Some(configured)
 }
 
 fn audit_hook_json_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    cache: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
 ) {
     let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
@@ -507,7 +568,7 @@ fn audit_hook_json_config(
                 let Some(actual) = hook_command_binary_fallback(&command) else {
                     continue;
                 };
-                audit_hook_binary(path, &actual, Some(expected), health);
+                audit_hook_binary(path, &actual, Some(expected), cache, health);
             }
         } else {
             for command in commands {
@@ -515,7 +576,7 @@ fn audit_hook_json_config(
                     continue;
                 }
                 if let Some(actual) = hook_command_binary_fallback(&command) {
-                    audit_hook_binary(path, &actual, None, health);
+                    audit_hook_binary(path, &actual, None, cache, health);
                 }
             }
         }
@@ -525,6 +586,7 @@ fn audit_hook_json_config(
 fn audit_provider_hook_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    cache: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
 ) {
     let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
@@ -548,13 +610,14 @@ fn audit_provider_hook_config(
         );
         return;
     };
-    audit_hook_binary(path, &actual, expected_hook_bin, health);
+    audit_hook_binary(path, &actual, expected_hook_bin, cache, health);
 }
 
 fn audit_hook_binary(
     path: &Path,
     actual: &str,
     expected_hook_bin: Option<&str>,
+    cache: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
 ) {
     let actual_path = Path::new(actual);
@@ -603,7 +666,7 @@ fn audit_hook_binary(
                 ),
             );
         }
-    } else if !bare_hook_binary_is_resolvable(actual) {
+    } else if !cache.bare_hook_binary_is_resolvable(actual) {
         degraded(
             health,
             format!(
