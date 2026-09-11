@@ -499,8 +499,10 @@ the same `issue.monitor.wait` declaration covers the retries.
 `verify.run` reads `params.commands` before it decides whether to admit at
 all (Issue #4196). A matrix is heavy when any command widens past a single
 target — `--workspace`, `--all`, `--all-features`, `--all-targets`,
-`--exclude`, more than one `-p`, or any program other than a recognized
-`cargo` invocation — and only a heavy matrix claims the host lease. A matrix
+`--exclude`, multiple packages or targets, or glob selectors — and only a
+heavy matrix claims the host lease. Unknown commands and value-taking Cargo
+global options are conservatively heavy; `cargo fmt` and `cargo metadata`
+are light. A matrix
 narrowed to one named target (`--test <name>`, `--bin <name>`,
 `--example <name>`), or to `--lib` of an explicit `-p <crate>`, is light: it
 starts immediately and several worktrees may run one at the same time. Bare

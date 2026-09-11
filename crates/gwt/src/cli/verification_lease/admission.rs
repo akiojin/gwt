@@ -92,6 +92,7 @@ const CARGO_SCOPE_WIDENING_FLAGS: &[&str] = &[
     "--examples",
     "--tests",
     "--doc",
+    "--bench",
     "--exclude",
 ];
 /// Flags that name one target, so they narrow a `cargo test` on their own.
@@ -263,14 +264,27 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
         .map(String::as_str)
         .take_while(|arg| *arg != "--")
         .collect();
-    let Some(subcommand) = cargo_args
-        .iter()
-        .copied()
-        .find(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-    else {
-        return CommandWeight::Heavy;
+    // Only skip global arguments known not to consume a value. Otherwise a
+    // --config path (even one named "fmt") could be mistaken for a command.
+    let mut args = cargo_args.iter().copied();
+    let subcommand = loop {
+        let Some(arg) = args.next() else {
+            return CommandWeight::Heavy;
+        };
+        if arg.starts_with('+')
+            || matches!(
+                arg,
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            return CommandWeight::Heavy;
+        }
+        break arg;
     };
-    if !CARGO_HEAVY_SUBCOMMANDS.contains(&subcommand) {
+    if matches!(subcommand, "fmt" | "metadata") {
         return CommandWeight::Light;
     }
     if !CARGO_SCOPED_SUBCOMMANDS.contains(&subcommand) {
@@ -286,29 +300,42 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// selects the lib target of *every* default member — the workspace-wide build
 /// this classification exists to catch, wearing a narrowing flag.
 fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
-    let mut named_target = false;
+    let mut named_targets = 0usize;
     let mut lib_target = false;
     let mut packages = 0usize;
-    for arg in cargo_args {
+    let mut args = cargo_args.iter().copied();
+    while let Some(arg) = args.next() {
         // `--test=name` and `--test name` select the same target.
-        let flag = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(name, value)| (name, Some(value)));
         if CARGO_SCOPE_WIDENING_FLAGS.contains(&flag) {
             return CommandWeight::Heavy;
-        }
-        if CARGO_NAMED_TARGET_SELECTORS.contains(&flag) {
-            named_target = true;
         }
         if flag == "--lib" {
             lib_target = true;
         }
-        if flag == "-p" || flag == "--package" {
-            packages += 1;
+        let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
+        let package = flag == "-p" || flag == "--package" || attached_package.is_some();
+        if package || CARGO_NAMED_TARGET_SELECTORS.contains(&flag) {
+            let Some(value) = attached_package.or(inline_value).or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Cargo expands these itself, including quoted package patterns.
+            if value.is_empty() || value.starts_with('-') || value.contains(['*', '?', '[', ']']) {
+                return CommandWeight::Heavy;
+            }
+            if package {
+                packages += 1;
+            } else {
+                named_targets += 1;
+            }
         }
     }
-    if packages > 1 {
+    if packages > 1 || named_targets + usize::from(lib_target) > 1 {
         return CommandWeight::Heavy;
     }
-    if named_target || (lib_target && packages == 1) {
+    if named_targets == 1 || (lib_target && packages == 1) {
         CommandWeight::Light
     } else {
         CommandWeight::Heavy
@@ -825,6 +852,23 @@ mod tests {
         assert_eq!(
             classify_command("cargo test --workspace --exclude gwt --lib"),
             CommandWeight::Heavy
+        );
+        // Global option values and Cargo's glob/attached selector syntax must
+        // not let a broad run masquerade as one package and one target.
+        for command in [
+            "cargo --config net.offline=true test --workspace --all-features",
+            "cargo test -p 'gwt-*' --lib",
+            "cargo test -p gwt --test '*'",
+            "cargo test -pgwt -pgwt-core --test admission",
+            "cargo test -p gwt --test admission --test verification_lease",
+            "cargo test -p gwt --lib --test admission",
+            "cargo test -p gwt --test admission --bench benchmark",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
+        assert_eq!(
+            classify_command("cargo test -pgwt --lib"),
+            CommandWeight::Light
         );
 
         // Nothing narrows these: they build every target of the selected
