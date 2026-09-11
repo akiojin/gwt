@@ -4,7 +4,55 @@ on:
   pull_request:
     branches: [develop, main]
 
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
+  # cannot affect skip instead of queueing a Windows runner. Only jobs that are
+  # NOT a develop required status check may depend on this job: GitHub reports
+  # a skipped job as Success to branch protection, so gating a required check
+  # here would let a PR merge without running it. The gated jobs condition on
+  # `!cancelled() && needs.changes.outputs.docs_only != 'true'`, so a failed
+  # classification (API error) falls open to running them. Both properties are
+  # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
+  changes:
+    name: Classify changed files
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Classify changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          # Documentation is Markdown anywhere plus docs/. Markdown the binaries
+          # embed is code: CHANGELOG.md (include_str! in gwt-core) and
+          # .claude/ + .codex/ (include_dir! in gwt-skills).
+          docs_only=true
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              CHANGELOG.md|.claude/*|.codex/*) docs_only=false ;;
+              docs/*|*.md) ;;
+              *) docs_only=false ;;
+            esac
+          done <<<"$files"
+          echo "$files"
+          echo "docs_only=$docs_only"
+          echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
+
   test:
     name: Test (Rust)
     runs-on: ubuntu-latest
@@ -212,6 +260,8 @@ jobs:
   # deterministic suite from a flake that happened to win the race.
   test-windows-default-parallel:
     name: Test (Rust default parallelism, Windows)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -272,6 +322,8 @@ jobs:
 
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch, ${{ matrix.provider }}/${{ matrix.selector }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -303,6 +355,8 @@ jobs:
 
   test-frontend:
     name: Test (Frontend + WebView E2E)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

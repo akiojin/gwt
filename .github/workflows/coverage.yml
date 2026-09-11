@@ -5,6 +5,11 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
+# Issue #4119: a manual dispatch supersedes a still-running scheduled report.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 jobs:
   rust-coverage:
     name: Rust Coverage
