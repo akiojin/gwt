@@ -24,6 +24,7 @@
 //! `AppRuntime::new` stay in `mod.rs` and are reached via `super`.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -39,14 +40,17 @@ use super::continuation::{
 };
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
-    apply_docker_runtime_to_launch_config, apply_windows_host_shell_wrapper, combined_window_id,
-    detect_shell_program, finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
+    apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
+    finalize_docker_agent_launch_config_with_binding, geometry_to_pty_size,
     install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_worktree_path,
     launch_output_mirror, mark_auto_resume_source_completed, next_window_runtime_incarnation,
-    normalize_branch_name, refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
-    save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
-    AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
+    normalize_branch_name, prepare_docker_runtime_for_launch,
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
+    register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
+    resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
+    resolve_launch_worktree, same_worktree_path, save_resumed_workspace_projection,
+    save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
     PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
@@ -1869,6 +1873,10 @@ pub(super) fn launch_config_from_persisted_session(
         builder = builder.tool_runtime_provenance(provenance);
     }
     builder = builder.tool_runtime_source_session_id(session.id.clone());
+    // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
+    // originally stamped, so a restored or resumed monitor launch does not
+    // quietly become a human-driven one.
+    builder = builder.launch_route(session.launch_route);
 
     // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
     // any structured `Session` field, so rebuilding a config here used to drop
@@ -2069,6 +2077,64 @@ struct AgentWindowSpawnOptions {
     launch_feedback_context: Option<LaunchFeedbackContext>,
     agent_kanban_target: Option<AgentKanbanLaunchTarget>,
     continuation: Option<PendingContinueWork>,
+}
+
+/// Provenance carried only by Issue Monitor launches. Possessing this value is
+/// not sufficient to trust a path: [`validate_issue_monitor_managed_codex_worktree`]
+/// still reconciles it with the resolved launch and Git's authoritative
+/// worktree inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IssueMonitorTrustCandidate {
+    pub(super) issue_number: u64,
+    pub(super) project_root: PathBuf,
+    pub(super) session_mode: gwt_agent::SessionMode,
+}
+
+/// A canonical worktree whose Issue Monitor ownership and Git inventory have
+/// been checked together. Keep the path private so an arbitrary launch cwd
+/// cannot be passed directly to the Codex trust writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ManagedCodexWorktree(PathBuf);
+
+impl ManagedCodexWorktree {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+pub(super) fn issue_monitor_trust_candidate_from_feedback(
+    agent_id: &gwt_agent::AgentId,
+    context: Option<&LaunchFeedbackContext>,
+) -> Result<Option<IssueMonitorTrustCandidate>, String> {
+    if agent_id != &gwt_agent::AgentId::Codex {
+        return Ok(None);
+    }
+    let Some((context, issue_number)) = context.and_then(|context| {
+        context
+            .issue_monitor_issue_number
+            .map(|issue_number| (context, issue_number))
+    }) else {
+        return Ok(None);
+    };
+    let project_root = context.issue_monitor_project_root.clone().ok_or_else(|| {
+        format!("Issue Monitor launch for Issue #{issue_number} has no project root provenance")
+    })?;
+    let session_mode = context.issue_monitor_session_mode.ok_or_else(|| {
+        format!("Issue Monitor launch for Issue #{issue_number} has no session mode provenance")
+    })?;
+    if !matches!(
+        session_mode,
+        gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
+    ) {
+        return Err(format!(
+            "Issue Monitor managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
+        ));
+    }
+    Ok(Some(IssueMonitorTrustCandidate {
+        issue_number,
+        project_root,
+        session_mode,
+    }))
 }
 
 /// SPEC-3864 T-006: install detection runs off the startup critical path.
@@ -2728,14 +2794,12 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
 pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
     profile_config_path: &Path,
     worktree_path: &Path,
-    agent_id: &gwt_agent::AgentId,
-    runtime_target: gwt_agent::LaunchRuntimeTarget,
-    docker_service: Option<&str>,
-    codex_home: Option<&Path>,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
     codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
     generated_hook_bin: Option<&str>,
 ) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
-    if agent_id != &gwt_agent::AgentId::Codex {
+    if config.agent_id != gwt_agent::AgentId::Codex {
         return Ok(None);
     }
 
@@ -2758,23 +2822,24 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
         return Ok(None);
     }
 
-    match runtime_target {
+    match config.runtime_target {
         gwt_agent::LaunchRuntimeTarget::Host => {
-            let Some(codex_config_path) = codex_home
-                .map(|home| home.join("config.toml"))
-                .or_else(|| codex_config_path_for_profile_config(profile_config_path))
-            else {
-                // Not a registration failure: gwt simply cannot locate this
-                // profile's Codex config, which says nothing about whether the
-                // hooks are trusted. Blocking the launch here would strand
-                // every Codex launch under a non-standard profile layout, so
-                // keep it a warning — Issue #3967 AC-4 covers registrations
-                // that actually fail.
-                tracing::warn!(
-                    profile_config = %profile_config_path.display(),
-                    "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
-                );
-                return Ok(None);
+            let child_cwd = config.working_dir.as_deref().unwrap_or(worktree_path);
+            let codex_config_path = match effective_host_codex_config_path(
+                child_cwd,
+                &config.env_vars,
+                HostEnvKeySemantics::native(),
+                dirs::home_dir().as_deref(),
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_config = %profile_config_path.display(),
+                        error = %error,
+                        "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
+                    );
+                    return Ok(None);
+                }
             };
             // Issue #3967 AC-1: trust every managed hooks file that can exist
             // on disk, not just the one this launch would generate. The
@@ -2809,11 +2874,34 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
             Ok(Some(report))
         }
         gwt_agent::LaunchRuntimeTarget::Docker => {
-            if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
-                worktree_path,
-                docker_service,
-                codex_hook_discovery_mode,
-            ) {
+            let Some(binding) = docker_binding else {
+                tracing::warn!(
+                    worktree = %worktree_path.display(),
+                    "Docker launch has no resolved binding while preparing Codex hook trust; continuing launch"
+                );
+                return Ok(None);
+            };
+            let host_gwt_bin = std::env::current_exe()
+                .map_err(|error| format!("current_exe: {error}"))
+                .map(|current_exe| {
+                    gwt_agent::resolve_public_gwt_bin_with_lookup(&current_exe, |command| {
+                        which::which(command).ok()
+                    })
+                })
+                .and_then(|path| {
+                    path.into_os_string()
+                        .into_string()
+                        .map_err(|_| "host gwtd path is not valid UTF-8".to_string())
+                });
+            let result = host_gwt_bin.and_then(|host_gwt_bin| {
+                register_codex_managed_hook_trust_in_docker(
+                    binding,
+                    &config.env_vars,
+                    &host_gwt_bin,
+                    codex_hook_discovery_mode,
+                )
+            });
+            if let Err(error) = result {
                 tracing::warn!(
                     worktree = %worktree_path.display(),
                     error = %error,
@@ -2825,12 +2913,261 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
     }
 }
 
-fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<PathBuf> {
-    let gwt_config_dir = profile_config_path.parent()?;
-    if gwt_config_dir.file_name().and_then(|name| name.to_str()) != Some(".gwt") {
-        return None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostEnvKeySemantics {
+    CaseSensitive,
+    WindowsCaseInsensitive,
+}
+
+impl HostEnvKeySemantics {
+    fn native() -> Self {
+        if cfg!(windows) {
+            Self::WindowsCaseInsensitive
+        } else {
+            Self::CaseSensitive
+        }
     }
-    Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
+}
+
+fn effective_host_env_value<'a>(
+    env_vars: &'a HashMap<String, String>,
+    key: &str,
+    semantics: HostEnvKeySemantics,
+) -> Result<Option<&'a str>, String> {
+    match semantics {
+        HostEnvKeySemantics::CaseSensitive => Ok(env_vars.get(key).map(String::as_str)),
+        HostEnvKeySemantics::WindowsCaseInsensitive => {
+            let mut values = env_vars
+                .iter()
+                .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key));
+            let value = values.next().map(|(_, value)| value.as_str());
+            if values.next().is_some() {
+                return Err(format!(
+                    "ambiguous {key}: the final Windows child environment contains multiple case-insensitive variants"
+                ));
+            }
+            Ok(value)
+        }
+    }
+}
+
+/// Resolve the Codex config file exactly as Codex 0.148 resolves its home.
+///
+/// A configured CODEX_HOME is resolved from the final child cwd and must
+/// already exist before Codex canonicalizes it. Without CODEX_HOME, Unix uses
+/// an absolute HOME while Windows uses the OS known-folder home and ignores
+/// HOME/USERPROFILE environment overrides.
+pub(super) fn effective_host_codex_config_path(
+    child_cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    semantics: HostEnvKeySemantics,
+    os_user_home: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let codex_home = effective_host_env_value(env_vars, "CODEX_HOME", semantics)?
+        .filter(|value| !value.is_empty());
+    if let Some(codex_home) = codex_home {
+        let codex_home = Path::new(codex_home);
+        let resolved = if codex_home.is_absolute() {
+            codex_home.to_path_buf()
+        } else {
+            child_cwd.join(codex_home)
+        };
+        return canonical_launch_path(&resolved, "CODEX_HOME").map(|home| home.join("config.toml"));
+    }
+
+    let user_home = match semantics {
+        HostEnvKeySemantics::CaseSensitive => {
+            effective_host_env_value(env_vars, "HOME", semantics)?
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        }
+        HostEnvKeySemantics::WindowsCaseInsensitive => os_user_home.map(Path::to_path_buf),
+    }
+    .ok_or_else(|| match semantics {
+        HostEnvKeySemantics::CaseSensitive => {
+            "cannot determine HOME for the Codex child environment".to_string()
+        }
+        HostEnvKeySemantics::WindowsCaseInsensitive => {
+            "cannot determine the OS user home for Codex".to_string()
+        }
+    })?;
+    if !user_home.is_absolute() {
+        return Err(format!(
+            "HOME must be absolute when CODEX_HOME is unset, got {}",
+            user_home.display()
+        ));
+    }
+    Ok(user_home.join(".codex").join("config.toml"))
+}
+
+fn canonical_launch_path(path: &Path, role: &str) -> Result<PathBuf, String> {
+    std::fs::canonicalize(path)
+        .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+        .map_err(|error| format!("failed to canonicalize {role} {}: {error}", path.display()))
+}
+
+pub(super) fn validate_issue_monitor_managed_codex_worktree(
+    candidate: Option<&IssueMonitorTrustCandidate>,
+    actual_project_root: &Path,
+    config: &gwt_agent::LaunchConfig,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Result<Option<ManagedCodexWorktree>, String> {
+    if config.agent_id != gwt_agent::AgentId::Codex {
+        return Ok(None);
+    }
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    let candidate_root =
+        canonical_launch_path(&candidate.project_root, "Issue Monitor project root")?;
+    let actual_root = canonical_launch_path(actual_project_root, "launch project root")?;
+    if candidate_root != actual_root {
+        return Err(format!(
+            "Issue Monitor project root {} does not match launch project root {}",
+            candidate_root.display(),
+            actual_root.display()
+        ));
+    }
+    if config.linked_issue_number != Some(candidate.issue_number) {
+        return Err(format!(
+            "Issue Monitor linked Issue #{} does not match launch metadata {:?}",
+            candidate.issue_number, config.linked_issue_number
+        ));
+    }
+    if !matches!(
+        candidate.session_mode,
+        gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
+    ) || config.session_mode != candidate.session_mode
+    {
+        return Err(format!(
+            "Issue Monitor session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
+            candidate.session_mode, config.session_mode
+        ));
+    }
+
+    let expected_branch = format!("work/issue-{}", candidate.issue_number);
+    if config.branch.as_deref() != Some(expected_branch.as_str()) {
+        return Err(format!(
+            "Issue Monitor branch must be {expected_branch}, got {:?}",
+            config.branch
+        ));
+    }
+
+    let configured_worktree = config.working_dir.as_deref().ok_or_else(|| {
+        "Issue Monitor Codex launch has no resolved working directory to validate".to_string()
+    })?;
+    let configured_worktree = canonical_launch_path(configured_worktree, "launch worktree")?;
+    let authoritative_worktree =
+        crate::usable_worktree_path_for_branch(worktrees, &expected_branch).ok_or_else(|| {
+            format!("Issue Monitor branch {expected_branch} has no authoritative gwt worktree")
+        })?;
+    let authoritative_worktree =
+        canonical_launch_path(&authoritative_worktree, "authoritative gwt worktree")?;
+    if configured_worktree != authoritative_worktree {
+        return Err(format!(
+            "launch worktree {} is not the authoritative gwt worktree {} for {expected_branch}",
+            configured_worktree.display(),
+            authoritative_worktree.display()
+        ));
+    }
+
+    Ok(Some(ManagedCodexWorktree(authoritative_worktree)))
+}
+
+pub(super) fn register_codex_managed_project_trust_for_resolved_launch(
+    profile_config_path: &Path,
+    managed_worktree: &ManagedCodexWorktree,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
+) -> Result<Option<gwt_skills::CodexProjectTrustReport>, String> {
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        profile_config_path,
+        managed_worktree,
+        config,
+        docker_binding,
+        std::env::var_os("CODEX_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+pub(super) fn register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+    _profile_config_path: &Path,
+    managed_worktree: &ManagedCodexWorktree,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
+    process_codex_home: Option<&OsStr>,
+    os_user_home: Option<&Path>,
+) -> Result<Option<gwt_skills::CodexProjectTrustReport>, String> {
+    match config.runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            let child_cwd = config.working_dir.as_deref().ok_or_else(|| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {}: launch has no final child cwd",
+                    managed_worktree.path().display()
+                )
+            })?;
+            let child_codex_config_path = effective_host_codex_config_path(
+                child_cwd,
+                &config.env_vars,
+                HostEnvKeySemantics::native(),
+                os_user_home,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {}: {error}",
+                    managed_worktree.path().display()
+                )
+            })?;
+            let Some(codex_config_path) =
+                gwt::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                    managed_worktree.path(),
+                    process_codex_home,
+                    os_user_home,
+                )
+            else {
+                return Ok(None);
+            };
+            if !gwt::managed_assets::codex_config_paths_equivalent(
+                &child_codex_config_path,
+                &codex_config_path,
+            ) {
+                tracing::info!(
+                    worktree = %managed_worktree.path().display(),
+                    "skipping project trust for a profile-owned Codex config"
+                );
+                return Ok(None);
+            }
+            gwt_skills::register_codex_managed_project_trust(
+                managed_worktree.path(),
+                &codex_config_path,
+            )
+            .map(Some)
+            .map_err(|error| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {} using config {}: {error}",
+                    managed_worktree.path().display(),
+                    codex_config_path.display()
+                )
+            })
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            let binding = docker_binding.ok_or_else(|| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {}: Docker launch has no resolved binding",
+                    managed_worktree.path().display()
+                )
+            })?;
+            register_codex_managed_project_trust_in_docker(binding, &config.env_vars)
+                .map(|()| None)
+                .map_err(|error| {
+                    format!(
+                        "failed to trust gwt-managed Codex worktree {}: {error}",
+                        managed_worktree.path().display()
+                    )
+                })
+        }
+    }
 }
 
 impl AppRuntime {
@@ -4363,6 +4700,10 @@ impl AppRuntime {
             .as_ref()
             .and_then(|context| context.issue_monitor_issue_number);
         let issue_monitor_launch = issue_monitor_issue_number.is_some();
+        let issue_monitor_trust_candidate = issue_monitor_trust_candidate_from_feedback(
+            &config.agent_id,
+            launch_feedback_context.as_ref(),
+        )?;
         if continuation.is_some() {
             if let Some(window_id) =
                 self.pending_continue_work
@@ -4562,6 +4903,7 @@ impl AppRuntime {
                 profile_config_path,
                 agent_capability_issuer,
                 prepared_manual_launch_claim,
+                issue_monitor_trust_candidate,
             );
         });
 
@@ -4601,6 +4943,7 @@ impl AppRuntime {
             profile_config_path,
             agent_capability_issuer,
             prepared_manual_launch_claim,
+            None,
         );
     }
 
@@ -4614,6 +4957,7 @@ impl AppRuntime {
         profile_config_path: PathBuf,
         agent_capability_issuer: Option<AgentCapabilityIssuer>,
         prepared_manual_launch_claim: Option<gwt_agent::SessionActiveLaunchHandshake>,
+        issue_monitor_trust_candidate: Option<IssueMonitorTrustCandidate>,
     ) {
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -4634,13 +4978,31 @@ impl AppRuntime {
                 message: "Preparing worktree...".to_string(),
             });
             resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+            let managed_codex_worktree = if issue_monitor_trust_candidate.is_some()
+                && config.agent_id == gwt_agent::AgentId::Codex
+            {
+                let main_worktree_root =
+                    gwt_git::worktree::main_worktree_root(Path::new(&project_root))
+                        .map_err(|error| error.to_string())?;
+                let worktrees = gwt_git::WorktreeManager::new(&main_worktree_root)
+                    .list()
+                    .map_err(|error| error.to_string())?;
+                validate_issue_monitor_managed_codex_worktree(
+                    issue_monitor_trust_candidate.as_ref(),
+                    Path::new(&project_root),
+                    &config,
+                    &worktrees,
+                )?
+            } else {
+                None
+            };
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Starting Docker service...".to_string(),
             });
-            let container_runtime =
-                apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+            let docker_launch_binding =
+                prepare_docker_runtime_for_launch(Path::new(&project_root), &mut config)?;
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -4661,6 +5023,21 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
+            if let Some(managed_worktree) = managed_codex_worktree.as_ref() {
+                let report = register_codex_managed_project_trust_for_resolved_launch(
+                    &profile_config_path,
+                    managed_worktree,
+                    &config,
+                    docker_launch_binding.as_ref(),
+                )?;
+                if report.is_some() {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: "Trusted the gwt-managed Codex worktree.".to_string(),
+                    });
+                }
+            }
+            resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
             let tool_runtime_migration_source =
                 hydrate_tool_runtime_provenance_from_source_session(&sessions_dir, &mut config)?;
             let runner_health_report = (config.runtime_target
@@ -4693,14 +5070,11 @@ impl AppRuntime {
                         worktree_path.display()
                     )
                 })?;
-            let codex_home = config.env_vars.get("CODEX_HOME").map(PathBuf::from);
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
                 &worktree_path,
-                &config.agent_id,
-                config.runtime_target,
-                config.docker_service.as_deref(),
-                codex_home.as_deref(),
+                &config,
+                docker_launch_binding.as_ref(),
                 codex_hook_discovery_mode,
                 managed_assets.hook_bin.as_deref(),
             )? {
@@ -4785,6 +5159,7 @@ impl AppRuntime {
             session.docker_service = config.docker_service.clone();
             session.docker_lifecycle_intent = config.docker_lifecycle_intent;
             session.linked_issue_number = config.linked_issue_number;
+            session.launch_route = config.launch_route;
             session.launch_command =
                 durable_tool_runtime_command.unwrap_or_else(|| config.command.clone());
             session.launch_args = config.args.clone();
@@ -4920,10 +5295,9 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
-                Path::new(&project_root),
+            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_binding(
                 &mut config,
-                container_runtime.as_ref(),
+                docker_launch_binding.as_ref(),
             )?;
             let agent_project_root = docker_runtime_worktree.unwrap_or_else(|| {
                 config
@@ -4981,7 +5355,9 @@ impl AppRuntime {
                 active_continuation: active_continuation.as_ref(),
                 execution_entrypoint: &execution_entrypoint,
                 runtime_target,
-                container_runtime: container_runtime.as_ref(),
+                container_runtime: docker_launch_binding
+                    .as_ref()
+                    .map(DockerLaunchBinding::runtime),
             }
             .install_with_prepared_claim(
                 &mut config.env_vars,
@@ -5510,11 +5886,17 @@ impl AppRuntime {
             }
         }
 
-        if let Err(error) = manager.remove_force(worktree_path) {
+        if let Err(error) =
+            gwt::managed_assets::cleanup_worktree_with_codex_project_trust(worktree_path, || {
+                manager
+                    .remove_force(worktree_path)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            })
+        {
             tracing::warn!(
                 worktree_path = %worktree_path.display(),
                 error = %error,
-                "failed to remove clean ephemeral worktree"
+                "failed to revoke Codex project trust and remove clean ephemeral worktree"
             );
         }
     }
@@ -5751,8 +6133,11 @@ mod docker_session_persistence_tests {
         config.command = "codex".to_string();
         config.args = vec!["--no-alt-screen".to_string()];
         let runtime = crate::resolved_test_docker_runtime(temp.path());
+        let plan = crate::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
         let runtime_worktree =
-            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+            finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
                 .expect("finalize Docker launch")
                 .expect("Docker runtime worktree");
 

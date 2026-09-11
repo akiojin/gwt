@@ -10632,7 +10632,7 @@ fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
         .expect("issue window")
         .id
         .clone();
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .branch("work/issue-3671")
         .build();
 
@@ -10676,7 +10676,7 @@ fn app_runtime_issue_monitor_launch_falls_back_to_canvas_without_issue_window() 
         &[WindowPreset::Board],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .branch("work/issue-3671-fallback")
         .build();
 
@@ -10798,7 +10798,7 @@ fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
     let mut feedback = issue_monitor_feedback(3671);
     feedback.issue_monitor_delivery_id = Some(delivery_id.clone());
     feedback.issue_monitor_project_root = Some(repo.clone());
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .branch("work/issue-3671-tracking")
         .build();
 
@@ -16806,7 +16806,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
                 issue_monitor_issue_number: Some(3456),
                 issue_monitor_delivery_id: Some(delivery_id.clone()),
                 issue_monitor_project_root: Some(repo.clone()),
-                issue_monitor_session_mode: None,
+                issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
                 issue_monitor_autonomous_handoff: None,
                 issue_monitor_autonomous_submit_started: false,
                 issue_monitor_review_dispatch: false,
@@ -28972,6 +28972,33 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
 // SPEC-3214 T-005/T-007: an ephemeral intake session leaves NO Work identity
 // and its throwaway `.intake-*` worktree is removed when it ends (clean), while
 // a dirty intake worktree is kept so no in-progress work is lost.
+fn seed_codex_project_trust_for_cleanup(worktree: &Path, home: &Path) -> (PathBuf, String) {
+    let config_path = home.join(".codex/config.toml");
+    let report = gwt_skills::register_codex_managed_project_trust(worktree, &config_path)
+        .expect("seed Codex project trust");
+    (
+        config_path,
+        report
+            .project_path
+            .to_str()
+            .expect("project path UTF-8")
+            .to_string(),
+    )
+}
+
+fn codex_project_trust_level(config_path: &Path, project_key: &str) -> Option<String> {
+    let root = fs::read_to_string(config_path)
+        .ok()
+        .and_then(|content| toml::from_str::<toml::Value>(&content).ok())?;
+    root.get("projects")?
+        .as_table()?
+        .get(project_key)?
+        .as_table()?
+        .get("trust_level")?
+        .as_str()
+        .map(str::to_string)
+}
+
 #[test]
 fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work() {
     let _env_lock = env_test_lock()
@@ -28980,6 +29007,7 @@ fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -28992,6 +29020,8 @@ fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work
         .create_detached("HEAD", &intake)
         .expect("intake worktree");
     assert!(intake.exists());
+    let (codex_config_path, codex_project_key) =
+        seed_codex_project_trust_for_cleanup(&intake, temp.path());
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -29010,6 +29040,11 @@ fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work
     assert!(
         !intake.exists(),
         "clean intake worktree is removed when the session ends"
+    );
+    assert_eq!(
+        codex_project_trust_level(&codex_config_path, &codex_project_key),
+        None,
+        "removing the managed worktree must revoke its Codex project trust"
     );
     let active_work_count = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -29036,6 +29071,7 @@ fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -29049,6 +29085,8 @@ fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
         .expect("intake worktree");
     // Uncommitted work must not be destroyed.
     fs::write(intake.join("wip.txt"), "unsaved intake work").expect("write wip");
+    let (codex_config_path, codex_project_key) =
+        seed_codex_project_trust_for_cleanup(&intake, temp.path());
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -29066,6 +29104,122 @@ fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
     assert!(
         intake.exists() && intake.join("wip.txt").exists(),
         "a dirty intake worktree is kept so uncommitted work is never lost"
+    );
+    assert_eq!(
+        codex_project_trust_level(&codex_config_path, &codex_project_key).as_deref(),
+        Some("trusted"),
+        "retaining the worktree must retain its Codex project trust"
+    );
+}
+
+#[test]
+fn ephemeral_intake_cleanup_keeps_worktree_when_codex_trust_cannot_be_revoked() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+
+    let intake = temp.path().join(".intake-invalid-codex-config");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    let config_path = temp.path().join(".codex/config.toml");
+    fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+        .expect("create Codex config parent");
+    fs::write(&config_path, "projects = [\n").expect("write malformed Codex config");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake-invalid-codex-config".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(
+        intake.exists(),
+        "Codex config parse failure must prevent filesystem deletion"
+    );
+    assert_eq!(
+        fs::read_to_string(config_path).expect("malformed config remains"),
+        "projects = [\n"
+    );
+}
+
+#[test]
+fn docker_ephemeral_intake_cleanup_removes_exact_host_trust_and_preserves_unrelated_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+
+    let intake = temp.path().join(".intake-docker");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    let config_path = temp.path().join(".codex/config.toml");
+    let project_key = gwt_skills::register_codex_managed_project_trust(&intake, &config_path)
+        .expect("seed exact Host Codex trust from an earlier Host launch")
+        .project_path
+        .to_string_lossy()
+        .into_owned();
+    let mut host_config: toml::Value =
+        toml::from_str(&fs::read_to_string(&config_path).expect("read seeded config"))
+            .expect("parse seeded config");
+    host_config.as_table_mut().expect("config table").insert(
+        "model".to_string(),
+        toml::Value::String("user-owned".to_string()),
+    );
+    fs::write(
+        &config_path,
+        toml::to_string_pretty(&host_config).expect("render host config"),
+    )
+    .expect("write host Codex sentinel");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake-docker".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(!intake.exists(), "clean Docker intake worktree is removed");
+    assert_eq!(
+        codex_project_trust_level(&config_path, &project_key),
+        None,
+        "deleting the Host path must remove exact stale Host trust even when the final session used Docker"
+    );
+    let remaining: toml::Value =
+        toml::from_str(&fs::read_to_string(config_path).expect("read host Codex sentinel"))
+            .expect("parse remaining Host config");
+    assert_eq!(
+        remaining["model"].as_str(),
+        Some("user-owned"),
+        "Docker-local lifecycle must not disturb unrelated Host Codex state"
     );
 }
 
@@ -37569,6 +37723,114 @@ fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
         }
     )));
     assert!(runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_codex_directory_trust_prompt_escalates_only_monitor_owned_live_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo_without_origin(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_agent_id("agent-1", "codex"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.clone(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let prompt = b"You are in /tmp/managed-worktree\r\n\r\n\
+        Do you trust the contents of this directory? Working with untrusted contents comes with higher\r\n\
+        risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\r\n\
+        policies to load.\r\n\r\n\
+        > 1. Yes, continue\r\n  2. No, quit\r\n\r\n  Press enter to continue\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+
+    runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        persisted.launched_issues.is_empty(),
+        "NeedsHuman releases the slot"
+    );
+    assert_eq!(persisted.failed_issues.len(), 1);
+    assert_eq!(persisted.failed_issues[0].issue_number, 42);
+    assert_eq!(
+        persisted.failed_issues[0].message,
+        "Codex requires directory trust confirmation for the managed worktree"
+    );
+    assert!(
+        !runtime.window_approval_waiting.contains_key(&window_id),
+        "directory trust is a typed terminal handoff, not tool-approval Waiting"
+    );
+}
+
+#[test]
+fn app_runtime_directory_trust_prompt_is_inert_for_unowned_codex_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo_without_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "codex-1",
+        repo.clone(),
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let prompt = b"You are in /tmp/manual-worktree\r\n\r\n\
+        Do you trust the contents of this directory? Working with untrusted contents comes with higher\r\n\
+        risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.\r\n\r\n\
+        > 1. Yes, continue\r\n  2. No, quit\r\n\r\n  Press enter to continue\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+
+    let events = runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+
+    assert_eq!(
+        events.len(),
+        1,
+        "unowned output remains ordinary terminal output"
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+            .map_or(true, |prefs| prefs.failed_issues.is_empty())
+    );
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
 }
 
 #[test]
@@ -53272,13 +53534,17 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
 
     let worktree = tempdir().expect("worktree tempdir");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .build();
+    launch_config
+        .env_vars
+        .insert("HOME".to_string(), home.path().display().to_string());
 
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53343,12 +53609,17 @@ fn codex_hook_trust_launch_vouches_for_the_binary_materialization_pinned() {
          the launch no longer needs to be told which binary was written: {guessed:?}"
     );
 
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .build();
+    launch_config
+        .env_vars
+        .insert("HOME".to_string(), home.path().display().to_string());
+
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         Some(generated_hook_bin.as_str()),
@@ -53364,6 +53635,859 @@ fn codex_hook_trust_launch_vouches_for_the_binary_materialization_pinned() {
 }
 
 #[test]
+fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let mut settings = Settings::default();
+    settings.agent.codex_trust_managed_hooks = Some(false);
+    settings
+        .save(&profile_config_path)
+        .expect("save hook trust opt-out");
+    let worktree = tempdir().expect("worktree tempdir");
+    let codex_home = tempdir().expect("codex home");
+
+    let worktrees = vec![gwt_git::WorktreeInfo {
+        path: worktree.path().to_path_buf(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    }];
+    let mut managed = None;
+    for mode in [
+        gwt_agent::SessionMode::Normal,
+        gwt_agent::SessionMode::Resume,
+    ] {
+        let candidate = super::IssueMonitorTrustCandidate {
+            issue_number: 42,
+            project_root: home.path().to_path_buf(),
+            session_mode: mode,
+        };
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(worktree.path())
+            .branch("work/issue-42")
+            .linked_issue_number(42)
+            .session_mode(mode)
+            .build();
+        managed = super::validate_issue_monitor_managed_codex_worktree(
+            Some(&candidate),
+            home.path(),
+            &config,
+            &worktrees,
+        )
+        .expect("exact Issue Monitor worktree must validate");
+        assert!(managed.is_some(), "{mode:?} launch must mint managed proof");
+    }
+    let managed = managed.expect("Codex Issue Monitor launch returns managed proof");
+
+    let mut trust_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .session_mode(gwt_agent::SessionMode::Resume)
+        .build();
+    trust_config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        codex_home.path().display().to_string(),
+    );
+    let report = super::register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        &profile_config_path,
+        &managed,
+        &trust_config,
+        None,
+        Some(codex_home.path().as_os_str()),
+        Some(home.path()),
+    )
+    .expect("managed Codex launch must register project trust")
+    .expect("host launch returns its project trust report");
+    assert_eq!(
+        Settings::load_from_path(&profile_config_path)
+            .expect("reload settings")
+            .agent
+            .codex_trust_managed_hooks,
+        Some(false),
+        "directory trust must not alter or depend on the managed-hook opt-out"
+    );
+
+    let canonical_worktree = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(worktree.path()).unwrap(),
+    );
+    assert_eq!(report.project_path, canonical_worktree);
+    assert_eq!(
+        report.config_path,
+        fs::canonicalize(codex_home.path())
+            .unwrap()
+            .join("config.toml")
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&report.config_path).unwrap()).unwrap();
+    assert_eq!(
+        config["projects"][canonical_worktree.to_string_lossy().as_ref()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+    assert!(
+        !home.path().join(".codex/config.toml").exists(),
+        "project trust must use the effective CODEX_HOME"
+    );
+}
+
+#[test]
+fn host_codex_config_path_matches_the_final_child_environment_and_cwd() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let child_cwd = temp.path().join("worktree");
+    fs::create_dir_all(&child_cwd).expect("create child cwd");
+    let relative_codex_home = child_cwd.join("relative/codex-home");
+    fs::create_dir_all(&relative_codex_home).expect("create relative CODEX_HOME");
+    let canonical_codex_home = fs::canonicalize(&relative_codex_home).unwrap();
+    let os_user_home = temp.path().join("os-user-home");
+    fs::create_dir_all(&os_user_home).expect("create OS user home");
+
+    let relative_codex_home_env =
+        HashMap::from([("CODEX_HOME".to_string(), "relative/codex-home".to_string())]);
+    assert_eq!(
+        super::effective_host_codex_config_path(
+            &child_cwd,
+            &relative_codex_home_env,
+            super::HostEnvKeySemantics::CaseSensitive,
+            Some(&os_user_home),
+        )
+        .expect("relative CODEX_HOME"),
+        canonical_codex_home.join("config.toml"),
+        "existing relative CODEX_HOME must canonicalize from the final child cwd"
+    );
+
+    let unix_home_path = temp.path().join("unix-home");
+    fs::create_dir_all(&unix_home_path).expect("create Unix HOME");
+    let unix_home = HashMap::from([("HOME".to_string(), unix_home_path.display().to_string())]);
+    assert_eq!(
+        super::effective_host_codex_config_path(
+            &child_cwd,
+            &unix_home,
+            super::HostEnvKeySemantics::CaseSensitive,
+            Some(&os_user_home),
+        )
+        .expect("Unix HOME fallback"),
+        unix_home_path.join(".codex/config.toml")
+    );
+
+    let windows_env = HashMap::from([
+        ("HOME".to_string(), "ignored/home".to_string()),
+        (
+            "userprofile".to_string(),
+            "ignored/windows-profile".to_string(),
+        ),
+    ]);
+    assert_eq!(
+        super::effective_host_codex_config_path(
+            &child_cwd,
+            &windows_env,
+            super::HostEnvKeySemantics::WindowsCaseInsensitive,
+            Some(&os_user_home),
+        )
+        .expect("Windows OS user-home fallback"),
+        os_user_home.join(".codex/config.toml"),
+        "Codex/dirs 6 on Windows ignores HOME and USERPROFILE env overrides"
+    );
+}
+
+#[test]
+fn host_codex_config_path_rejects_relative_home_and_missing_relative_codex_home() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let child_cwd = temp.path().join("worktree");
+    fs::create_dir_all(&child_cwd).expect("create child cwd");
+    let os_user_home = temp.path().join("os-user-home");
+
+    let relative_home = HashMap::from([("HOME".to_string(), "relative/home".to_string())]);
+    let error = super::effective_host_codex_config_path(
+        &child_cwd,
+        &relative_home,
+        super::HostEnvKeySemantics::CaseSensitive,
+        Some(&os_user_home),
+    )
+    .expect_err("Codex requires its Unix fallback home to be absolute");
+    assert!(error.contains("HOME must be absolute"), "{error}");
+
+    let missing_codex_home =
+        HashMap::from([("CODEX_HOME".to_string(), "missing/codex-home".to_string())]);
+    let error = super::effective_host_codex_config_path(
+        &child_cwd,
+        &missing_codex_home,
+        super::HostEnvKeySemantics::CaseSensitive,
+        Some(&os_user_home),
+    )
+    .expect_err("Codex metadata-checks CODEX_HOME before canonicalizing it");
+    assert!(error.contains("CODEX_HOME"), "{error}");
+
+    let error = super::effective_host_codex_config_path(
+        &child_cwd,
+        &HashMap::new(),
+        super::HostEnvKeySemantics::CaseSensitive,
+        Some(&os_user_home),
+    )
+    .expect_err("Unix Codex fallback must not borrow the parent process home");
+    assert!(error.contains("HOME"), "{error}");
+}
+
+#[test]
+fn host_codex_config_path_rejects_windows_duplicate_case_ambiguity() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let child_cwd = temp.path().join("worktree");
+    fs::create_dir_all(&child_cwd).expect("create child cwd");
+    let ambiguous_env = HashMap::from([
+        ("CODEX_HOME".to_string(), "first".to_string()),
+        ("codex_home".to_string(), "second".to_string()),
+    ]);
+
+    let error = super::effective_host_codex_config_path(
+        &child_cwd,
+        &ambiguous_env,
+        super::HostEnvKeySemantics::WindowsCaseInsensitive,
+        Some(temp.path()),
+    )
+    .expect_err("case-insensitive duplicate CODEX_HOME values must fail closed");
+    assert!(error.contains("ambiguous CODEX_HOME"), "{error}");
+}
+
+#[test]
+fn managed_project_trust_skips_worktree_relative_codex_home() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&project).expect("create project");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let profile_config_path = project.join(".gwt/config.toml");
+    let candidate = super::IssueMonitorTrustCandidate {
+        issue_number: 42,
+        project_root: project.clone(),
+        session_mode: gwt_agent::SessionMode::Normal,
+    };
+    let worktrees = vec![gwt_git::WorktreeInfo {
+        path: worktree.clone(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    }];
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .session_mode(gwt_agent::SessionMode::Normal)
+        .build();
+    config
+        .env_vars
+        .insert("CODEX_HOME".to_string(), "relative/codex-home".to_string());
+    fs::create_dir_all(worktree.join("relative/codex-home")).expect("create relative CODEX_HOME");
+    let managed = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        &project,
+        &config,
+        &worktrees,
+    )
+    .expect("managed provenance validation")
+    .expect("managed proof");
+
+    let report = super::register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        &profile_config_path,
+        &managed,
+        &config,
+        None,
+        None,
+        Some(temp.path()),
+    )
+    .expect("worktree-relative CODEX_HOME is an explicit no-write boundary");
+
+    assert!(report.is_none());
+    assert!(
+        !worktree.join("relative/codex-home/config.toml").exists(),
+        "project trust must not be written to a worktree-local CODEX_HOME"
+    );
+}
+
+#[test]
+fn managed_project_trust_skips_absolute_process_codex_home_inside_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktree");
+    let nested_codex_home = worktree.join(".codex");
+    fs::create_dir_all(&project).expect("create project");
+    fs::create_dir_all(&nested_codex_home).expect("create nested Codex home");
+    let profile_config_path = project.join(".gwt/config.toml");
+    let candidate = super::IssueMonitorTrustCandidate {
+        issue_number: 42,
+        project_root: project.clone(),
+        session_mode: gwt_agent::SessionMode::Normal,
+    };
+    let worktrees = vec![gwt_git::WorktreeInfo {
+        path: worktree.clone(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    }];
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .session_mode(gwt_agent::SessionMode::Normal)
+        .build();
+    config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        nested_codex_home.display().to_string(),
+    );
+    let managed = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        &project,
+        &config,
+        &worktrees,
+    )
+    .expect("managed provenance validation")
+    .expect("managed proof");
+
+    let report = super::register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        &profile_config_path,
+        &managed,
+        &config,
+        None,
+        Some(nested_codex_home.as_os_str()),
+        Some(temp.path()),
+    )
+    .expect("worktree-contained process CODEX_HOME is an explicit no-write boundary");
+
+    assert!(report.is_none());
+    assert!(
+        !nested_codex_home.join("config.toml").exists(),
+        "project trust must not be written inside the managed worktree"
+    );
+}
+
+#[test]
+fn managed_project_trust_skips_profile_supplied_arbitrary_codex_home() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktree");
+    let default_home = temp.path().join("default-home");
+    let profile_codex_home = temp.path().join("profile-codex-home");
+    fs::create_dir_all(&project).expect("create project");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    fs::create_dir_all(&default_home).expect("create default home");
+    fs::create_dir_all(&profile_codex_home).expect("create profile Codex home");
+    let profile_config_path = project.join(".gwt/config.toml");
+    let candidate = super::IssueMonitorTrustCandidate {
+        issue_number: 42,
+        project_root: project.clone(),
+        session_mode: gwt_agent::SessionMode::Normal,
+    };
+    let worktrees = vec![gwt_git::WorktreeInfo {
+        path: worktree.clone(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    }];
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .session_mode(gwt_agent::SessionMode::Normal)
+        .build();
+    config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        profile_codex_home.display().to_string(),
+    );
+    let managed = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        &project,
+        &config,
+        &worktrees,
+    )
+    .expect("managed provenance validation")
+    .expect("managed proof");
+
+    let report = super::register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        &profile_config_path,
+        &managed,
+        &config,
+        None,
+        None,
+        Some(&default_home),
+    )
+    .expect("custom CODEX_HOME is an explicit no-write boundary");
+
+    assert!(report.is_none());
+    assert!(
+        !profile_codex_home.join("config.toml").exists(),
+        "gwt must not create project trust in a profile-owned arbitrary CODEX_HOME"
+    );
+    assert!(
+        !default_home.join(".codex/config.toml").exists(),
+        "a mismatched child config must not cause a useless default-config trust write"
+    );
+}
+
+#[test]
+fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let profile_config_path = home.path().join(".gwt/config.toml");
+    let worktree = tempdir().expect("worktree tempdir");
+
+    let candidate = super::IssueMonitorTrustCandidate {
+        issue_number: 42,
+        project_root: home.path().to_path_buf(),
+        session_mode: gwt_agent::SessionMode::Normal,
+    };
+    let worktrees = vec![gwt_git::WorktreeInfo {
+        path: worktree.path().to_path_buf(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    }];
+    let claude_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .working_dir(worktree.path())
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .build();
+    let claude = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        home.path(),
+        &claude_config,
+        &worktrees,
+    )
+    .expect("non-Codex launch should not fail");
+    assert!(claude.is_none());
+    assert!(!home.path().join(".codex/config.toml").exists());
+
+    let codex_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .build();
+    for session_mode in [
+        gwt_agent::SessionMode::Normal,
+        gwt_agent::SessionMode::Continue,
+    ] {
+        let mut unowned_config = codex_config.clone();
+        unowned_config.session_mode = session_mode;
+        let unowned = super::validate_issue_monitor_managed_codex_worktree(
+            None,
+            home.path(),
+            &unowned_config,
+            &worktrees,
+        )
+        .expect("unowned Codex launch should not fail");
+        assert!(
+            unowned.is_none(),
+            "manual, Quick Start, and generic Continue launches must never mint managed trust proof ({session_mode:?})"
+        );
+    }
+    let managed = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        home.path(),
+        &codex_config,
+        &worktrees,
+    )
+    .unwrap()
+    .unwrap();
+    let invalid_codex_home = home.path().join("not-a-directory");
+    fs::write(&invalid_codex_home, "file").unwrap();
+    let mut invalid_config = codex_config;
+    invalid_config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        invalid_codex_home.display().to_string(),
+    );
+    let error = super::register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        &profile_config_path,
+        &managed,
+        &invalid_config,
+        None,
+        Some(invalid_codex_home.as_os_str()),
+        Some(home.path()),
+    )
+    .expect_err("project trust failure must abort before Codex can prompt");
+    assert!(error.contains("failed to trust gwt-managed Codex worktree"));
+}
+
+#[test]
+fn issue_monitor_project_trust_candidate_requires_complete_feedback_provenance() {
+    let project = tempdir().expect("project tempdir");
+    let _gwt_home = ScopedGwtHome::set(project.path());
+    let complete = LaunchFeedbackContext {
+        client_id: "client-1".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(42),
+        issue_monitor_delivery_id: Some("delivery-42".to_string()),
+        issue_monitor_project_root: Some(project.path().to_path_buf()),
+        issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
+    };
+
+    let candidate = super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&complete),
+    )
+    .expect("complete provenance")
+    .expect("Issue Monitor candidate");
+    assert_eq!(candidate.issue_number, 42);
+    assert_eq!(candidate.project_root, project.path());
+    assert_eq!(candidate.session_mode, gwt_agent::SessionMode::Normal);
+
+    let generic_continue = LaunchFeedbackContext {
+        issue_monitor_session_mode: Some(gwt_agent::SessionMode::Continue),
+        ..complete.clone()
+    };
+    let error = super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&generic_continue),
+    )
+    .expect_err("generic Continue provenance must never mint managed trust eligibility");
+    assert!(error.contains("Normal or Resume"), "{error}");
+
+    let missing_mode = LaunchFeedbackContext {
+        issue_monitor_session_mode: None,
+        ..complete.clone()
+    };
+    let error = super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&missing_mode),
+    )
+    .expect_err("Issue Monitor ownership without a typed session mode must fail closed");
+    assert!(error.contains("session mode provenance"), "{error}");
+
+    let incomplete = LaunchFeedbackContext {
+        issue_monitor_project_root: None,
+        ..complete
+    };
+    let error = super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&incomplete),
+    )
+    .expect_err("Issue Monitor ownership without project root must fail closed");
+    assert!(error.contains("no project root provenance"), "{error}");
+    assert!(super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::ClaudeCode,
+        Some(&incomplete),
+    )
+    .expect("non-Codex launch must ignore trust provenance")
+    .is_none());
+}
+
+#[test]
+fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&project).expect("create project");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo_without_origin(&project);
+    let launch_effect_id = "phase85-trust-preflight";
+    let delivery_id = format!("launch:{launch_effect_id}");
+    let feedback = LaunchFeedbackContext {
+        client_id: "__issue_monitor__".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(42),
+        issue_monitor_delivery_id: Some(delivery_id.clone()),
+        issue_monitor_project_root: Some(project.clone()),
+        issue_monitor_session_mode: Some(gwt_agent::SessionMode::Resume),
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
+    };
+    let candidate = super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&feedback),
+    )
+    .expect("typed Issue Monitor feedback")
+    .expect("managed trust candidate");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .session_mode(gwt_agent::SessionMode::Resume)
+        .build();
+    let invalid_codex_home = temp.path().join("codex-home-is-a-file");
+    fs::write(&invalid_codex_home, "not a directory").expect("write invalid CODEX_HOME");
+    config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        invalid_codex_home.display().to_string(),
+    );
+    let managed = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        &project,
+        &config,
+        &[gwt_git::WorktreeInfo {
+            path: worktree,
+            branch: Some("work/issue-42".to_string()),
+            locked: false,
+            prunable: false,
+        }],
+    )
+    .expect("actual feedback must pass provenance preflight")
+    .expect("managed worktree proof");
+    let error = super::register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        &project.join(".gwt/config.toml"),
+        &managed,
+        &config,
+        None,
+        Some(invalid_codex_home.as_os_str()),
+        Some(temp.path()),
+    )
+    .expect_err("trust writer failure must abort launch preflight");
+
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Codex trust preflight failure".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        42,
+        "claim-phase85-trust-preflight",
+        "host/session",
+        launch_effect_id,
+        "2026-08-29T00:00:00Z",
+    ));
+    assert!(monitor.claim_launch_delivery(
+        42,
+        &delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        "tab-1::agent-1",
+        |_| false,
+    ));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        &monitor.prefs(),
+    )
+    .expect("seed durable delivery");
+    let events = runtime.issue_monitor_launch_failed_delivery_events_with_mode(
+        Some(&project),
+        42,
+        &error,
+        feedback.issue_monitor_delivery_id.as_deref(),
+        feedback.issue_monitor_session_mode.unwrap(),
+    );
+
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message,
+            session_mode: gwt_agent::SessionMode::Resume,
+        }) if message == &error
+    ));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number: 42,
+            message,
+        } if message == &error
+    )));
+    let persisted =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&project))
+            .expect("reload trust-preflight failure");
+    assert!(persisted.launching_issues.is_empty());
+    assert!(persisted.launched_issues.is_empty());
+    assert!(persisted.pending_launch_deliveries.is_empty());
+    assert!(persisted
+        .failed_issues
+        .iter()
+        .any(|failure| failure.issue_number == 42 && failure.message == error));
+    let restored =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    assert_eq!(
+        restored.active_count(),
+        0,
+        "a fail-closed trust preflight must durably release its Issue Monitor slot"
+    );
+}
+
+#[test]
+fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation() {
+    let source = include_str!("launch.rs");
+    let worker = source
+        .split("fn spawn_agent_window_async_with_claim")
+        .nth(1)
+        .expect("launch worker source");
+    let validate = worker
+        .find("validate_issue_monitor_managed_codex_worktree")
+        .expect("managed provenance validation");
+    let docker_prepare = worker
+        .find("prepare_docker_runtime_for_launch")
+        .expect("Docker service and immutable binding preparation");
+    let register = worker
+        .find("register_codex_managed_project_trust_for_resolved_launch")
+        .expect("project trust registration");
+    let docker_runner_probe = worker
+        .find("resolve_docker_agent_program_with_binding")
+        .expect("Docker agent runner probe");
+    let runner_probe = worker
+        .find("resolve_host_runner_health_checked")
+        .expect("host runner probe");
+    let session = worker
+        .find("gwt_agent::Session::new")
+        .expect("durable Session creation");
+
+    assert!(
+        validate < register,
+        "provenance must be proven before trust"
+    );
+    assert!(
+        docker_prepare < register,
+        "Docker identity and service must be bound before container-local trust"
+    );
+    assert!(
+        register < docker_runner_probe,
+        "directory trust must be registered before any Docker agent runner probe"
+    );
+    assert!(
+        register < runner_probe,
+        "directory trust must be registered before any Codex runner probe"
+    );
+    assert!(
+        register < session,
+        "directory trust failure must abort before Session/process materialization"
+    );
+}
+
+#[test]
+fn codex_project_trust_scope_refuses_arbitrary_working_dir_even_with_issue_metadata() {
+    let project = tempdir().expect("project tempdir");
+    let _gwt_home = ScopedGwtHome::set(project.path());
+    let managed_worktree = tempdir().expect("managed worktree tempdir");
+    let arbitrary = tempdir().expect("arbitrary worktree tempdir");
+    let candidate = super::IssueMonitorTrustCandidate {
+        issue_number: 42,
+        project_root: project.path().to_path_buf(),
+        session_mode: gwt_agent::SessionMode::Normal,
+    };
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(arbitrary.path())
+        .branch("work/issue-42")
+        .linked_issue_number(42)
+        .build();
+    let worktrees = vec![gwt_git::WorktreeInfo {
+        path: managed_worktree.path().to_path_buf(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    }];
+
+    let error = super::validate_issue_monitor_managed_codex_worktree(
+        Some(&candidate),
+        project.path(),
+        &config,
+        &worktrees,
+    )
+    .expect_err("inventory-external directory must never become trusted");
+
+    assert!(error.contains("authoritative gwt worktree"), "{error}");
+}
+
+#[test]
+fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
+    let project = tempdir().expect("project tempdir");
+    let _gwt_home = ScopedGwtHome::set(project.path());
+    let other_project = tempdir().expect("other project tempdir");
+    let worktree = tempdir().expect("worktree tempdir");
+    let base_config = || {
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(worktree.path())
+            .branch("work/issue-42")
+            .linked_issue_number(42)
+            .build()
+    };
+    let valid_candidate = super::IssueMonitorTrustCandidate {
+        issue_number: 42,
+        project_root: project.path().to_path_buf(),
+        session_mode: gwt_agent::SessionMode::Normal,
+    };
+    let valid_entry = gwt_git::WorktreeInfo {
+        path: worktree.path().to_path_buf(),
+        branch: Some("work/issue-42".to_string()),
+        locked: false,
+        prunable: false,
+    };
+
+    let cases = [
+        (
+            super::IssueMonitorTrustCandidate {
+                issue_number: 42,
+                project_root: other_project.path().to_path_buf(),
+                session_mode: gwt_agent::SessionMode::Normal,
+            },
+            base_config(),
+            valid_entry.clone(),
+            "project root",
+        ),
+        (
+            valid_candidate.clone(),
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(worktree.path())
+                .branch("work/issue-42")
+                .linked_issue_number(43)
+                .build(),
+            valid_entry.clone(),
+            "linked Issue",
+        ),
+        (
+            super::IssueMonitorTrustCandidate {
+                session_mode: gwt_agent::SessionMode::Resume,
+                ..valid_candidate.clone()
+            },
+            base_config(),
+            valid_entry.clone(),
+            "session mode",
+        ),
+        (
+            valid_candidate.clone(),
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(worktree.path())
+                .branch("feature/arbitrary")
+                .linked_issue_number(42)
+                .build(),
+            valid_entry.clone(),
+            "branch",
+        ),
+        (
+            valid_candidate,
+            base_config(),
+            gwt_git::WorktreeInfo {
+                prunable: true,
+                ..valid_entry
+            },
+            "authoritative gwt worktree",
+        ),
+    ];
+
+    for (candidate, config, entry, expected) in cases {
+        let error = super::validate_issue_monitor_managed_codex_worktree(
+            Some(&candidate),
+            project.path(),
+            &config,
+            &[entry],
+        )
+        .expect_err("mismatched provenance must fail closed");
+        assert!(
+            error.contains(expected),
+            "expected {expected:?} in {error:?}"
+        );
+    }
+}
+
+#[test]
 fn codex_hook_trust_launch_uses_effective_codex_home_config() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
@@ -53371,21 +54495,28 @@ fn codex_hook_trust_launch_uses_effective_codex_home_config() {
     let worktree = tempdir().expect("worktree tempdir");
     let codex_home = tempdir().expect("codex home");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .build();
+    launch_config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        codex_home.path().display().to_string(),
+    );
 
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
+        &launch_config,
         None,
-        Some(codex_home.path()),
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
     )
     .unwrap()
     .expect("Codex launch should register trust into the effective CODEX_HOME");
 
-    let codex_home_config = codex_home.path().join("config.toml");
+    let codex_home_config = fs::canonicalize(codex_home.path())
+        .unwrap()
+        .join("config.toml");
     assert_eq!(report.config_path, codex_home_config);
     let config = fs::read_to_string(&codex_home_config).unwrap();
     assert!(
@@ -53405,13 +54536,17 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+    let mut codex_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .build();
+    codex_config
+        .env_vars
+        .insert("HOME".to_string(), home.path().display().to_string());
 
     let unset = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &codex_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53432,9 +54567,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
     let disabled = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &codex_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53452,9 +54585,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
     let enabled = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &codex_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53468,12 +54599,12 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         5
     );
 
+    let mut claude_config = codex_config.clone();
+    claude_config.agent_id = gwt_agent::AgentId::ClaudeCode;
     let claude = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::ClaudeCode,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &claude_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53605,12 +54736,17 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
         .expect("refresh managed codex hooks");
 
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    launch_config
+        .env_vars
+        .insert("HOME".to_string(), home.path().display().to_string());
+
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         &worktree,
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53650,12 +54786,17 @@ fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
     )
     .unwrap();
 
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .build();
+    launch_config
+        .env_vars
+        .insert("HOME".to_string(), home.path().display().to_string());
+
     let result = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -53682,13 +54823,17 @@ fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
 
     let codex_config_parent = home.path().join(".codex");
     fs::write(&codex_config_parent, "not a directory").unwrap();
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.path())
+        .build();
+    launch_config
+        .env_vars
+        .insert("HOME".to_string(), home.path().display().to_string());
 
     let result = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
         worktree.path(),
-        &gwt_agent::AgentId::Codex,
-        gwt_agent::LaunchRuntimeTarget::Host,
-        None,
+        &launch_config,
         None,
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         None,
@@ -54582,6 +55727,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
             recovery_probes: Vec::new(),
             available_recoveries: vec!["verify.run".to_string(), "execution.reopen".to_string()],
             warnings: vec!["Host status is temporarily unavailable".to_string()],
+            launch_route: Some("manual".to_string()),
         },
     );
 
@@ -58483,10 +59629,19 @@ fn pm_cleanup_holds_the_shared_lifecycle_lock_through_probe_and_remove() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let codex_home = temp.path().join(".codex");
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
     let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let worktree = create_detached_pm_worktree_fixture(&repo);
+    let codex_config_path = codex_home.join("config.toml");
+    let codex_project =
+        gwt_skills::register_codex_managed_project_trust(&worktree, &codex_config_path)
+            .expect("seed PM Codex project trust")
+            .project_path
+            .to_string_lossy()
+            .into_owned();
     fs::write(
         worktree.join("cleanup-barrier.txt"),
         "generated cleanup probe\n",
@@ -58539,6 +59694,83 @@ fn pm_cleanup_holds_the_shared_lifecycle_lock_through_probe_and_remove() {
     assert!(
         !worktree.exists(),
         "serialized cleanup must remove the worktree"
+    );
+    assert_eq!(
+        codex_project_trust_level(&codex_config_path, &codex_project),
+        None,
+        "PM worktree removal must revoke its Codex project trust"
+    );
+}
+
+#[test]
+fn pm_cleanup_keeps_worktree_when_codex_trust_revocation_fails() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let codex_home = temp.path().join(".codex");
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = create_detached_pm_worktree_fixture(&repo);
+    let config_path = codex_home.join("config.toml");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
+    fs::write(&config_path, "projects = [\n").expect("write malformed Codex config");
+
+    let error = gwt::pm_registry::cleanup_pm_worktree_for_repo_path(&repo, |_, _| false)
+        .expect_err("malformed Codex config must stop PM cleanup");
+
+    assert!(
+        error.to_string().contains("Codex project trust"),
+        "failure must identify trust revocation: {error}"
+    );
+    assert!(
+        worktree.exists(),
+        "trust revocation failure must keep the PM worktree"
+    );
+    assert_eq!(
+        fs::read_to_string(config_path).expect("malformed config remains"),
+        "projects = [\n"
+    );
+}
+
+#[test]
+fn pm_cleanup_retains_project_trust_when_local_work_keeps_the_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let codex_home = temp.path().join(".codex");
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = create_detached_pm_worktree_fixture(&repo);
+    let config_path = codex_home.join("config.toml");
+    let project_key = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
+        .expect("seed PM Codex project trust")
+        .project_path
+        .to_string_lossy()
+        .into_owned();
+    fs::write(worktree.join("user-work.txt"), "keep me\n").expect("write local PM work");
+
+    let outcome = gwt::pm_registry::cleanup_pm_worktree_for_repo_path(&repo, |_, _| false)
+        .expect("local-work classification");
+
+    assert_eq!(
+        outcome,
+        gwt::pm_registry::PmWorktreeCleanupOutcome::RetainedLocalWork
+    );
+    assert!(worktree.exists(), "local work must keep the PM worktree");
+    assert_eq!(
+        codex_project_trust_level(&config_path, &project_key).as_deref(),
+        Some("trusted"),
+        "retained worktree must keep its project trust"
     );
 }
 
@@ -60125,6 +61357,80 @@ fn repeated_restores_never_accumulate_sessions_without_a_resume_handle() {
             "restart {restart} wrote a successor Session with no resume handle"
         );
         restored = successor;
+    }
+}
+
+#[test]
+fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let runner_bin = write_fixture_runners(temp.path(), &["codex", "npx", "bunx"]);
+
+    for (origin, expected_route) in [
+        (
+            super::startup::RestoreOrigin::Automatic,
+            gwt_agent::LaunchRoute::Autonomous,
+        ),
+        (
+            super::startup::RestoreOrigin::UserRequested,
+            gwt_agent::LaunchRoute::Manual,
+        ),
+    ] {
+        let case_root = temp.path().join(format!("{origin:?}"));
+        let repo = case_root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
+        let mut settings = Settings::default();
+        pin_launch_package_runners(&mut settings, &runner_bin);
+        settings
+            .profiles
+            .set_env_var(
+                "default",
+                "CODEX_HOME",
+                case_root.join("codex-home").to_str().expect("Codex home"),
+            )
+            .expect("isolate Codex state and shared spawn pacing");
+        write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
+        runtime.agent_capability_issuer =
+            Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+                "http://127.0.0.1:43123/internal/hook-live",
+                "ws://127.0.0.1:43124/ws",
+                "ws://127.0.0.1:43123/internal/pane-ws",
+            ));
+        let mut source = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::Codex);
+        source.agent_session_id = Some("conversation-4217-restart".to_string());
+        source.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        source.save(&runtime.sessions_dir).expect("save source");
+
+        runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        });
+        let recorded = recorded_events.lock().expect("event log");
+        let completion = recorded
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::LaunchComplete { result, .. } => Some(result.as_ref()),
+                _ => None,
+            })
+            .expect("launch completion")
+            .as_ref()
+            .expect("successful restore preparation");
+        // Inspect preparation without dispatching the completion into a PTY.
+        let successor =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
+                .expect("load restored Session");
+        assert_eq!(successor.launch_route, expected_route, "{origin:?}");
     }
 }
 
@@ -66324,6 +67630,32 @@ fn continue_work_durable_seed_with_foreign_owner_resolves_to_work_owner() {
     );
 }
 
+#[test]
+fn continue_work_from_autonomous_session_uses_manual_launch_route() {
+    let mut seed = issue_3489_durable_seed(Some(4217));
+    let ContinueWorkLaunchSeed::DurableSession(session) = &mut seed else {
+        unreachable!("durable fixture");
+    };
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    // Restoring the same launch must retain its route; an explicit Continue
+    // work action starts a new manual launch from that conversation.
+    assert_eq!(
+        super::launch_config_from_persisted_session(session).launch_route,
+        gwt_agent::LaunchRoute::Autonomous
+    );
+    let (config, _) = continuation_launch_config(
+        &seed,
+        Path::new("/tmp/gwt-issue-3489/work"),
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4217,
+        },
+        None,
+    );
+
+    assert_eq!(config.launch_route, gwt_agent::LaunchRoute::Manual);
+}
+
 /// Issue #3489 AC-2: the Work projection seed keeps the same single source of
 /// owner truth, so both seeds stay interchangeable for the binding install.
 #[test]
@@ -66723,7 +68055,10 @@ fn codex_managed_config_startup_writes_experimental_mode_into_home_codex_config(
     let config_path = super::startup::codex_home_for_startup(None).join("config.toml");
     assert_eq!(config_path, home.path().join(".codex/config.toml"));
 
-    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        gwt_skills::CodexFeaturesSchema::AcceptsTables,
+    );
 
     let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(
@@ -66768,7 +68103,10 @@ fn codex_managed_config_startup_records_operation_refusal_on_unparseable_config(
 not toml";
     fs::write(&config_path, broken).unwrap();
 
-    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        gwt_skills::CodexFeaturesSchema::AcceptsTables,
+    );
 
     assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
     let rows = gwt_core::error_ledger::list_since(None).unwrap();
@@ -66789,6 +68127,53 @@ not toml";
         "ledger row must carry the key and the cause, got: {}",
         rows[0].message
     );
+}
+
+// Issue #4229 AC-5: the codex gwt launches (`bunx @openai/codex@latest`, which
+// loads the table) and the `codex` on PATH are different binaries. The managed
+// key follows the PATH codex, so an old one there keeps the table out.
+#[test]
+fn codex_managed_config_follows_path_codex_not_launch_target() {
+    use gwt_skills::CodexFeaturesSchema::{AcceptsTables, BooleansOnly};
+
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = home.path().join(".codex/config.toml");
+    let schema_for = |version: Option<&str>| {
+        super::startup::codex_features_schema_for_path_codex(Some(&gwt_agent::DetectedAgent {
+            agent_id: gwt_agent::AgentId::Codex,
+            version: version.map(str::to_string),
+            path: std::path::PathBuf::from("codex"),
+        }))
+    };
+
+    assert_eq!(schema_for(Some("codex-cli 0.148.0")), BooleansOnly);
+    assert_eq!(schema_for(Some("codex-cli 0.152.0")), BooleansOnly);
+    assert_eq!(schema_for(Some("codex-cli 0.153.0")), AcceptsTables);
+    assert_eq!(schema_for(Some("codex-cli 0.154.0")), AcceptsTables);
+    assert_eq!(
+        schema_for(None),
+        BooleansOnly,
+        "a PATH codex whose version gwt cannot read must not risk the table"
+    );
+    assert_eq!(
+        super::startup::codex_features_schema_for_path_codex(None),
+        AcceptsTables,
+        "with no PATH codex only the gwt launch target reads the config"
+    );
+
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        schema_for(Some("codex-cli 0.148.0")),
+    );
+
+    assert!(
+        fs::read_to_string(&config_path)
+            .map(|content| !content.contains("context_management"))
+            .unwrap_or(true),
+        "PATH codex 0.148.0 must never receive the table"
+    );
+    assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
