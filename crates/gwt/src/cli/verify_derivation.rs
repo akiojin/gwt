@@ -130,7 +130,7 @@ fn rust_test_command_for(package: Option<&str>, host: VerificationHost) -> Strin
     // A workspace-wide gate builds the deadlocking package too, so both
     // spellings take CI's Windows gate.
     let takes_windows_gate = host == VerificationHost::Windows
-        && package.map_or(true, |package| package == WINDOWS_DEADLOCKING_PACKAGE);
+        && package.is_none_or(|package| package == WINDOWS_DEADLOCKING_PACKAGE);
     let gate = if takes_windows_gate {
         CI_WINDOWS_RUST_TEST_GATE
     } else {
