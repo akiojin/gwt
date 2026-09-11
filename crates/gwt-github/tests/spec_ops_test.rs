@@ -504,3 +504,58 @@ fn red_96_spec_3248_scale_roundtrip() {
     let got = ops.read_section(IssueNumber(1), &n("tasks")).unwrap();
     assert_eq!(got, content);
 }
+
+// Issue #4250 AC-4: `create_spec` verifies its own write the way
+// `write_section` already does. A remote that stores something other than the
+// section map it was handed must fail the create instead of answering with a
+// snapshot the caller then trusts.
+#[test]
+fn create_spec_readback_failure_fails_the_create() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    client.corrupt_next_patch_body();
+
+    let ops = SpecOps::new(client, cache);
+    let err = ops
+        .create_spec(
+            "SPEC: Dropped",
+            std::collections::BTreeMap::from([(n("spec"), "Spec text".to_string())]),
+            &[],
+        )
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("spec"),
+        "the failure names the section: {message}"
+    );
+}
+
+// Issue #4250 AC-4: the ordinary create still succeeds and its sections read
+// back verbatim.
+#[test]
+fn create_spec_readback_passes_for_a_faithful_remote() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+
+    let ops = SpecOps::new(client, cache);
+    let snapshot = ops
+        .create_spec(
+            "SPEC: Stored",
+            std::collections::BTreeMap::from([
+                (n("spec"), "Spec text".to_string()),
+                (n("plan"), "Plan text".to_string()),
+            ]),
+            &[],
+        )
+        .expect("a faithful remote passes readback");
+    assert_eq!(
+        ops.read_section(snapshot.number, &n("spec")).unwrap(),
+        "Spec text"
+    );
+    assert_eq!(
+        ops.read_section(snapshot.number, &n("plan")).unwrap(),
+        "Plan text"
+    );
+}

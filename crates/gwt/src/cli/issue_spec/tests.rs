@@ -410,6 +410,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
                 title: "SPEC: Created from markdown".to_string(),
                 file: "legacy.md".to_string(),
                 labels: vec!["gwt-spec".to_string()],
+                allow_empty: false,
             },
             &mut out,
         )
@@ -444,7 +445,11 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         run(&mut env, IssueCommand::SpecCreateHelp, &mut out).unwrap(),
         0
     );
-    assert!(out.contains("Input JSON schema:"));
+    assert!(out.contains("Input JSON schema"));
+    // Issue #4250: the help must document the params the operation actually
+    // reads. It used to advertise a `params.spec` that no code path accepts,
+    // which is how a caller ended up creating an empty SPEC.
+    assert!(out.contains("Params: title (required), body, labels, structured, allow_empty."));
 
     out.clear();
     assert_eq!(
@@ -633,6 +638,7 @@ fn spec_create_with_auto_merge_refuses_body_without_acceptance_block() {
             title: "SPEC: Demo".to_string(),
             body: "# SPEC: Demo\n\n## 成功基準\n\n- [ ] AC-1: misplaced\n".to_string(),
             labels: vec!["auto-merge".to_string()],
+            allow_empty: false,
         },
         &mut out,
     )
@@ -654,6 +660,7 @@ fn spec_create_with_auto_merge_refuses_body_without_acceptance_block() {
             title: "SPEC: Demo".to_string(),
             body: "# SPEC: Demo\n\n## 受け入れ基準\n\n- [ ] AC-1: readable\n".to_string(),
             labels: vec!["auto-merge".to_string()],
+            allow_empty: false,
         },
         &mut out,
     )
@@ -803,4 +810,171 @@ fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
     Cache::new(env.cache_root())
         .write_snapshot(&snapshot)
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4250: `issue.spec.create` used to drop the body it was handed.
+//
+// A plain Markdown body carries no `<!-- artifact:NAME BEGIN -->` markers, so
+// `extract_sections` returned an empty list, the section map went out empty,
+// and the operation still answered `ok:true`. #4249 was created that way and
+// looked like a SPEC that merely lacked `plan`/`tasks`.
+// ---------------------------------------------------------------------------
+
+/// AC-1: an unmarked body is the SPEC text itself and must land in `spec`.
+#[test]
+fn spec_create_stores_an_unmarked_body_as_the_spec_section() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let mut out = String::new();
+    let body = "# SPEC: Demo\n\n## 背景\n\nThe body the caller handed over.\n";
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Demo".to_string(),
+            body: body.to_string(),
+            labels: Vec::new(),
+            allow_empty: false,
+        },
+        &mut out,
+    )
+    .expect("an unmarked body is accepted");
+    assert_eq!(code, 0);
+
+    let number = IssueNumber(1);
+    let stored = Cache::new(env.cache_root())
+        .read_section(number, &SectionName("spec".to_string()))
+        .expect("cache read")
+        .expect("the spec section exists");
+    assert_eq!(stored, body.trim_end_matches('\n'));
+    assert!(
+        out.contains("readback verified"),
+        "the create reports its own readback: {out}"
+    );
+}
+
+/// AC-1: a body that already carries section markers keeps its own routing.
+#[test]
+fn spec_create_keeps_marked_sections_as_authored() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let mut out = String::new();
+    let body = "<!-- artifact:spec BEGIN -->\nSpec text\n<!-- artifact:spec END -->\n\n\
+<!-- artifact:plan BEGIN -->\nPlan text\n<!-- artifact:plan END -->\n";
+    run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Marked".to_string(),
+            body: body.to_string(),
+            labels: Vec::new(),
+            allow_empty: false,
+        },
+        &mut out,
+    )
+    .expect("a marked body is accepted");
+
+    let cache = Cache::new(env.cache_root());
+    assert_eq!(
+        cache
+            .read_section(IssueNumber(1), &SectionName("spec".to_string()))
+            .expect("cache read"),
+        Some("Spec text".to_string())
+    );
+    assert_eq!(
+        cache
+            .read_section(IssueNumber(1), &SectionName("plan".to_string()))
+            .expect("cache read"),
+        Some("Plan text".to_string())
+    );
+}
+
+/// AC-3: an empty create is refused unless the caller asks for one, and the
+/// refusal happens before any Issue exists.
+#[test]
+fn spec_create_refuses_an_empty_body_without_the_explicit_opt_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Empty".to_string(),
+            body: "   \n".to_string(),
+            labels: Vec::new(),
+            allow_empty: false,
+        },
+        &mut out,
+    )
+    .expect_err("an empty SPEC must not be created silently");
+    assert!(err.to_string().contains("allow_empty"), "err = {err}");
+    assert!(
+        !env.client
+            .call_log()
+            .iter()
+            .any(|call| call.contains("create_issue")),
+        "no Issue may be created: {:?}",
+        env.client.call_log()
+    );
+
+    out.clear();
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Empty".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            allow_empty: true,
+        },
+        &mut out,
+    )
+    .expect("an explicitly empty SPEC is still possible");
+    assert_eq!(code, 0);
+}
+
+/// AC-3: markers that enclose nothing are the same silent-drop shape as no
+/// markers at all, so they are refused too.
+#[test]
+fn spec_create_refuses_markers_that_enclose_nothing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Hollow".to_string(),
+            body: "<!-- artifact:spec BEGIN -->\n\n<!-- artifact:spec END -->\n".to_string(),
+            labels: Vec::new(),
+            allow_empty: false,
+        },
+        &mut out,
+    )
+    .expect_err("markers with no content must not create an empty SPEC");
+    assert!(err.to_string().contains("allow_empty"), "err = {err}");
+}
+
+/// AC-4: the create verifies its own write. A remote that stores something
+/// other than what was sent fails the operation instead of reporting success.
+#[test]
+fn spec_create_fails_when_the_section_does_not_read_back() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.client.corrupt_next_patch_body();
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Dropped".to_string(),
+            body: "# SPEC: Dropped\n\nContent that the remote loses.\n".to_string(),
+            labels: Vec::new(),
+            allow_empty: false,
+        },
+        &mut out,
+    )
+    .expect_err("a section that does not read back must fail the create");
+    let message = err.to_string();
+    assert!(message.contains("spec"), "err = {message}");
+    assert!(
+        message.contains('1'),
+        "the issue number is named: {message}"
+    );
 }

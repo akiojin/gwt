@@ -292,6 +292,17 @@ impl<C: IssueClient> SpecOps<C> {
         sections: BTreeMap<SectionName, String>,
         extra_labels: &[String],
     ) -> Result<IssueSnapshot, SpecOpsError> {
+        // Canonicalise up front so the post-create readback (Issue #4250 AC-4)
+        // compares against exactly what the section parser will hand back.
+        let sections: BTreeMap<SectionName, String> = sections
+            .into_iter()
+            .map(|(name, content)| {
+                (
+                    name,
+                    crate::sections::trim_surrounding_newlines(&content).to_string(),
+                )
+            })
+            .collect();
         let routing = decide_routing(&sections);
 
         // Compose the initial body with body-inline sections, but leave
@@ -356,6 +367,30 @@ impl<C: IssueClient> SpecOps<C> {
             FetchResult::NotModified => created,
         };
         self.cache.write_snapshot(&fresh)?;
+
+        // 5. Post-create readback (Issue #4250 AC-4). `write_section` has
+        //    verified its writes since SPEC-3248 P7C; a create that reports a
+        //    fresh Issue number while its sections went missing is the same
+        //    class of silent loss, and it is worse because nothing downstream
+        //    has a previous version to compare against.
+        for (name, expected) in &sections {
+            let actual = self.cache.read_section(number, name)?;
+            if actual.as_deref() != Some(expected.as_str()) {
+                let detail = match actual.as_deref() {
+                    None => "the section is absent".to_string(),
+                    Some(text) if text.trim().is_empty() => {
+                        "the section read back empty".to_string()
+                    }
+                    Some(_) => "the section read back with different content".to_string(),
+                };
+                return Err(SpecOpsError::from(ApiError::Unexpected(format!(
+                    "created issue #{} but its '{}' section failed post-create readback: \
+                     {detail}; the SPEC content was not stored — repair it with \
+                     issue.spec.edit before relying on this SPEC",
+                    number.0, name.0
+                ))));
+            }
+        }
 
         Ok(fresh)
     }

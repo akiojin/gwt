@@ -3441,3 +3441,47 @@ fn a_claim_block_is_revalidated_once_the_issue_changed_under_it() {
     assert_eq!(item.blocked_by_claim_id, None);
     assert_eq!(item.claim_expires_at, None);
 }
+
+/// Issue #4250 AC-5: an empty `spec` section and a missing `plan`/`tasks` pair
+/// are different repairs, and the Monitor row is the only place the operator
+/// sees which one applies. #4249 read as "plan/tasks の整備が必要" while the
+/// SPEC had no `spec` section at all, and that cost a full cycle.
+#[test]
+fn scan_candidates_separates_an_empty_spec_from_missing_plan_tasks() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let mut empty_spec = issue(50, &["gwt-spec"]);
+    empty_spec.readiness = IssueMonitorReadiness::SpecMissing;
+    let mut missing_plan = issue(51, &["gwt-spec"]);
+    missing_plan.readiness = IssueMonitorReadiness::NotReady;
+
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        &[empty_spec, missing_plan],
+        "2026-09-11T10:00:00Z",
+    );
+
+    let empty = monitor
+        .inbox_item(50)
+        .expect("empty-spec item stays visible");
+    assert_eq!(empty.state, MonitorInboxState::NotReady);
+    let empty_reason = empty.exclusion_reason.as_deref().expect("reason");
+    assert!(
+        empty_reason.contains("spec"),
+        "the empty-spec reason names the spec section: {empty_reason}"
+    );
+    assert!(
+        !empty_reason.contains("plan/tasks"),
+        "an empty SPEC must not be reported as a plan/tasks gap: {empty_reason}"
+    );
+
+    let missing = monitor
+        .inbox_item(51)
+        .expect("plan/tasks item stays visible");
+    assert_eq!(
+        missing.exclusion_reason.as_deref(),
+        Some("plan/tasks の整備が必要（gwt-plan-spec）")
+    );
+}

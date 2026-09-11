@@ -37,6 +37,10 @@ pub struct FakeIssueClient {
     /// When set, the next `create_comment` stores a corrupted body so tests
     /// can prove that post-write readback fails closed.
     corrupt_next_create_comment: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, the next `patch_body` drops every body-resident section's
+    /// content while keeping the markers — the exact shape Issue #4250
+    /// produced, so tests can prove the create-side readback fails closed.
+    corrupt_next_patch_body: Arc<std::sync::atomic::AtomicBool>,
     /// Failure injection for the Issue field patches (`patch_body`,
     /// `patch_title`, `set_labels`): the next such call fails with the stored
     /// error and writes nothing (Issue #3865 AC-5).
@@ -131,6 +135,7 @@ impl FakeIssueClient {
             clock: Arc::new(AtomicU64::new(1)),
             fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            corrupt_next_patch_body: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fail_next_issue_patch: Arc::new(Mutex::new(None)),
         }
     }
@@ -168,6 +173,13 @@ impl FakeIssueClient {
     pub fn corrupt_next_create_comment(&self) {
         self.corrupt_next_create_comment
             .store(true, Ordering::SeqCst);
+    }
+
+    /// Corruption injection: the next `patch_body` keeps the section markers
+    /// but stores nothing between them — the shape a SPEC created without any
+    /// section content had (Issue #4250).
+    pub fn corrupt_next_patch_body(&self) {
+        self.corrupt_next_patch_body.store(true, Ordering::SeqCst);
     }
 
     /// Preload an Issue snapshot. Used by tests to set up fixtures.
@@ -489,6 +501,27 @@ impl Default for FakeIssueClient {
     }
 }
 
+/// Keep every `<!-- artifact:NAME BEGIN -->` / `END` pair but store nothing
+/// between them. Used by [`FakeIssueClient::corrupt_next_patch_body`] to
+/// reproduce a remote that accepted the write and kept none of the content.
+fn blank_body_sections(body: &str) -> String {
+    const BEGIN_SUFFIX: &str = " BEGIN -->";
+    const MARKER_PREFIX: &str = "<!-- artifact:";
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(begin) = rest.find(BEGIN_SUFFIX) {
+        let content_start = begin + BEGIN_SUFFIX.len();
+        let Some(end_rel) = rest[content_start..].find(MARKER_PREFIX) else {
+            break;
+        };
+        out.push_str(&rest[..content_start]);
+        out.push('\n');
+        rest = &rest[content_start + end_rel..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl IssueClient for FakeIssueClient {
     fn fetch(
         &self,
@@ -518,6 +551,11 @@ impl IssueClient for FakeIssueClient {
         if new_body.len() > 65_536 {
             return Err(ApiError::BodyTooLarge);
         }
+        let stored_body = if self.corrupt_next_patch_body.swap(false, Ordering::SeqCst) {
+            blank_body_sections(new_body)
+        } else {
+            new_body.to_string()
+        };
         let mut state = self
             .inner
             .lock()
@@ -527,7 +565,7 @@ impl IssueClient for FakeIssueClient {
             .issues
             .get_mut(&number)
             .ok_or(ApiError::NotFound(number))?;
-        issue.body = new_body.to_string();
+        issue.body = stored_body;
         issue.updated_at = self.tick();
         Ok(issue.clone())
     }

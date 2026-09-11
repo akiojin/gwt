@@ -30,13 +30,26 @@ use structured::{
 };
 
 const SPEC_SECTION_NAME: &str = "spec";
-const SPEC_CREATE_HELP: &str = r#"gwtd stdin JSON envelope operation: issue.spec.create
+const SPEC_CREATE_HELP: &str = r##"gwtd stdin JSON envelope operation: issue.spec.create
+
+Params: title (required), body, labels, structured, allow_empty.
+
+- body (Markdown, the default): the SPEC text. A body with no
+  `<!-- artifact:NAME BEGIN -->` markers is stored whole as the `spec`
+  section; a body that carries markers keeps the sections it declares.
+- structured: true — `body` is the structured JSON object described below
+  instead of Markdown.
+- allow_empty: true — create a SPEC with no section content on purpose.
+  Without it, a create that would write nothing is refused (Issue #4250).
+
+There is no `params.spec`; structured input travels in `body` with
+`structured: true`.
 
 Structured SPEC input is owned by gwt-github (spec_structured). Use this help
-output as the single source of truth for the `params.spec` JSON shape and the
-generated Markdown format.
+output as the single source of truth for that JSON shape and the generated
+Markdown format.
 
-Input JSON schema:
+Input JSON schema (the value of `body` when `structured` is true):
 {
   "background": ["paragraph 1", "paragraph 2"],
   "user_stories": [
@@ -68,13 +81,17 @@ Field notes:
 
 Examples:
 "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: Launch agents from GUI","spec":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]}}}
+{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: Launch agents from GUI","body":"# SPEC: Launch agents from GUI\n\n## 背景\n..."}}
 JSON
 
 "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"issue.spec.edit","params":{"number":1942,"section":"spec","spec":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]},"replace":true}}
+{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: Launch agents from GUI","structured":true,"body":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]}}}
 JSON
-"#;
+
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":1942,"section":"spec","structured":true,"body":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]},"replace":true}}
+JSON
+"##;
 
 pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
     if args.is_empty() {
@@ -131,11 +148,13 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
         let mut labels: Vec<String> = Vec::new();
         let mut json = false;
         let mut help = false;
+        let mut allow_empty = false;
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
                 "--help" => help = true,
                 "--json" => json = true,
+                "--allow-empty" => allow_empty = true,
                 "--title" => {
                     i += 1;
                     if i >= args.len() {
@@ -175,6 +194,7 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
             title: title.ok_or(CliParseError::MissingFlag("--title"))?,
             file: file.ok_or(CliParseError::MissingFlag("-f"))?,
             labels,
+            allow_empty,
         });
     }
     if head == "pull" {
@@ -398,17 +418,19 @@ pub(super) fn run<E: CliEnv>(
             title,
             file,
             labels,
+            allow_empty,
         } => {
             let raw = env.read_file(&file).map_err(|err| {
                 SpecOpsError::from(gwt_github::client::ApiError::Network(err.to_string()))
             })?;
-            create_spec_from_markdown(env, out, title, &raw, labels)?
+            create_spec_from_markdown(env, out, title, &raw, labels, allow_empty)?
         }
         IssueCommand::SpecCreateBody {
             title,
             body,
             labels,
-        } => create_spec_from_markdown(env, out, title, &body, labels)?,
+            allow_empty,
+        } => create_spec_from_markdown(env, out, title, &body, labels, allow_empty)?,
         IssueCommand::SpecCreateJsonBody {
             title,
             body,
@@ -672,12 +694,65 @@ fn write_structured_spec_section<E: CliEnv>(
     Ok(0)
 }
 
+/// Decide which sections a create writes, and refuse the shapes that used to
+/// produce an empty SPEC under `ok:true` (Issue #4250 AC-1 / AC-3).
+///
+/// The silent drop came from treating [`gwt_github::extract_sections`] as the
+/// only source of sections: plain Markdown carries no
+/// `<!-- artifact:NAME BEGIN -->` markers, so the parser returned nothing and
+/// the body went nowhere. An unmarked body is not "no sections" — it is the
+/// SPEC text, so it becomes the `spec` section. Anything that really would
+/// write nothing is refused unless the caller asked for an empty SPEC.
+fn resolve_create_sections(
+    raw: &str,
+    allow_empty: bool,
+) -> Result<BTreeMap<SectionName, String>, SpecOpsError> {
+    let parsed = gwt_github::extract_sections(raw)
+        .map_err(|err| SpecOpsError::from(gwt_github::body::ParseError::Section(err)))?;
+    if parsed.is_empty() {
+        if raw.trim().is_empty() {
+            return if allow_empty {
+                Ok(BTreeMap::new())
+            } else {
+                Err(empty_spec_create_refusal("the body is empty"))
+            };
+        }
+        return Ok(BTreeMap::from([(
+            SectionName(SPEC_SECTION_NAME.to_string()),
+            raw.to_string(),
+        )]));
+    }
+    let sections: BTreeMap<SectionName, String> = parsed
+        .into_iter()
+        .map(|section| (section.name, section.content))
+        .collect();
+    if !allow_empty && sections.values().all(|content| content.trim().is_empty()) {
+        return Err(empty_spec_create_refusal(
+            "every section marker in the body encloses empty content",
+        ));
+    }
+    Ok(sections)
+}
+
+/// Pre-write refusal: nothing was created, so the caller fixes the input and
+/// retries. Names the opt-in because creating an empty SPEC on purpose is a
+/// real (if rare) use, and a refusal with no escape hatch just moves the
+/// confusion one step.
+fn empty_spec_create_refusal(detail: &str) -> SpecOpsError {
+    SpecOpsError::Validation(format!(
+        "issue.spec.create refused: {detail}, so no section would be written and the \
+         SPEC would be created empty. Pass the SPEC text in `body`, or pass \
+         `allow_empty: true` to create an empty SPEC on purpose."
+    ))
+}
+
 fn create_spec_from_markdown<E: CliEnv>(
     env: &mut E,
     out: &mut String,
     title: String,
     raw: &str,
     labels: Vec<String>,
+    allow_empty: bool,
 ) -> Result<i32, SpecOpsError> {
     let cache = Cache::new(env.cache_root());
     let ops = SpecOps::new(
@@ -686,13 +761,9 @@ fn create_spec_from_markdown<E: CliEnv>(
         },
         cache,
     );
-    let parsed = gwt_github::extract_sections(raw)
-        .map_err(|err| SpecOpsError::from(gwt_github::body::ParseError::Section(err)))?;
-    let sections: BTreeMap<SectionName, String> = parsed
-        .into_iter()
-        .map(|section| (section.name, section.content))
-        .collect();
+    let sections = resolve_create_sections(raw, allow_empty)?;
     guard_autonomous_acceptance_block(&labels, raw)?;
+    let written: Vec<String> = sections.keys().map(|name| name.0.clone()).collect();
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -701,10 +772,23 @@ fn create_spec_from_markdown<E: CliEnv>(
         snapshot.number.0,
     );
     out.push_str(&format!(
-        "created issue #{} with labels {:?}\n",
-        snapshot.number.0, snapshot.labels
+        "created issue #{} with labels {:?}{}\n",
+        snapshot.number.0,
+        snapshot.labels,
+        render_created_sections(&written)
     ));
     Ok(0)
+}
+
+/// Issue #4250 AC-4: say which sections the create actually stored. The
+/// operation used to report only the Issue number, which read identically
+/// whether the body landed or vanished.
+fn render_created_sections(written: &[String]) -> String {
+    if written.is_empty() {
+        " (no sections written, allow_empty)".to_string()
+    } else {
+        format!(" (sections [{}] readback verified)", written.join(", "))
+    }
 }
 
 fn create_spec_from_structured_json<E: CliEnv>(

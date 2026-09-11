@@ -494,6 +494,12 @@ fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
             .map(String::as_str)
             .filter(|content| !content.trim().is_empty())
     };
+    // Issue #4250 AC-5: separate "the SPEC has no content" from "the SPEC
+    // exists but is unplanned". They need different repairs, and folding both
+    // into NotReady sent operators to gwt-plan-spec for an empty SPEC.
+    if section("spec").is_none() {
+        return IssueMonitorReadiness::SpecMissing;
+    }
     let (Some(_plan), Some(tasks)) = (section("plan"), section("tasks")) else {
         return IssueMonitorReadiness::NotReady;
     };
@@ -2248,6 +2254,44 @@ mod tests {
         assert_eq!(issues[2].readiness, crate::IssueMonitorReadiness::NotReady);
     }
 
+    /// Issue #4250 AC-5: a SPEC with no `spec` section at all is a different
+    /// repair from one that merely lacks `plan`/`tasks`, so readiness reports
+    /// it separately instead of folding both into `NotReady`. #4249 was
+    /// created in exactly this shape — an index with no sections.
+    #[test]
+    fn a_spec_with_no_spec_section_is_readiness_spec_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let sectionless = IssueSnapshot {
+            number: IssueNumber(60),
+            title: "SPEC 60".to_string(),
+            body: "<!-- gwt-spec id=60 version=1 -->\n<!-- sections:\n-->\n".to_string(),
+            labels: vec!["gwt-spec".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: Vec::new(),
+        };
+        cache
+            .write_snapshot(&sectionless)
+            .expect("write sectionless spec cache");
+        cache
+            .write_snapshot(&structured_spec(61, "t1", "   ", "- [ ] T-001"))
+            .expect("write empty-plan spec cache");
+
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![
+                live_issue(60, &["gwt-spec"], Some("t1")),
+                live_issue(61, &["gwt-spec"], Some("t1")),
+            ],
+            dir.path(),
+            |_| panic!("matching cache must not refresh"),
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(issues[0].readiness, IssueMonitorReadiness::SpecMissing);
+        assert_eq!(issues[1].readiness, IssueMonitorReadiness::NotReady);
+    }
+
     #[test]
     fn structured_spec_task_completion_is_explicit_and_fail_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3445,6 +3489,12 @@ mod tests {
         let mut spec = github_issue(3165);
         spec.title = "SPEC: Missing plan and tasks".to_string();
         spec.labels = vec!["gwt-spec".to_string()];
+        // Issue #4250: give the fixture a real `spec` section so it exercises
+        // the plan/tasks gap it is named for. With an empty body it would now
+        // report SpecMissing, which is a different repair.
+        spec.body = "<!-- gwt-spec id=3165 version=1 -->\n<!-- sections:\nspec=body\n-->\n\n\
+                     <!-- artifact:spec BEGIN -->\nSpec body\n<!-- artifact:spec END -->\n"
+            .to_string();
         let ready_spec = structured_spec(3166, "t1", "Plan body", "- [ ] T-001");
         let mut closed = github_issue(3000);
         closed.title = "Closed issue".to_string();

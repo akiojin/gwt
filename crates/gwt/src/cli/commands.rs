@@ -50,11 +50,15 @@ pub enum IssueCommand {
         title: String,
         file: String,
         labels: Vec<String>,
+        /// Issue #4250 AC-3: opt in to creating a SPEC with no section content.
+        allow_empty: bool,
     },
     SpecCreateBody {
         title: String,
         body: String,
         labels: Vec<String>,
+        /// Issue #4250 AC-3: opt in to creating a SPEC with no section content.
+        allow_empty: bool,
     },
     SpecCreateJson {
         title: String,

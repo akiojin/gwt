@@ -1971,6 +1971,11 @@ pub enum IssueMonitorReadiness {
     /// checked. This is the only SPEC readiness that permits completion.
     ReadyWithCompletedTasks,
     NotReady,
+    /// Issue #4250 AC-5: the Issue carries `gwt-spec` but has no `spec`
+    /// section at all. Distinct from [`Self::NotReady`], which means the SPEC
+    /// exists and `plan`/`tasks` are the gap — a different repair, and the
+    /// Monitor row is the only place an operator learns which one applies.
+    SpecMissing,
 }
 
 impl IssueMonitorReadiness {
@@ -3503,6 +3508,12 @@ pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonito
 
 const ISSUE_MONITOR_NOT_READY_REASON: &str = "plan/tasks の整備が必要（gwt-plan-spec）";
 
+/// Issue #4250 AC-5: an Issue whose `spec` section is missing entirely used to
+/// read as a plan/tasks gap, which sent the operator to `gwt-plan-spec` for a
+/// SPEC that had no content to plan against. Name the actual repair.
+const ISSUE_MONITOR_EMPTY_SPEC_REASON: &str =
+    "spec section が空（issue.spec.edit で spec 本文を書く）";
+
 fn issue_monitor_candidate_exclusion(
     issue: &IssueMonitorIssue,
 ) -> Option<(MonitorInboxState, String)> {
@@ -3522,10 +3533,12 @@ fn issue_monitor_candidate_exclusion(
         .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
         && !issue.readiness.is_launch_ready()
     {
-        return Some((
-            MonitorInboxState::NotReady,
-            ISSUE_MONITOR_NOT_READY_REASON.to_string(),
-        ));
+        let reason = if issue.readiness == IssueMonitorReadiness::SpecMissing {
+            ISSUE_MONITOR_EMPTY_SPEC_REASON
+        } else {
+            ISSUE_MONITOR_NOT_READY_REASON
+        };
+        return Some((MonitorInboxState::NotReady, reason.to_string()));
     }
     None
 }
@@ -6017,7 +6030,10 @@ impl IssueMonitorState {
             IssueMonitorReadiness::ReadyWithOpenTasks => IssueCompletionDecision::Incomplete,
             IssueMonitorReadiness::NotApplicable
             | IssueMonitorReadiness::Ready
-            | IssueMonitorReadiness::NotReady => IssueCompletionDecision::Unknown,
+            | IssueMonitorReadiness::NotReady
+            // Issue #4250: an empty SPEC carries no task inventory, so it says
+            // nothing about completion — the same Unknown as an unplanned one.
+            | IssueMonitorReadiness::SpecMissing => IssueCompletionDecision::Unknown,
         }
     }
 

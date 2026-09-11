@@ -1038,19 +1038,65 @@ fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseEr
     }))
 }
 
+/// Every param `issue.spec.create` reads. Anything else is a caller working
+/// from a different mental model of the operation, and Issue #4250 is what
+/// happens when such a call is answered with `ok:true`.
+const SPEC_CREATE_PARAMS: &[&str] = &["allow_empty", "body", "labels", "structured", "title"];
+
+/// Issue #4250 AC-2: a refusal has to name both what arrived and what the
+/// operation expects. The caller that created the empty #4249 was following
+/// the help text; a bare "missing body" would not have told them which param
+/// name the operation actually reads.
+fn spec_create_param_error(params: &Map<String, Value>, problem: &str) -> CliParseError {
+    let received: Vec<&str> = params.keys().map(String::as_str).collect();
+    let received = if received.is_empty() {
+        "(none)".to_string()
+    } else {
+        received.join(", ")
+    };
+    CliParseError::InvalidJson(format!(
+        "issue.spec.create {problem}; received: {received}; accepted: {}",
+        SPEC_CREATE_PARAMS.join(", ")
+    ))
+}
+
 fn issue_spec_create(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    for key in params.keys() {
+        if !SPEC_CREATE_PARAMS.contains(&key.as_str()) {
+            return Err(spec_create_param_error(
+                params,
+                &format!("does not accept the parameter '{key}'"),
+            ));
+        }
+    }
     let structured = optional_bool(params, "structured")?.unwrap_or(false);
+    let allow_empty = optional_bool(params, "allow_empty")?.unwrap_or(false);
+    let title = required_string(params, "title")?;
+    let labels = optional_string_vec(params, "labels")?;
     if structured {
         return Ok(CliCommand::Issue(IssueCommand::SpecCreateJsonBody {
-            title: required_string(params, "title")?,
+            title,
             body: required_json_or_string(params, "body")?,
-            labels: optional_string_vec(params, "labels")?,
+            labels,
         }));
     }
+    // Issue #4250 AC-3: an empty SPEC stays reachable, but only on purpose.
+    let body = match optional_string(params, "body")? {
+        Some(body) => body,
+        None if allow_empty => String::new(),
+        None => {
+            return Err(spec_create_param_error(
+                params,
+                "needs a non-empty 'body' (Markdown; pass structured:true for the \
+                 JSON spec shape, or allow_empty:true to create an empty SPEC on purpose)",
+            ))
+        }
+    };
     Ok(CliCommand::Issue(IssueCommand::SpecCreateBody {
-        title: required_string(params, "title")?,
-        body: required_string(params, "body")?,
-        labels: optional_string_vec(params, "labels")?,
+        title,
+        body,
+        labels,
+        allow_empty,
     }))
 }
 
@@ -3276,6 +3322,66 @@ mod tests {
             ),
             CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
         ));
+    }
+
+    /// Issue #4250 AC-2: the operation used to ignore param names it does not
+    /// read, so a caller following the (then wrong) help text and passing
+    /// `spec` got `ok:true` and an empty SPEC. The refusal has to name both
+    /// what arrived and what the operation expects, because the caller can see
+    /// neither from a bare "missing body".
+    #[test]
+    fn issue_spec_create_rejects_unknown_params_naming_received_and_expected() {
+        match err(
+            "issue.spec.create",
+            json!({"title": "t", "spec": {"background": []}}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("spec"), "{message}");
+                assert!(message.contains("received: spec, title"), "{message}");
+                assert!(message.contains("accepted:"), "{message}");
+                assert!(message.contains("body"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #4250 AC-2/AC-3: a create with no writable body is refused rather
+    /// than silently producing an empty SPEC, and the refusal names the escape
+    /// hatch for an intentionally empty one.
+    #[test]
+    fn issue_spec_create_without_body_is_refused_with_param_inventory() {
+        match err("issue.spec.create", json!({"title": "t", "labels": ["x"]})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("received: labels, title"), "{message}");
+                assert!(message.contains("body"), "{message}");
+                assert!(message.contains("allow_empty"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("issue.spec.create", json!({"title": "t", "body": "   "})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("allow_empty"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #4250 AC-3: creating an empty SPEC on purpose stays possible, but
+    /// only through an explicit opt-in.
+    #[test]
+    fn issue_spec_create_allows_an_empty_body_only_when_opted_in() {
+        match ok(
+            "issue.spec.create",
+            json!({"title": "t", "allow_empty": true}),
+        ) {
+            CliCommand::Issue(IssueCommand::SpecCreateBody {
+                body, allow_empty, ..
+            }) => {
+                assert!(body.is_empty(), "body = {body:?}");
+                assert!(allow_empty);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     // SPEC-3431: PM agent diagnostics parse variants.
