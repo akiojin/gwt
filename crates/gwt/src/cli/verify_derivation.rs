@@ -32,6 +32,31 @@
 //! (#3640). Tests in this module pin the derived commands against the
 //! workflow files so CI cannot drift away from them unnoticed.
 //!
+//! # The one exception: the `gwt` crate's binary targets on Windows
+//!
+//! A Windows host cannot run those, and no amount of waiting changes that.
+//! Four `app_runtime` tests take `env_test_lock` and never release it
+//! (#4014), so the run wedges with the test binary's CPU flat, a pile of
+//! orphaned `cmd /d /s /c "exit /b 0"` children, and — because the wedged
+//! process keeps holding it — the host-wide verification lease. One such run
+//! starved every other worktree on the machine for hours, and since
+//! `execution.reopen` and the Ready PR gate both consume a passing derived
+//! record, finished work could not ship while it sat there (#4182).
+//! Serializing with `--test-threads=1` only moves the wedge later; linking
+//! those targets also fails outright with `os error 5`, because Windows
+//! cannot replace the very `gwtd.exe` that is running the verification
+//! (#3808, #4172).
+//!
+//! So on Windows the `gwt` package — and the workspace gate, which contains
+//! it — narrows to `--lib`, and every derived `cargo test` is serialized.
+//! This follows CI rather than departing from it: `test-windows-default-parallel`
+//! runs exactly [`CI_WINDOWS_RUST_TEST_GATE`] and documents the same
+//! deadlock as its reason for excluding the target. Every other package
+//! keeps CI's full gate, because only these targets have ever been observed
+//! to wedge — narrowing further would buy nothing and cost real coverage.
+//! Windows verification is weaker than Linux's as a result, and CI stays the
+//! gate that decides; a local run that cannot finish decides nothing at all.
+//!
 //! The derived plan is a DEFAULT, not a cage: explicit `verify.plan`
 //! commands stay supported, and the recorded plan carries `derived: true`
 //! so downstream review can tell the two apart. Acceptance-scenario-driven
@@ -50,12 +75,80 @@ const CI_FMT_GATE: &str = "cargo fmt --all -- --check";
 /// CI's clippy gate (`.github/workflows/lint.yml`, job `lint`).
 const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
 
+/// The broad Rust test gate CI runs on Windows (`.github/workflows/
+/// test.yml`, job `test-windows-default-parallel`): the same gate restricted
+/// to library targets, because the `gwt` crate's binary targets deadlock
+/// there. Derivation applies the identical restriction — see the module
+/// header.
+const CI_WINDOWS_RUST_TEST_GATE: &str = "cargo test --workspace --lib --all-features";
+
+/// The only package whose binary targets are known to wedge a Windows host,
+/// and the only one derivation narrows there (#4014, #4182).
+const WINDOWS_DEADLOCKING_PACKAGE: &str = "gwt";
+
+/// Which host the derived matrix has to be runnable on.
+///
+/// Derivation is host-sensitive because CI's own Rust matrix is (#4182).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationHost {
+    /// Windows, where the `gwt` crate's binary targets deadlock.
+    Windows,
+    /// Every other host, where CI's full gate runs as written.
+    Other,
+}
+
+impl VerificationHost {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// The CI Rust gate scoped to one package. Package selection is the only
 /// narrowing derivation is allowed to apply — a target filter such as
 /// `--lib` drops whole test families (the `gwt` crate's binary targets carry
 /// ~1300 unit tests) while still reporting a GREEN verification run (#3640).
-fn package_test_command(package: &str) -> String {
-    CI_RUST_TEST_GATE.replace("--workspace", &format!("-p {package}"))
+///
+/// Windows narrows one package's targets on top of that, because it cannot
+/// run them at all — see the module header.
+fn package_test_command_for(package: &str, host: VerificationHost) -> String {
+    rust_test_command_for(Some(package), host)
+}
+
+/// CI's unnarrowed Rust gate for `host`, used when a change cannot be
+/// attributed to any single package.
+fn workspace_test_command_for(host: VerificationHost) -> String {
+    rust_test_command_for(None, host)
+}
+
+/// The derived Rust test command for one package, or for the whole
+/// workspace when `package` is `None`.
+fn rust_test_command_for(package: Option<&str>, host: VerificationHost) -> String {
+    // A workspace-wide gate builds the deadlocking package too, so both
+    // spellings take CI's Windows gate.
+    let takes_windows_gate = host == VerificationHost::Windows
+        && package.map_or(true, |package| package == WINDOWS_DEADLOCKING_PACKAGE);
+    let gate = if takes_windows_gate {
+        CI_WINDOWS_RUST_TEST_GATE
+    } else {
+        CI_RUST_TEST_GATE
+    };
+    let scope = match package {
+        Some(package) => format!("-p {package}"),
+        None => "--workspace".to_string(),
+    };
+    let mut command = gate.replace("--workspace", &scope);
+    if host == VerificationHost::Windows {
+        // Serialization is not the fix for that deadlock — it only defers
+        // it — but the targeted Windows CI steps run serialized because
+        // several own external resources (a real PTY, a console subsystem),
+        // and a derived matrix cannot tell which of those it is about to run.
+        command.push_str(" -- --test-threads=1");
+    }
+    command
 }
 
 /// A derived verification plan: the matrix plus the surface classification
@@ -193,6 +286,12 @@ fn is_docs_path(path: &str) -> bool {
 /// Non-git directories remain invalid because they cannot provide a stable
 /// worktree fingerprint.
 pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
+    derive_for_host(worktree, VerificationHost::current())
+}
+
+/// [`derive`] against an explicit host, so both branches of the
+/// host-sensitive matrix stay reachable from tests on any machine (#4182).
+fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPlan, String> {
     if git_lines(worktree, &["rev-parse", "--git-dir"]).is_empty() {
         return Err("verify.plan derive requires a git worktree".to_string());
     }
@@ -277,10 +376,10 @@ pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
         // A workspace manifest change cannot be attributed to any single
         // package, so it takes CI's gate unnarrowed — which subsumes every
         // per-package command the surfaces above would have added.
-        push_unique(&mut commands, CI_RUST_TEST_GATE.to_string());
+        push_unique(&mut commands, workspace_test_command_for(host));
     } else {
         for package in test_packages {
-            push_unique(&mut commands, package_test_command(package));
+            push_unique(&mut commands, package_test_command_for(package, host));
         }
     }
     // Only lint files that still exist — a deleted path would make
@@ -355,7 +454,7 @@ mod tests {
         write(dir.path(), ".gwt/work/events.jsonl", "{}");
         write(dir.path(), "tasks/todo.md", "- [ ] x");
 
-        let plan = derive(dir.path()).unwrap();
+        let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
         assert_eq!(
             plan.commands,
             vec![
@@ -402,7 +501,7 @@ mod tests {
         // Only a doc is dirty now — the committed rust must still derive.
         write(dir.path(), "README.md", "# readme");
 
-        let plan = derive(dir.path()).unwrap();
+        let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
         assert!(
             plan.commands
                 .contains(&"cargo test -p gwt-core --all-features".to_string()),
@@ -503,12 +602,188 @@ mod tests {
 
     /// The derived matrix for every surface, for invariant sweeps.
     fn derive_for(files: &[&str]) -> DerivedPlan {
+        derive_on(VerificationHost::Other, files)
+    }
+
+    /// The same sweep pinned to one host, so both branches of the
+    /// host-sensitive matrix are exercised wherever the suite runs (#4182).
+    fn derive_on(host: VerificationHost, files: &[&str]) -> DerivedPlan {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
         for file in files {
             write(dir.path(), file, "x\n");
         }
-        derive(dir.path()).unwrap()
+        derive_for_host(dir.path(), host).unwrap()
+    }
+
+    /// Every `cargo test` command in a derived matrix.
+    fn cargo_tests(plan: &DerivedPlan) -> Vec<String> {
+        plan.commands
+            .iter()
+            .filter(|command| command.starts_with("cargo test"))
+            .cloned()
+            .collect()
+    }
+
+    // #4182 AC-1 / AC-6: the derived matrix must not ask a Windows host to
+    // run the `gwt` crate's binary targets. Four `app_runtime` tests take
+    // `env_test_lock` and never release it there (#4014), so the run wedges
+    // with the test binary's CPU flat and a pile of orphaned
+    // `cmd /d /s /c "exit /b 0"` children — while still holding the
+    // host-wide verification lease. CI already refuses to run that target on
+    // Windows; only the locally derived matrix still demanded it.
+    #[test]
+    fn windows_derivation_drops_the_deadlocking_gwt_bin_target() {
+        let plan = derive_on(
+            VerificationHost::Windows,
+            &["crates/gwt/src/app_runtime.rs"],
+        );
+        assert!(
+            plan.commands.contains(
+                &"cargo test -p gwt --lib --all-features -- --test-threads=1".to_string()
+            ),
+            "{:?}",
+            plan.commands
+        );
+        assert!(
+            !plan
+                .commands
+                .contains(&"cargo test -p gwt --all-features".to_string()),
+            "the full gate deadlocks on Windows: {:?}",
+            plan.commands
+        );
+    }
+
+    // #4182 AC-1: whichever packages a Windows change puts under test, every
+    // derived `cargo test` is serialized. The targeted Windows CI steps pin
+    // `--test-threads=1` per fixture because they own external resources (a
+    // real PTY, a console subsystem); a locally derived matrix cannot tell
+    // which of those it is about to run, so it serializes all of them.
+    #[test]
+    fn windows_derived_cargo_tests_are_serialized() {
+        for files in [
+            vec!["crates/gwt-core/src/lib.rs"],
+            vec!["Cargo.toml"],
+            vec!["scripts/release.sh"],
+            vec!["crates/gwt/web/styles/tokens.css"],
+        ] {
+            let plan = derive_on(VerificationHost::Windows, &files);
+            let tests = cargo_tests(&plan);
+            assert!(!tests.is_empty(), "{files:?}: {:?}", plan.commands);
+            for command in tests {
+                assert!(
+                    command.ends_with(" -- --test-threads=1"),
+                    "{files:?}: `{command}` is not serialized"
+                );
+            }
+        }
+    }
+
+    // #4182 AC-8 / AC-9: the run that holds the verification lease is itself
+    // a `gwtd` process, and Windows cannot replace a file that is open. A
+    // derived matrix that relinks `target/debug/gwtd.exe` therefore fails
+    // with `os error 5` every time (#3808, #4172). Restricting the Windows
+    // matrix to library targets makes that structurally impossible, because
+    // `--lib` builds no binary targets at all.
+    #[test]
+    fn windows_derivation_never_relinks_the_running_gwtd() {
+        for files in [
+            vec!["crates/gwt/src/main.rs"],
+            vec!["Cargo.toml"],
+            vec!["scripts/release.sh"],
+        ] {
+            for command in cargo_tests(&derive_on(VerificationHost::Windows, &files)) {
+                for target in ["--bins", "--bin ", "--all-targets", "--tests", "--test "] {
+                    assert!(
+                        !command.contains(target),
+                        "{files:?}: `{command}` builds binary targets ({target}) and would \
+                         relink the running gwtd"
+                    );
+                }
+                assert!(
+                    command.contains(" --lib "),
+                    "{files:?}: `{command}` is not restricted to library targets"
+                );
+            }
+        }
+    }
+
+    // #4182 AC-6: the Windows matrix is CI's own Windows gate narrowed by
+    // package, exactly as the default matrix is CI's Linux gate narrowed by
+    // package. This fails the moment CI's Windows job changes shape and the
+    // derivation is not updated with it.
+    #[test]
+    fn windows_derived_rust_matrix_tracks_the_ci_windows_gate() {
+        // CI narrows its own Windows gate to `-p gwt`, and builds it on a
+        // separate budget before the timed loop, so the job runs the gate
+        // twice: once with `--no-run`, once for real.
+        let gwt_gate = CI_WINDOWS_RUST_TEST_GATE.replace("--workspace", "-p gwt");
+        assert_eq!(
+            workflow_cargo_tests("test.yml", "test-windows-default-parallel"),
+            vec![format!("{gwt_gate} --no-run"), gwt_gate.clone()],
+            "CI's Windows Rust gate changed — update verify.plan derivation with it (#4182)"
+        );
+        assert_eq!(
+            package_test_command_for("gwt", VerificationHost::Windows),
+            format!("{gwt_gate} -- --test-threads=1")
+        );
+        assert!(
+            derive_on(VerificationHost::Windows, &["Cargo.toml"])
+                .commands
+                .contains(&format!("{CI_WINDOWS_RUST_TEST_GATE} -- --test-threads=1")),
+            "workspace manifest change must derive the full Windows gate"
+        );
+    }
+
+    // #4182: the Windows narrowing is as small as the evidence. Only the
+    // `gwt` crate's binary targets have ever wedged a Windows host, so only
+    // they are dropped — every other package keeps CI's full gate there,
+    // integration tests included. Narrowing further would trade real
+    // coverage for nothing, which is the #3640 failure mode in reverse.
+    #[test]
+    fn windows_narrowing_is_confined_to_the_deadlocking_package() {
+        assert_eq!(
+            package_test_command_for("gwt-core", VerificationHost::Windows),
+            "cargo test -p gwt-core --all-features -- --test-threads=1"
+        );
+        assert_eq!(
+            package_test_command_for("gwt-skills", VerificationHost::Windows),
+            "cargo test -p gwt-skills --all-features -- --test-threads=1"
+        );
+        let plan = derive_on(VerificationHost::Windows, &["crates/gwt-core/src/lib.rs"]);
+        assert!(
+            plan.commands
+                .contains(&"cargo test -p gwt-core --all-features -- --test-threads=1".to_string()),
+            "{:?}",
+            plan.commands
+        );
+    }
+
+    // #4182 AC-5: the Windows split changes nothing anywhere else. Linux and
+    // macOS keep running CI's full `--all-features` gate, target filters and
+    // all, because the deadlock it exists to avoid is Windows-only.
+    #[test]
+    fn non_windows_derivation_is_untouched_by_the_windows_split() {
+        for files in [
+            vec!["crates/gwt/src/app_runtime.rs"],
+            vec!["crates/gwt-core/src/lib.rs"],
+            vec!["Cargo.toml"],
+            vec!["scripts/release.sh"],
+        ] {
+            let plan = derive_on(VerificationHost::Other, &files);
+            let tests = cargo_tests(&plan);
+            assert!(!tests.is_empty(), "{files:?}: {:?}", plan.commands);
+            for command in tests {
+                assert!(
+                    !command.contains("--lib") && !command.contains("--test-threads"),
+                    "{files:?}: `{command}` leaked the Windows narrowing"
+                );
+            }
+        }
+        assert_eq!(
+            package_test_command_for("gwt-core", VerificationHost::Other),
+            "cargo test -p gwt-core --all-features"
+        );
     }
 
     // #3640 AC-1: the `gwt` crate's binary targets carry ~1300 unit tests
@@ -590,7 +865,7 @@ mod tests {
             "CI's Rust gate changed — update verify.plan derivation with it (#3640)"
         );
         assert_eq!(
-            package_test_command("gwt-core"),
+            package_test_command_for("gwt-core", VerificationHost::Other),
             "cargo test -p gwt-core --all-features"
         );
         // A workspace-manifest change cannot be attributed to one package,
@@ -631,7 +906,7 @@ mod tests {
         fixture(dir.path());
         write(dir.path(), "scripts/release.sh", "#!/bin/sh\n");
 
-        let plan = derive(dir.path()).unwrap();
+        let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
         assert!(plan.commands.contains(&CI_CLIPPY_GATE.to_string()));
         assert!(plan
             .commands
