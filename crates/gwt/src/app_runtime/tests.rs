@@ -67906,7 +67906,10 @@ fn codex_managed_config_startup_writes_experimental_mode_into_home_codex_config(
     let config_path = super::startup::codex_home_for_startup(None).join("config.toml");
     assert_eq!(config_path, home.path().join(".codex/config.toml"));
 
-    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        gwt_skills::CodexFeaturesSchema::AcceptsTables,
+    );
 
     let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(
@@ -67951,7 +67954,10 @@ fn codex_managed_config_startup_records_operation_refusal_on_unparseable_config(
 not toml";
     fs::write(&config_path, broken).unwrap();
 
-    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        gwt_skills::CodexFeaturesSchema::AcceptsTables,
+    );
 
     assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
     let rows = gwt_core::error_ledger::list_since(None).unwrap();
@@ -67972,6 +67978,53 @@ not toml";
         "ledger row must carry the key and the cause, got: {}",
         rows[0].message
     );
+}
+
+// Issue #4229 AC-5: the codex gwt launches (`bunx @openai/codex@latest`, which
+// loads the table) and the `codex` on PATH are different binaries. The managed
+// key follows the PATH codex, so an old one there keeps the table out.
+#[test]
+fn codex_managed_config_follows_path_codex_not_launch_target() {
+    use gwt_skills::CodexFeaturesSchema::{AcceptsTables, BooleansOnly};
+
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = home.path().join(".codex/config.toml");
+    let schema_for = |version: Option<&str>| {
+        super::startup::codex_features_schema_for_path_codex(Some(&gwt_agent::DetectedAgent {
+            agent_id: gwt_agent::AgentId::Codex,
+            version: version.map(str::to_string),
+            path: std::path::PathBuf::from("codex"),
+        }))
+    };
+
+    assert_eq!(schema_for(Some("codex-cli 0.148.0")), BooleansOnly);
+    assert_eq!(schema_for(Some("codex-cli 0.152.0")), BooleansOnly);
+    assert_eq!(schema_for(Some("codex-cli 0.153.0")), AcceptsTables);
+    assert_eq!(schema_for(Some("codex-cli 0.154.0")), AcceptsTables);
+    assert_eq!(
+        schema_for(None),
+        BooleansOnly,
+        "a PATH codex whose version gwt cannot read must not risk the table"
+    );
+    assert_eq!(
+        super::startup::codex_features_schema_for_path_codex(None),
+        AcceptsTables,
+        "with no PATH codex only the gwt launch target reads the config"
+    );
+
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        schema_for(Some("codex-cli 0.148.0")),
+    );
+
+    assert!(
+        fs::read_to_string(&config_path)
+            .map(|content| !content.contains("context_management"))
+            .unwrap_or(true),
+        "PATH codex 0.148.0 must never receive the table"
+    );
+    assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
