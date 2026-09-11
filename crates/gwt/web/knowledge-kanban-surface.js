@@ -207,7 +207,12 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
   if (Number.isFinite(entry?.queue_position)) {
-    items.push({ kind: "chip", key: "queue", label: `Queue ${entry.queue_position}` });
+    const terminal = String(entry?.queue_terminal || "").trim();
+    items.push({
+      kind: "chip",
+      key: "queue",
+      label: terminal ? `Queue ${entry.queue_position} · ${terminal}` : `Queue ${entry.queue_position}`,
+    });
   }
   if (work?.pr_number) {
     const prState = String(work.pr_state || "").trim();
@@ -247,7 +252,7 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   switch (monitor?.state) {
     case "queued":
       return {
-        order: ["launch-now", "configure-issue", "move-up", "move-down", ...workActions],
+        order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
     case "launch_failed":
     case "agent_failed":
@@ -290,6 +295,10 @@ function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, can
     }
     case "launch-now":
       return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "queue-push":
+      return issueEntryStateKey(entry) === "open" && !monitor;
+    case "queue-remove":
+      return Boolean(Number.isFinite(entry?.queue_position));
     case "configure-issue":
       return Boolean(monitor);
     case "move-up":
@@ -2984,6 +2993,10 @@ export function createKnowledgeKanbanSurface({
           label: "Settings",
           aria: "Project Agent settings for",
         }),
+        "queue-remove": Object.freeze({
+          label: "Remove from queue",
+          aria: "Remove from queue",
+        }),
         "move-up": Object.freeze({ label: "↑ Move up", aria: "Move up" }),
         "move-down": Object.freeze({ label: "↓ Move down", aria: "Move down" }),
         "continue-work": Object.freeze({ label: "Continue work", aria: "Continue work on" }),
@@ -3028,6 +3041,12 @@ export function createKnowledgeKanbanSurface({
               kind: "issue_monitor_configure_issue",
               issue_number: entry.number,
               linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "queue-remove":
+            send({
+              kind: "issue_monitor_queue_remove",
+              issue_numbers: [entry.number],
             });
             return;
           case "move-up":

@@ -9,10 +9,12 @@ use crate::{
 
 const CLAIM_BEGIN: &str = "<!-- gwt-auto-improve-claim v1 -->";
 const CLAIM_END: &str = "<!-- /gwt-auto-improve-claim -->";
+pub const QUEUED_LABEL: &str = "gwt-queued";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimStatus {
+    Queued,
     Active,
     Released,
     Completed,
@@ -111,6 +113,10 @@ pub fn parse_claim_comment(
 
 pub fn claim_is_active(claim: &ClaimComment, now: &str) -> bool {
     claim.status == ClaimStatus::Active && claim.expires_at.as_str() > now
+}
+
+pub fn claim_is_queued(claim: &ClaimComment, now: &str) -> bool {
+    claim.status == ClaimStatus::Queued && claim.expires_at.as_str() > now
 }
 
 pub fn select_winning_claim<'a>(claims: &'a [ClaimComment], now: &str) -> Option<&'a ClaimComment> {
@@ -285,6 +291,13 @@ fn classify_claim_resolution(
     issue_number: IssueNumber,
     now: &str,
 ) -> ClaimResolution {
+    if let Some(queued) = claims.iter().find(|existing| {
+        claim_is_queued(existing, now)
+            && existing.issue_number == issue_number.0
+            && existing.owner != requested.owner
+    }) {
+        return ClaimResolution::Blocked(queued.clone());
+    }
     let active_own_exists = claims.iter().any(|existing| {
         claim_identity_matches(existing, requested, issue_number) && claim_is_active(existing, now)
     });
@@ -564,5 +577,71 @@ fn fetch_claims<C: IssueClient + ?Sized>(
     match client.fetch(issue_number, None)? {
         FetchResult::Updated(snapshot) => Ok(extract_claim_comments(&snapshot.comments)),
         FetchResult::NotModified => Ok(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claim(owner: &str) -> ClaimComment {
+        ClaimComment {
+            comment_id: None,
+            claim_id: "same-claim".to_string(),
+            owner: owner.to_string(),
+            issue_number: 42,
+            status: ClaimStatus::Active,
+            heartbeat_at: "2026-09-10T00:00:00Z".to_string(),
+            expires_at: "2026-09-10T01:00:00Z".to_string(),
+            launched_work_id: None,
+        }
+    }
+
+    #[test]
+    fn same_username_and_pid_on_different_hosts_are_distinct_owners() {
+        let requested = claim("macbook:akiojin:40272");
+        let other_host = claim("studio:akiojin:40272");
+        assert!(!claim_identity_matches(
+            &other_host,
+            &requested,
+            IssueNumber(42)
+        ));
+        assert!(matches!(
+            classify_claim_resolution(
+                &[other_host],
+                &requested,
+                IssueNumber(42),
+                "2026-09-10T00:00:01Z"
+            ),
+            ClaimResolution::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn live_foreign_queued_claim_blocks_acquisition_but_expired_one_does_not() {
+        let requested = claim("studio:akiojin:40272");
+        let mut queued = claim("macbook:akiojin:40272");
+        queued.claim_id = "queued-claim".to_string();
+        queued.status = ClaimStatus::Queued;
+        queued.expires_at = "2026-09-10T01:00:00Z".to_string();
+        assert!(matches!(
+            classify_claim_resolution(
+                &[queued.clone()],
+                &requested,
+                IssueNumber(42),
+                "2026-09-10T00:30:00Z"
+            ),
+            ClaimResolution::Blocked(_)
+        ));
+        queued.expires_at = "2026-09-10T00:01:00Z".to_string();
+        assert!(matches!(
+            classify_claim_resolution(
+                &[queued],
+                &requested,
+                IssueNumber(42),
+                "2026-09-10T00:30:00Z"
+            ),
+            ClaimResolution::NoWinner
+        ));
     }
 }

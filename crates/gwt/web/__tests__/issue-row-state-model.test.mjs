@@ -226,7 +226,7 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     "queue position and the SPEC attribute win over the remaining labels",
   );
   assert.deepEqual(queued.actions, ["launch-now", "configure-issue"]);
-  assert.deepEqual(queued.overflow, ["move-up", "move-down"]);
+  assert.deepEqual(queued.overflow, ["queue-remove", "move-up", "move-down"]);
 
   const liveInline = issueRowStateModel({
     entry: knowledgeEntry(3671, { monitor_state: "launched", labels: ["auto-merge"] }),
@@ -554,7 +554,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
     { kind: "chip", text: "Spec" },
   ]);
   assert.deepEqual(visibleActions(row42), ["launch-now", "configure-issue"]);
-  assert.deepEqual(overflowActions(row42), ["move-up", "move-down"]);
+  assert.deepEqual(overflowActions(row42), ["queue-remove", "move-up", "move-down"]);
   assert.equal(row42.querySelector('[data-action="move-up"]').disabled, true);
   assert.equal(row42.querySelector('[data-action="move-down"]').disabled, false);
 
@@ -643,6 +643,15 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
     issue_number: 42,
     linked_issue_kind: "spec",
   });
+  const remove42 = row42.querySelector('[data-action="queue-remove"]');
+  assert.equal(remove42.textContent, "Remove from queue");
+  assert.equal(remove42.getAttribute("aria-label"), "Remove from queue Issue #42");
+  const beforeRemove = fixture.sent.length;
+  remove42.click();
+  assert.deepEqual(fixture.sent.slice(beforeRemove), [{
+    kind: "issue_monitor_queue_remove",
+    issue_numbers: [42],
+  }]);
   assert.equal(
     fixture.sent.filter((message) => message.kind === "select_knowledge_bridge_entry").length,
     0,

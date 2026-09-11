@@ -802,6 +802,11 @@ pub enum FrontendEvent {
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },
+    /// SPEC #3165 TQ-9: remove Issues from this terminal's explicit queue.
+    /// A launch already running for them is not stopped.
+    IssueMonitorQueueRemove {
+        issue_numbers: Vec<u64>,
+    },
     ListIssueMonitor,
     QuickRegisterIssue {
         title: String,

@@ -859,6 +859,12 @@ pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
     pub priority_order: Vec<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
+    #[serde(default)]
+    pub terminal_queue_auto_refill: bool,
+    #[serde(default)]
+    pub terminal_queue_auto_refill_limit: usize,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1053,12 +1059,31 @@ pub struct IssueMonitorPrefs {
     pub last_scan_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTerminalQueueEntry {
+    pub number: u64,
+    pub queued_at: String,
+    #[serde(default)]
+    pub queued_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMonitorTerminalQueue {
+    #[serde(default)]
+    pub entries: Vec<IssueMonitorTerminalQueueEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
+}
+
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
             enabled: false,
             max_active_agents: 1,
             priority_order: Vec::new(),
+            terminal_queues: BTreeMap::new(),
+            terminal_queue_auto_refill: false,
+            terminal_queue_auto_refill_limit: 0,
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -2560,6 +2585,12 @@ pub struct IssueMonitorStatusView {
     pub enabled: bool,
     pub state: String,
     pub queue_len: usize,
+    #[serde(default)]
+    pub terminal_queue_len: usize,
+    #[serde(default)]
+    pub unqueued_open_count: usize,
+    #[serde(default)]
+    pub other_terminal_queue_count: usize,
     pub active_count: usize,
     pub max_active_agents: usize,
     pub total_candidates: usize,
@@ -3225,6 +3256,10 @@ pub struct IssueMonitorState {
     launch_auth_required: bool,
     active_launches: Vec<u64>,
     priority_order: Vec<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
+    terminal_queue_auto_refill: bool,
+    terminal_queue_auto_refill_limit: usize,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -5112,6 +5147,9 @@ impl IssueMonitorState {
             launch_auth_required: false,
             active_launches: Vec::new(),
             priority_order: Vec::new(),
+            terminal_queues: BTreeMap::new(),
+            terminal_queue_auto_refill: false,
+            terminal_queue_auto_refill_limit: 0,
             launch_profiles: Vec::new(),
             launch_usage_threshold_percent: DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT,
             provider_quota_holds: BTreeMap::new(),
@@ -5172,6 +5210,9 @@ impl IssueMonitorState {
         state.launch_profiles = prefs.launch_profile_pool();
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.priority_order = prefs.priority_order;
+        state.terminal_queues = prefs.terminal_queues;
+        state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
+        state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
         state.last_scan_at = prefs.last_scan_at;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
         state.provider_quota_hold_evidence =
@@ -5374,6 +5415,9 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             max_active_agents: self.config.max_active.max(1),
             priority_order: self.priority_order.clone(),
+            terminal_queues: self.terminal_queues.clone(),
+            terminal_queue_auto_refill: self.terminal_queue_auto_refill,
+            terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -8552,6 +8596,30 @@ impl IssueMonitorState {
                     .next()
                     .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
             });
+        let host = crate::process::current_hostname();
+        let local_entries = self.terminal_queues.get(&host).map(|queue| {
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<BTreeSet<_>>()
+        });
+        let terminal_queue_len = local_entries.as_ref().map_or(0, BTreeSet::len);
+        let unqueued_open_count = local_entries.as_ref().map_or(0, |entries| {
+            self.inbox
+                .iter()
+                .filter(|item| {
+                    item.issue.state == IssueMonitorIssueState::Open
+                        && !entries.contains(&item.issue.number)
+                })
+                .count()
+        });
+        let other_terminal_queue_count = self
+            .terminal_queues
+            .iter()
+            .filter(|(terminal, _)| *terminal != &host)
+            .map(|(_, queue)| queue.entries.len())
+            .sum();
         IssueMonitorStatusView {
             enabled: self.config.enabled,
             state: if !self.config.enabled {
@@ -8583,6 +8651,9 @@ impl IssueMonitorState {
                 "idle".to_string()
             },
             queue_len: self.queue.len(),
+            terminal_queue_len,
+            unqueued_open_count,
+            other_terminal_queue_count,
             active_count: self.active_launches.len(),
             max_active_agents: self.config.max_active,
             total_candidates: self.inbox.len(),
@@ -9921,6 +9992,109 @@ impl IssueMonitorState {
         self.priority_order = issue_numbers;
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
+    }
+
+    /// Add Issues to this terminal's explicit queue, preserving order and
+    /// avoiding duplicates. The queue itself is durable through
+    /// [`IssueMonitorState::prefs`].
+    pub fn terminal_queue_push(&mut self, issue_numbers: &[u64], queued_by: &str, now: &str) {
+        let host = crate::process::current_hostname();
+        let queue = self.terminal_queues.entry(host).or_default();
+        for number in issue_numbers {
+            if !queue.entries.iter().any(|entry| entry.number == *number) {
+                queue.entries.push(IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: now.to_string(),
+                    queued_by: queued_by.to_string(),
+                });
+            }
+        }
+        queue.last_seen_at = Some(now.to_string());
+    }
+
+    pub fn terminal_queue_remove(&mut self, issue_numbers: &[u64], now: &str) {
+        let host = crate::process::current_hostname();
+        if let Some(queue) = self.terminal_queues.get_mut(&host) {
+            queue
+                .entries
+                .retain(|entry| !issue_numbers.contains(&entry.number));
+            queue.last_seen_at = Some(now.to_string());
+        }
+    }
+
+    pub fn terminal_queue_move(&mut self, number: u64, position: usize, now: &str) -> bool {
+        let host = crate::process::current_hostname();
+        let Some(queue) = self.terminal_queues.get_mut(&host) else {
+            return false;
+        };
+        let Some(index) = queue
+            .entries
+            .iter()
+            .position(|entry| entry.number == number)
+        else {
+            return false;
+        };
+        let entry = queue.entries.remove(index);
+        let target = position.min(queue.entries.len());
+        queue.entries.insert(target, entry);
+        queue.last_seen_at = Some(now.to_string());
+        true
+    }
+
+    pub fn terminal_queue_orphans(&self) -> Vec<String> {
+        let host = crate::process::current_hostname();
+        self.terminal_queues
+            .keys()
+            .filter(|terminal| *terminal != &host)
+            .cloned()
+            .collect()
+    }
+
+    pub fn adopt_terminal_queue(&mut self, terminal: &str, now: &str) -> usize {
+        let Some(orphan) = self.terminal_queues.remove(terminal) else {
+            return 0;
+        };
+        let host = crate::process::current_hostname();
+        let queue = self.terminal_queues.entry(host).or_default();
+        let mut adopted = 0;
+        for entry in orphan.entries {
+            if !queue
+                .entries
+                .iter()
+                .any(|existing| existing.number == entry.number)
+            {
+                queue.entries.push(entry);
+                adopted += 1;
+            }
+        }
+        queue.last_seen_at = Some(now.to_string());
+        adopted
+    }
+
+    pub fn auto_refill_terminal_queue(&mut self, candidates: &[u64], now: &str) -> usize {
+        if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
+            return 0;
+        }
+        let host = crate::process::current_hostname();
+        let queue = self.terminal_queues.entry(host).or_default();
+        let mut added = 0;
+        for number in candidates {
+            if added >= self.terminal_queue_auto_refill_limit {
+                break;
+            }
+            if !queue.entries.iter().any(|entry| entry.number == *number) {
+                queue.entries.push(IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: now.to_string(),
+                    queued_by: "auto-refill".to_string(),
+                });
+                added += 1;
+            }
+        }
+        if added > 0 {
+            queue.last_seen_at = Some(now.to_string());
+        }
+        added
     }
 
     fn apply_priority_order_to_queue(&mut self) {
@@ -13560,6 +13734,28 @@ pub fn scan_issue_monitor_candidates(
     monitor.last_scan_at = Some(now.to_string());
     monitor.last_error = None;
     monitor.launch_auth_required = false;
+    if monitor
+        .terminal_queues
+        .get(&crate::process::current_hostname())
+        .is_some_and(|queue| queue.entries.is_empty())
+    {
+        let refill = issues
+            .iter()
+            .filter(|issue| is_auto_improve_candidate(issue, &monitor.config))
+            .map(|issue| issue.number)
+            .collect::<Vec<_>>();
+        monitor.auto_refill_terminal_queue(&refill, now);
+    }
+    let terminal_queue = monitor
+        .terminal_queues
+        .get(&crate::process::current_hostname())
+        .map(|queue| {
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<BTreeSet<_>>()
+        });
 
     for issue in issues {
         summary.scanned += 1;
@@ -13581,6 +13777,13 @@ pub fn scan_issue_monitor_candidates(
             continue;
         }
         if !is_auto_improve_candidate(issue, &monitor.config) {
+            summary.skipped += 1;
+            continue;
+        }
+        if terminal_queue
+            .as_ref()
+            .is_some_and(|entries| !entries.contains(&issue.number))
+        {
             summary.skipped += 1;
             continue;
         }
@@ -24583,6 +24786,247 @@ mod tests {
             readiness: IssueMonitorReadiness::NotApplicable,
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn explicit_terminal_queue_excludes_unqueued_candidates() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queues.insert(
+            crate::process::current_hostname(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 1,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: None,
+            },
+        );
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[
+                auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+                auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            ],
+            "2026-09-10T00:01:00Z",
+        );
+        assert!(monitor.inbox_item(1).is_some());
+        assert!(monitor.inbox_item(2).is_none());
+    }
+
+    #[test]
+    fn missing_terminal_queue_keeps_legacy_derive_behavior() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            "2026-09-10T00:01:00Z",
+        );
+        assert!(monitor.inbox_item(2).is_some());
+    }
+
+    #[test]
+    fn terminal_queue_prefs_round_trip_and_legacy_default() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.terminal_queues.insert(
+            "host-a".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 7,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: Some("2026-09-10T00:01:00Z".to_string()),
+            },
+        );
+        let encoded = serde_json::to_string(&prefs).expect("prefs serialize");
+        let decoded: IssueMonitorPrefs = serde_json::from_str(&encoded).expect("prefs parse");
+        assert_eq!(decoded.terminal_queues, prefs.terminal_queues);
+        let legacy: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":false,"max_active_agents":1,"priority_order":[]}"#)
+                .expect("legacy prefs parse");
+        assert!(legacy.terminal_queues.is_empty());
+    }
+
+    #[test]
+    fn terminal_queue_operations_are_deduplicated_ordered_and_non_destructive() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[3, 1, 3], "test", "2026-09-10T00:00:00Z");
+        assert!(monitor.terminal_queue_move(1, 0, "2026-09-10T00:01:00Z"));
+        monitor.terminal_queue_remove(&[3], "2026-09-10T00:02:00Z");
+        let queue = monitor
+            .terminal_queues
+            .get(&crate::process::current_hostname())
+            .expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn status_projects_terminal_queue_counts() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[1], "test", "2026-09-10T00:00:00Z");
+        monitor.record_candidate(auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        monitor.record_candidate(auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        monitor.terminal_queues.insert(
+            "other-host".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 9,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: None,
+            },
+        );
+        let status = monitor.status_view_at("2026-09-10T00:01:00Z");
+        assert_eq!(status.terminal_queue_len, 1);
+        assert_eq!(status.unqueued_open_count, 1);
+        assert_eq!(status.other_terminal_queue_count, 1);
+    }
+
+    #[test]
+    fn auto_refill_is_off_by_default_and_orphan_can_be_adopted() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(
+            monitor.auto_refill_terminal_queue(&[1, 2], "2026-09-10T00:00:00Z"),
+            0
+        );
+        monitor.terminal_queues.insert(
+            "old-host".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![IssueMonitorTerminalQueueEntry {
+                    number: 7,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "test".to_string(),
+                }],
+                last_seen_at: None,
+            },
+        );
+        assert_eq!(monitor.terminal_queue_orphans(), vec!["old-host"]);
+        assert_eq!(
+            monitor.adopt_terminal_queue("old-host", "2026-09-10T00:01:00Z"),
+            1
+        );
+        assert!(monitor.terminal_queue_orphans().is_empty());
+    }
+
+    #[test]
+    fn adopting_orphan_queue_merges_without_duplicate_issue_numbers() {
+        let now = "2026-09-10T00:02:00Z";
+        let host = crate::process::current_hostname();
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[7], "operator", now);
+        monitor.terminal_queues.insert(
+            "retired-host".to_string(),
+            IssueMonitorTerminalQueue {
+                entries: vec![
+                    IssueMonitorTerminalQueueEntry {
+                        number: 7,
+                        queued_at: "2026-09-09T23:00:00Z".to_string(),
+                        queued_by: "retired".to_string(),
+                    },
+                    IssueMonitorTerminalQueueEntry {
+                        number: 8,
+                        queued_at: "2026-09-09T23:01:00Z".to_string(),
+                        queued_by: "retired".to_string(),
+                    },
+                ],
+                last_seen_at: Some("2026-09-09T23:01:00Z".to_string()),
+            },
+        );
+
+        assert_eq!(monitor.adopt_terminal_queue("retired-host", now), 1);
+        assert_eq!(monitor.adopt_terminal_queue("missing-host", now), 0);
+        let queue = monitor.terminal_queues.get(&host).expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(queue.last_seen_at.as_deref(), Some(now));
+        assert!(monitor.terminal_queue_orphans().is_empty());
+    }
+
+    #[test]
+    fn enabled_auto_refill_populates_only_an_empty_local_queue_within_limit() {
+        let now = "2026-09-10T00:00:00Z";
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_auto_refill = true;
+        monitor.terminal_queue_auto_refill_limit = 2;
+        let host = crate::process::current_hostname();
+        monitor.terminal_queues.insert(
+            host.clone(),
+            IssueMonitorTerminalQueue {
+                entries: Vec::new(),
+                last_seen_at: None,
+            },
+        );
+
+        assert_eq!(monitor.auto_refill_terminal_queue(&[4, 5, 6], now), 2);
+        let queue = monitor.terminal_queues.get(&host).expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert_eq!(queue.entries[0].queued_by, "auto-refill");
+        assert_eq!(queue.last_seen_at.as_deref(), Some(now));
+
+        // The direct refill primitive remains bounded and deduplicated when
+        // called again by a scheduler.
+        assert_eq!(monitor.auto_refill_terminal_queue(&[6], now), 1);
+        assert_eq!(
+            monitor
+                .terminal_queues
+                .get(&host)
+                .expect("local queue")
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn scan_auto_refill_is_opt_in_and_requires_a_defined_empty_queue() {
+        let now = "2026-09-10T00:00:00Z";
+        let mut absent = IssueMonitorState::new(IssueMonitorConfig::default());
+        absent.terminal_queue_auto_refill = true;
+        absent.terminal_queue_auto_refill_limit = 3;
+        scan_issue_monitor_candidates(&mut absent, &[issue(1)], now);
+        assert!(absent.terminal_queues.is_empty());
+
+        let mut enabled = IssueMonitorState::new(IssueMonitorConfig::default());
+        enabled.terminal_queue_auto_refill = true;
+        enabled.terminal_queue_auto_refill_limit = 1;
+        enabled.terminal_queue_push(&[], "operator", now);
+        scan_issue_monitor_candidates(&mut enabled, &[issue(2), issue(3)], now);
+        let queue = enabled
+            .terminal_queues
+            .get(&crate::process::current_hostname())
+            .expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     fn autonomous_state() -> IssueMonitorState {

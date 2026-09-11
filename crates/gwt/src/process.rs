@@ -24,6 +24,28 @@ fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> Stri
         .to_string()
 }
 
+fn normalize_hostname(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .map(|value| value.trim_end_matches(".local").to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_string())
+}
+
+/// Stable owner identity for remote Issue claims. The host component prevents
+/// same-user/PID collisions across machines; old persisted claims remain
+/// readable because parsing still treats owner as an opaque string.
+pub fn current_claim_owner() -> String {
+    let hostname = current_hostname();
+    format!("{}:{}:{}", hostname, current_username(), std::process::id())
+}
+
+pub fn current_hostname() -> String {
+    normalize_hostname(whoami::hostname().ok().as_deref())
+}
+
 /// Return the current username, falling back to the platform environment.
 pub fn current_username() -> String {
     let whoami_value = whoami::username().ok();
@@ -201,6 +223,20 @@ mod tests {
         );
         assert_eq!(resolve_username(None, Some(" runner ")), "runner");
         assert_eq!(resolve_username(None, None), "unknown");
+    }
+
+    #[test]
+    fn hostname_normalization_is_case_insensitive_and_removes_local_suffix() {
+        assert_eq!(normalize_hostname(Some(" MacBook.LOCAL ")), "macbook");
+        assert_eq!(normalize_hostname(Some("  ")), "unknown-host");
+        assert_eq!(normalize_hostname(None), "unknown-host");
+    }
+
+    #[test]
+    fn claim_owner_contains_host_username_and_pid() {
+        let owner = current_claim_owner();
+        assert_eq!(owner.split(':').count(), 3);
+        assert!(owner.ends_with(&format!(":{}", std::process::id())));
     }
 
     #[test]

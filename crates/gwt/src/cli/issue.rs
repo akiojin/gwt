@@ -202,6 +202,32 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             issue_numbers,
         } => run_monitor_priority_set(env, project_root.as_deref(), &issue_numbers, out)?,
+        IssueCommand::MonitorQueueList {
+            project_root,
+            terminal,
+        } => run_monitor_queue_list(env, project_root.as_deref(), terminal.as_deref(), out)?,
+        IssueCommand::MonitorQueuePush {
+            project_root,
+            issue_numbers,
+            position,
+            force,
+        } => run_monitor_queue_push(
+            env,
+            project_root.as_deref(),
+            &issue_numbers,
+            position,
+            force,
+            out,
+        )?,
+        IssueCommand::MonitorQueueRemove {
+            project_root,
+            issue_numbers,
+        } => run_monitor_queue_remove(env, project_root.as_deref(), &issue_numbers, out)?,
+        IssueCommand::MonitorQueueMove {
+            project_root,
+            number,
+            position,
+        } => run_monitor_queue_move(env, project_root.as_deref(), number, position, out)?,
         IssueCommand::MonitorLaunchNow {
             project_root,
             number,
@@ -696,6 +722,193 @@ fn run_monitor_priority_set<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
     out.push_str(&serde_json::json!({"priority_order": prefs.priority_order}).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_queue_list<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    terminal: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let prefs =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+            .map_err(io_as_api_error)?;
+    let key = terminal
+        .unwrap_or(&crate::process::current_hostname())
+        .to_string();
+    let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
+    out.push_str(&serde_json::to_string(&queue).expect("queue serializes"));
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_queue_push<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    numbers: &[u64],
+    position: Option<usize>,
+    force: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+    let now = chrono::Utc::now().to_rfc3339();
+    let queued_expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
+    let mut accepted_numbers = Vec::new();
+    // Queue claims are advisory: a GitHub outage must not make the local
+    // queue unusable. Active claims remain authoritative and are left alone.
+    for number in numbers {
+        if let Ok(gwt_github::client::FetchResult::Updated(snapshot)) =
+            env.client().fetch(IssueNumber(*number), None)
+        {
+            let claims =
+                if snapshot.labels.iter().any(|label| {
+                    label.eq_ignore_ascii_case(gwt_github::issue_auto_claim::QUEUED_LABEL)
+                }) {
+                    gwt_github::issue_auto_claim::extract_claim_comments(&snapshot.comments)
+                } else {
+                    Vec::new()
+                };
+            if !force
+                && claims.iter().any(|claim| {
+                    claim.issue_number == *number
+                        && matches!(
+                            claim.status,
+                            gwt_github::issue_auto_claim::ClaimStatus::Active
+                                | gwt_github::issue_auto_claim::ClaimStatus::Queued
+                        )
+                        && claim.owner != crate::process::current_claim_owner()
+                })
+            {
+                continue;
+            }
+            let claim = gwt_github::issue_auto_claim::ClaimComment {
+                comment_id: None,
+                claim_id: format!("gwt-queue:{}:{}", number, uuid::Uuid::new_v4()),
+                owner: crate::process::current_hostname(),
+                issue_number: *number,
+                status: gwt_github::issue_auto_claim::ClaimStatus::Queued,
+                heartbeat_at: now.clone(),
+                expires_at: queued_expires_at.clone(),
+                launched_work_id: None,
+            };
+            let _ = env.client().create_comment(
+                IssueNumber(*number),
+                &gwt_github::issue_auto_claim::render_claim_comment(&claim),
+            );
+            let mut labels = snapshot.labels.clone();
+            if !labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(gwt_github::issue_auto_claim::QUEUED_LABEL))
+            {
+                labels.push(gwt_github::issue_auto_claim::QUEUED_LABEL.to_string());
+                let _ = env.client().patch_issue_fields(
+                    IssueNumber(*number),
+                    &gwt_github::client::IssueFieldsPatch {
+                        labels: Some(labels),
+                        ..Default::default()
+                    },
+                );
+            }
+            accepted_numbers.push(*number);
+        } else {
+            accepted_numbers.push(*number);
+        }
+    }
+    let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let host = crate::process::current_hostname();
+        let queue = prefs.terminal_queues.entry(host).or_default();
+        for number in &accepted_numbers {
+            if !queue.entries.iter().any(|entry| entry.number == *number) {
+                queue
+                    .entries
+                    .push(crate::issue_monitor::IssueMonitorTerminalQueueEntry {
+                        number: *number,
+                        queued_at: now.clone(),
+                        queued_by: "operation".to_string(),
+                    });
+            }
+        }
+        if let Some(pos) = position {
+            let mut selected = Vec::new();
+            for number in &accepted_numbers {
+                if let Some(i) = queue
+                    .entries
+                    .iter()
+                    .position(|entry| entry.number == *number)
+                {
+                    selected.push(queue.entries.remove(i));
+                }
+            }
+            let at = pos.min(queue.entries.len());
+            for (offset, e) in selected.into_iter().enumerate() {
+                queue
+                    .entries
+                    .insert((at + offset).min(queue.entries.len()), e);
+            }
+        }
+        queue.last_seen_at = Some(now.clone());
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+    out.push_str(&serde_json::to_string(&prefs.terminal_queues).expect("queue serializes"));
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_queue_remove<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    numbers: &[u64],
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+    let now = chrono::Utc::now().to_rfc3339();
+    let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        if let Some(queue) = prefs
+            .terminal_queues
+            .get_mut(&crate::process::current_hostname())
+        {
+            queue.entries.retain(|e| !numbers.contains(&e.number));
+            queue.last_seen_at = Some(now.clone());
+        }
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+    out.push_str(&serde_json::to_string(&prefs.terminal_queues).expect("queue serializes"));
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_queue_move<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    position: usize,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+    let now = chrono::Utc::now().to_rfc3339();
+    let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        if let Some(queue) = prefs
+            .terminal_queues
+            .get_mut(&crate::process::current_hostname())
+        {
+            if let Some(i) = queue.entries.iter().position(|e| e.number == number) {
+                let e = queue.entries.remove(i);
+                queue.entries.insert(position.min(queue.entries.len()), e);
+                queue.last_seen_at = Some(now.clone());
+            }
+        }
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+    out.push_str(&serde_json::to_string(&prefs.terminal_queues).expect("queue serializes"));
     out.push('\n');
     Ok(0)
 }
