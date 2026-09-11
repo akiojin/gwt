@@ -6778,13 +6778,13 @@ button.workspace-board-ref:focus-visible {
 }
 
 .recovery-center-row__badge.is-pending {
-  border-color: var(--color-state-waiting);
-  color: var(--color-state-waiting);
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
 }
 
 .recovery-center-row__badge.is-acknowledged {
-  border-color: var(--color-state-running);
-  color: var(--color-state-running);
+  border-color: var(--color-state-success);
+  color: var(--color-state-success);
 }
 
 .recovery-center-row__badge.is-conflicted {
@@ -6796,10 +6796,6 @@ button.workspace-board-ref:focus-visible {
 .recovery-center-row__meta,
 .recovery-center-count {
   color: var(--color-text-muted);
-}
-
-.recovery-center-row__summary {
-  line-height: var(--leading-normal);
 }
 
 .recovery-center-row__meta,

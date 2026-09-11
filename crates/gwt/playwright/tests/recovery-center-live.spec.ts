@@ -63,27 +63,11 @@ test.describe.serial("Recovery Center live backend", () => {
     expect(Array.isArray(event.items)).toBe(true);
 
     for (const item of event.items) {
-      expect(Object.keys(item).sort()).toEqual(
-        expect.arrayContaining([
-          "action_handle",
-          "state",
-          "summary",
-          "updated_at",
-          "worktree_form",
-        ]),
-      );
-      expect(Object.keys(item)).not.toEqual(
-        expect.arrayContaining([
-          "session_id",
-          "project_root",
-          "path",
-          "recovery_id",
-          "intent",
-          "provider_receipt",
-          "digest",
-          "error",
-        ]),
-      );
+      const publicKeys = [
+        "action_handle", "state", "summary", "updated_at", "worktree_form",
+      ];
+      if (Object.hasOwn(item, "title")) publicKeys.push("title");
+      expect(Object.keys(item).sort()).toEqual(publicKeys.sort());
     }
 
     const modalText = await modal.innerText();

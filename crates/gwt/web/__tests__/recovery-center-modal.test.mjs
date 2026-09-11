@@ -93,6 +93,18 @@ function choose(select, value, window) {
   select.dispatchEvent(new window.Event("change"));
 }
 
+test("Recovery Center CSS references defined Operator tokens", () => {
+  const components = readFileSync(resolve(here, "..", "styles", "components.css"), "utf8");
+  const recoveryCss = components.split("/* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center. */")[1];
+  assert.ok(recoveryCss, "Recovery Center styles must be present");
+  const tokenSources = ["tokens.css", "typography.css"]
+    .map((file) => readFileSync(resolve(here, "..", "styles", file), "utf8"))
+    .join("\n");
+  const defined = new Set(Array.from(tokenSources.matchAll(/(--[\w-]+)\s*:/g), ([, name]) => name));
+  const referenced = new Set(Array.from(recoveryCss.matchAll(/var\(\s*(--[\w-]+)/g), ([, name]) => name));
+  assert.deepEqual([...referenced].filter((name) => !defined.has(name)), []);
+});
+
 test("Recovery Center uses the shared modal and WAI-ARIA primitives", () => {
   const { document } = fixture();
   const modal = document.getElementById("recovery-center-modal");
