@@ -1152,22 +1152,28 @@ where
             &query,
         ],
     )?;
-    if !output.success {
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|e| GwtError::Other(format!("owner issue states JSON: {e}")))?;
+    // gh exits nonzero for partial GraphQL responses too. Only a NOT_FOUND
+    // attached to a requested issue alias is a recoverable per-owner failure.
+    let mut missing = std::collections::BTreeSet::new();
+    for error in value["errors"].as_array().into_iter().flatten() {
+        let path = error["path"].as_array();
+        let owner = path
+            .filter(|p| p.len() == 2 && p[0] == "repository")
+            .and_then(|p| p[1].as_str())
+            .and_then(|alias| alias.strip_prefix("owner_"))
+            .and_then(|n| n.parse::<u64>().ok())
+            .filter(|n| owners.contains(n));
+        if error["type"] != "NOT_FOUND" || owner.is_none() {
+            return Err(GwtError::Git(format!("owner issue states: {error}")));
+        }
+        missing.insert(owner.expect("validated owner alias"));
+    }
+    if !output.success && missing.is_empty() {
         return Err(GwtError::Git(format!(
             "gh owner issue states: {}",
             output.stderr
-        )));
-    }
-    let value: serde_json::Value = serde_json::from_str(&output.stdout)
-        .map_err(|e| GwtError::Other(format!("owner issue states JSON: {e}")))?;
-    if value
-        .get("errors")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|errors| !errors.is_empty())
-    {
-        return Err(GwtError::Git(format!(
-            "owner issue states: {}",
-            value["errors"]
         )));
     }
     for row in rows {
@@ -1179,12 +1185,19 @@ where
             continue;
         };
         let state = &value["data"]["repository"][format!("owner_{owner}")]["state"];
+        if missing.contains(&owner) {
+            row["fallbackOwnerState"] = serde_json::json!("UNKNOWN");
+            continue;
+        }
         if !state.as_str().is_some_and(|s| s == "OPEN" || s == "CLOSED") {
             return Err(GwtError::Git(format!(
                 "owner issue #{owner} state unavailable"
             )));
         }
         row["fallbackOwnerState"] = state.clone();
+    }
+    if !missing.is_empty() {
+        eprintln!("warning: owner issue state unavailable (NOT_FOUND): {missing:?}");
     }
     Ok(1)
 }
@@ -4674,8 +4687,10 @@ mod tests {
 
     #[test]
     fn missing_fallback_owner_does_not_hide_other_closed_owners() {
-        let mut rows = vec![serde_json::json!({"headRefName":"work/issue-3972"}),
-            serde_json::json!({"headRefName":"work/issue-999999"})];
+        let mut rows = vec![
+            serde_json::json!({"headRefName":"work/issue-3972"}),
+            serde_json::json!({"headRefName":"work/issue-999999"}),
+        ];
         hydrate_fallback_owners(Path::new("/tmp/repo"), &mut rows, &mut |_, _| Ok(GhCliOutput {
             success: false, stderr: "Could not resolve to an Issue".into(),
             stdout: serde_json::json!({"data":{"repository":{"owner_3972":{"state":"CLOSED"},"owner_999999":null}},
@@ -4700,6 +4715,7 @@ mod tests {
         let mut owner_closed = false;
         for offset in [0, PR_INVENTORY_CACHE_TTL_SECS + 1] {
             let mut owner_calls = 0;
+            let calls_before = gh.calls.len();
             let read = fetch_pr_inventory_cached_with(
                 Path::new("/tmp/repo"),
                 &tmp.path().join(PR_INVENTORY_CACHE_FILE),
@@ -4726,6 +4742,22 @@ mod tests {
             )
             .unwrap();
             assert_eq!(owner_calls, 1);
+            let actual_calls = owner_calls
+                + gh.calls[calls_before..]
+                    .iter()
+                    .filter(|call| call.as_str() != "api rate_limit")
+                    .count();
+            assert_eq!(read.github_calls as usize, actual_calls);
+            if offset == 0 {
+                assert_eq!(actual_calls, 31);
+                assert_eq!(
+                    gh.calls[calls_before..]
+                        .iter()
+                        .filter(|call| call.starts_with("pr view "))
+                        .count(),
+                    29
+                );
+            }
             assert!(read.github_calls <= 31);
             assert!(read.items.iter().all(|item| item.owner_issue == Some(3972)
                 && item.owner_issue_closed == owner_closed
