@@ -43467,6 +43467,64 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(persisted.pending_effects, journal);
 }
 
+// SPEC #3165 TQ-9 / AC-4: the row's "Remove from queue" action removes the
+// Issue from this terminal's queue and leaves other terminals' queues alone.
+#[test]
+fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let queue = |numbers: &[u64]| gwt::issue_monitor::IssueMonitorTerminalQueue {
+        entries: numbers
+            .iter()
+            .map(|number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                number: *number,
+                queued_at: "2026-09-10T00:00:00Z".to_string(),
+                queued_by: "operator".to_string(),
+            })
+            .collect(),
+        last_seen_at: None,
+    };
+    let host = gwt::process::current_hostname();
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 1,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    seeded.terminal_queues.insert(host.clone(), queue(&[42, 43]));
+    seeded
+        .terminal_queues
+        .insert(format!("{host}-other"), queue(&[42]));
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueueRemove {
+            issue_numbers: vec![42],
+        },
+    );
+
+    assert!(!events.is_empty(), "removal answers with a refreshed snapshot");
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let numbers = |terminal: &str| {
+        persisted.terminal_queues[terminal]
+            .entries
+            .iter()
+            .map(|entry| entry.number)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(numbers(&host), vec![43]);
+    assert_eq!(numbers(&format!("{host}-other")), vec![42]);
+}
+
 #[test]
 fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_and_delivery() {
     let _env_lock = env_test_lock()
