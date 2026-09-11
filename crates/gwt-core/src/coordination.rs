@@ -27,7 +27,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{config::BareProjectConfig, paths::gwt_project_dir_for_repo_path, GwtError, Result};
+use crate::{
+    board_escalation::{BoardEscalation, BoardEscalationStore, ESCALATIONS_FILE_NAME},
+    config::BareProjectConfig,
+    paths::gwt_project_dir_for_repo_path,
+    GwtError, Result,
+};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -359,6 +364,16 @@ pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bo
             .any(|mention| match_keys.iter().any(|key| key == &mention.typed_key()))
 }
 
+/// The worktree form a Board post came from (SPEC-1974 FR-063).
+///
+/// This is *provenance*, not a behavioural lane: it records the shape of the
+/// worktree the posting session was launched into, so a post made from a
+/// branchless ephemeral worktree stays identifiable after that worktree is
+/// gone. The vocabulary is Issue #3384's canonical worktree-form wording, and
+/// the type is closed on purpose — the retired Intake / Execution action lanes
+/// (SPEC #3245 Stage C) cannot be reintroduced through this field.
+pub type BoardOriginWorktreeForm = BoardWorktreeForm;
+
 /// One immutable post on the shared coordination Board. Appended by agents
 /// and the user via `board.post`, persisted to the repo-local event log
 /// (`.gwt/coordination/`), and projected into [`BoardProjection`] for the UI.
@@ -380,6 +395,16 @@ pub struct BoardEntry {
     pub state: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Board entry ids this post closes (Issue #3655). Only a `blocked` entry
+    /// can be named here; anything else is ignored by the escalation fold.
+    ///
+    /// Deliberately separate from `parent_id`: threading says "this reply
+    /// belongs under that post", which is true of any follow-up including the
+    /// ones that report the block is still standing. Resolution is a much
+    /// stronger claim and needs its own explicit word, or an agent chatting in
+    /// a thread would silently retire the request it was discussing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves_entry_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -521,6 +546,7 @@ impl BoardEntry {
             title_summary: None,
             state,
             parent_id,
+            resolves_entry_ids: Vec::new(),
             created_at: now,
             updated_at: now,
             related_topics,
@@ -558,6 +584,9 @@ pub fn board_entry_payload_digest(entry: &BoardEntry) -> Result<String> {
         title_summary: &'a Option<String>,
         state: &'a Option<String>,
         parent_id: &'a Option<String>,
+        // Preserve existing v1 digests when no resolution targets were supplied.
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        resolves_entry_ids: &'a [String],
         related_topics: &'a [String],
         related_owners: &'a [String],
         origin_branch: &'a Option<String>,
@@ -585,6 +614,7 @@ pub fn board_entry_payload_digest(entry: &BoardEntry) -> Result<String> {
         title_summary: &entry.title_summary,
         state: &entry.state,
         parent_id: &entry.parent_id,
+        resolves_entry_ids: &entry.resolves_entry_ids,
         related_topics: &entry.related_topics,
         related_owners: &entry.related_owners,
         origin_branch: &entry.origin_branch,
@@ -682,6 +712,8 @@ pub struct BoardEntryDraft {
     pub title: Option<String>,
     pub title_summary: Option<String>,
     pub parent_id: Option<String>,
+    /// Escalation ids this post closes (Issue #3655).
+    pub resolves_entry_ids: Vec<String>,
     pub related_topics: Vec<String>,
     pub related_owners: Vec<String>,
     pub target_owners: Vec<String>,
@@ -705,6 +737,7 @@ impl BoardEntryDraft {
             title: None,
             title_summary: None,
             parent_id: None,
+            resolves_entry_ids: Vec::new(),
             related_topics: Vec::new(),
             related_owners: Vec::new(),
             target_owners: Vec::new(),
@@ -743,6 +776,7 @@ impl BoardEntryDraft {
         );
         entry.title = trimmed_or_none(self.title);
         entry.title_summary = trimmed_or_none(self.title_summary);
+        entry.resolves_entry_ids = sanitize_board_terms(&self.resolves_entry_ids);
         entry.target_owners = sanitize_board_terms(&self.target_owners);
         entry.mentions = normalize_board_mentions(&self.mentions);
         entry.audience = normalize_board_audience(self.audience);
@@ -927,6 +961,28 @@ mod board_entry_draft_tests {
         assert_eq!(entry.origin_worktree_form, None);
         assert_eq!(entry.origin_recovery_id, None);
         assert_eq!(entry.state, None);
+    }
+
+    #[test]
+    fn finalize_keeps_the_worktree_form_and_drops_a_blank_recovery_id() {
+        // SPEC-1974 FR-063: the worktree form and the recovery identity travel
+        // with the rest of the origin, and a blank recovery id is dropped the
+        // same way a blank branch is.
+        let mut d = draft("body");
+        d.origin = BoardOrigin::new("  ", "session-1", "agent-a")
+            .with_worktree_form(BoardOriginWorktreeForm::Ephemeral)
+            .with_recovery_id("   ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(
+            entry.origin_worktree_form,
+            Some(BoardOriginWorktreeForm::Ephemeral)
+        );
+        assert_eq!(entry.origin_recovery_id, None);
+
+        let mut d = draft("body");
+        d.origin = BoardOrigin::default().with_recovery_id("  recovery-7 ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-7"));
     }
 }
 
@@ -1132,6 +1188,10 @@ pub fn coordination_board_projection_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(BOARD_PROJECTION_FILE_NAME)
 }
 
+pub fn coordination_escalations_path(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join(ESCALATIONS_FILE_NAME)
+}
+
 fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(".lock")
 }
@@ -1180,6 +1240,160 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
         return with_coordination_lock(worktree_root, || repair_snapshot_locked(worktree_root));
     }
     Ok(CoordinationSnapshot { board: projection })
+}
+
+/// Read the blocked-escalation index (Issue #3655).
+///
+/// The index is a derived file, so a missing or unreadable one is repaired by
+/// replaying the event log rather than reported as an error: a reader asking
+/// "who is blocked?" must never be told "the index is broken" when the answer
+/// is recoverable from history that is already on disk.
+pub fn load_escalation_store(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    ensure_repo_local_files(worktree_root)?;
+    let path = coordination_escalations_path(worktree_root);
+    if path.exists() {
+        match load_json_or_default::<BoardEscalationStore>(&path) {
+            Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+                return Ok(store)
+            }
+            Ok(store) => {
+                tracing::warn!(
+                    version = store.version,
+                    "board escalation index has an unknown version; rebuilding from the event log"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "board escalation index is unreadable; rebuilding from the event log"
+                );
+            }
+        }
+    }
+    with_coordination_lock(worktree_root, || {
+        rebuild_escalation_store_locked(worktree_root)
+    })
+}
+
+/// Every unblock request that is still standing, oldest first.
+pub fn load_open_escalations(worktree_root: &Path) -> Result<Vec<BoardEscalation>> {
+    Ok(load_escalation_store(worktree_root)?.open_escalations())
+}
+
+/// Open escalations concerning one owner (an Issue number as text).
+pub fn load_open_escalations_for_owner(
+    worktree_root: &Path,
+    owner: &str,
+) -> Result<Vec<BoardEscalation>> {
+    Ok(load_escalation_store(worktree_root)?
+        .open_for_owner(owner)
+        .into_iter()
+        .cloned()
+        .collect())
+}
+
+/// How long a closed escalation stays in the index.
+///
+/// Long enough to explain a recently resolved blocker, short enough that a
+/// years-old repository does not carry every unblock request it ever had. Open
+/// escalations are never pruned at any age — an unanswered request is the most
+/// important row in the file.
+const RESOLVED_ESCALATION_RETENTION_DAYS: i64 = 30;
+
+fn resolved_escalation_cutoff() -> DateTime<Utc> {
+    Utc::now() - chrono::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
+}
+
+fn rebuild_escalation_store_in_memory(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let coordination_root = coordination_dir(worktree_root);
+    let mut entries = load_board_entries_from_segments_root(&coordination_root)?;
+    entries.sort_by_key(|entry| entry.created_at);
+    let mut store = BoardEscalationStore::from_entries(entries.iter());
+    store.prune_resolved_before(resolved_escalation_cutoff());
+    Ok(store)
+}
+
+fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let store = rebuild_escalation_store_in_memory(worktree_root)?;
+    write_atomic_json(&coordination_escalations_path(worktree_root), &store)?;
+    Ok(store)
+}
+
+fn load_escalation_store_for_update(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let path = coordination_escalations_path(worktree_root);
+    if !path.exists() {
+        return rebuild_escalation_store_in_memory(worktree_root);
+    }
+    match load_json_or_default::<BoardEscalationStore>(&path) {
+        Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+            Ok(store)
+        }
+        Ok(store) => {
+            tracing::warn!(
+                version = store.version,
+                "board escalation index has an unknown version; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "board escalation index is unreadable; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+    }
+}
+
+/// Re-insert blocked posts that `params.resolves` names but the on-disk index
+/// no longer carries — typically because the index was rebuilt from the hot
+/// Board window (Issue #3690).
+fn restore_lost_resolve_targets(
+    store: &mut BoardEscalationStore,
+    worktree_root: &Path,
+    target_ids: &[String],
+) -> Result<bool> {
+    let mut changed = false;
+    let coordination_root = coordination_dir(worktree_root);
+    for target_id in target_ids {
+        let target_id = target_id.trim();
+        if target_id.is_empty()
+            || store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == target_id)
+        {
+            continue;
+        }
+        let Some(historical) = find_board_entry_in_segments(&coordination_root, target_id)? else {
+            continue;
+        };
+        if store.restore_lost_blocked(&historical) {
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Fold one freshly appended entry into the index, already holding the
+/// coordination lock.
+///
+/// A never-written or unreadable index is rebuilt from the whole log instead
+/// of started from this single entry, so upgrading an existing repository does
+/// not silently discard the escalations that were already open. The incoming
+/// entry is always folded afterwards — a rebuild that dropped the resolve
+/// would leave the PM unable to close overflowed blockers (Issue #3690).
+fn update_escalation_store_locked(worktree_root: &Path, entry: &BoardEntry) -> Result<()> {
+    let path = coordination_escalations_path(worktree_root);
+    let mut store = load_escalation_store_for_update(worktree_root)?;
+    let restored =
+        restore_lost_resolve_targets(&mut store, worktree_root, &entry.resolves_entry_ids)?;
+    let applied = store.apply_entry(entry);
+    let pruned = store.prune_resolved_before(resolved_escalation_cutoff());
+    if restored || applied || pruned || !path.exists() {
+        write_atomic_json(&path, &store)?;
+    }
+    Ok(())
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
@@ -1281,6 +1495,123 @@ pub fn post_entry_exact(
     }
 }
 
+/// What a deterministic (caller-identified) Board append settled to
+/// (SPEC-1974 FR-064).
+///
+/// All three are answers, not failures: they map onto the durable intent states
+/// a recovery store tracks (FR-067). An `Err` from
+/// [`post_entry_deterministic`] means the storage attempt itself failed and the
+/// intent stays pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardDeterministicOutcome {
+    /// The identity was new; this call materialized it.
+    Appended(BoardPostOutcome),
+    /// The identity was already on the Board carrying this exact payload, so
+    /// nothing was written. A retry after a lost response lands here.
+    AlreadyMaterialized { entry_id: String },
+    /// The identity is already on the Board carrying a *different* payload.
+    /// Refused with zero mutation: reusing an identity for other content would
+    /// make the id meaningless as a retry key.
+    Conflicted { entry_id: String },
+}
+
+/// Append a Board post under a caller-supplied deterministic identity
+/// (SPEC-1974 FR-064).
+///
+/// The identity, the existence check, and the append all happen under the same
+/// exclusive coordination lock, so a post materializes exactly zero or one
+/// times no matter how many times a crashed or disconnected caller replays it.
+///
+/// The lookup reads the segment log rather than the hot projection, so an
+/// identity that has aged out of the projection is still recognized as
+/// materialized.
+pub fn post_entry_deterministic(
+    worktree_root: &Path,
+    entry: BoardEntry,
+) -> Result<BoardDeterministicOutcome> {
+    let mut entry = entry;
+    entry.id = entry.id.trim().to_string();
+    if entry.id.is_empty() {
+        return Err(GwtError::Other(
+            "a deterministic Board append requires a caller-supplied entry id".to_string(),
+        ));
+    }
+    entry.normalize_audience();
+
+    with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files(worktree_root)?;
+        let coordination_root = coordination_dir(worktree_root);
+        if let Some(existing) = find_board_entry_in_segments(&coordination_root, &entry.id)? {
+            let entry_id = existing.id.clone();
+            return Ok(if same_board_payload(&existing, &entry) {
+                BoardDeterministicOutcome::AlreadyMaterialized { entry_id }
+            } else {
+                BoardDeterministicOutcome::Conflicted { entry_id }
+            });
+        }
+        append_event_locked_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
+            .map(BoardDeterministicOutcome::Appended)
+    })
+}
+
+/// Whether two posts sharing a deterministic id carry the same authored intent.
+///
+/// `created_at` / `updated_at` are excluded deliberately: a caller that crashed
+/// before it learned the append's fate rebuilds the entry on restart and can
+/// never reproduce the original clock reading, so comparing them would turn
+/// every legitimate replay into a conflict. `body_html` is render-only and
+/// never persisted. Everything the caller actually authored is compared.
+fn same_board_payload(left: &BoardEntry, right: &BoardEntry) -> bool {
+    // Destructured rather than field-by-field so that adding a field to
+    // `BoardEntry` fails to compile here instead of silently dropping out of
+    // the identity comparison.
+    let BoardEntry {
+        id: _,
+        created_at: _,
+        updated_at: _,
+        body_html: _,
+        author_kind,
+        author,
+        kind,
+        body,
+        title,
+        title_summary,
+        state,
+        parent_id,
+        resolves_entry_ids,
+        related_topics,
+        related_owners,
+        origin_branch,
+        origin_session_id,
+        origin_agent_id,
+        origin_worktree_form,
+        origin_recovery_id,
+        target_owners,
+        mentions,
+        audience,
+    } = left;
+
+    author_kind == &right.author_kind
+        && author == &right.author
+        && kind == &right.kind
+        && body == &right.body
+        && title == &right.title
+        && title_summary == &right.title_summary
+        && state == &right.state
+        && parent_id == &right.parent_id
+        && resolves_entry_ids == &right.resolves_entry_ids
+        && related_topics == &right.related_topics
+        && related_owners == &right.related_owners
+        && origin_branch == &right.origin_branch
+        && origin_session_id == &right.origin_session_id
+        && origin_agent_id == &right.origin_agent_id
+        && origin_worktree_form == &right.origin_worktree_form
+        && origin_recovery_id == &right.origin_recovery_id
+        && target_owners == &right.target_owners
+        && mentions == &right.mentions
+        && audience == &right.audience
+}
+
 pub fn append_event(
     worktree_root: &Path,
     event: &CoordinationEvent,
@@ -1336,6 +1667,23 @@ fn arbitrate_coordination_lock_result<T>(
     operation_result
 }
 
+/// Fold a committed entry into the escalation index, best-effort.
+///
+/// The entry is already durable at this point, so an index failure must not
+/// turn a successful post into an error the caller might retry — that would
+/// duplicate the very unblock request the index exists to track. The index is
+/// derived and self-heals on the next read.
+fn update_escalation_store_after_commit(worktree_root: &Path, event: &CoordinationEvent) {
+    let CoordinationEvent::MessageAppended { entry } = event;
+    if let Err(error) = update_escalation_store_locked(worktree_root, entry) {
+        tracing::warn!(
+            entry_id = %entry.id,
+            %error,
+            "board entry committed but the escalation index could not be updated"
+        );
+    }
+}
+
 fn append_event_locked_outcome(
     worktree_root: &Path,
     event: &CoordinationEvent,
@@ -1361,12 +1709,14 @@ fn append_event_after_legacy_import_locked_outcome(
     )? {
         EventAppendOutcome::ManifestUpdated(manifest) => manifest,
         EventAppendOutcome::CommittedWithoutManifest { error } => {
+            update_escalation_store_after_commit(worktree_root, event);
             return Ok(BoardPostOutcome::CommittedWithoutSnapshot {
                 entry_id,
                 refresh_error: error,
             });
         }
     };
+    update_escalation_store_after_commit(worktree_root, event);
 
     let refresh_result = (|| -> Result<CoordinationSnapshot> {
         let mut projection: BoardProjection =
@@ -1542,6 +1892,12 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
+    // through git — skip the guaranteed exit-128 spawn and use the child
+    // bare repository directly.
+    if !crate::paths::git_repository_discovery_possible(worktree_root) {
+        return coordination_child_bare_repo(worktree_root);
+    }
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
@@ -2814,24 +3170,40 @@ pub fn has_recent_post_by(
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
     ensure_repo_local_files(worktree_root)?;
+    Ok(find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)?.is_some())
+}
+
+/// Load one immutable Board entry by its durable id, including entries that
+/// have aged out of the hot projection.
+pub fn load_board_entry(worktree_root: &Path, entry_id: &str) -> Result<Option<BoardEntry>> {
+    ensure_repo_local_files(worktree_root)?;
+    find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)
+}
+
+fn find_board_entry_in_segments(
+    coordination_root: &Path,
+    entry_id: &str,
+) -> Result<Option<BoardEntry>> {
     let entry_id = entry_id.trim();
     if entry_id.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let coordination_root = coordination_dir(worktree_root);
-    let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    let manifest = load_event_manifest_from_dir(coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
     for segment in manifest.segments.into_iter().rev() {
         let path = segments_dir.join(segment.file);
+        if !path.exists() {
+            continue;
+        }
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.id == entry_id {
-                return Ok(true);
+                return Ok(Some(entry));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub fn load_entries_before(
@@ -2931,6 +3303,37 @@ pub trait BoardProvider {
     ) -> BoardExactAppendResult<BoardExactAppendReceipt> {
         Err(BoardExactAppendError::Unsupported)
     }
+
+    /// Whether this provider can store a caller-supplied deterministic entry id
+    /// and report back an exact acknowledgement for it (SPEC-1974 FR-069).
+    ///
+    /// Defaults to `false`. A provider proves the capability by implementing
+    /// [`post_entry_deterministic`](Self::post_entry_deterministic) and saying
+    /// so here; anything that has not is treated as unable, which is the safe
+    /// direction. Callers holding a durable intent read this *before* they
+    /// attempt delivery, so an unsupported Board leaves the intent pending
+    /// rather than producing an acknowledgement nobody can honour.
+    fn supports_deterministic_identity(&self) -> bool {
+        false
+    }
+    /// Append under a caller-supplied deterministic identity (SPEC-1974 FR-064).
+    ///
+    /// The default refuses (FR-069). Appending here anyway would either
+    /// duplicate the post the next time the caller retried, or acknowledge an
+    /// identity the provider cannot recognize again — and falling back to the
+    /// local log would report a delivery that never reached the remote Board.
+    fn post_entry_deterministic(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardDeterministicOutcome> {
+        let _ = (worktree_root, entry);
+        Err(GwtError::Other(
+            "this Board provider cannot preserve a caller-supplied deterministic entry id; \
+             refusing the append rather than risking a duplicate post or a false acknowledgement"
+                .to_string(),
+        ))
+    }
     /// Load the hot projection snapshot.
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
     /// Load the snapshot filtered to an audience scope.
@@ -3009,6 +3412,20 @@ impl BoardProvider for LocalProvider {
         entry: BoardEntry,
     ) -> BoardExactAppendResult<BoardExactAppendReceipt> {
         post_entry_exact(worktree_root, entry)
+    }
+
+    /// The event log stores whatever id the caller supplies and can look it up
+    /// again, so the local Board honours deterministic identity (FR-069).
+    fn supports_deterministic_identity(&self) -> bool {
+        true
+    }
+
+    fn post_entry_deterministic(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardDeterministicOutcome> {
+        post_entry_deterministic(worktree_root, entry)
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -3222,6 +3639,13 @@ mod tests {
         let mut routing_change = entry.clone();
         routing_change.audience = vec!["workspace-2".to_string()];
         assert_ne!(board_entry_payload_digest(&routing_change).unwrap(), digest);
+
+        let mut resolution_change = entry.clone();
+        resolution_change.resolves_entry_ids = vec!["blocked-entry".to_string()];
+        assert_ne!(
+            board_entry_payload_digest(&resolution_change).unwrap(),
+            digest
+        );
 
         let mut origin_change = entry;
         origin_change.origin_worktree_form = Some(BoardWorktreeForm::Ephemeral);
@@ -4994,7 +5418,15 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "entry-0"));
         assert!(board_entry_exists(dir.path(), "entry-0").unwrap());
+        let historical = load_board_entry(dir.path(), "entry-0")
+            .unwrap()
+            .expect("load entry outside hot projection");
+        assert_eq!(historical.id, "entry-0");
+        assert_eq!(historical.body, "entry-0");
         assert!(!board_entry_exists(dir.path(), "missing-entry").unwrap());
+        assert!(load_board_entry(dir.path(), "missing-entry")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -5478,6 +5910,7 @@ mod tests {
             vec![
                 ".lock".to_string(),
                 "board.latest.json".to_string(),
+                ESCALATIONS_FILE_NAME.to_string(),
                 "events".to_string(),
                 "events.manifest.json".to_string(),
             ]
@@ -6393,5 +6826,629 @@ mod tests {
             assert_eq!(kind.as_str(), value);
         }
         assert!(BoardEntryKind::from_str("mystery").is_err());
+    }
+
+    // ---- Issue #3655: durable blocked-escalation index -------------------
+
+    fn escalation_entry(kind: BoardEntryKind, owner: &str, body: &str) -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            kind,
+            body,
+            None,
+            None,
+            vec![],
+            vec![owner.to_string()],
+        )
+    }
+
+    #[test]
+    fn posting_a_blocked_entry_opens_a_persisted_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        post_entry(dir.path(), blocked.clone()).unwrap();
+
+        assert!(
+            coordination_escalations_path(dir.path()).exists(),
+            "the escalation index must be written next to the board projection"
+        );
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].entry_id, blocked.id);
+        assert_eq!(open[0].body, "事象: 実行不能");
+        assert_eq!(
+            load_escalation_store(dir.path())
+                .unwrap()
+                .open_owner_issue_numbers(),
+            vec![2338]
+        );
+    }
+
+    #[test]
+    fn an_explicit_resolution_post_closes_the_persisted_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_routine_status_post_leaves_the_escalation_standing() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(
+                BoardEntryKind::Status,
+                "2338",
+                "Claude Code is ready for the next instruction on Issue #2338",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            1,
+            "the Stop-gate status post must never retire an unblock request"
+        );
+    }
+
+    #[test]
+    fn the_escalation_survives_scrolling_out_of_the_hot_projection() {
+        // The production failure this index exists for: on a busy board the
+        // blocked post leaves the 500-entry projection within hours, and every
+        // reader that derives "who is blocked" from the timeline goes blind.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            1,
+            "the index must answer independently of the hot projection window"
+        );
+    }
+
+    #[test]
+    fn an_explicit_resolution_closes_an_escalation_that_has_left_the_hot_projection() {
+        // Issue #3690: the PM's only handle is params.resolves with the
+        // durable index id. Once the blocked post has scrolled out of the
+        // 500-entry Board window, that handle must still close the row.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.id == blocked_id),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("the durable index must still carry the overflowed row");
+        assert!(
+            closed.resolved_at.is_some(),
+            "params.resolves must stamp resolved_at even after the Board window has moved on"
+        );
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resolution_recovers_an_escalation_dropped_by_a_hot_window_rebuild() {
+        // Issue #3690 production shape: BoardEscalationStore::from_entries on
+        // the hot projection drops overflowed blocked posts from the in-memory
+        // index. apply_entry then no-ops, the persisted file is left unchanged,
+        // and the wake prompt keeps quoting the open row. Recreate that index
+        // state and require the next params.resolves to fold the historical
+        // blocked post back in and close it.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        write_atomic_json(
+            &coordination_escalations_path(dir.path()),
+            &BoardEscalationStore::default(),
+        )
+        .unwrap();
+        assert!(
+            load_open_escalations(dir.path()).unwrap().is_empty(),
+            "the fixture is the index after a hot-window rebuild, which no longer has the row"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("resolving must recover the historical blocked post into the index");
+        assert!(closed.resolved_at.is_some());
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_lost_escalation_index_is_rebuilt_from_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::remove_file(coordination_escalations_path(dir.path())).unwrap();
+
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1, "a derived file must self-heal from history");
+        assert!(
+            coordination_escalations_path(dir.path()).exists(),
+            "the rebuild must persist so the next read is cheap"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_escalation_index_is_rebuilt_rather_than_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::write(coordination_escalations_path(dir.path()), "{ not json").unwrap();
+
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1);
+    }
+
+    #[test]
+    fn an_index_written_before_this_feature_is_backfilled_on_first_post() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate an existing repository: board history exists, no index does.
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::remove_file(coordination_escalations_path(dir.path())).unwrap();
+
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Status, "2338", "unrelated"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_open_escalations(dir.path()).unwrap().len(),
+            1,
+            "backfilling must replay history instead of starting from the new entry"
+        );
+    }
+
+    #[test]
+    fn resolves_entry_ids_round_trip_through_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = escalation_entry(BoardEntryKind::Decision, "2338", "解消しました");
+        entry.resolves_entry_ids = vec!["some-entry-id".to_string()];
+        post_entry(dir.path(), entry).unwrap();
+
+        let snapshot = rebuild_snapshot_from_segments(dir.path()).unwrap();
+        assert_eq!(
+            snapshot.board.entries[0].resolves_entry_ids,
+            vec!["some-entry-id".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_index_forgets_old_resolved_rows_but_never_an_open_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 古い blocker");
+        stale.created_at = Utc::now() - chrono::Duration::days(120);
+        stale.updated_at = stale.created_at;
+        let stale_id = stale.id.clone();
+        post_entry(dir.path(), stale).unwrap();
+
+        let mut resolution = escalation_entry(BoardEntryKind::Decision, "2338", "解消済み");
+        resolution.created_at = Utc::now() - chrono::Duration::days(119);
+        resolution.updated_at = resolution.created_at;
+        resolution.resolves_entry_ids = vec![stale_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let mut fresh = escalation_entry(BoardEntryKind::Blocked, "3645", "事象: 未解決");
+        fresh.created_at = Utc::now() - chrono::Duration::days(200);
+        fresh.updated_at = fresh.created_at;
+        post_entry(dir.path(), fresh).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        assert!(
+            !store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == stale_id),
+            "a long-closed escalation must not accumulate forever"
+        );
+        assert_eq!(
+            store.open_owner_issue_numbers(),
+            vec![3645],
+            "an unanswered request survives pruning at any age"
+        );
+    }
+
+    #[test]
+    fn a_legacy_entry_without_the_field_still_deserializes() {
+        let entry: BoardEntry = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "blocked",
+            "body": "legacy body",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z",
+        }))
+        .unwrap();
+        assert!(entry.resolves_entry_ids.is_empty());
+    }
+
+    // --- SPEC-1974 Phase 14R: worktree origin + deterministic identity ------
+
+    /// A post that carries a caller-supplied durable identity, the way a
+    /// recovery intent replays one.
+    fn identified_entry(id: &str, body: &str) -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        entry.id = id.to_string();
+        entry
+    }
+
+    #[test]
+    fn a_board_entry_carries_its_worktree_origin_and_recovery_identity() {
+        // FR-063: origin metadata is additive and survives the event log.
+        let entry = identified_entry("intent-1", "body")
+            .with_origin_worktree_form(BoardOriginWorktreeForm::Ephemeral)
+            .with_origin_recovery_id("recovery-7");
+
+        let roundtripped: BoardEntry =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+
+        assert_eq!(
+            roundtripped.origin_worktree_form,
+            Some(BoardOriginWorktreeForm::Ephemeral)
+        );
+        assert_eq!(
+            roundtripped.origin_recovery_id.as_deref(),
+            Some("recovery-7")
+        );
+    }
+
+    #[test]
+    fn worktree_origin_speaks_the_worktree_form_vocabulary_not_a_lane() {
+        // FR-063 with Issue #3384's vocabulary: the wire values name a worktree
+        // form. `intake` was a behavioural lane and is not a form, so it must
+        // not resolve back into the domain.
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::Ephemeral).unwrap(),
+            serde_json::json!("ephemeral")
+        );
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::BranchBacked).unwrap(),
+            serde_json::json!("branch-backed")
+        );
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::Unknown).unwrap(),
+            serde_json::json!("unknown")
+        );
+        assert!(
+            serde_json::from_value::<BoardOriginWorktreeForm>(serde_json::json!("intake")).is_err(),
+            "a behavioural lane must not deserialize as a worktree form"
+        );
+    }
+
+    #[test]
+    fn a_legacy_entry_without_origin_metadata_does_not_gain_the_new_keys() {
+        // FR-063 additive compatibility: entries written before this contract
+        // load unchanged, and rewriting them does not invent the new fields.
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy body",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z",
+            "origin_branch": "work/issue-1",
+        });
+
+        let entry: BoardEntry = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(entry.origin_worktree_form, None);
+        assert_eq!(entry.origin_recovery_id, None);
+
+        let rewritten = serde_json::to_value(&entry).unwrap();
+        assert!(rewritten.get("origin_worktree_form").is_none());
+        assert!(rewritten.get("origin_recovery_id").is_none());
+        assert_eq!(rewritten["origin_branch"], legacy["origin_branch"]);
+    }
+
+    #[test]
+    fn a_deterministic_identity_materializes_exactly_once_across_retries() {
+        // FR-064: the response to the first append can be lost, so the retry
+        // has to be a no-op rather than a second post.
+        let dir = tempfile::tempdir().unwrap();
+
+        let first =
+            post_entry_deterministic(dir.path(), identified_entry("intent-1", "the post")).unwrap();
+        assert!(matches!(first, BoardDeterministicOutcome::Appended(_)));
+
+        let retry =
+            post_entry_deterministic(dir.path(), identified_entry("intent-1", "the post")).unwrap();
+        assert!(matches!(
+            retry,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 1, "a retry must not append a second time");
+    }
+
+    #[test]
+    fn a_replayed_intent_matches_even_though_its_timestamps_are_regenerated() {
+        // FR-065 replay: a crash-restarted retry rebuilds the entry, so it can
+        // never reproduce the original `created_at`. Identity is the caller's
+        // id plus the authored payload, not the moment of construction.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry_deterministic(dir.path(), identified_entry("intent-2", "same intent")).unwrap();
+
+        let mut replay = identified_entry("intent-2", "same intent");
+        replay.created_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        replay.updated_at = replay.created_at;
+
+        let outcome = post_entry_deterministic(dir.path(), replay).unwrap();
+        assert!(matches!(
+            outcome,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn reusing_a_deterministic_identity_for_a_different_payload_conflicts() {
+        // FR-064: the same id with different content is a different post. It is
+        // refused as a conflict and the Board is left exactly as it was.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry_deterministic(dir.path(), identified_entry("intent-3", "original")).unwrap();
+
+        let outcome =
+            post_entry_deterministic(dir.path(), identified_entry("intent-3", "rewritten"))
+                .unwrap();
+        assert!(matches!(
+            outcome,
+            BoardDeterministicOutcome::Conflicted { .. }
+        ));
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].body, "original",
+            "a conflicting retry must not overwrite the materialized post"
+        );
+    }
+
+    #[test]
+    fn a_deterministic_append_without_a_caller_identity_is_refused() {
+        // FR-064: without a caller-supplied id there is nothing to be
+        // idempotent about, so the append fails closed instead of inventing one.
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = post_entry_deterministic(dir.path(), identified_entry("   ", "body"));
+
+        assert!(outcome.is_err());
+        assert!(load_snapshot(dir.path()).unwrap().board.entries.is_empty());
+    }
+
+    #[test]
+    fn the_local_provider_declares_and_honors_deterministic_identity() {
+        // FR-069: the filesystem provider can preserve a caller-supplied id, so
+        // it declares the capability and the retry is idempotent through it.
+        let provider = LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(provider.supports_deterministic_identity());
+
+        provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-4", "body"))
+            .unwrap();
+        let retry = provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-4", "body"))
+            .unwrap();
+
+        assert!(matches!(
+            retry,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_provider_that_cannot_preserve_identity_fails_closed() {
+        // FR-069: the trait default refuses. Appending anyway would either
+        // duplicate the post on the next retry or report an acknowledgement the
+        // provider never made, and falling back to the local log would fake a
+        // delivery that never reached the remote Board.
+        struct IdentityBlindProvider;
+
+        impl BoardProvider for IdentityBlindProvider {
+            fn post_entry(
+                &self,
+                worktree_root: &Path,
+                entry: BoardEntry,
+            ) -> Result<CoordinationSnapshot> {
+                LocalProvider.post_entry(worktree_root, entry)
+            }
+            fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
+                LocalProvider.load_snapshot(worktree_root)
+            }
+            fn load_snapshot_for_scope(
+                &self,
+                worktree_root: &Path,
+                scope: &BoardAudienceScope,
+            ) -> Result<CoordinationSnapshot> {
+                LocalProvider.load_snapshot_for_scope(worktree_root, scope)
+            }
+            fn load_entries_since(
+                &self,
+                worktree_root: &Path,
+                since: DateTime<Utc>,
+            ) -> Result<Vec<BoardEntry>> {
+                LocalProvider.load_entries_since(worktree_root, since)
+            }
+            fn load_entries_since_for_scope(
+                &self,
+                worktree_root: &Path,
+                since: DateTime<Utc>,
+                scope: &BoardAudienceScope,
+            ) -> Result<Vec<BoardEntry>> {
+                LocalProvider.load_entries_since_for_scope(worktree_root, since, scope)
+            }
+            fn has_recent_post_by(
+                &self,
+                worktree_root: &Path,
+                author: &str,
+                kind: &BoardEntryKind,
+                within: chrono::Duration,
+            ) -> Result<bool> {
+                LocalProvider.has_recent_post_by(worktree_root, author, kind, within)
+            }
+            fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
+                LocalProvider.board_entry_exists(worktree_root, entry_id)
+            }
+            fn load_entries_before(
+                &self,
+                worktree_root: &Path,
+                before_entry_id: Option<&str>,
+                limit: usize,
+            ) -> Result<BoardHistoryPage> {
+                LocalProvider.load_entries_before(worktree_root, before_entry_id, limit)
+            }
+            fn load_entries_before_for_scope(
+                &self,
+                worktree_root: &Path,
+                before_entry_id: Option<&str>,
+                limit: usize,
+                scope: &BoardAudienceScope,
+            ) -> Result<BoardHistoryPage> {
+                LocalProvider.load_entries_before_for_scope(
+                    worktree_root,
+                    before_entry_id,
+                    limit,
+                    scope,
+                )
+            }
+        }
+
+        let provider = IdentityBlindProvider;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!provider.supports_deterministic_identity());
+
+        let refusal =
+            provider.post_entry_deterministic(dir.path(), identified_entry("intent-5", "body"));
+
+        assert!(refusal.is_err());
+        assert!(
+            provider
+                .load_snapshot(dir.path())
+                .unwrap()
+                .board
+                .entries
+                .is_empty(),
+            "a refused deterministic append must not leave a local fallback post"
+        );
     }
 }

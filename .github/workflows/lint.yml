@@ -22,10 +22,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
+      # list, so a changed set is never served the previous archive.
+      - name: Cache Linux GTK dependency packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/gwt-apt-archives
+          key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+        timeout-minutes: 5
+      # Issue #4191: scripts/ci-apt.sh owns the deadline (900s) and retries
+      # inside it; this cap is only the outer net and must stay above it, so
+      # the script and not GitHub reports a dependency-install failure. The
+      # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -60,6 +71,22 @@ jobs:
             CHANGELOG.md
       - name: Validate SKILL.md frontmatter
         run: bash scripts/validate-skill-frontmatter.sh
+
+  lint-windows:
+    name: Clippy (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-windows
+        continue-on-error: true
+      - name: Run Windows Clippy
+        run: cargo clippy -p gwt -p gwt-core --all-targets --all-features -- -D warnings
+        timeout-minutes: 30
 
   commitlint:
     name: Commit Message Lint

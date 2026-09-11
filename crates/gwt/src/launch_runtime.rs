@@ -36,6 +36,67 @@ fn set_worktree_launch_path(
     env_vars.insert("GWT_PROJECT_ROOT".to_string(), path.display().to_string());
 }
 
+fn launch_worktree_materialization_lock_path(main_repo_path: &Path, branch_name: &str) -> PathBuf {
+    let repo_hash = gwt_core::repo_hash::compute_path_hash(main_repo_path);
+    let branch_digest = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(branch_name.as_bytes())
+    );
+    gwt_core::paths::gwt_home()
+        .join("locks/launch-worktree-materialization")
+        .join(format!("{repo_hash}-{}.lock", &branch_digest[..16]))
+}
+
+fn with_launch_worktree_materialization_lock<T>(
+    main_repo_path: &Path,
+    branch_name: &str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock_path = launch_worktree_materialization_lock_path(main_repo_path, branch_name);
+    let lock_dir = lock_path.parent().ok_or_else(|| {
+        format!(
+            "launch materialization lock has no parent: {}",
+            lock_path.display()
+        )
+    })?;
+    std::fs::create_dir_all(lock_dir).map_err(|error| {
+        format!(
+            "failed to create launch materialization lock directory {}: {error}",
+            lock_dir.display()
+        )
+    })?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "failed to open launch materialization lock {} for branch {branch_name}: {error}",
+                lock_path.display()
+            )
+        })?;
+    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(|error| {
+        format!(
+            "failed to acquire launch materialization lock {} for branch {branch_name}: {error}",
+            lock_path.display()
+        )
+    })?;
+    let result = operation();
+    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
+        format!(
+            "failed to release launch materialization lock {} for branch {branch_name}: {error}",
+            lock_path.display()
+        )
+    });
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
@@ -64,19 +125,51 @@ pub fn resolve_launch_worktree_request(
             return Err(error.to_string());
         }
     };
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    with_launch_worktree_materialization_lock(&main_repo_path, &branch_name, || {
+        resolve_launch_worktree_request_locked(
+            &main_repo_path,
+            &branch_name,
+            base_branch,
+            working_dir,
+            env_vars,
+        )
+    })
+}
+
+fn resolve_launch_worktree_request_locked(
+    main_repo_path: &Path,
+    branch_name: &str,
+    base_branch: &mut Option<String>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    let manager = gwt_git::WorktreeManager::new(main_repo_path);
+    let start_work_branch = is_start_work_branch_name(branch_name);
+    let fresh_start_work_launch = start_work_branch && base_branch.is_some();
     let mut worktrees = manager.list().map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-        set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
+    let mut usable_worktree = usable_worktree_path_for_branch(&worktrees, branch_name);
+    if let Some(existing_worktree) = usable_worktree
+        .as_ref()
+        .filter(|_| !fresh_start_work_launch)
+    {
+        set_worktree_launch_path(working_dir, env_vars, existing_worktree);
         return Ok(());
     }
-    if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
+    let observed_worktree_path = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
+        .map(|worktree| worktree.path.clone());
+    if worktrees_have_stale_branch_entry(&worktrees, branch_name) {
         manager
             .prune()
             .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
         worktrees = manager.list().map_err(|err| err.to_string())?;
-        if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-            set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
+        usable_worktree = usable_worktree_path_for_branch(&worktrees, branch_name);
+        if let Some(existing_worktree) = usable_worktree
+            .as_ref()
+            .filter(|_| !fresh_start_work_launch)
+        {
+            set_worktree_launch_path(working_dir, env_vars, existing_worktree);
             return Ok(());
         }
     }
@@ -85,23 +178,24 @@ pub fn resolve_launch_worktree_request(
         .clone()
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let mut remote_base_ref = origin_remote_ref(&effective_base_branch);
-    let remote_branch_ref = origin_remote_ref(&branch_name);
-    let has_local_branch = local_branch_exists(&main_repo_path, &branch_name)?;
+    let remote_branch_ref = origin_remote_ref(branch_name);
+    let has_local_branch = local_branch_exists(main_repo_path, branch_name)?;
 
-    if !has_local_branch {
-        if is_start_work_branch_name(&branch_name) {
-            manager
-                .prepare_start_work_remote_develop()
-                .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
-            effective_base_branch = "origin/develop".to_string();
-            remote_base_ref = origin_remote_ref(&effective_base_branch);
-            *base_branch = Some(effective_base_branch.clone());
-        } else {
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to fetch origin: {err}"))?;
-        }
+    if start_work_branch && (fresh_start_work_launch || !has_local_branch) {
+        manager
+            .prepare_start_work_remote_develop()
+            .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
+        effective_base_branch = "origin/develop".to_string();
+        remote_base_ref = origin_remote_ref(&effective_base_branch);
+        *base_branch = Some(effective_base_branch.clone());
+    } else if !has_local_branch {
+        manager
+            .fetch_origin()
+            .map_err(|err| format!("failed to fetch origin: {err}"))?;
+    }
 
+    let mut has_remote_branch = false;
+    if !has_local_branch || fresh_start_work_launch {
         if !manager
             .remote_branch_exists(&remote_base_ref)
             .map_err(|err| {
@@ -110,7 +204,7 @@ pub fn resolve_launch_worktree_request(
         {
             if let Some(fallback_base_branch) =
                 gwt::start_work::refallback_start_work_base_branch_with(
-                    &branch_name,
+                    branch_name,
                     &effective_base_branch,
                     |candidate| {
                         let candidate_ref = origin_remote_ref(candidate);
@@ -130,36 +224,96 @@ pub fn resolve_launch_worktree_request(
             }
         }
 
-        if !manager
+        has_remote_branch = manager
             .remote_branch_exists(&remote_branch_ref)
-            .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
-        {
-            manager
-                .create_remote_branch_from_base(&remote_base_ref, &branch_name)
-                .map_err(|err| {
-                    format!(
-                        "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                    )
-                })?;
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
-        }
+            .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?;
     }
 
     let preferred_worktree_path =
-        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+        gwt_git::worktree::sibling_worktree_path(main_repo_path, branch_name);
+    if fresh_start_work_launch {
+        let mut recovery_refs = Vec::with_capacity(2);
+        if has_local_branch {
+            recovery_refs.push(branch_name);
+        }
+        if has_remote_branch {
+            recovery_refs.push(remote_branch_ref.as_str());
+        }
+        let mut unique_commit_ref = None;
+        for recovery_ref in recovery_refs {
+            let divergence = gwt_git::git_divergence(
+                main_repo_path,
+                recovery_ref,
+                &remote_base_ref,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to verify whether existing launch branch {branch_name} has unique commits against {remote_base_ref}: {error}"
+                )
+            })?;
+            if divergence.ahead > 0 {
+                unique_commit_ref = Some((recovery_ref.to_string(), divergence.ahead));
+                break;
+            }
+        }
+        // Issue #4074 AC-2: unique commits are a reason to *inherit* the
+        // existing launch ref, not to park the owner Issue. Refusing here fired
+        // before the Execution Control Record successor route in
+        // `app_runtime/launch.rs` could ever run, so every Monitor relaunch of
+        // an Issue with pushed work fell out as `needs_human` and a human filed
+        // a successor Issue instead. The one loss inheritance cannot prevent is
+        // two agents sharing a worktree, so that — and only that — still
+        // refuses.
+        if let Some((recovery_ref, ahead)) = unique_commit_ref {
+            let residual_path = usable_worktree
+                .as_deref()
+                .or(observed_worktree_path.as_deref())
+                .unwrap_or(&preferred_worktree_path);
+            if let Some(holder) =
+                live_session_holding_worktree(&gwt_core::paths::gwt_sessions_dir(), residual_path)
+            {
+                return Err(format!(
+                    "needs_human: unique commits present on existing launch ref `{recovery_ref}` for branch `{branch_name}` ({ahead} commit(s) ahead of `{remote_base_ref}`), and its worktree is still held by live Session `{holder}`; refusing automatic fresh-launch recovery to preserve work. Residual worktree location: `{}`. Recommended action: let the live Session finish or stop it, then retry the launch.",
+                    residual_path.display()
+                ));
+            }
+            // A stale local ref would otherwise materialize the worktree behind
+            // the pushed work, which is how #3551 spent ten days off `develop`.
+            if has_local_branch && has_remote_branch {
+                fast_forward_stale_launch_ref(main_repo_path, branch_name, &remote_branch_ref)?;
+            }
+        }
+    }
+
+    if let Some(existing_worktree) = usable_worktree {
+        set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
+        return Ok(());
+    }
+
+    if !has_local_branch && !has_remote_branch {
+        manager
+            .create_remote_branch_from_base(&remote_base_ref, branch_name)
+            .map_err(|err| {
+                format!(
+                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
+                )
+            })?;
+        manager
+            .fetch_origin()
+            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
+    }
+
     let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
         .ok_or_else(|| {
             format!("failed to resolve available worktree path for branch {branch_name}")
         })?;
     if has_local_branch {
         manager
-            .create(&branch_name, &worktree_path)
+            .create(branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
     } else {
         manager
-            .create_from_remote(&remote_branch_ref, &branch_name, &worktree_path)
+            .create_from_remote(&remote_branch_ref, branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
     }
 
@@ -167,12 +321,13 @@ pub fn resolve_launch_worktree_request(
     Ok(())
 }
 
-/// Resolve a working directory for an ephemeral intake launch (SPEC-3214
-/// T-004): materialize a detached `.intake-*` worktree at `base_ref` and set
-/// `working_dir`. Unlike [`resolve_launch_worktree_request`] this never creates
-/// a branch — the intake worktree hosts a short-lived session and is removed
-/// when the session ends. `working_dir` already set is a no-op (idempotent /
-/// reuse). Collisions with existing worktrees are avoided by suffixing.
+/// Resolve a working directory for a generic ephemeral launch: materialize a
+/// detached worktree at `base_ref` and set `working_dir`. The `.intake-*`
+/// filesystem prefix is retained as a compatibility contract even though the
+/// former Intake product route is gone. Unlike [`resolve_launch_worktree_request`]
+/// this never creates a branch; the short-lived worktree is removed when the
+/// session ends. `working_dir` already set is a no-op (idempotent / reuse).
+/// Collisions with existing worktrees are avoided by suffixing.
 pub fn resolve_ephemeral_launch_worktree(
     repo_path: &Path,
     base_ref: Option<&str>,
@@ -194,13 +349,14 @@ pub fn resolve_ephemeral_launch_worktree(
         .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
 
     // Default to HEAD: `git worktree add --detach <path> HEAD` always resolves
-    // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
+    // in a repo with commits. Generic ephemeral callers may pass an explicit
     // base ref such as `origin/develop` when they need a specific base.
     // #3374: a remote base must reflect the FRESH origin state — fetch before
     // materializing so the remote-tracking ref is not months stale. Unlike
-    // Start Work's prepare step, intake never creates remote branches: a repo
-    // without an origin remote, or whose origin lacks the base branch, falls
-    // back to HEAD (the local checkout is the only truth there).
+    // Start Work's prepare step, an ephemeral launch never creates remote
+    // branches: a repo without an origin remote, or whose origin lacks the
+    // base branch, falls back to HEAD (the local checkout is the only truth
+    // there).
     let base_ref = base_ref.unwrap_or("HEAD");
     let base_ref = if base_ref.starts_with("origin/") {
         let has_origin = manager
@@ -231,20 +387,118 @@ pub fn resolve_ephemeral_launch_worktree(
     Ok(())
 }
 
+/// Fast-forward a local launch ref that is strictly behind its remote
+/// counterpart (Issue #4074 AC-2).
+///
+/// Only a fast-forward is performed: a genuinely diverged local ref keeps its
+/// own commits and is materialized as-is, because rewriting it would be the
+/// commit loss the guard exists to prevent.
+fn fast_forward_stale_launch_ref(
+    main_repo_path: &Path,
+    branch_name: &str,
+    remote_branch_ref: &str,
+) -> Result<(), String> {
+    let divergence = gwt_git::git_divergence(main_repo_path, branch_name, remote_branch_ref)
+        .map_err(|error| {
+            format!(
+                "failed to compare local launch ref {branch_name} with {remote_branch_ref}: {error}"
+            )
+        })?;
+    if divergence.ahead > 0 || divergence.behind == 0 {
+        return Ok(());
+    }
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "update-ref",
+            &format!("refs/heads/{branch_name}"),
+            remote_branch_ref,
+        ],
+        Some(main_repo_path),
+    )
+    .map_err(|error| {
+        format!("failed to fast-forward {branch_name} to {remote_branch_ref}: {error}")
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to fast-forward {branch_name} to {remote_branch_ref}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// The id of a live Session whose worktree is `worktree`, when one exists
+/// (Issue #4074 AC-2).
+///
+/// "Live" means a runtime sidecar under a Host PID that still answers. A
+/// Session record left behind by a crashed or replaced Host holds nothing, so
+/// it must not keep an owner Issue parked forever.
+fn live_session_holding_worktree(sessions_dir: &Path, worktree: &Path) -> Option<String> {
+    let target = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
+            continue;
+        };
+        let session_worktree = dunce::canonicalize(&session.worktree_path)
+            .unwrap_or_else(|_| session.worktree_path.clone());
+        if session_worktree != target {
+            continue;
+        }
+        if session_runtime_host_is_alive(sessions_dir, &session.id) {
+            return Some(session.id);
+        }
+    }
+    None
+}
+
+fn session_runtime_host_is_alive(sessions_dir: &Path, session_id: &str) -> bool {
+    let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
+        return false;
+    };
+    for namespace in namespaces.flatten() {
+        let Some(host_pid) = namespace
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let sidecar = namespace.path().join(format!("{session_id}.json"));
+        let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&sidecar) else {
+            continue;
+        };
+        if matches!(
+            runtime.status,
+            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+        ) {
+            continue;
+        }
+        if gwt::process::is_host_process_alive(host_pid) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_start_work_branch_name(branch_name: &str) -> bool {
     branch_name
         .strip_prefix("work/")
         .is_some_and(|name| !name.is_empty())
 }
 
-/// Reap orphaned ephemeral intake worktrees at startup (SPEC-3214 T-006).
+/// Reap orphaned legacy-prefixed ephemeral worktrees at startup.
 ///
-/// A crash between an intake launch and its session-end cleanup leaves a
-/// detached `.intake-*` worktree behind. On startup no intake session is live,
-/// so every `.intake-*` worktree is an orphan: remove the clean ones and keep
-/// the dirty ones (uncommitted work is never destroyed). Bounded by
-/// `max_removals` so a pathological pile-up cannot stall startup. Returns the
-/// number removed. Never errors — best-effort recovery.
+/// A crash between an ephemeral launch and its session-end cleanup can leave
+/// a detached `.intake-*` worktree behind. The prefix remains for filesystem
+/// compatibility. At startup every worktree in the fixed snapshot is an
+/// orphan: remove the clean ones and keep the dirty ones (uncommitted work is
+/// never destroyed). Bounded by `max_removals` so a pathological pile-up
+/// cannot stall startup. Returns the number removed. Never errors — best-effort
+/// recovery.
 #[cfg(test)]
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
     let Some(plan) = plan_orphan_intake_worktree_prune(repo_path) else {
@@ -256,7 +510,7 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
 /// Fixed startup snapshot of detached `.intake-*` worktrees that existed
 /// before the GUI became interactive. Keeping discovery separate from safety
 /// inspection lets startup dispatch the expensive per-worktree checks to a
-/// worker without ever considering an intake created after startup.
+/// worker without ever considering an ephemeral worktree created after startup.
 #[derive(Debug)]
 pub struct OrphanIntakePrunePlan {
     main_repo_path: PathBuf,
@@ -325,8 +579,8 @@ pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
-    // SPEC-3214: an ephemeral intake launch resolves a detached throwaway
-    // worktree instead of creating/reusing a branch worktree.
+    // A generic ephemeral launch resolves a detached throwaway worktree
+    // instead of creating/reusing a branch worktree.
     if config.is_ephemeral {
         resolve_ephemeral_launch_worktree(
             repo_path,
@@ -425,6 +679,9 @@ pub fn build_shell_process_launch(
             env,
             remove_env,
             cwd: Some(worktree),
+            pending_tool_runtime_migration: None,
+            // Shell panes keep the direct spawn route (SPEC #1921 FR-237).
+            resource_policy: None,
         });
     }
 
@@ -458,6 +715,8 @@ pub fn build_shell_process_launch(
         env,
         remove_env: Vec::new(),
         cwd: Some(worktree),
+        pending_tool_runtime_migration: None,
+        resource_policy: None,
     })
 }
 
@@ -777,7 +1036,7 @@ pub fn probe_host_package_runner_with_timeout(
     poll_interval: Duration,
 ) -> bool {
     gwt_agent::prepare::probe_host_runner_with_timeout(
-        gwt_agent::HostRunnerProbeKind::Package,
+        gwt_agent::HostRunnerProbeKind::Runner,
         command,
         args,
         env_vars,
@@ -927,6 +1186,17 @@ mod tests {
         config
     }
 
+    #[cfg(windows)]
+    fn sample_exact_windows_npx_launch_config() -> gwt_agent::LaunchConfig {
+        let mut config = sample_versioned_launch_config();
+        config.tool_version = Some("2.1.210".to_string());
+        config.args = vec![
+            "@anthropic-ai/claude-code@2.1.210".to_string(),
+            "--print".to_string(),
+        ];
+        config
+    }
+
     #[cfg(not(windows))]
     fn sample_direct_codex_launch_config(bin_dir: &Path) -> gwt_agent::LaunchConfig {
         write_executable(&bin_dir.join("bunx"));
@@ -946,6 +1216,7 @@ mod tests {
         config
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn probe_success() -> gwt_agent::HostRunnerProbeOutcome {
         gwt_agent::HostRunnerProbeOutcome {
             success: true,
@@ -974,6 +1245,7 @@ mod tests {
     #[test]
     fn checked_host_runner_falls_back_from_broken_direct_to_healthy_bunx() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         let original_args = config.args.clone();
         let mut probes = Vec::new();
@@ -1012,6 +1284,7 @@ mod tests {
     #[test]
     fn checked_host_runner_falls_back_from_broken_bunx_to_healthy_npx() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         let original_args = config.args.clone();
         let mut probes = Vec::new();
@@ -1053,6 +1326,7 @@ mod tests {
     #[test]
     fn checked_host_runner_rejects_broken_direct_bunx_and_npx_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         config
             .env_vars
@@ -1088,6 +1362,7 @@ mod tests {
         assert!(error.contains("npx unavailable"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn checked_host_runner_uses_descriptor_version_argv_for_copilot() {
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Copilot).build();
@@ -1140,9 +1415,396 @@ mod tests {
             .success()
     }
 
+    fn init_launch_test_repo(root: &Path) -> PathBuf {
+        let origin = root.join("origin.git");
+        let repo = root.join("repo");
+        run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
+        run_git(
+            root,
+            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "gwt"]);
+        run_git(&repo, &["checkout", "-qb", "develop"]);
+        fs::write(repo.join("README.md"), "develop\n").expect("write readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "seed develop"]);
+        run_git(&repo, &["push", "-u", "origin", "develop"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "-a"]);
+        repo
+    }
+
+    #[test]
+    fn launch_worktree_materialization_waits_for_same_branch_lock() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-serial";
+        run_git(&repo, &["branch", branch, "origin/develop"]);
+        let existing_worktree = temp.path().join("existing-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                existing_worktree.to_str().unwrap(),
+                branch,
+            ],
+        );
+
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
+        let repo_hash = gwt_core::repo_hash::compute_path_hash(&main_repo);
+        let branch_digest = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(branch.as_bytes())
+        );
+        let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
+        fs::create_dir_all(&lock_dir).expect("lock dir");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16])))
+            .expect("lock file");
+        gwt_core::operation_deadline::lock_exclusive(&lock).expect("hold materialization lock");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repo_for_thread = repo.clone();
+        let branch_for_thread = branch.to_string();
+        let gwt_home_for_thread = temp.path().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(&gwt_home_for_thread);
+            let mut base_branch = Some("origin/develop".to_string());
+            let mut working_dir = None;
+            let mut env_vars = HashMap::new();
+            let result = resolve_launch_worktree_request(
+                &repo_for_thread,
+                Some(&branch_for_thread),
+                &mut base_branch,
+                &mut working_dir,
+                &mut env_vars,
+            );
+            tx.send((result, working_dir)).expect("send result");
+        });
+
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("resolver ignored the same-branch materialization lock: {other:?}"),
+        }
+        fs2::FileExt::unlock(&lock).expect("release materialization lock");
+        let (result, working_dir) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("resolver completes after lock release");
+        result.expect("existing worktree is reusable");
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|path| { crate::same_worktree_path(path, &existing_worktree) }));
+        handle.join().expect("resolver thread");
+    }
+
+    #[test]
+    fn fresh_launch_inherits_issue_branch_with_unique_commits() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-unique";
+        let scratch = temp.path().join("scratch");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                scratch.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(scratch.join("unique.txt"), "preserve me\n").expect("write unique file");
+        run_git(&scratch, &["add", "unique.txt"]);
+        run_git(&scratch, &["commit", "-m", "unique work"]);
+        run_git(&scratch, &["push", "-u", "origin", branch]);
+        let remote_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("remote unique head");
+        assert!(remote_head.status.success());
+        let remote_head = String::from_utf8_lossy(&remote_head.stdout)
+            .trim()
+            .to_string();
+        run_git(&repo, &["worktree", "remove", scratch.to_str().unwrap()]);
+        run_git(&repo, &["branch", "-f", branch, "origin/develop"]);
+        let local_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("local commitless head");
+        assert!(local_head.status.success());
+        let local_head = String::from_utf8_lossy(&local_head.stdout)
+            .trim()
+            .to_string();
+        assert_ne!(local_head, remote_head, "fixture requires divergent refs");
+
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
+        let residual_path = gwt_git::worktree::sibling_worktree_path(&main_repo, branch);
+        fs::create_dir_all(&residual_path).expect("residual directory");
+        fs::write(residual_path.join("sentinel.txt"), "keep\n").expect("residual sentinel");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("unique commits must be inherited, not refused (Issue #4074 AC-2)");
+
+        let working_dir = working_dir.expect("inherited worktree");
+        assert_eq!(
+            env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(working_dir.display().to_string().as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(residual_path.join("sentinel.txt")).expect("preserved sentinel"),
+            "keep\n"
+        );
+        // The launch lands on the ref that carries the unique commits, so the
+        // relaunched agent sees its own pushed work instead of redoing it.
+        let inherited_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&working_dir)
+            .output()
+            .expect("inherited head");
+        assert!(inherited_head.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&inherited_head.stdout).trim(),
+            remote_head,
+            "inherited launch must fast-forward the stale local ref (was {local_head})"
+        );
+        assert_eq!(
+            fs::read_to_string(working_dir.join("unique.txt")).expect("inherited unique file"),
+            "preserve me\n"
+        );
+        let preserved_remote_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "origin/work/issue-unique"])
+            .current_dir(&repo)
+            .output()
+            .expect("preserved remote branch head");
+        assert!(preserved_remote_head.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&preserved_remote_head.stdout).trim(),
+            remote_head
+        );
+    }
+
+    #[test]
+    fn fresh_launch_inherits_usable_issue_worktree_with_unique_commits() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-usable-unique";
+        let worktree = temp.path().join("existing-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(worktree.join("unique.txt"), "preserve me\n").expect("write unique file");
+        run_git(&worktree, &["add", "unique.txt"]);
+        run_git(&worktree, &["commit", "-m", "unique work"]);
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("an unheld worktree with unique commits is inherited (Issue #4074 AC-2)");
+
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|path| crate::same_worktree_path(path, &worktree)));
+        assert_eq!(
+            fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
+            "preserve me\n"
+        );
+    }
+
+    /// Issue #4074 AC-2: inheritance stops at a worktree an agent is still
+    /// working in. Two agents in one worktree is the only loss the guard has
+    /// left to prevent, so a live holder keeps the `needs_human` refusal.
+    #[test]
+    fn fresh_launch_refuses_issue_worktree_held_by_live_session() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-held";
+        let worktree = temp.path().join("held-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(worktree.join("unique.txt"), "in progress\n").expect("write unique file");
+        run_git(&worktree, &["add", "unique.txt"]);
+        run_git(&worktree, &["commit", "-m", "unique work"]);
+
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session = gwt_agent::Session::new(&worktree, branch, gwt_agent::AgentId::ClaudeCode);
+        session.save(&sessions_dir).expect("persist session");
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions_dir, std::process::id(), &session.id);
+        fs::create_dir_all(runtime_path.parent().expect("runtime dir")).expect("runtime dir");
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&runtime_path)
+            .expect("persist runtime sidecar");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let error = resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect_err("a live Session holding the worktree must still refuse");
+
+        assert!(error.contains("needs_human"), "{error}");
+        assert!(error.contains("unique commits present"), "{error}");
+        assert!(error.contains(&session.id), "{error}");
+        assert!(error.contains(&worktree.display().to_string()), "{error}");
+        assert!(working_dir.is_none());
+        assert_eq!(
+            fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
+            "in progress\n"
+        );
+    }
+
+    /// A Session record whose Host process is gone holds nothing: the launch
+    /// inherits the worktree instead of parking the owner Issue for a human.
+    #[test]
+    fn fresh_launch_inherits_issue_worktree_left_by_dead_session() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-dead-holder";
+        let worktree = temp.path().join("dead-holder-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(worktree.join("unique.txt"), "orphaned\n").expect("write unique file");
+        run_git(&worktree, &["add", "unique.txt"]);
+        run_git(&worktree, &["commit", "-m", "unique work"]);
+
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session = gwt_agent::Session::new(&worktree, branch, gwt_agent::AgentId::ClaudeCode);
+        session.save(&sessions_dir).expect("persist session");
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions_dir, u32::MAX - 7, &session.id);
+        fs::create_dir_all(runtime_path.parent().expect("runtime dir")).expect("runtime dir");
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&runtime_path)
+            .expect("persist runtime sidecar");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("a dead holder must not park the owner Issue");
+
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|path| crate::same_worktree_path(path, &worktree)));
+        assert_eq!(
+            fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
+            "orphaned\n"
+        );
+    }
+
+    #[test]
+    fn fresh_launch_materializes_commitless_issue_branch_beside_residual_directory() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-reusable";
+        run_git(&repo, &["branch", branch, "origin/develop"]);
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
+        let residual_path = gwt_git::worktree::sibling_worktree_path(&main_repo, branch);
+        fs::create_dir_all(&residual_path).expect("residual directory");
+        fs::write(residual_path.join("sentinel.txt"), "keep\n").expect("residual sentinel");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("commitless residual branch is reusable");
+
+        let working_dir = working_dir.expect("materialized worktree");
+        assert_ne!(working_dir, residual_path);
+        assert!(working_dir.exists());
+        assert_eq!(
+            fs::read_to_string(residual_path.join("sentinel.txt")).expect("preserved sentinel"),
+            "keep\n"
+        );
+        let current = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&working_dir)
+            .output()
+            .expect("materialized branch");
+        assert!(current.status.success());
+        assert_eq!(String::from_utf8_lossy(&current.stdout).trim(), branch);
+    }
+
     #[test]
     fn start_work_launch_materialization_prepares_origin_develop_at_launch_time() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let origin = temp.path().join("origin.git");
         let repo = temp.path().join("repo");
         run_git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
@@ -1402,6 +2064,7 @@ mod tests {
     #[test]
     fn command_prompt_agent_wrapper_normalizes_bun_claude_stub_before_shell_expression() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bun_bin_dir = temp.path().join(".bun").join("bin");
         fs::create_dir_all(&bun_bin_dir).expect("bun bin");
         let global_shim = bun_bin_dir.join("claude.exe");
@@ -1488,6 +2151,7 @@ mod tests {
     #[test]
     fn command_prompt_agent_wrapper_preserves_inner_cmd_expression_env() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bin = temp.path().join("Program Files").join("npm bin");
         fs::create_dir_all(&bin).expect("cmd shim directory");
         let shim = bin.join("npx.cmd");
@@ -1529,6 +2193,7 @@ mod tests {
         // an actionable error rather than embed the non-PE stub into the shell
         // expression (which would raise the Windows 16-bit dialog from cmd).
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let package_root = temp
             .path()
             .join("node_modules")
@@ -1569,6 +2234,7 @@ mod tests {
     #[test]
     fn windows_npx_cache_corruption_detection_requires_verified_old_binary_signature() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx_base = temp
             .path()
             .join("Local Cache With Spaces")
@@ -1606,6 +2272,7 @@ mod tests {
     #[test]
     fn windows_npx_cache_corruption_detection_rejects_paths_outside_local_npx_root() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let outside_root = temp.path().join("other-cache").join("_npx").join("abc");
         let bin_dir = outside_root
@@ -1631,6 +2298,8 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_repairs_corrupt_npx_cache_once_before_switching() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
         let bin_dir = npx_root
@@ -1645,20 +2314,19 @@ mod tests {
             "'\"{}\"' is not recognized as an internal or external command",
             bin_dir.join("claude.exe").display()
         );
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_exact_windows_npx_launch_config();
         let mut probe_calls = Vec::new();
         let mut repair_calls = Vec::new();
 
         let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base.clone()),
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probe_calls.push((command.to_string(), args.clone()));
+            |kind, command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((kind, command.to_string(), args.clone()));
                 match probe_calls.len() {
-                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
-                    2 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr),
-                    3 => gwt_agent::HostRunnerProbeOutcome::success(),
+                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr),
+                    2 => gwt_agent::HostRunnerProbeOutcome::success(),
                     _ => panic!("unexpected extra probe call: {probe_calls:?}"),
                 }
             },
@@ -1673,15 +2341,25 @@ mod tests {
         assert!(report.switched_to_fallback);
         assert!(report.repaired_npx_cache);
         assert_eq!(repair_calls, vec![npx_root]);
-        assert_eq!(probe_calls.len(), 3);
-        assert_eq!(probe_calls[1].0, "npx");
-        assert_eq!(probe_calls[1].1, vec!["--version".to_string()]);
-        assert_eq!(config.command, "npx");
+        assert_eq!(probe_calls.len(), 2);
+        for (kind, command, args) in &probe_calls {
+            assert_eq!(*kind, gwt_agent::HostRunnerProbeKind::Package);
+            assert_eq!(command, &npx.display().to_string());
+            assert_eq!(
+                args,
+                &vec![
+                    "--yes".to_string(),
+                    "@anthropic-ai/claude-code@2.1.210".to_string(),
+                    "--version".to_string(),
+                ]
+            );
+        }
+        assert_eq!(config.command, npx.display().to_string());
         assert_eq!(
             config.args,
             vec![
                 "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
+                "@anthropic-ai/claude-code@2.1.210".to_string(),
                 "--print".to_string(),
             ],
         );
@@ -1691,6 +2369,8 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_fails_before_spawn_when_npx_repair_fails() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
         let bin_dir = npx_root
@@ -1705,20 +2385,19 @@ mod tests {
             "'\"{}\"' is not recognized as an internal or external command",
             bin_dir.join("claude.exe").display()
         );
-        let mut config = sample_versioned_launch_config();
-        let original_command = config.command.clone();
+        let mut config = sample_exact_windows_npx_launch_config();
+        let original = format!("{config:?}");
         let mut repair_calls = 0;
 
         let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base),
-            |_kind, command, _args, _env, _remove_env, _cwd| {
-                if command.eq_ignore_ascii_case("bunx") {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
-                } else {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr)
-                }
+            |kind, command, args, _env, _remove_env, _cwd| {
+                assert_eq!(kind, gwt_agent::HostRunnerProbeKind::Package);
+                assert_eq!(command, npx.display().to_string());
+                assert_eq!(args.last().map(String::as_str), Some("--version"));
+                gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr)
             },
             |_candidate| {
                 repair_calls += 1;
@@ -1728,7 +2407,7 @@ mod tests {
         .expect_err("repair failure should stop before agent spawn");
 
         assert_eq!(repair_calls, 1);
-        assert_eq!(config.command, original_command);
+        assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("Failed to repair npm npx cache"));
         assert!(error.contains("access denied"));
         assert!(error.contains(&npx_root.display().to_string()));
@@ -1738,20 +2417,22 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_does_not_repair_unrelated_npx_failure() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_exact_windows_npx_launch_config();
+        let original = format!("{config:?}");
         let mut repair_calls = 0;
 
         let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base),
-            |_kind, command, _args, _env, _remove_env, _cwd| {
-                if command.eq_ignore_ascii_case("bunx") {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
-                } else {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
-                }
+            |kind, command, args, _env, _remove_env, _cwd| {
+                assert_eq!(kind, gwt_agent::HostRunnerProbeKind::Package);
+                assert_eq!(command, npx.display().to_string());
+                assert_eq!(args.last().map(String::as_str), Some("--version"));
+                gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
             },
             |_candidate| {
                 repair_calls += 1;
@@ -1761,7 +2442,8 @@ mod tests {
         .expect_err("unrelated npx failure should fail before agent spawn");
 
         assert_eq!(repair_calls, 0);
-        assert!(error.contains("npx package-runner probe failed"));
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("exact npx package probe failed"));
         assert!(error.contains("registry timeout"));
     }
 
@@ -1769,11 +2451,23 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_rejects_npx_timeout_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_exact_windows_npx_launch_config();
         config
             .env_vars
             .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
+        // Issue #3941: pin the package caches to this fixture so a version
+        // cached on the developer machine cannot turn the timeout into a launch.
+        config.env_vars.insert(
+            "npm_config_cache".to_string(),
+            temp.path().join("npm-cache").display().to_string(),
+        );
+        config.env_vars.insert(
+            "BUN_INSTALL_CACHE_DIR".to_string(),
+            temp.path().join("bun-cache").display().to_string(),
+        );
         config.remove_env.push("REMOVE_SENTINEL".to_string());
         let original = format!("{config:?}");
         let mut probe_calls = Vec::new();
@@ -1781,15 +2475,11 @@ mod tests {
 
         let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base),
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probe_calls.push((command.to_string(), args.clone()));
-                match probe_calls.len() {
-                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
-                    2 => gwt_agent::HostRunnerProbeOutcome::timeout(),
-                    _ => panic!("unexpected extra probe call: {probe_calls:?}"),
-                }
+            |kind, command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((kind, command.to_string(), args.clone()));
+                gwt_agent::HostRunnerProbeOutcome::timeout()
             },
             |_candidate| {
                 repair_calls += 1;
@@ -1799,10 +2489,12 @@ mod tests {
         .expect_err("npx probe timeout must stop before PTY spawn");
 
         assert_eq!(repair_calls, 0);
-        assert_eq!(probe_calls.len(), 2);
+        assert_eq!(probe_calls.len(), 1);
+        assert_eq!(probe_calls[0].0, gwt_agent::HostRunnerProbeKind::Package);
+        assert_eq!(probe_calls[0].1, npx.display().to_string());
         assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("npx"));
-        assert!(error.contains("@anthropic-ai/claude-code@latest"));
+        assert!(error.contains("@anthropic-ai/claude-code@2.1.210"));
         assert!(error.contains("probe timed out"));
         assert!(!error.contains("must-not-leak"));
     }
@@ -1826,11 +2518,18 @@ mod tests {
     #[test]
     fn host_launch_keeps_bunx_when_runner_version_probe_succeeds() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bunx = temp.path().join("bunx");
         write_executable(&bunx);
         let mut config = sample_versioned_launch_config();
         config.command = bunx.display().to_string();
-        config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        config.env_vars = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            (
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            ),
+        ]);
         config.working_dir = Some(temp.path().to_path_buf());
 
         let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
@@ -1844,10 +2543,17 @@ mod tests {
     #[test]
     fn host_launch_switches_to_npx_when_bunx_absent_but_npx_present() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         write_executable(&temp.path().join("npx"));
         let mut config = sample_versioned_launch_config();
         config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
-        config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        config.env_vars = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            (
+                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
+                "1".to_string(),
+            ),
+        ]);
         config.working_dir = Some(temp.path().to_path_buf());
 
         let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
@@ -1868,6 +2574,7 @@ mod tests {
     // prepend dirname(GWT_BIN_PATH) to env_vars["PATH"] with dedup + empty
     // guard. Mirrors crates/gwt-agent/src/prepare.rs::tests::install_launch_gwt_bin_env_*.
 
+    #[cfg(not(windows))]
     #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
         let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
@@ -1899,6 +2606,7 @@ mod tests {
     #[test]
     fn install_launch_gwt_bin_env_host_uses_checkout_sibling_before_foreign_path_install() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
         let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
         let current_exe = temp.path().join("checkout").join(executable_name);

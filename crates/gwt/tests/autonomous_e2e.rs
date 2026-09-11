@@ -30,7 +30,15 @@ fn auto_issue(number: u64) -> IssueMonitorIssue {
         body: Some(BODY.to_string()),
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: Some("2026-06-29T00:00:00Z".to_string()),
     }
+}
+
+fn completed_auto_spec(number: u64) -> IssueMonitorIssue {
+    let mut issue = auto_issue(number);
+    issue.labels.push("gwt-spec".to_string());
+    issue.readiness = gwt::IssueMonitorReadiness::ReadyWithCompletedTasks;
+    issue
 }
 
 fn verified() -> BranchProtectionStatus {
@@ -83,7 +91,7 @@ fn drive_to_reviewed(
 }
 
 #[test]
-fn full_pass_reaches_deliver_and_completes_only_on_sha_match() {
+fn full_pass_reaches_deliver_and_requeues_an_open_issue_only_on_sha_match() {
     let mut monitor = autonomous_monitor();
     let issue = auto_issue(42);
     drive_to_reviewed(&mut monitor, &issue, true);
@@ -109,7 +117,12 @@ fn full_pass_reaches_deliver_and_completes_only_on_sha_match() {
     monitor.record_merged(42);
     assert_eq!(
         monitor.inbox_item(42).map(|i| i.state),
-        Some(MonitorInboxState::Merged),
+        Some(MonitorInboxState::Queued),
+    );
+    assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    assert_eq!(
+        monitor.prefs().queued_launch_session_strategies.get(&42),
+        Some(&gwt::IssueMonitorLaunchSessionStrategy::FreshRequired),
     );
     assert!(
         monitor.autonomous_record(42).is_none(),
@@ -159,9 +172,10 @@ fn acceptance_drift_after_launch_does_not_reach_deliver() {
         evaluate_autonomous_gate(&inputs),
         GateDecision::Fail(_)
     ));
+    // Issue #3944: the moved spec is implemented by a fresh attempt, not parked.
     assert!(matches!(
         route_autonomous_gate(&inputs),
-        GateAction::Escalate(_)
+        GateAction::Remediate(_)
     ));
 }
 
@@ -206,17 +220,36 @@ fn pending_ci_waits_does_not_merge() {
 #[test]
 fn unverified_branch_protection_blocks_eligibility() {
     // The whole loop never even starts if branch protection is not verified.
+    // Issue #3944 AC-4: the row is `not_ready` with the cause named, re-checked
+    // on the next scan — never parked as needs_human.
     let mut monitor = autonomous_monitor();
     let issue = auto_issue(42);
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&issue),
+        "2026-06-29T00:00:00Z",
+    );
     let decision = monitor.prepare_autonomous_candidate(
         &issue,
         &BranchProtectionStatus::Absent,
         "2026-06-29T00:00:00Z",
     );
-    assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
+    assert!(matches!(decision, EligibilityDecision::NotReady(_)));
     assert_eq!(
+        monitor.inbox_item(42).map(|i| i.state),
+        Some(MonitorInboxState::NotReady),
+    );
+    assert!(monitor
+        .inbox_item(42)
+        .and_then(|i| i.exclusion_reason.as_deref())
+        .is_some_and(|reason| reason.contains("branch protection")));
+    assert_ne!(
         monitor.autonomous_record(42).map(|r| r.phase),
         Some(AutonomousPhase::NeedsHuman),
+    );
+    assert!(
+        monitor.queued_issue_numbers().is_empty(),
+        "a not-ready row is not launchable"
     );
 }
 
@@ -257,7 +290,7 @@ fn fr_family_decision_boundaries_are_observable() {
     // assertion block per FR family; if a future refactor makes a boundary
     // silent, this audit goes RED.
     let mut monitor = autonomous_monitor();
-    let issue = auto_issue(42);
+    let issue = completed_auto_spec(42);
 
     // FR-001/FR-003 (two-stage opt-in): the eligibility DECISION is a returned
     // value, and a non-candidate leaves no autonomous state behind.
@@ -285,12 +318,7 @@ fn fr_family_decision_boundaries_are_observable() {
     // FR-026 (attempt counter) + FR-022/FR-024/FR-029 (transient retry/backoff):
     // the failure outcome is a returned value; the counter, the backoff window,
     // and a warn notice are all observable.
-    let outcome = monitor.record_autonomous_failure(
-        42,
-        gwt::FailureClass::Transient,
-        "transient blip",
-        "2026-07-02T00:10:00Z",
-    );
+    let outcome = monitor.record_autonomous_failure(42, "transient blip", "2026-07-02T00:10:00Z");
     assert!(matches!(
         outcome,
         gwt::issue_monitor::AutonomousFailureOutcome::Retry { attempt: 1 }
@@ -358,9 +386,21 @@ fn fr_family_decision_boundaries_are_observable() {
         );
     }
 
-    // FR-027 (NeedsHuman escalation): terminal failure is observable via the
-    // inbox state, the status view, and an error notice.
-    let mut escalated = autonomous_monitor();
+    // FR-027 as re-scoped by Issue #3944: a failed attempt at the cap is not a
+    // human decision. It is requeued at the capped backoff, the PM is asked to
+    // steer (warn notice + `steering` on the status view), and the row never
+    // reads `needs_human`.
+    let mut escalated = IssueMonitorState::with_prefs(
+        IssueMonitorConfig::default(),
+        IssueMonitorPrefs {
+            autonomous_mode: true,
+            autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
+                max_attempts: 1,
+                ..Default::default()
+            },
+            ..IssueMonitorPrefs::default()
+        },
+    );
     let issue2 = auto_issue(44);
     gwt::scan_issue_monitor_candidates(
         &mut escalated,
@@ -368,32 +408,242 @@ fn fr_family_decision_boundaries_are_observable() {
         "2026-07-02T00:00:00Z",
     );
     escalated.prepare_autonomous_candidate(&issue2, &verified(), "2026-07-02T00:00:00Z");
-    let terminal = escalated.record_autonomous_failure(
-        44,
-        gwt::FailureClass::Terminal,
-        "review rejected",
-        "2026-07-02T00:30:00Z",
+    escalated.complete_active_launch(44, "tab-1::agent-44");
+    let at_cap = escalated.record_autonomous_failure(44, "review rejected", "2026-07-02T00:30:00Z");
+    assert_eq!(
+        at_cap,
+        gwt::issue_monitor::AutonomousFailureOutcome::Retry { attempt: 1 }
     );
-    assert!(matches!(
-        terminal,
-        gwt::issue_monitor::AutonomousFailureOutcome::Escalated(_)
-    ));
     assert_eq!(
         escalated.inbox_item(44).map(|i| i.state),
-        Some(MonitorInboxState::NeedsHuman)
+        Some(MonitorInboxState::Queued)
     );
     let status = escalated.status_view();
-    assert!(status
+    let summary = status
         .autonomous_issues
         .iter()
-        .any(|entry| entry.issue_number == 44 && entry.needs_human));
+        .find(|entry| entry.issue_number == 44)
+        .expect("issue 44 summarized");
+    assert!(!summary.needs_human, "exhaustion is not needs_human");
+    assert!(
+        summary
+            .steering
+            .as_ref()
+            .is_some_and(|steering| steering.reason.contains("exhausted")),
+        "the PM-facing steering request is on the status view: {summary:?}"
+    );
     assert!(escalated
         .take_autonomous_notices()
         .iter()
-        .any(|notice| notice.level == "error" && notice.issue_number == 44));
+        .any(|notice| notice.level == "warn" && notice.issue_number == 44));
 
     // FR-002 (kill switch observability): flipping the mode off is visible on
     // the status view.
     escalated.set_autonomous_mode(false);
     assert!(!escalated.status_view().autonomous_mode);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4084: idle windows (review verdict published / settled implementation
+// window / dead binding) free their slot within one scan so the queue head
+// launches, while a live-but-idle Active record stays on the steering path.
+// ---------------------------------------------------------------------------
+
+mod idle_windows {
+    use super::*;
+    use gwt::{
+        IssueMonitorExecutionSettlement, IssueMonitorIdleKind, IssueMonitorWindowObservation,
+        IssueMonitorWindowSnapshot, WindowState,
+    };
+    use std::collections::BTreeMap;
+
+    const NOW: &str = "2026-09-07T04:00:00Z";
+
+    fn idle_monitor() -> IssueMonitorState {
+        IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                max_active_agents: 1,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+    }
+
+    fn observation(
+        window_id: &str,
+        issue_number: u64,
+        status: WindowState,
+        review_dispatch: bool,
+    ) -> IssueMonitorWindowObservation {
+        IssueMonitorWindowObservation {
+            window_id: window_id.to_string(),
+            issue_number: Some(issue_number),
+            status,
+            review_dispatch,
+        }
+    }
+
+    fn snapshot(windows: Vec<IssueMonitorWindowObservation>) -> IssueMonitorWindowSnapshot {
+        IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: NOW.to_string(),
+            windows,
+        }
+    }
+
+    /// Launch `launched` into the single slot with `queued` waiting behind it.
+    fn launched_with_queue(launched: u64, queued: u64, window_id: &str) -> IssueMonitorState {
+        let mut monitor = idle_monitor();
+        monitor.set_gui_connected(true);
+        gwt::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[auto_issue(launched), auto_issue(queued)],
+            NOW,
+        );
+        monitor.complete_active_launch(launched, window_id);
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.queued_issue_numbers(), vec![queued]);
+        assert!(
+            monitor.next_launch_request(NOW).is_none(),
+            "the slot is held before the idle window is released"
+        );
+        monitor
+    }
+
+    fn assert_slot_freed_for_queue_head(
+        monitor: &mut IssueMonitorState,
+        released: u64,
+        queued: u64,
+        kind: IssueMonitorIdleKind,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+    ) {
+        let outcome = monitor.reconcile_idle_windows(settlements, NOW);
+        assert_eq!(outcome.released, vec![released], "{kind:?}");
+        assert_eq!(
+            outcome
+                .idle_windows
+                .iter()
+                .map(|idle| idle.idle_kind)
+                .collect::<Vec<_>>(),
+            vec![kind]
+        );
+        assert_eq!(monitor.active_count(), 0, "{kind:?}: the slot is free");
+        assert_eq!(
+            monitor.queued_issue_numbers(),
+            vec![queued],
+            "{kind:?}: the released Issue is not requeued"
+        );
+        assert_eq!(
+            monitor
+                .next_launch_request(NOW)
+                .map(|request| request.issue_number),
+            Some(queued),
+            "{kind:?}: the queue head is admitted in the same scan"
+        );
+        assert_eq!(
+            monitor.inbox_item(released).map(|item| item.state),
+            Some(MonitorInboxState::Launched),
+            "{kind:?}: the released row stays out of the queue"
+        );
+    }
+
+    #[test]
+    fn review_window_idle_after_verdict_frees_the_slot_within_one_scan() {
+        let mut monitor = launched_with_queue(41, 51, "tab-1::review-41");
+        monitor.begin_review(41, 410, SHA);
+        monitor.record_review_verdict(41, true);
+        monitor.record_window_snapshot(snapshot(vec![observation(
+            "tab-1::review-41",
+            41,
+            WindowState::Idle,
+            true,
+        )]));
+        assert_slot_freed_for_queue_head(
+            &mut monitor,
+            41,
+            51,
+            IssueMonitorIdleKind::ReviewVerdictPublished,
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::review-41".to_string()]
+        );
+    }
+
+    #[test]
+    fn settled_implementation_window_idle_frees_the_slot_within_one_scan() {
+        let mut monitor = launched_with_queue(42, 52, "tab-1::impl-42");
+        monitor.record_window_snapshot(snapshot(vec![observation(
+            "tab-1::impl-42",
+            42,
+            WindowState::Idle,
+            false,
+        )]));
+        assert_slot_freed_for_queue_head(
+            &mut monitor,
+            42,
+            52,
+            IssueMonitorIdleKind::ExecutionSettled,
+            &BTreeMap::from([(42, IssueMonitorExecutionSettlement::Completed)]),
+        );
+        assert_eq!(
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .map(|close| close.window_id)
+                .collect::<Vec<_>>(),
+            vec!["tab-1::impl-42".to_string()]
+        );
+    }
+
+    #[test]
+    fn dead_binding_frees_the_slot_within_one_scan() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        assert_slot_freed_for_queue_head(
+            &mut monitor,
+            43,
+            53,
+            IssueMonitorIdleKind::BindingDead,
+            &BTreeMap::new(),
+        );
+        assert!(
+            monitor.take_pending_idle_pane_closes().is_empty(),
+            "there is no pane to close for a dead binding"
+        );
+    }
+
+    #[test]
+    fn active_record_with_idle_pane_keeps_its_slot() {
+        let mut monitor = launched_with_queue(44, 54, "tab-1::stuck-44");
+        monitor.record_window_snapshot(snapshot(vec![observation(
+            "tab-1::stuck-44",
+            44,
+            WindowState::Idle,
+            false,
+        )]));
+        let outcome = monitor.reconcile_idle_windows(
+            &BTreeMap::from([(44, IssueMonitorExecutionSettlement::Active)]),
+            NOW,
+        );
+        assert!(outcome.released.is_empty());
+        assert_eq!(
+            outcome
+                .idle_windows
+                .iter()
+                .map(|idle| idle.idle_kind)
+                .collect::<Vec<_>>(),
+            vec![IssueMonitorIdleKind::StuckUnknown]
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert!(monitor.next_launch_request(NOW).is_none());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+    }
 }

@@ -76,8 +76,49 @@ fn sync_coordination_for_session_with_paths(
         return Ok(());
     };
 
+    // Issue #3655 AC-3: while an unblock request is standing, the routine
+    // lifecycle summary is worse than silence. "ready for the next
+    // instruction" is a `status` post, and a `status` post moves the Work back
+    // to Active — so the generic Stop notice literally overwrote the blocked
+    // state, and on the Board it buried the request under a line that reads
+    // like everything is fine. The escalation stays the last word about this
+    // owner until somebody resolves it.
+    if suppress_lifecycle_summary_for_open_escalation(session, &entry) {
+        tracing::debug!(
+            session_id = %session.id,
+            owners = ?entry.related_owners,
+            "lifecycle summary suppressed: an unblock request is still open"
+        );
+        return Ok(());
+    }
+
     post_entry(&session.worktree_path, entry).map_err(coordination_as_hook_error)?;
     Ok(())
+}
+
+fn suppress_lifecycle_summary_for_open_escalation(session: &Session, entry: &BoardEntry) -> bool {
+    // Only the Stop notice. `SessionStart` on a blocked owner is the opposite
+    // signal — it is how the Board shows that the fresh launch the escalation
+    // asked for actually happened — so withholding it would hide the PM's own
+    // answer to the request.
+    if entry.kind != BoardEntryKind::Status || entry.state.as_deref() != Some("ready") {
+        return false;
+    }
+    let store = match gwt_core::coordination::load_escalation_store(&session.worktree_path) {
+        Ok(store) => store,
+        Err(error) => {
+            // Fail open: a readable Board post is better than a dropped one.
+            tracing::warn!(
+                %error,
+                "could not read the escalation index; posting the lifecycle summary anyway"
+            );
+            return false;
+        }
+    };
+    entry
+        .related_owners
+        .iter()
+        .any(|owner| !store.open_for_owner(owner).is_empty())
 }
 
 fn board_entry_for_event_with_paths(
@@ -166,6 +207,19 @@ fn resolve_issue_context_with_paths(
         number: issue_number,
         title,
         is_spec,
+    })
+}
+
+/// The Issue a session owns: its explicit link, or the branch linkage store
+/// gwt writes at launch.
+///
+/// Shared with `board.post` (Issue #3655) so an escalation is filed against the
+/// same owner the lifecycle summaries name. Two independent answers here would
+/// mean a blocked post that never reaches the Issue it is about.
+pub(crate) fn linked_issue_number(session: &Session) -> Option<u64> {
+    session.linked_issue_number.or_else(|| {
+        let path = default_issue_linkage_store_path(&session.worktree_path)?;
+        linked_issue_number_for_branch(session, Some(path.as_path()))
     })
 }
 
@@ -321,6 +375,137 @@ mod tests {
         let entry = &snapshot.board.entries[0];
         assert!(entry.body.contains("Issue #2042"));
         assert!(!entry.body.contains("Issue #2042 Issue #2042"));
+    }
+
+    /// Issue #3655 AC-3: the Stop-gate summary must not overwrite or bury a
+    /// standing unblock request.
+    #[test]
+    fn stop_lifecycle_summary_is_withheld_while_an_unblock_request_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "work/issue-2338", AgentId::ClaudeCode);
+        session.linked_issue_number = Some(2338);
+
+        let escalation = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Blocked,
+            "事象: execution.reopen が immutable\n原因: Completed ECR\n依頼: fresh launch\n再開条件: 新 pane",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        gwt_core::coordination::post_entry(dir.path(), escalation).unwrap();
+
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(
+            snapshot.board.entries.len(),
+            1,
+            "the routine ready notice must not be appended over an open escalation"
+        );
+        assert_eq!(snapshot.board.entries[0].kind, BoardEntryKind::Blocked);
+    }
+
+    /// The suppression must lift the moment the escalation is resolved, or a
+    /// blocked post would silence the agent's lifecycle forever.
+    #[test]
+    fn stop_lifecycle_summary_returns_once_the_unblock_request_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "work/issue-2338", AgentId::ClaudeCode);
+        session.linked_issue_number = Some(2338);
+
+        let escalation = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Blocked,
+            "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        let escalation_id = escalation.id.clone();
+        gwt_core::coordination::post_entry(dir.path(), escalation).unwrap();
+
+        let mut resolution = BoardEntry::new(
+            AuthorKind::User,
+            "You",
+            BoardEntryKind::Decision,
+            "fresh launch を手配しました",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        resolution.resolves_entry_ids = vec![escalation_id];
+        gwt_core::coordination::post_entry(dir.path(), resolution).unwrap();
+
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 3);
+        assert!(snapshot.board.entries[2].body.contains("next instruction"));
+    }
+
+    /// The fresh launch an escalation asked for must still announce itself:
+    /// `SessionStart` on a blocked owner is the PM's answer becoming visible,
+    /// not more noise on top of the request.
+    #[test]
+    fn session_start_still_posts_while_an_unblock_request_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "work/issue-2338", AgentId::ClaudeCode);
+        session.linked_issue_number = Some(2338);
+
+        let escalation = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Blocked,
+            "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        gwt_core::coordination::post_entry(dir.path(), escalation).unwrap();
+
+        sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
+            .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 2);
+        assert_eq!(snapshot.board.entries[1].state.as_deref(), Some("started"));
+    }
+
+    /// A block on one Issue must not silence the lifecycle of another.
+    #[test]
+    fn stop_lifecycle_summary_is_unaffected_by_another_owners_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "work/issue-3645", AgentId::ClaudeCode);
+        session.linked_issue_number = Some(3645);
+
+        let escalation = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Blocked,
+            "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        gwt_core::coordination::post_entry(dir.path(), escalation).unwrap();
+
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 2);
+        assert!(snapshot.board.entries[1].body.contains("Issue #3645"));
     }
 
     #[test]

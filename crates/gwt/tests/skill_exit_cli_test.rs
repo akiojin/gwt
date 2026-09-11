@@ -381,12 +381,31 @@ fn seed_assigned_branch_work(
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
-        project_state_root,
-        work_event_root,
-        |_, _, _| Ok(((), vec![event])),
-    )
-    .expect("seed split-root assigned branch Work");
+    let mut result = None;
+    for attempt in 0..4 {
+        let event = event.clone();
+        match gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            project_state_root,
+            work_event_root,
+            |_, _, _| Ok(((), vec![event])),
+        ) {
+            Ok(()) => return,
+            Err(gwt_core::error::GwtError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 3 =>
+            {
+                result = Some(gwt_core::error::GwtError::Io(error));
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+            }
+            Err(error) => {
+                result = Some(error);
+                break;
+            }
+        }
+    }
+    panic!(
+        "seed split-root assigned branch Work: {:?}",
+        result.expect("failed seed must retain its error")
+    );
 }
 
 fn seed_ambiguous_legacy_assigned_work(

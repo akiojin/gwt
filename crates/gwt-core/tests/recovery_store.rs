@@ -192,6 +192,27 @@ fn pending_intent_survives_restart_before_board_append() {
 }
 
 #[test]
+fn recovery_restart_preserves_escalation_resolution_targets() {
+    let temp = TempDir::new().unwrap();
+    let store = open_store(&temp);
+    let mut entry = board_entry(RECOVERY_ID, "safe status");
+    entry.resolves_entry_ids = vec!["blocked-entry-1974".to_string()];
+    let intent = RecoveryIntent::new(
+        RECOVERY_ID,
+        RecoveryProvider::Local,
+        BoardWorktreeForm::BranchBacked,
+        entry,
+    )
+    .unwrap();
+    let write = store.prepare("prepare-resolution", intent).unwrap();
+    drop(store);
+    assert_eq!(
+        open_store(&temp).get(RECOVERY_ID).unwrap(),
+        Some(write.record)
+    );
+}
+
+#[test]
 fn prepare_replays_same_operation_and_rejects_mutated_payload() {
     let temp = TempDir::new().unwrap();
     let store = open_store(&temp);

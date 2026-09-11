@@ -41,16 +41,28 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
+/// Called with each tick's account rows, in addition to the client broadcast.
+///
+/// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
+/// event loop can touch, so the caller supplies the hop. Taking a callback
+/// rather than an `EventLoopProxy` keeps this module free of the event enum.
+pub type AccountsObserver = Arc<dyn Fn(Vec<ProviderUsage>) + Send + Sync>;
+
 /// Spawn the usage poller onto the shared tokio runtime.
 pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
     refresh: Arc<Notify>,
+    observe_accounts: AccountsObserver,
 ) {
-    drop(runtime.handle().spawn(run(clients, refresh)));
+    drop(
+        runtime
+            .handle()
+            .spawn(run(clients, refresh, observe_accounts)),
+    );
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>) {
+async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: AccountsObserver) {
     let mut poller = Poller::default();
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -67,6 +79,10 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>) {
             continue;
         }
         let snapshot = poller.poll_once(Utc::now(), forced).await;
+        // Issue #3616: hand the account rows to the event loop before the
+        // broadcast. Both consumers need the same tick, and the classifier is
+        // the one whose absence lets a quota-dead pane hold a slot for days.
+        observe_accounts(snapshot.accounts.clone());
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,

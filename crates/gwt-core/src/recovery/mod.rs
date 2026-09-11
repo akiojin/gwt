@@ -222,6 +222,8 @@ struct PersistedBoardPayloadV1 {
     title_summary: Option<String>,
     state: Option<String>,
     parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resolves_entry_ids: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     related_topics: Vec<String>,
@@ -249,6 +251,7 @@ impl From<&BoardEntry> for PersistedBoardPayloadV1 {
             title_summary: entry.title_summary.clone(),
             state: entry.state.clone(),
             parent_id: entry.parent_id.clone(),
+            resolves_entry_ids: entry.resolves_entry_ids.clone(),
             created_at: entry.created_at,
             updated_at: entry.updated_at,
             related_topics: entry.related_topics.clone(),
@@ -277,6 +280,7 @@ impl PersistedBoardPayloadV1 {
             title_summary: self.title_summary,
             state: self.state,
             parent_id: self.parent_id,
+            resolves_entry_ids: self.resolves_entry_ids,
             created_at: self.created_at,
             updated_at: self.updated_at,
             related_topics: self.related_topics,
@@ -862,6 +866,7 @@ fn validate_sanitized_entry(
         || !optional_string_is_canonical(&entry.origin_session_id)
         || !optional_string_is_canonical(&entry.origin_agent_id)
         || !optional_string_is_canonical(&entry.origin_recovery_id)
+        || entry.resolves_entry_ids != sanitize_board_terms(&entry.resolves_entry_ids)
         || entry.related_topics != sanitize_board_terms(&entry.related_topics)
         || entry.related_owners != sanitize_board_terms(&entry.related_owners)
         || entry.target_owners != sanitize_board_terms(&entry.target_owners)
@@ -903,6 +908,7 @@ fn entry_text_values(entry: &BoardEntry) -> Vec<&str> {
         entry.author.as_str(),
         entry.body.as_str(),
     ];
+    values.extend(entry.resolves_entry_ids.iter().map(String::as_str));
     values.extend(entry.related_topics.iter().map(String::as_str));
     values.extend(entry.related_owners.iter().map(String::as_str));
     values.extend(entry.target_owners.iter().map(String::as_str));

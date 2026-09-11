@@ -480,45 +480,68 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_returns_immediately_so_callers_do_not_block_on_disk_write() {
+    fn enqueue_burst_does_not_wait_for_blocked_disk_write() {
         let temp = tempdir().expect("tempdir");
-        let path = temp.path().join("session-state.json");
-        let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
-
-        let started = std::time::Instant::now();
-        for index in 0..200 {
-            dispatcher.enqueue(PersistSnapshot {
-                session_path: path.clone(),
-                session: gwt::PersistedSessionState {
-                    tabs: Vec::new(),
-                    active_tab_id: Some(format!("tab-{index}")),
-                    recent_projects: Vec::new(),
-                },
-                workspaces: Vec::new(),
-            });
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let session_path = temp.path().join("session-state.json");
+        let workspace_path = temp.path().join("workspace.json");
+        let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
+        let (write_started_tx, write_started_rx) = mpsc::sync_channel(1);
+        let (release_write_tx, release_write_rx) = mpsc::sync_channel(1);
+        let release_write_rx = Arc::new(Mutex::new(release_write_rx));
+        dispatcher.set_before_workspace_write_hook(Arc::new(move || {
+            write_started_tx
+                .send(())
+                .expect("report blocked workspace write");
+            release_write_rx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv()
+                .expect("release blocked workspace write");
+        }));
+        dispatcher.enqueue(PersistSnapshot {
+            session_path: session_path.clone(),
+            session: sample_session("blocking-write"),
+            workspaces: vec![(workspace_path, empty_workspace_state())],
+        });
+        let write_started = write_started_rx.recv_timeout(Duration::from_secs(5));
+        if write_started.is_err() {
+            let _ = release_write_tx.send(());
         }
-        let elapsed = started.elapsed();
+        write_started.expect("worker should reach the blocked workspace write");
 
-        assert!(
-            elapsed < Duration::from_millis(20),
-            "200 enqueue calls should not synchronously wait for disk; took {elapsed:?}",
-        );
+        let enqueue_dispatcher = Arc::clone(&dispatcher);
+        let enqueue_session_path = session_path.clone();
+        let (burst_done_tx, burst_done_rx) = mpsc::sync_channel(1);
+        let burst = std::thread::spawn(move || {
+            for index in 0..200 {
+                enqueue_dispatcher.enqueue(PersistSnapshot {
+                    session_path: enqueue_session_path.clone(),
+                    session: sample_session(&format!("tab-{index}")),
+                    workspaces: Vec::new(),
+                });
+            }
+            burst_done_tx.send(()).expect("report enqueue burst");
+        });
+
+        let burst_done = burst_done_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_write_tx.send(());
+        burst_done.expect("enqueue burst must complete while the worker write is blocked");
+        burst.join().expect("enqueue burst thread");
 
         assert!(dispatcher.wait_idle(Duration::from_secs(5)));
-        let on_disk = load_session_state(&path).expect("load persisted session");
-        assert!(
-            on_disk
-                .active_tab_id
-                .as_deref()
-                .is_some_and(|id| id.starts_with("tab-")),
-            "disk should hold a snapshot from the burst (got {:?})",
-            on_disk.active_tab_id
+        let on_disk = load_session_state(&session_path).expect("load persisted session");
+        assert_eq!(
+            on_disk.active_tab_id.as_deref(),
+            Some("tab-199"),
+            "disk should hold the latest snapshot from the non-blocking burst",
         );
     }
 
     #[test]
     fn coalesces_burst_so_only_latest_snapshot_persists() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
@@ -551,6 +574,7 @@ mod tests {
         // a quick burst (resize / focus / viewport pan / arrange) collapses
         // to a single disk hit instead of producing one write per call.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
@@ -593,6 +617,7 @@ mod tests {
     #[test]
     fn suppresses_identical_snapshot_after_successful_write() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
         let snapshot = sample_snapshot(path.clone(), "stable");
@@ -631,6 +656,7 @@ mod tests {
     #[test]
     fn suppresses_identical_snapshot_while_pending() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = unstarted_dispatcher();
         let snapshot = sample_snapshot(path.clone(), "pending");
@@ -671,6 +697,7 @@ mod tests {
     #[test]
     fn failed_write_does_not_suppress_later_retry() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         std::fs::create_dir(&path).expect("create blocking directory");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
@@ -704,6 +731,7 @@ mod tests {
         // flush a pending snapshot to disk before returning, otherwise an app
         // shutdown immediately after a state change loses the latest write.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
@@ -741,6 +769,7 @@ mod tests {
             .build()
             .expect("tokio runtime");
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("session-state.json");
 
         {
@@ -778,6 +807,7 @@ mod tests {
     #[test]
     fn writes_workspace_state_alongside_session_state() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
         let workspace_path = temp.path().join("workspace.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
@@ -796,6 +826,7 @@ mod tests {
     #[test]
     fn durable_workspace_barrier_orders_exact_window_after_inflight_snapshot() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
         let workspace_path = temp.path().join("workspace.json");
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));

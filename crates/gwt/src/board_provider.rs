@@ -20,8 +20,8 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
-    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
-    BoardProvider, CoordinationSnapshot, LocalProvider,
+    BoardAudienceScope, BoardDeterministicOutcome, BoardEntry, BoardEntryKind, BoardHistoryPage,
+    BoardPostOutcome, BoardProvider, CoordinationSnapshot, LocalProvider,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
 use gwt_core::recovery::RecoveryProvider;
@@ -469,6 +469,26 @@ pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<Boa
     provider_for(worktree_root).post_entry_outcome(worktree_root, entry)
 }
 
+/// Append a Board entry under a caller-supplied deterministic identity
+/// (SPEC-1974 FR-064 / FR-069).
+///
+/// Routed through the repo's resolved provider like every other Board write, so
+/// a project pointed at a provider that cannot preserve the identity gets a
+/// refusal here rather than a silent local append.
+pub fn post_entry_deterministic(
+    worktree_root: &Path,
+    entry: BoardEntry,
+) -> Result<BoardDeterministicOutcome> {
+    provider_for(worktree_root).post_entry_deterministic(worktree_root, entry)
+}
+
+/// Whether this repo's resolved Board provider can preserve a caller-supplied
+/// deterministic entry id (SPEC-1974 FR-069). Callers holding a durable intent
+/// check this before attempting delivery.
+pub fn supports_deterministic_identity(worktree_root: &Path) -> bool {
+    provider_for(worktree_root).supports_deterministic_identity()
+}
+
 /// Load the hot projection snapshot through the active provider.
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     provider_for(worktree_root).load_snapshot(worktree_root)
@@ -910,6 +930,84 @@ mod tests {
         assert_eq!(routing.provider_source, "global");
         // In unit tests the global kind defaults to local (test override).
         assert_eq!(routing.provider, "local");
+    }
+
+    // --- Deterministic identity routing (SPEC-1974 FR-064 / FR-069) ---------
+
+    fn identified_entry(id: &str) -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Status,
+            "recovery intent body",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        entry.id = id.to_string();
+        entry
+    }
+
+    #[test]
+    fn a_local_repo_routes_a_deterministic_append_and_stays_idempotent() {
+        // FR-064 through the routing shim: the repo resolves to local, which
+        // preserves the caller's id, so the replay is a no-op.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(supports_deterministic_identity(dir.path()));
+
+        post_entry_deterministic(dir.path(), identified_entry("intent-1")).unwrap();
+        let replay = post_entry_deterministic(dir.path(), identified_entry("intent-1")).unwrap();
+
+        assert!(matches!(
+            replay,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_remote_provider_fails_closed_instead_of_appending_locally() {
+        // FR-069: Slack cannot preserve a caller-supplied id yet (SPEC #2963
+        // owns that contract), so the append is refused. The refusal must not
+        // leave a local post behind — that would acknowledge a delivery the
+        // remote Board never received.
+        let dir = tempfile::tempdir().unwrap();
+        let slack = SlackProvider::new(
+            "xoxb-test".to_string(),
+            "C-TEST".to_string(),
+            BTreeMap::new(),
+            Box::new(ReqwestHttpClient::new()),
+            60,
+        );
+
+        assert!(!slack.supports_deterministic_identity());
+        assert!(slack
+            .post_entry_deterministic(dir.path(), identified_entry("intent-2"))
+            .is_err());
+        assert!(
+            LocalProvider
+                .load_snapshot(dir.path())
+                .unwrap()
+                .board
+                .entries
+                .is_empty(),
+            "a refused remote append must not fall back to the local Board"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_provider_fails_closed_on_deterministic_append() {
+        // FR-010 + FR-069 together: a selected-but-unusable remote refuses the
+        // deterministic append for the same reason it refuses every other
+        // operation — no silent local service.
+        let dir = tempfile::tempdir().unwrap();
+        let provider = build_remote(BoardProviderKind::Slack, &Settings::default());
+
+        assert!(!provider.supports_deterministic_identity());
+        assert!(provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-3"))
+            .is_err());
     }
 
     #[test]
