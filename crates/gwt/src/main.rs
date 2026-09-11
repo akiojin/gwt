@@ -361,6 +361,41 @@ fn frontend_event_kind_label(event: &FrontendEvent) -> DispatchLabel {
     debug_variant_label(event)
 }
 
+fn log_frontend_timing(
+    event: DispatchLabel,
+    received_at: std::time::Instant,
+    handler_started: std::time::Instant,
+    completed_at: std::time::Instant,
+    window_count: usize,
+) {
+    let queue_wait_ms = handler_started.duration_since(received_at).as_millis() as u64;
+    let handler_ms = completed_at.duration_since(handler_started).as_millis() as u64;
+    let receive_to_complete_ms = completed_at.duration_since(received_at).as_millis() as u64;
+    if receive_to_complete_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            event = %event,
+            elapsed_ms = handler_ms,
+            queue_wait_ms,
+            handler_ms,
+            receive_to_complete_ms,
+            window_count,
+            "frontend event receive-to-completion latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            event = %event,
+            elapsed_ms = handler_ms,
+            queue_wait_ms,
+            handler_ms,
+            receive_to_complete_ms,
+            window_count,
+            "frontend event handled"
+        );
+    }
+}
+
 /// Issue #3611 AC-4: name the event-loop dispatch that is about to be timed.
 /// `UserEvent` carries the interesting handlers (Work/branch scan results,
 /// projection refreshes), so it is labelled by its own variant rather than the
@@ -1259,6 +1294,7 @@ enum UserEvent {
     Frontend {
         client_id: ClientId,
         event: FrontendEvent,
+        received_at: std::time::Instant,
     },
     /// Internal request from the capability-authenticated pane bridge. The
     /// server-side principal is the only project/Session routing authority.
@@ -1785,6 +1821,63 @@ mod tests {
         assert_eq!(
             frontend_event_kind_label(&gwt::FrontendEvent::FrontendReady).as_str(),
             "FrontendReady"
+        );
+    }
+
+    pub(crate) fn capture_timing_warnings(run: impl FnOnce()) -> String {
+        let output = tempfile::NamedTempFile::new().expect("timing log");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(output.reopen().expect("timing log writer"))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        std::fs::read_to_string(output.path()).expect("read timing log")
+    }
+
+    #[test]
+    fn frontend_timing_warns_for_receive_latency_without_logging_input() {
+        use std::time::{Duration, Instant};
+        let received = Instant::now();
+        let started = received + Duration::from_millis(50);
+        let completed = started + Duration::from_millis(5);
+        let label = frontend_event_kind_label(&gwt::FrontendEvent::TerminalInput {
+            id: "secret-window".to_string(),
+            data: "secret-input".to_string(),
+        });
+        let output = capture_timing_warnings(|| {
+            super::log_frontend_timing(label, received, started, completed, 9);
+            super::log_frontend_timing(
+                label,
+                received + Duration::from_millis(26),
+                started,
+                completed,
+                9,
+            );
+            super::log_frontend_timing(
+                label,
+                received + Duration::from_millis(25),
+                started,
+                completed,
+                9,
+            );
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 2, "29ms must not warn; 30ms must warn");
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["event"], "TerminalInput");
+        assert_eq!(fields["queue_wait_ms"], 50);
+        assert_eq!(fields["handler_ms"], 5);
+        assert_eq!(fields["elapsed_ms"], 5);
+        assert_eq!(fields["receive_to_complete_ms"], 55);
+        assert_eq!(fields["window_count"], 9);
+        assert_eq!(logs[1]["fields"]["receive_to_complete_ms"], 30);
+        assert!(
+            !output.contains("secret"),
+            "timing must exclude input payload"
         );
     }
 
@@ -9065,7 +9158,11 @@ fn main() -> std::io::Result<()> {
                 );
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+            Event::UserEvent(UserEvent::Frontend {
+                client_id,
+                event,
+                received_at,
+            }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
                 // Issue #4145 AC-1: the canvas reporting its bounds is the
@@ -9079,25 +9176,17 @@ fn main() -> std::io::Result<()> {
                 let dispatch_kind = frontend_event_kind_label(&event);
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                let completed_at = std::time::Instant::now();
                 if canvas_ready {
                     record_startup_perf_route_once();
                 }
-                let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
-                if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
-                    tracing::warn!(
-                        target: "gwt.frontend.timing",
-                        event = %dispatch_kind,
-                        elapsed_ms = dispatch_elapsed_ms,
-                        "frontend event handler blocked the GUI event loop"
-                    );
-                } else {
-                    tracing::debug!(
-                        target: "gwt.frontend.timing",
-                        event = %dispatch_kind,
-                        elapsed_ms = dispatch_elapsed_ms,
-                        "frontend event handled"
-                    );
-                }
+                log_frontend_timing(
+                    dispatch_kind,
+                    received_at,
+                    dispatch_started,
+                    completed_at,
+                    app.window_lookup.len(),
+                );
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
