@@ -49,8 +49,9 @@
 //!
 //! So on Windows the `gwt` package — and the workspace gate, which contains
 //! it — narrows to `--lib`, and every derived `cargo test` is serialized.
-//! This follows CI rather than departing from it: `test-windows-default-parallel`
-//! runs exactly [`CI_WINDOWS_RUST_TEST_GATE`] and documents the same
+//! This follows CI rather than departing from it: the nightly
+//! `test-windows-default-parallel` job runs exactly
+//! [`CI_WINDOWS_RUST_TEST_GATE`] and documents the same
 //! deadlock as its reason for excluding the target. Every other package
 //! keeps CI's full gate, because only these targets have ever been observed
 //! to wedge — narrowing further would buy nothing and cost real coverage.
@@ -76,7 +77,7 @@ const CI_FMT_GATE: &str = "cargo fmt --all -- --check";
 const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
 
 /// The broad Rust test gate CI runs on Windows (`.github/workflows/
-/// test.yml`, job `test-windows-default-parallel`): the same gate restricted
+/// nightly.yml`, job `test-windows-default-parallel`): the same gate restricted
 /// to library targets, because the `gwt` crate's binary targets deadlock
 /// there. Derivation applies the identical restriction — see the module
 /// header.
@@ -716,10 +717,11 @@ mod tests {
     fn windows_derived_rust_matrix_tracks_the_ci_windows_gate() {
         // CI narrows its own Windows gate to `-p gwt`, and builds it on a
         // separate budget before the timed loop, so the job runs the gate
-        // twice: once with `--no-run`, once for real.
+        // twice: once with `--no-run`, once for real. The job left PR CI for
+        // the nightly schedule (#4134 AC-1) without changing its gate.
         let gwt_gate = CI_WINDOWS_RUST_TEST_GATE.replace("--workspace", "-p gwt");
         assert_eq!(
-            workflow_cargo_tests("test.yml", "test-windows-default-parallel"),
+            workflow_cargo_tests("nightly.yml", "test-windows-default-parallel"),
             vec![format!("{gwt_gate} --no-run"), gwt_gate.clone()],
             "CI's Windows Rust gate changed — update verify.plan derivation with it (#4182)"
         );
