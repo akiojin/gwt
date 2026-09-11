@@ -4495,28 +4495,40 @@ mod tests {
         std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
         write_test_runner(&inherited_bin.join("npx"));
         write_test_runner(&explicit_bin.join("npx"));
+        let inherited_consulted = std::cell::Cell::new(false);
         // The inherited host PATH is injected through the seam instead of
         // swapping the process-global PATH, which would race every parallel
         // process spawn in this test binary (Issue #3895).
-        let host_path = || Some(inherited_bin.display().to_string());
-
         let inherited = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::new(),
             &[],
             Some(temp.path()),
-            host_path,
+            || {
+                inherited_consulted.set(true);
+                Some(inherited_bin.display().to_string())
+            },
+        );
+        assert!(
+            inherited_consulted.replace(false),
+            "inherited PATH must consult the host environment"
         );
         let removed = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::new(),
             &["PATH".to_string()],
             Some(temp.path()),
-            host_path,
+            || {
+                inherited_consulted.set(true);
+                Some(inherited_bin.display().to_string())
+            },
         );
         let overridden = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
             &["PATH".to_string()],
             Some(temp.path()),
-            host_path,
+            || {
+                inherited_consulted.set(true);
+                Some(inherited_bin.display().to_string())
+            },
         );
 
         assert_eq!(
@@ -4526,6 +4538,10 @@ mod tests {
         );
         assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
         assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
+        assert!(
+            !inherited_consulted.get(),
+            "explicit PATH or PATH removal must not hydrate the inherited host environment"
+        );
     }
 
     /// Issue #3972: a launch `PATH` that pins its own runners re-binds the
