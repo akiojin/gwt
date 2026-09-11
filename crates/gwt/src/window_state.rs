@@ -100,6 +100,72 @@ pub fn approval_prompt_fingerprint(provider: ApprovalPromptProvider, screen: &st
     ))
 }
 
+/// Return a privacy-safe identity only for Codex's fully rendered directory
+/// trust onboarding prompt. This is intentionally separate from tool approval:
+/// a managed launch blocked here needs a terminal human handoff, while ordinary
+/// approvals remain a resumable `Waiting` state.
+pub fn directory_trust_prompt_fingerprint(
+    provider: ApprovalPromptProvider,
+    screen: &str,
+) -> Option<u64> {
+    if provider != ApprovalPromptProvider::Codex {
+        return None;
+    }
+
+    const TITLE: &str = "doyoutrustthecontentsofthisdirectory?";
+    const TITLE_START: &str = "doyoutrustthecontents";
+    const ACCEPT: &str = "1.yes,continue";
+    const REJECT: &str = "2.no,quit";
+    const FOOTERS: &[&str] = &[
+        "pressentertocontinueandcreateasandbox...",
+        "pressentertocontinue",
+    ];
+
+    let lines = screen.lines().collect::<Vec<_>>();
+    let title_line = lines
+        .iter()
+        .rposition(|line| normalize_directory_trust_screen(line).starts_with(TITLE_START))?;
+    let context_line = lines[..title_line]
+        .iter()
+        .rposition(|line| directory_trust_context_path(line).is_some())?;
+    let prompt_lines = &lines[context_line..];
+    let normalized = normalize_directory_trust_screen(&prompt_lines.join("\n"));
+    let title_start =
+        normalize_directory_trust_screen(&lines[context_line..title_line].join("\n")).len();
+    if !normalized[title_start..].starts_with(TITLE) {
+        return None;
+    }
+    let title_end = title_start + TITLE.len();
+    let accept_end = normalized[title_end..]
+        .find(ACCEPT)
+        .map(|start| title_end + start + ACCEPT.len())?;
+    let reject_end = normalized[accept_end..]
+        .find(REJECT)
+        .map(|start| accept_end + start + REJECT.len())?;
+    let footer = FOOTERS
+        .iter()
+        .copied()
+        .find(|footer| normalized.ends_with(footer))?;
+    let footer_start = normalized.len().checked_sub(footer.len())?;
+    if footer_start < reject_end
+        || !has_selected_choice_in_latest_block(
+            &prompt_lines.join("\n"),
+            TITLE,
+            &normalized[title_end..footer_start],
+        )
+    {
+        return None;
+    }
+
+    // The platform-specific footer is a rendering detail, not a different
+    // prompt. Excluding it also keeps the identity stable as the selection
+    // moves between the two choices.
+    Some(fnv1a64(
+        b"codex-directory-trust:",
+        &normalized.as_bytes()[..footer_start],
+    ))
+}
+
 /// Boolean compatibility wrapper for callers that do not need prompt
 /// identity.
 pub fn detect_approval_prompt(provider: ApprovalPromptProvider, screen: &str) -> bool {
@@ -142,6 +208,36 @@ fn normalize_approval_screen(screen: &str) -> String {
         })
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn normalize_directory_trust_screen(screen: &str) -> String {
+    screen
+        .lines()
+        .map(directory_trust_line_body)
+        .flat_map(str::chars)
+        .filter(|character| {
+            !character.is_whitespace() && !matches!(character, '›' | '❯' | '▸' | '▶')
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn directory_trust_line_body(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix(['›', '❯', '▸', '▶', '>'])
+        .map(str::trim_start)
+        .unwrap_or(trimmed)
+}
+
+fn directory_trust_context_path(line: &str) -> Option<&str> {
+    let body = directory_trust_line_body(line);
+    let path = body.strip_prefix("You are in")?;
+    path.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(path.trim())
+        .filter(|path| !path.is_empty())
 }
 
 fn has_selected_choice_in_latest_block(
@@ -337,8 +433,9 @@ mod tests {
     use super::{
         approval_prompt_fingerprint, compose_window_state,
         compose_window_state_with_active_session, compose_window_state_with_approval_wait,
-        detect_approval_prompt, has_approval_prompt_evidence, is_approval_resolution_input,
-        runtime_hook_window_state, window_state_from_pane_status, ApprovalPromptProvider,
+        detect_approval_prompt, directory_trust_prompt_fingerprint, has_approval_prompt_evidence,
+        is_approval_resolution_input, runtime_hook_window_state, window_state_from_pane_status,
+        ApprovalPromptProvider,
     };
     use crate::{
         daemon_runtime::{RuntimeHookEvent, RuntimeHookEventKind},
@@ -624,6 +721,94 @@ Press enter to confirm or esc to cancel
             ApprovalPromptProvider::Unsupported,
             codex_prompt
         ));
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_requires_the_complete_bottom_anchored_structure() {
+        let prompt = "You are in /Users/alice/project\n\n\
+            Do you trust the contents of this directory? Working with untrusted contents comes with higher\n\
+            risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n\
+            policies to load.\n\n\
+            › 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue";
+        let wrapped = prompt
+            .replace("contents of this directory", "contents of this\n directory")
+            .replace("Yes, continue", "Yes,\n continue");
+        let reject_selected = prompt
+            .replace("› 1. Yes", "  1. Yes")
+            .replace("  2. No", "› 2. No");
+        let windows_footer = prompt.replace(
+            "Press enter to continue",
+            "Press enter to continue and create a sandbox...",
+        );
+
+        let fingerprint = directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, prompt)
+            .expect("complete Codex directory-trust prompt");
+        assert_eq!(
+            directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, &wrapped),
+            Some(fingerprint),
+            "terminal soft wrapping must not change prompt identity"
+        );
+        assert_eq!(
+            directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, &reject_selected),
+            Some(fingerprint),
+            "selection movement must not change prompt identity"
+        );
+        assert_eq!(
+            directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, &windows_footer),
+            Some(fingerprint),
+            "the Windows sandbox footer must preserve prompt identity"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_rejects_partial_prose_history_tool_and_non_codex_frames() {
+        let prompt = "You are in /Users/alice/project\n\n\
+            Do you trust the contents of this directory? Working with untrusted contents comes with higher\n\
+            risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n\
+            policies to load.\n\n\
+            › 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue";
+        let partial = "Do you trust the contents of this directory?\n› 1. Yes, continue";
+        let missing_context = "Do you trust the contents of this directory? Working with untrusted contents comes with higher\n\
+            risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.\n\n\
+            > 1. Yes, continue\n2. No, quit\nPress enter to continue";
+        let prose = "The documentation asks: Do you trust the contents of this directory?\n\
+            > 1. Yes, continue\n2. No, quit\nPress enter to continue";
+        let wrong_order = "You are in /Users/alice/project\n\n\
+            Do you trust the contents of this directory?\n\n\
+            > 2. No, quit\n1. Yes, continue\n\nPress enter to continue";
+        let history = format!("{prompt}\nCodex is now working on the task.");
+        let tool_approval = "Would you like to run the following command?\n\
+            › 1. Yes, proceed\n 2. No, and tell Codex what to do differently\n\
+            Press enter to confirm or esc to cancel";
+
+        for (case, provider, screen) in [
+            ("partial", ApprovalPromptProvider::Codex, partial),
+            (
+                "missing working-directory context",
+                ApprovalPromptProvider::Codex,
+                missing_context,
+            ),
+            ("prose", ApprovalPromptProvider::Codex, prose),
+            (
+                "wrong choice order",
+                ApprovalPromptProvider::Codex,
+                wrong_order,
+            ),
+            ("history", ApprovalPromptProvider::Codex, history.as_str()),
+            (
+                "tool approval",
+                ApprovalPromptProvider::Codex,
+                tool_approval,
+            ),
+            ("Claude", ApprovalPromptProvider::ClaudeCode, prompt),
+            ("unsupported", ApprovalPromptProvider::Unsupported, prompt),
+        ] {
+            assert_eq!(
+                directory_trust_prompt_fingerprint(provider, screen),
+                None,
+                "{case} must not become a directory-trust failure"
+            );
+        }
     }
 
     #[test]

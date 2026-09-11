@@ -556,9 +556,23 @@ pub fn execute_orphan_intake_worktree_prune(
             intake_hook_config_is_disposable(&worktree_path, entry)
         }) {
             Ok(false) => {
-                if manager.remove_force(&worktree_path).is_ok() {
-                    removed += 1;
+                let cleanup = gwt::managed_assets::cleanup_worktree_with_codex_project_trust(
+                    &worktree_path,
+                    || {
+                        manager
+                            .remove_force(&worktree_path)
+                            .map_err(|error| std::io::Error::other(error.to_string()))
+                    },
+                );
+                if let Err(error) = cleanup {
+                    tracing::warn!(
+                        worktree_path = %worktree_path.display(),
+                        %error,
+                        "keeping orphaned intake worktree because locked trust cleanup failed"
+                    );
+                    continue;
                 }
+                removed += 1;
             }
             // Has local work or unknown → keep it (fail closed).
             _ => {
