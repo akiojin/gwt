@@ -28,8 +28,9 @@ pub use codex_hook_trust::{
     CodexHookTrustExpectation, CodexHookTrustReport, CodexProjectTrustReport,
 };
 pub use codex_managed_config::{
-    ensure_codex_context_management_experimental_mode, CodexManagedConfigOutcome,
-    CodexManagedConfigReport, CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+    ensure_codex_context_management_experimental_mode, CodexFeaturesSchema,
+    CodexManagedConfigOutcome, CodexManagedConfigReport,
+    CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY, CODEX_FEATURE_TABLE_MIN_VERSION,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
