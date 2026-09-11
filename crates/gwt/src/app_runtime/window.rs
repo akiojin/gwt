@@ -113,9 +113,7 @@ impl AppRuntime {
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
         if tab_changed {
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
@@ -351,6 +349,25 @@ impl AppRuntime {
         self.activate_tab_for_window_events(address.tab_id)
     }
 
+    /// SPEC-3885 FR-012: return a Windowized Issue window to the Issue list. The
+    /// canvas resolves both the Issue and its host window, so a stale frontend cannot
+    /// send the window somewhere it does not belong.
+    pub(crate) fn dock_agent_window_to_issue_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.dock_agent_window_to_issue(&address.raw_id)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        self.activate_tab_for_window_events(address.tab_id)
+    }
+
     pub(crate) fn set_agent_kanban_card_collapsed_events(
         &mut self,
         id: &str,
@@ -465,6 +482,11 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
     ) -> CloseWindowOutcome {
+        // Issue #4145 AC-1: every close route converges here, and Issue #3783
+        // designed the accepted close to stay on the event loop, so this guard
+        // measures exactly the latency a person sees when a pane disappears.
+        // The detached teardown that follows is deliberately outside it.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneClose);
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         if !close_window_from_workspace(
             &mut self.tabs,
@@ -477,6 +499,11 @@ impl AppRuntime {
                 events: Vec::new(),
             };
         }
+        // Issue #4084: the review-dispatch marker dies with its window.
+        self.issue_monitor_review_dispatch_windows.remove(id);
+        // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
+        // in-flight restore marker must not outlive its window.
+        self.restore_launch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
         // runs in one detached finalizer and cannot delay PaneCloseResult.

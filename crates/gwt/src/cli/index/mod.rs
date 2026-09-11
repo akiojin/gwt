@@ -22,7 +22,7 @@ use audit::{
 };
 use runtime::{
     format_runner_failure, parse_runner_json, rebuild_actions, render_index_status,
-    resolve_index_context, run_runner_rebuild, run_runner_status,
+    resolve_index_context, run_runner_rebuild, run_runner_rebuild_with_repair, run_runner_status,
 };
 
 /// SPEC-1942 command model for `index.*` JSON operations.
@@ -32,6 +32,10 @@ pub enum IndexCommand {
     Status,
     /// `index.rebuild`.
     Rebuild { scope: IndexScope },
+    /// Request cancellation of an issues rebuild.
+    Cancel,
+    /// Explicitly repair the issues index.
+    Repair,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +62,16 @@ pub fn parse(args: &[String]) -> Result<IndexCommand, CliParseError> {
         "rebuild" => Ok(IndexCommand::Rebuild {
             scope: parse_rebuild_scope(rest)?,
         }),
+        "cancel" | "repair" => {
+            if !rest.is_empty() && parse_rebuild_scope(rest)? != IndexScope::Issues {
+                return Err(CliParseError::Usage);
+            }
+            Ok(if head == "cancel" {
+                IndexCommand::Cancel
+            } else {
+                IndexCommand::Repair
+            })
+        }
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -89,7 +103,19 @@ pub fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match cmd {
         IndexCommand::Status => run_status(env, out),
-        IndexCommand::Rebuild { scope } => run_rebuild(env, scope, out),
+        IndexCommand::Rebuild { scope } => run_rebuild(env, scope, false, out),
+        IndexCommand::Repair => run_rebuild(env, IndexScope::Issues, true, out),
+        IndexCommand::Cancel => {
+            let context = resolve_index_context(env.repo_path())?;
+            let scope_dir = gwt_core::index::paths::gwt_index_root()
+                .join(context.repo_hash.as_str())
+                .join("issues");
+            std::fs::create_dir_all(&scope_dir)
+                .and_then(|()| std::fs::write(scope_dir.join("cancel-requested"), b""))
+                .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?;
+            out.push_str("issues: cancellation requested\n");
+            Ok(0)
+        }
     }
 }
 
@@ -120,6 +146,7 @@ fn run_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsEr
 fn run_rebuild<E: CliEnv>(
     env: &mut E,
     scope: IndexScope,
+    repair: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let context = resolve_index_context(env.repo_path())?;
@@ -150,8 +177,12 @@ fn run_rebuild<E: CliEnv>(
             coordinator_worktree.as_deref(),
             gwt_core::index_coordinator::JobPriority::ManualRebuild,
             || {
-                let output = run_runner_rebuild(&context, action, "interactive")
-                    .map_err(|err| err.to_string())?;
+                let output = if repair {
+                    run_runner_rebuild_with_repair(&context, action, "interactive", true)
+                } else {
+                    run_runner_rebuild(&context, action, "interactive")
+                }
+                .map_err(|err| err.to_string())?;
                 let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
                 let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
                 if !output.status.success() {
@@ -237,6 +268,36 @@ mod tests {
         );
         std::fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
         develop
+    }
+
+    #[test]
+    fn cancel_issues_records_request_without_bootstrapping_python() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = make_bare_workspace_with_worktree(&tmp.path().join("workspace"));
+        let context = resolve_index_context(&repo).unwrap();
+        let mut env = crate::cli::env::TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = repo;
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                parse(&s(&["cancel", "--scope", "issues"])).unwrap(),
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        assert!(gwt_core::index::paths::gwt_index_root()
+            .join(context.repo_hash.as_str())
+            .join("issues/cancel-requested")
+            .exists());
+        assert!(!context.python.exists());
     }
 
     #[test]

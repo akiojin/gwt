@@ -17,8 +17,8 @@ mod view_model;
 use options::*;
 
 pub use options::{
-    build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
-    load_agent_options,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
+    default_wizard_version_cache_path, load_agent_options, AgentSetupAffordance, AgentSetupKind,
 };
 pub use profiles::{
     load_previous_launch_profile, load_previous_launch_profiles,
@@ -60,9 +60,6 @@ pub enum LaunchWizardMode {
     Branch,
     StartWork,
     Knowledge,
-    /// SPEC-3214 FR-001: disposable branch-free intake session on an
-    /// ephemeral detached worktree.
-    Intake,
     /// SPEC-3214 FR-010: standalone existing-branch picker (US-83
     /// SelectExistingBranch) that continues on a remote branch without
     /// minting a new work/* branch.
@@ -289,6 +286,35 @@ pub struct LaunchWizardHolderDecisionView {
     pub move_unavailable_reason: Option<String>,
 }
 
+/// SPEC-3864 FR-005..FR-007: wire form of [`AgentSetupAffordance`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardAgentSetupView {
+    pub agent_id: String,
+    /// `"install"` or `"configure"`.
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    /// Button label; absent when gwt cannot run the setup itself.
+    pub action_label: Option<String>,
+}
+
+/// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
+/// candidate pool. Absent for every other wizard.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolImpactView {
+    /// `replace_head` — the save overwrites candidate index 0. Agent Settings
+    /// never appends; adding a candidate is a `profiles.set` operation.
+    pub action: String,
+    /// Provider this save writes to index 0.
+    pub agent_id: String,
+    /// Provider currently at index 0, when the save switches it out.
+    pub replaced_agent_id: Option<String>,
+    pub title: String,
+    pub detail: String,
+    /// The `launch_profile_summary` the Monitor will report after the save.
+    pub resulting_summary: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
@@ -364,11 +390,29 @@ pub struct LaunchWizardView {
     /// the wizard shows a non-blocking "OpenCode is not set up" hint with an
     /// in-pane setup launcher. Only meaningful for the OpenCode agent.
     pub opencode_needs_setup: bool,
+    /// SPEC-3864 FR-005..FR-007: agent-independent setup affordance for the
+    /// selected built-in (install when no `Installed` / `latest` route exists,
+    /// configure when first-time setup is missing). `None` when launchable.
+    pub agent_setup: Option<LaunchWizardAgentSetupView>,
+    /// Issue #4079 AC-2: filled by the app runtime when this wizard is the
+    /// Issue Monitor Agent Settings form, so the operator sees which candidate
+    /// the save writes before committing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_monitor_pool_impact: Option<LaunchWizardIssueMonitorPoolImpactView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
+    /// Issue #3863: model candidates for the selected provider (blank
+    /// provider = config default provider), from `providers.<id>.models`.
+    pub hermes_model_options: Vec<String>,
     pub hermes_profile: String,
+    /// Issue #3863: `agent.personalities` keys.
+    pub hermes_profile_options: Vec<String>,
     pub hermes_toolsets: String,
+    /// Issue #3863: toolset names known to the user's Hermes config.
+    pub hermes_toolset_options: Vec<String>,
     pub hermes_skills: String,
+    /// Issue #3863: installed skill names under the user's Hermes home.
+    pub hermes_skill_options: Vec<String>,
     pub hermes_max_turns: String,
     pub hermes_safe_mode: bool,
     pub show_branch_controls: bool,
@@ -396,6 +440,9 @@ pub struct LaunchWizardView {
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
     pub error: Option<String>,
+    /// Issue #3962 AC-5: non-blocking hint shown when a restored model is no
+    /// longer offered by the agent and the wizard fell back to the default.
+    pub model_fallback_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -441,6 +488,21 @@ pub struct LaunchWizardPreviousProfile {
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub windows_shell: Option<gwt_agent::WindowsShellKind>,
+    /// Issue #3863 AC-7: Hermes-specific values from the previous Hermes
+    /// launch. Always default for other agents.
+    pub hermes: HermesLaunchPreferences,
+}
+
+/// Issue #3863 AC-7: the Hermes launch options worth restoring across
+/// launches. Safe mode is deliberately excluded — it disables gwt hooks, so
+/// it must be re-chosen per launch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HermesLaunchPreferences {
+    pub provider: Option<String>,
+    pub profile: Option<String>,
+    pub toolsets: Option<String>,
+    pub skills: Option<String>,
+    pub max_turns: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -587,11 +649,6 @@ pub struct LaunchWizardContext {
     /// environment. This gate applies to installed, `latest`, and pinned
     /// versions.
     pub claude_workflows_enabled: bool,
-    /// SPEC-3214 Phase 3: when `Some(base_ref)`, this wizard launches an
-    /// ephemeral **intake session** — the agent runs in a detached, throwaway
-    /// worktree based on `base_ref` (e.g. `origin/develop`) and creates no
-    /// branch. `None` is the normal branch-based launch.
-    pub ephemeral_base_ref: Option<String>,
 }
 
 impl LaunchWizardContext {
@@ -664,6 +721,45 @@ impl LaunchWizardLaunchRequest {
             );
         }
     }
+
+    /// Issue #4217 (AC-2): record that the Issue Monitor started this launch.
+    ///
+    /// Unconditional on purpose. `set_autonomous_execution_context` below is
+    /// gated on the project's `autonomous_mode` preference, which answers a
+    /// different question — whether the project opted into unattended
+    /// operation — and a monitor launch made while that preference reads false
+    /// therefore looked human-driven to every gate downstream. The launch then
+    /// stalled waiting for a human who was never asked to be there (#3777,
+    /// #3697). Nobody is watching a monitor-started launch either way, so the
+    /// route is a fact about how it started, not a setting.
+    ///
+    /// A no-op for non-agent (shell) launches.
+    pub fn set_issue_monitor_launch_route(&mut self) {
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        }
+    }
+
+    /// Issue #3984 (AC-1): mark an independent-review dispatch launch.
+    ///
+    /// SPEC-3248 P8a already keeps the reviewer out of the implementer's
+    /// Execution Control Record via `suppress_execution_control`; that flag is
+    /// launch-local and invisible to the hooks, so the same decision is also
+    /// published into the review agent's environment. Without it the identity
+    /// and obligation gates treat the reviewer as a producing session whose
+    /// settlement paths it can never reach, and the finished verdict never
+    /// leaves the window.
+    ///
+    /// A no-op for non-agent (shell) launches.
+    pub fn set_review_dispatch_context(&mut self) {
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.suppress_execution_control = true;
+            config.env_vars.insert(
+                crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV.to_string(),
+                "1".to_string(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -710,6 +806,88 @@ mod autonomous_launch_tests {
                         .map(String::as_str),
                     Some("3478")
                 );
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Issue #4217 AC-2: the Issue Monitor stamps the route it launched
+    /// through, and it does so whatever the project's `autonomous_mode`
+    /// preference says. That preference records an opt-in; it does not record
+    /// who pressed the button, and conflating the two is what let a
+    /// monitor-launched window classify itself as human-driven and stall
+    /// (#3777, #3697).
+    #[test]
+    fn an_issue_monitor_launch_records_the_autonomous_route_regardless_of_the_preference() {
+        for autonomous_mode in [true, false] {
+            let mut request = agent_request(false);
+            request.set_issue_monitor_launch_route();
+            request.set_autonomous_execution_context(autonomous_mode, 4217);
+            match request {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(
+                        config.launch_route,
+                        gwt_agent::LaunchRoute::Autonomous,
+                        "the route is a fact about the launch, not a setting \
+                         (autonomous_mode = {autonomous_mode})"
+                    );
+                    assert!(!config.launch_route.is_attended());
+                }
+                LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+            }
+        }
+    }
+
+    /// AC-7: a launch nobody stamped stays attended, so every human-driven
+    /// route keeps its visual-verification gate.
+    #[test]
+    fn an_unstamped_launch_stays_attended() {
+        let request = agent_request(false);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert_eq!(config.launch_route, gwt_agent::LaunchRoute::Manual);
+                assert!(config.launch_route.is_attended());
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Issue #3984 (AC-1): the review dispatch launch publishes both halves of
+    /// the review contract — the P8a execution suppression and the marker its
+    /// hooks read.
+    #[test]
+    fn review_dispatch_launch_marks_the_review_contract() {
+        let mut request = agent_request(false);
+        request.set_review_dispatch_context();
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert!(
+                    config.suppress_execution_control,
+                    "the reviewer never owns the implementer's execution"
+                );
+                assert_eq!(
+                    config
+                        .env_vars
+                        .get(crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV)
+                        .map(String::as_str),
+                    Some("1")
+                );
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Non-regression: an implementation launch is never marked as a review,
+    /// so it keeps the producing-session gates in full.
+    #[test]
+    fn an_implementation_launch_carries_no_review_marker() {
+        let request = agent_request(false);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert!(!config.suppress_execution_control);
+                assert!(!config
+                    .env_vars
+                    .contains_key(crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV));
             }
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }
@@ -868,15 +1046,15 @@ pub enum LaunchWizardAction {
     SetHermesSafeMode {
         enabled: bool,
     },
-    /// SPEC-3151 FR-010: launch `<opencode runner> auth login` in an in-pane
-    /// host shell so the user can sign in to an AI provider without leaving the
-    /// wizard. OpenCode auth is host-global, so this always runs on the host.
+    /// SPEC-3864 FR-006 / FR-007: run the selected agent's setup affordance
+    /// in an in-pane host shell — the descriptor's install command when the
+    /// agent is missing, or `<runner> <setup_args>` (e.g. `opencode auth
+    /// login`) when first-time configuration is missing. Setup state is
+    /// host-global, so this always runs on the host.
     ///
-    /// Explicit serde rename: the default snake_case of `RunOpenCodeSetup` is
-    /// `run_open_code_setup`, but the frontend and the action-label use the
-    /// `opencode` convention, so the wire tag is `run_opencode_setup`.
-    #[serde(rename = "run_opencode_setup")]
-    RunOpenCodeSetup,
+    /// The SPEC-3151 wire tag `run_opencode_setup` stays accepted as an alias.
+    #[serde(rename = "run_agent_setup", alias = "run_opencode_setup")]
+    RunAgentSetup,
     Submit,
     /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
     GotoStep {
@@ -927,26 +1105,27 @@ pub struct LaunchWizardState {
     pub hermes_skills: String,
     pub hermes_max_turns: String,
     pub hermes_safe_mode: bool,
-    /// SPEC-3152: providers enumerated from the user's `~/.hermes/config.yaml`
-    /// (model.provider + `providers:` keys), populated at wizard open. Empty
-    /// in tests / when no config exists; the wizard then offers only the
-    /// "use config default" and free-text "Other" provider entries.
-    pub hermes_provider_choices: Vec<String>,
-    /// SPEC-3152 FR-005: `true` when the user's global Hermes home has no
-    /// resolvable credentials, so the wizard shows a non-blocking "Hermes is
-    /// not set up" hint. Populated at wizard open; never blocks launch.
-    pub hermes_needs_setup: bool,
-    /// SPEC-3151 FR-009: `true` when OpenCode has no AI provider configured in
-    /// its global data home, so the wizard shows a non-blocking "OpenCode is
-    /// not set up" hint with an in-pane setup launcher. Populated at wizard
-    /// open; never blocks launch.
-    pub opencode_needs_setup: bool,
+    /// SPEC-3152 / Issue #3863: launch-option candidates enumerated from the
+    /// user's `~/.hermes` (providers, models per provider, profiles,
+    /// toolsets, skills), populated at wizard open. Empty in tests / when no
+    /// config exists; the wizard then offers only the "use config default"
+    /// and free-text "Other" entries.
+    pub hermes_choices: gwt_skills::HermesLaunchChoices,
+    /// SPEC-3864 FR-006: built-in agent ids (command keys) whose first-time
+    /// configuration is missing, populated by the app runtime at wizard open
+    /// (Hermes credentials, OpenCode provider auth, ...). Drives the
+    /// `configure` setup affordance; never blocks launch.
+    pub needs_configuration: std::collections::BTreeSet<String>,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.
     pub initial_prompt: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
+    /// Issue #3962 AC-5: set when a restored model left the agent's catalog and
+    /// the wizard silently fell back to the current default. A non-blocking
+    /// hint, never an error — the launch still proceeds with the default model.
+    pub model_fallback_notice: Option<String>,
     pub is_hydrating: bool,
     pub runtime_context_resolved: bool,
     pub runtime_resolution_pending: bool,

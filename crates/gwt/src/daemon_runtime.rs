@@ -705,14 +705,17 @@ pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
         return Ok(());
     }
     runtime_state::handle_with_input(event, input)?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::RuntimeState,
+    emit_live_event_fail_open(
         Some(event),
-        runtime_state::status_for_event(event).map(str::to_string),
-        None,
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some(event),
+            runtime_state::status_for_event(event).map(str::to_string),
+            None,
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
@@ -721,40 +724,61 @@ pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
         return Ok(());
     }
     runtime_state::record_blocked_stop_from_env()?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::RuntimeState,
+    emit_live_event_fail_open(
         Some("Stop"),
-        Some("Running".to_string()),
-        Some("blocked-stop".to_string()),
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some("Stop"),
+            Some("Running".to_string()),
+            Some("blocked-stop".to_string()),
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
 pub fn handle_coordination_event(event: &str, input: &str) -> Result<(), HookError> {
     coordination_event::handle(event)?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::CoordinationEvent,
+    emit_live_event_fail_open(
         Some(event),
-        None,
-        Some(format!("coordination:{event}")),
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::CoordinationEvent,
+            Some(event),
+            None,
+            Some(format!("coordination:{event}")),
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
 pub fn handle_forward(input: &str) -> Result<(), HookError> {
+    forward_with_diagnostic_event(None, input)
+}
+
+/// [`handle_forward`] that knows which hook event it serves, so a fail-open
+/// transport failure can be attributed in the error ledger (Issue #3541). The
+/// live payload itself is unchanged: `Forward` events keep `source_event`
+/// empty so the receiver's SessionStart readiness policy is not triggered.
+pub fn handle_forward_for_event(event: &str, input: &str) -> Result<(), HookError> {
+    forward_with_diagnostic_event(Some(event), input)
+}
+
+fn forward_with_diagnostic_event(event: Option<&str>, input: &str) -> Result<(), HookError> {
     forward::handle_with_input(input)?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::Forward,
-        None,
-        None,
-        None,
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+    emit_live_event_fail_open(
+        event,
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::Forward,
+            None,
+            None,
+            None,
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
@@ -836,10 +860,58 @@ fn live_event_agent_session_id(
         .map(str::to_string)
 }
 
-fn emit_live_event_fail_open(event: RuntimeHookEvent) {
-    if let Err(error) = emit_live_event(&event) {
-        eprintln!("gwtd hook live event: {error}");
-    }
+/// Live forwarding never fails the hook (non-policy fail-open contract), but
+/// Issue #3541 requires the failure to stay observable: record it in the host
+/// error ledger with event/handler context and say so on stderr.
+fn emit_live_event_fail_open(diagnostic_event: Option<&str>, event: RuntimeHookEvent) {
+    use gwt_core::error_ledger::{sanitize_error_message, ErrorKind, ErrorTarget};
+
+    let Err(error) = emit_live_event(&event) else {
+        return;
+    };
+    let handler = match event.kind {
+        RuntimeHookEventKind::RuntimeState => "runtime-state/live-forward",
+        RuntimeHookEventKind::CoordinationEvent => "coordination-event/live-forward",
+        RuntimeHookEventKind::Forward => "forward/live-forward",
+    };
+    let source_event = diagnostic_event
+        .or(event.source_event.as_deref())
+        .unwrap_or("unknown");
+    let detail = sanitize_error_message(&error);
+    let linked_issue = runtime_state::linked_issue_from_env();
+    let context = std::collections::BTreeMap::from([
+        ("event".to_string(), source_event.to_string()),
+        ("handler".to_string(), handler.to_string()),
+        ("exit_status".to_string(), "0".to_string()),
+        ("fail_open".to_string(), "true".to_string()),
+    ]);
+    let recorded = crate::error_report::report_error_and_publish_with_context(
+        ErrorKind::HookFailure,
+        format!("{source_event}/{handler} (fail-open): {detail}"),
+        ErrorTarget {
+            issue: linked_issue,
+            session_id: event.gwt_session_id.clone(),
+            project_root: event.project_root.clone().or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|dir| dir.display().to_string())
+            }),
+            ..ErrorTarget::default()
+        },
+        context,
+    );
+    let diagnostic = match recorded {
+        Some(record) => format!("errors.list id={}", record.id),
+        None => {
+            "errors.list (row not appended: recent duplicate or ledger unavailable)".to_string()
+        }
+    };
+    let report_target = linked_issue
+        .map(|number| format!("Board/Issue #{number}"))
+        .unwrap_or_else(|| "Board/owning Issue".to_string());
+    eprintln!(
+        "gwtd hook live event: {source_event}/{handler} failed (fail-open): {detail} | diagnostic={diagnostic} report_status=not_sent report_target={report_target}"
+    );
 }
 
 fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {

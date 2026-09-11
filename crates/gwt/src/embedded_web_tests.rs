@@ -1818,17 +1818,19 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*runtimeState\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
         )
         .expect("valid regex");
 
     assert!(
-        js.contains("const windowRuntimeStateMap = new Map();"),
-        "expected embedded js to keep a shared runtime-state map for badges and the window list",
+        js.contains("const windowRuntimeStateMap = new Map();")
+            && js.contains("return normalizeWindowRuntimeState(sourceState, windowData.preset);")
+            && js.contains("function runtimeStateForAgentFocus(windowData)"),
+        "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
             apply_status.is_match(js),
-            "expected applyStatus to normalize runtime state once, update the shared map, and re-render the window list",
+            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
         );
 }
 
@@ -3038,16 +3040,12 @@ fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_offers_improvement_inbox() {
+fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"data-preset="improvement""#),
-        "expected Add window modal to expose the Improvement Inbox preset",
-    );
-    assert!(
-        html.contains("<strong>Improvement Inbox</strong>"),
-        "expected Improvement Inbox to have a visible preset label",
+        !html.contains(r#"data-preset="improvement""#),
+        "the retired Improvement Inbox preset must not appear in the Add window modal",
     );
 }
 
@@ -3169,16 +3167,16 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
-// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
-// global entry that drives the shared wizard renderer.
+// SPEC-3245 Stage E: the Intake-only command route is retired while the shared
+// Launch Wizard renderer and its generic controls remain available.
 #[test]
-fn embedded_web_intake_session_uses_shared_wizard_renderer() {
+fn embedded_web_has_no_legacy_intake_route_and_keeps_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"case "intake-session":"#)
-            && html.contains(r#"kind: "open_intake_session""#),
-        "expected Intake session to use a global command instead of a Branches window action",
+        !html.contains(r#"case "intake-session":"#)
+            && !html.contains(r#"kind: "open_intake_session""#),
+        "legacy Intake-only command and event routes must be absent from the embedded bundle",
     );
     assert!(
         !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
@@ -3493,7 +3491,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         ".surface-knowledge",
         ".surface-mock",
         ".surface-profile",
-        ".surface-improvement",
     ];
 
     for (anchor, role) in [
@@ -4245,5 +4242,65 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
             .expect("cache-first refresh regex")
             .is_match(related_refresh),
         "the shipped Related Work refresh scheduler must stay cache-first",
+    );
+}
+
+#[test]
+fn embedded_web_retires_the_autonomous_notifications_log_region() {
+    // SPEC #3206 v2 FR-012 (Sc 6): the top-right floating "autonomous
+    // notifications" log region is replaced by the notification center (bell +
+    // unread badge + history drawer). Nothing of the retired surface may ship:
+    // no module registration, no import / mount / fan-out in app.js, no CSS.
+    // Precedent: SPEC-1939 Phase 13 (project-bar Index badge withdrawal).
+    let html = frontend_styles_bundle();
+    let js = app_js();
+    let module_graph: String = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.source)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/autonomous-notifications.js"),
+        "SPEC #3206 FR-012: autonomous-notifications.js must not be registered",
+    );
+    assert!(
+        !js.contains("autonomous-notifications")
+            && !js.contains("createAutonomousNotifications")
+            && !js.contains("autonomousNotifications"),
+        "SPEC #3206 FR-012: app.js must not import, mount or fan out to the retired log region",
+    );
+    assert!(
+        !module_graph.contains("createAutonomousNotifications"),
+        "SPEC #3206 FR-012: no embedded module may still define the retired region",
+    );
+    assert!(
+        !html.contains(".autonomous-notifications"),
+        "SPEC #3206 FR-012: retired region CSS must not ship",
+    );
+
+    // The replacement is wired: registered + imported, bell in the rail, and
+    // the autonomous fan-out records into the notification center history.
+    assert!(
+        root_js_module_assets()
+            .iter()
+            .any(|asset| asset.path == "/notification-center.js"),
+        "SPEC #3206 v2: notification-center.js must be registered",
+    );
+    assert!(
+        js.contains("from \"/notification-center.js\"")
+            && js.contains("notificationCenter.mount(document.body)"),
+        "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
+    );
+    assert!(
+        html.contains("id=\"op-notifications-button\"")
+            && html.contains("data-cmd=\"toggle-notifications\""),
+        "SPEC #3206 FR-009: the rail must carry the notification bell",
+    );
+    assert!(
+        js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),
+        "SPEC #3206 FR-011: issue_monitor_toast must record into the notification center",
     );
 }

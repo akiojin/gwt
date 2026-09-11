@@ -19,13 +19,45 @@ fn evaluate_bash_command_without_observation(
     command: &str,
     worktree_root: &Path,
 ) -> Option<HookOutput> {
-    block_git_branch_ops::evaluate_bash_command(command)
+    let decision = block_git_branch_ops::evaluate_bash_command(command)
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_git_dir_override::evaluate_bash_command(command))
         .or_else(|| evaluate_long_pr_ci_polling_sleep(command))
         .or_else(|| evaluate_github_workflow_cli(command))
-        .or_else(|| evaluate_github_mutation_sinks(command))
+        .or_else(|| evaluate_github_mutation_sinks(command));
+    if decision.is_none() {
+        record_agent_gh_spend(command, &gwt_core::github_budget::BudgetLedger::global());
+    }
+    decision
+}
+
+/// SPEC #4093 FR-004 / AC-6: an agent pane's `gh` command spends the same
+/// GitHub budget gwt's own reads do, so every allowed `gh` segment is counted
+/// on the machine-wide ledger under an `agent gh <command> <verb>` source.
+/// Counted only, never refused here — refusing an agent's PR operation
+/// would break the Ready PR gate (PM ruling on SPEC #4093).
+fn record_agent_gh_spend(command: &str, ledger: &gwt_core::github_budget::BudgetLedger) {
+    let now = chrono::Utc::now();
+    for segment in super::segments::split_command_segments(command) {
+        let tokens = command_tokens(&segment);
+        let Some(first) = tokens.first().copied() else {
+            continue;
+        };
+        if normalize_command_name(first) != "gh" {
+            continue;
+        }
+        let args = &tokens[1..];
+        let quota = gwt_core::github_quota::classify_gh_args(args);
+        if quota == gwt_core::github_quota::GitHubQuota::Free {
+            continue;
+        }
+        ledger.record_spawn_from(
+            quota,
+            &gwt_core::github_budget::agent_spawn_source(args),
+            now,
+        );
+    }
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
@@ -229,6 +261,7 @@ Recommended alternatives:\n\
 - PR workflow: JSON operations `pr.current`, `pr.list`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
 - PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
 - Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
+- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),
@@ -696,6 +729,35 @@ fn gh_api_target<'a>(tokens: &'a [&'a str]) -> Option<&'a str> {
         i += if consumes_value { 2 } else { 1 };
     }
     None
+}
+
+#[cfg(test)]
+mod agent_gh_ledger_tests {
+    use super::*;
+
+    /// SPEC #4093 AC-6: an allowed agent `gh` command lands on the shared
+    /// ledger under an `agent gh ...` source; a free call does not.
+    #[test]
+    fn allowed_agent_gh_commands_are_counted_on_the_ledger() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        record_agent_gh_spend("gh api rate_limit", &ledger);
+        record_agent_gh_spend(
+            "gh api repos/o/r/commits/abc/status && gh pr checks 12",
+            &ledger,
+        );
+        let snapshot = ledger.snapshot(chrono::Utc::now());
+        assert_eq!(snapshot.local["core"].calls_last_minute, 1);
+        assert_eq!(
+            snapshot.local["core"].sources_last_minute["agent gh api repos"],
+            1
+        );
+        assert_eq!(snapshot.local["graphql"].calls_last_minute, 1);
+        assert_eq!(
+            snapshot.local["graphql"].sources_last_minute["agent gh pr checks"],
+            1
+        );
+    }
 }
 
 #[cfg(test)]

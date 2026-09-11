@@ -13,6 +13,7 @@ use gwt::{
 };
 use gwt_agent::AgentId;
 use gwt_core::process::hidden_command;
+use gwt_skills::settings_local::{hook_bin_override, ScopedHookBin};
 use gwt_skills::CodexHookDiscoveryMode;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -26,11 +27,10 @@ fn coordination_guidance_is_identical_for_all_session_kinds() {
     fn materialize_and_read(is_ephemeral: bool) -> String {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
-        let _env_guard = env_lock();
         let cli_bin = dir.path().join("bin/gwtd");
         std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
         std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
         refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             dir.path(),
@@ -68,11 +68,10 @@ fn intake_materialize_keeps_full_skill_set() {
     fn materialize(is_ephemeral: bool) -> tempfile::TempDir {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
-        let _env_guard = env_lock();
         let cli_bin = dir.path().join("bin/gwtd");
         std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
         std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
         refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             dir.path(),
             &AgentId::ClaudeCode,
@@ -123,11 +122,10 @@ fn intake_materialize_keeps_full_skill_set() {
 fn envless_rematerialize_keeps_full_skill_set_for_intake_lane_file() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
         .expect("materialize managed assets");
@@ -167,11 +165,10 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
             &["add", ".claude/skills/gwt-register-issue/SKILL.md"],
         );
 
-        let _env_guard = env_lock();
         let cli_bin = dir.path().join("bin/gwtd");
         std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
         std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
         refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             dir.path(),
             &AgentId::ClaudeCode,
@@ -211,11 +208,10 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
@@ -276,16 +272,17 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let cli_bin_text = cli_bin.display().to_string();
     // Diagnostic-rich asserts: if the test ever flakes on CI again,
     // the failure message includes the resolved cli_bin path, the
-    // observed GWT_HOOK_BIN env value, and a redacted view of the
-    // generated commands so we can see WHICH command shape mismatched
-    // instead of just `assertion failed`.
-    let observed_env = std::env::var("GWT_HOOK_BIN").unwrap_or_else(|_| "<unset>".to_string());
+    // thread-local hook bin override in effect (#4057: no process env is
+    // involved any more), and a redacted view of the generated commands so
+    // we can see WHICH command shape mismatched instead of just
+    // `assertion failed`.
+    let observed_override = hook_bin_override().unwrap_or_else(|| "<unset>".to_string());
     let claude_commands = json_commands(&claude_settings);
     assert!(
         claude_commands
             .iter()
             .any(|command| command.contains(&cli_bin_text)),
-        "claude settings missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  GWT_HOOK_BIN env: {observed_env}\n  generated commands ({} entries):\n{}",
+        "claude settings missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         claude_commands.len(),
         claude_commands
             .iter()
@@ -298,7 +295,7 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         codex_commands
             .iter()
             .any(|command| command.contains(&cli_bin_text)),
-        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  GWT_HOOK_BIN env: {observed_env}\n  generated commands ({} entries):\n{}",
+        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         codex_commands.len(),
         codex_commands
             .iter()
@@ -339,7 +336,7 @@ fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hoo
     std::fs::write(&stable_hook_bin, "#!/bin/sh\nexit 0\n").expect("write stable hook bin");
     std::fs::set_permissions(&stable_hook_bin, std::fs::Permissions::from_mode(0o755))
         .expect("make stable hook bin executable");
-    let _hook_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &stable_hook_bin);
+    let _hook_bin_guard = ScopedHookBin::set(&stable_hook_bin);
 
     let claude_settings = dir.path().join(".claude/settings.local.json");
     std::fs::create_dir_all(claude_settings.parent().expect("Claude settings parent"))
@@ -417,7 +414,7 @@ fn browser_check_hook_audit_blocks_exact_fallback_mismatch() {
     run_git(dir.path(), &["init", "-q"]);
     let hermes_home = tempdir().expect("hermes home tempdir");
     let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
-    let _hook_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+    let _hook_bin_guard = ScopedHookBin::set("gwtd");
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
@@ -471,7 +468,7 @@ fn browser_check_hook_audit_allows_missing_logical_fallback() {
     run_git(dir.path(), &["init", "-q"]);
     let hermes_home = tempdir().expect("hermes home tempdir");
     let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
-    let _hook_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+    let _hook_bin_guard = ScopedHookBin::set("gwtd");
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
@@ -503,11 +500,10 @@ fn browser_check_hook_audit_allows_missing_logical_fallback() {
 fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Codex)
         .expect("refresh Codex assets");
@@ -547,7 +543,7 @@ fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
 }
 
 #[test]
-fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
+fn refresh_managed_assets_for_agent_self_heals_existing_mirror_targets() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
     let _env_guard = env_lock();
@@ -555,6 +551,65 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
     let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    let stale_codex_skill = dir.path().join(".codex/skills/gwt-manage-pr/SKILL.md");
+    std::fs::create_dir_all(stale_codex_skill.parent().expect("skill parent"))
+        .expect("create stale codex skill dir");
+    std::fs::write(&stale_codex_skill, "stale").expect("seed stale codex skill");
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
+        .expect("refresh Claude assets");
+
+    assert!(dir
+        .path()
+        .join(".claude/skills/gwt-manage-pr/references/deliver-flow.md")
+        .exists());
+    assert!(
+        dir.path()
+            .join(".codex/skills/gwt-manage-pr/references/deliver-flow.md")
+            .exists(),
+        "existing Codex managed surface must be self-healed during Claude launch refresh"
+    );
+    assert!(dir.path().join(".codex/hooks.json").exists());
+    assert!(!dir.path().join(".gwt/hermes/config.yaml").exists());
+}
+
+#[test]
+fn refresh_managed_assets_for_an_agent_without_a_surface_still_heals_existing_targets() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    let stale_claude_skill = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
+    std::fs::create_dir_all(stale_claude_skill.parent().expect("skill parent"))
+        .expect("create stale claude skill dir");
+    std::fs::write(&stale_claude_skill, "stale").expect("seed stale claude skill");
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Gemini)
+        .expect("refresh assets for an agent without a managed surface");
+
+    assert!(
+        dir.path()
+            .join(".claude/skills/gwt-manage-pr/references/deliver-flow.md")
+            .exists(),
+        "an agent without its own managed surface must still refresh the existing ones"
+    );
+    assert!(!dir.path().join(".codex").exists());
+}
+
+#[test]
+fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
     // Pin HERMES_HOME to an isolated empty dir so the credential bridge never
     // reads the developer's real ~/.hermes during this test.
     let hermes_home = tempdir().expect("hermes home tempdir");
@@ -593,11 +648,10 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
 fn refresh_existing_managed_assets_refreshes_only_present_provider_surfaces() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
     std::fs::create_dir_all(dir.path().join(".codex/skills")).expect("create codex marker");
 
     refresh_existing_managed_gwt_assets_for_worktree(dir.path())
@@ -728,11 +782,10 @@ fn materialize_into_pm_worktree(
 
     seed(&worktree);
 
-    let _env_guard = env_lock();
     let cli_bin = home.join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         &worktree,
@@ -780,8 +833,7 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
 
     std::fs::write(&path, "stale contract").expect("tamper");
     let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
-    let _env_guard = env_lock();
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", home.path().join("bin/gwtd"));
+    let _cli_bin_guard = ScopedHookBin::set(home.path().join("bin/gwtd"));
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         &worktree,
         &AgentId::ClaudeCode,
@@ -794,6 +846,45 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
         gwt_skills::pm_guidance::render_skill_md(),
         "a tampered or stale contract must be rewritten from the canonical source"
     );
+}
+
+/// Issue #3825 AC-5: both generated mirrors must be the canonical
+/// `pm_guidance` source verbatim, and both must carry the nonblocking resident
+/// loop. `.codex` was only ever asserted to exist, so a Codex PM could have
+/// been handed a mirror that disagreed with the Claude one about how long a
+/// cycle may block.
+#[test]
+fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
+    let canonical = gwt_skills::pm_guidance::render_skill_md();
+
+    for (agent, mirror) in [
+        (AgentId::ClaudeCode, ".claude/skills/gwt-pm/SKILL.md"),
+        (AgentId::Codex, ".codex/skills/gwt-pm/SKILL.md"),
+    ] {
+        let home = tempdir().expect("tempdir");
+        let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
+        let rendered = std::fs::read_to_string(worktree.join(mirror))
+            .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        assert_eq!(
+            rendered, canonical,
+            "{mirror} must be the canonical pm_guidance source verbatim"
+        );
+        for phrase in [
+            "`params.timeout_seconds:5`",
+            "as a background task",
+            "Do not await or synchronously poll it",
+            "outer wall-clock deadline of 5 seconds",
+        ] {
+            assert!(
+                rendered.contains(phrase),
+                "{mirror} must carry the nonblocking resident loop: {phrase}"
+            );
+        }
+        assert!(
+            !rendered.contains("`params.timeout_seconds:60`"),
+            "{mirror} must not restore the 60-second blocking subscribe"
+        );
+    }
 }
 
 /// Per-target isolation holds for gwt-pm exactly as it does for
@@ -861,16 +952,65 @@ fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror(
 fn non_pm_worktree_never_receives_gwt_pm_guidance() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("materialize managed assets");
 
     assert!(!dir.path().join(".claude/skills/gwt-pm").exists());
     assert!(!dir.path().join(".codex/skills/gwt-pm").exists());
+}
+
+/// #4057 regression: two materializations running at the same time on
+/// different threads, each pinning its own hook binary through the thread-local
+/// seam, must never see each other's binary in the generated hook commands.
+/// The CI flake this guards against embedded another test's (already deleted)
+/// tempdir because the pin was a process-global `GWT_HOOK_BIN`.
+#[test]
+fn concurrent_materializations_keep_their_own_hook_bin() {
+    const WRITERS: usize = 4;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+    let workers = (0..WRITERS)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let dir = tempdir().expect("tempdir");
+                run_git(dir.path(), &["init", "-q"]);
+                let cli_bin = dir.path().join("bin/gwtd");
+                std::fs::create_dir_all(cli_bin.parent().expect("bin parent"))
+                    .expect("create bin dir");
+                std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+                let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+                barrier.wait();
+                refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
+                    .expect("materialize managed assets");
+                let settings =
+                    std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
+                        .expect("read claude settings");
+                (cli_bin.display().to_string(), json_commands(&settings))
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join materialization thread"))
+        .collect::<Vec<_>>();
+    for (own_bin, commands) in &results {
+        assert!(
+            commands.iter().any(|command| command.contains(own_bin)),
+            "generated commands must embed this thread's hook bin {own_bin}:\n{commands:#?}"
+        );
+        for (other_bin, _) in &results {
+            if other_bin != own_bin {
+                assert!(
+                    !commands.iter().any(|command| command.contains(other_bin)),
+                    "another thread's hook bin {other_bin} leaked into commands generated for {own_bin}:\n{commands:#?}"
+                );
+            }
+        }
+    }
 }
 
 fn run_git(repo: &Path, args: &[&str]) {

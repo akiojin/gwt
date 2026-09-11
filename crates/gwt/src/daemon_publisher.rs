@@ -23,8 +23,6 @@
 //! authority, connection/send/receipt uncertainty never authorizes a local
 //! fallback writer.
 
-#![cfg(unix)]
-
 use std::{path::Path, time::Duration};
 
 use gwt_core::{
@@ -43,7 +41,7 @@ use crate::runtime_daemon_events::{
 };
 
 /// Default per-stage timeout for the GUI / CLI hot path. 200 ms is
-/// generous for a local Unix-socket round-trip (typical is < 5 ms) but
+/// generous for a local IPC round-trip (typical is < 5 ms) but
 /// short enough that a hung daemon cannot freeze the caller for more
 /// than 600 ms total (connect + send + ack — three independent
 /// stages, see [`publish_event_with_timeout`]). Phase H1 GREEN handler
@@ -179,7 +177,7 @@ fn authority_owned_endpoint(
         0 => {
             let descriptor_path = requested_scope.endpoint_path(gwt_home);
             let socket_present = gwt_core::daemon::resolve_daemon_socket_path(&descriptor_path)
-                .map(|socket| socket.path.exists())
+                .map(|socket| crate::cli::daemon::transport::bind_is_present(&socket.path))
                 .unwrap_or(false);
             Err(format!(
                 "Issue Monitor authority fence pid {} has no usable endpoint in {} \
@@ -229,6 +227,11 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     .map_err(|error| OutcomeUnknown(format!("bootstrap resolve failed: {error}")))?;
     match action {
         DaemonBootstrapAction::Reuse(endpoint) => Ok(Some(endpoint)),
+        // Issue #4038: version-agnostic resolution never yields this arm; a
+        // stale-version daemon is only ever named by the GUI supervisor.
+        DaemonBootstrapAction::RetireStaleVersion { .. } => Err(OutcomeUnknown(
+            "daemon endpoint belongs to another gwt version".to_string(),
+        )),
         DaemonBootstrapAction::Spawn { .. } => match absence_evidence {
             EndpointAbsenceEvidence::Missing | EndpointAbsenceEvidence::DefinitelyDead => {
                 match fence_evidence {
@@ -471,7 +474,9 @@ pub fn publish_event_with_timeout(
         .map_err(|err| format!("bootstrap resolve failed: {err}"))?;
     let endpoint = match action {
         DaemonBootstrapAction::Reuse(ep) => ep,
-        DaemonBootstrapAction::Spawn { .. } => return Err("daemon not running".to_string()),
+        DaemonBootstrapAction::Spawn { .. } | DaemonBootstrapAction::RetireStaleVersion { .. } => {
+            return Err("daemon not running".to_string())
+        }
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -510,7 +515,10 @@ pub fn publish_event_with_timeout(
 // `crate::process::is_process_alive`.
 use crate::process::is_process_alive as is_alive;
 
-#[cfg(test)]
+// The fixtures below stand up a fake daemon on a raw `std` Unix listener;
+// the transport-neutral publisher path is exercised end-to-end through
+// `cli::daemon::client` and `daemon_subscriber` tests on every host.
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         io::{BufRead, Write},
@@ -534,6 +542,29 @@ mod tests {
         publish_issue_monitor_control_with_timeout,
         publish_issue_monitor_control_with_timeout_and_liveness,
     };
+
+    /// The publish budget for tests whose subject is the retry *behaviour*
+    /// rather than the size of the budget.
+    ///
+    /// Issue #3921: both busy-control tests ran on the production 200-500 ms
+    /// budget, which has to cover scope resolution, endpoint readback, runtime
+    /// construction and at least one socket round trip. On a host that is also
+    /// compiling several other worktrees it does not, and the budget then
+    /// expires at a different point in the exchange than the test is about:
+    /// the retried publish never reaches its ACK, and the exhaustion test
+    /// reports `OutcomeUnknown("budget exhausted during scope/bootstrap
+    /// resolution")` instead of the explicit `Busy` it exists to pin. Both
+    /// subjects survive a budget this size - the fixture daemon in the
+    /// exhaustion test never ACKs, so the budget still expires - while the
+    /// runner can no longer decide which outcome appears.
+    ///
+    /// Unlike a hang guard on an awaited event, this one is *spent*: the
+    /// exhaustion test retries until it expires, so the number is real suite
+    /// time rather than a ceiling that is never reached. Five seconds buys
+    /// roughly twenty-five times the margin those failures needed while costing
+    /// the suite five seconds once. The retry test returns on its ACK and costs
+    /// nothing.
+    const PUBLISH_HANG_GUARD: Duration = Duration::from_secs(5);
 
     #[test]
     fn publish_returns_error_when_no_daemon_registered() {
@@ -1218,7 +1249,7 @@ mod tests {
         publish_issue_monitor_control_with_timeout(
             project.path(),
             payload.clone(),
-            Duration::from_millis(500),
+            PUBLISH_HANG_GUARD,
         )
         .expect("explicit Busy is safely retried");
         server.join().expect("test daemon joins");
@@ -1313,7 +1344,7 @@ mod tests {
         let error = publish_issue_monitor_control_with_timeout(
             project.path(),
             json!({"enabled": false}),
-            super::DEFAULT_TIMEOUT,
+            PUBLISH_HANG_GUARD,
         )
         .expect_err("Busy must remain explicit when its retry budget expires");
         stop.store(true, Ordering::Release);

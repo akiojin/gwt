@@ -24,6 +24,7 @@
 //! `AppRuntime::new` stay in `mod.rs` and are reached via `super`.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -39,14 +40,17 @@ use super::continuation::{
 };
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
-    apply_docker_runtime_to_launch_config, apply_windows_host_shell_wrapper, combined_window_id,
-    detect_shell_program, finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
+    apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
+    finalize_docker_agent_launch_config_with_binding, geometry_to_pty_size,
     install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_worktree_path,
     launch_output_mirror, mark_auto_resume_source_completed, next_window_runtime_incarnation,
-    normalize_branch_name, refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
-    save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
-    AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
+    normalize_branch_name, prepare_docker_runtime_for_launch,
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
+    register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
+    resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
+    resolve_launch_worktree, same_worktree_path, save_resumed_workspace_projection,
+    save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
     PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
@@ -109,6 +113,93 @@ pub struct ProcessLaunch {
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
+    /// SPEC #1921 Phase 86 (#3813): resource policy applied to the PTY tree
+    /// through the start gate before the target runs. `None` keeps the direct
+    /// spawn route (Shell panes, or isolation disabled).
+    pub(crate) resource_policy: Option<gwt_terminal::pty::ProcessPolicy>,
+}
+
+/// SPEC #1921 Phase 86 (#3813): resolve the AgentBootstrap resource policy
+/// for a launch whose repository is `repo_path`, handing the build
+/// parallelism to build tools through `env` where it is not already pinned. Settings come from
+/// the global profile config; `max_active` from the repository's persisted
+/// Issue Monitor preferences (missing preferences count as one agent).
+fn resolve_agent_resource_launch(
+    profile_config_path: &Path,
+    repo_path: &Path,
+    env: &mut HashMap<String, String>,
+) -> Result<Option<gwt_terminal::pty::ProcessPolicy>, String> {
+    let settings = if profile_config_path.exists() {
+        gwt_config::Settings::load_from_path(profile_config_path).map_err(|error| {
+            format!(
+                "load agent resource policy from {}: {error}",
+                profile_config_path.display()
+            )
+        })?
+    } else {
+        gwt_config::Settings::default()
+    };
+    let max_active =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo_path))
+            .map_or(1, |prefs| prefs.max_active_agents);
+    let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let resolved = gwt::agent_resource_policy::resolve_agent_resource_policy(
+        &settings.agent.resource,
+        max_active,
+        logical_cores,
+    )
+    .map_err(|error| format!("agent resource policy: {error}"))?;
+    gwt::agent_resource_policy::inject_build_parallelism_env(env, resolved.build_jobs);
+    Ok(resolved.process_policy)
+}
+
+/// Resolve the trusted PTY start-gate program and its hidden entry arguments.
+fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
+    let gate_program = bound_pty_gate_program()
+        .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
+    #[cfg(not(test))]
+    let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
+    #[cfg(test)]
+    let gate_args = vec![
+        "app_runtime::tests::pty_start_gate_helper".to_string(),
+        "--exact".to_string(),
+        "--nocapture".to_string(),
+    ];
+    Ok((gate_program, gate_args))
+}
+
+/// Apply an agent resource policy to a gated launch without letting a
+/// rejection fail it.
+///
+/// Issue #3942: the tree-wide priority of SPEC #1921 Phase 86 (#3813) is an
+/// optimization for GUI responsiveness, not a precondition for running an
+/// agent. `setpriority` returns EPERM on every host where the launcher may not
+/// renice the target's process group, and propagating that turned an ordinary
+/// launch into a user-facing `PTY creation failed: setpriority permission
+/// denied`. This returns nothing on purpose: the spawn routes never hold an
+/// outcome they could propagate, panic on, or drop silently.
+pub(crate) fn best_effort_apply_policy(
+    window_id: &str,
+    pending: &gwt_terminal::PendingPane,
+    policy: gwt_terminal::pty::ProcessPolicy,
+) {
+    note_unapplied_agent_resource_policy(window_id, pending.apply_policy(policy));
+}
+
+/// Warn about a rejected policy and let the target run at the inherited
+/// priority. Split from `best_effort_apply_policy` so the warning contract is
+/// testable without a live PTY.
+pub(crate) fn note_unapplied_agent_resource_policy(
+    window_id: &str,
+    outcome: Result<(), gwt_terminal::TerminalError>,
+) {
+    if let Err(error) = outcome {
+        tracing::warn!(
+            window_id = %window_id,
+            error = %error,
+            "agent resource policy was not applied; continuing launch at the inherited priority"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -742,6 +833,45 @@ enum AgentCapabilityLaunchAuthority<'a> {
     Active(&'a gwt_agent::SessionExecutionBinding),
 }
 
+/// Issue #3759: best-effort republication of a lost worktree pointer/projection
+/// pair from the committed owner ledger, run before a strict authority read.
+///
+/// The repair is idempotent and never touches the owner ledger. Any failure
+/// is logged only: the strict read that follows reports the real state, so a
+/// heal error can never mask or replace the authoritative refusal.
+pub(crate) fn heal_lost_generation_publication_best_effort(
+    worktree: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+) {
+    use gwt::cli::execution_state::GenerationPublicationHeal;
+    match gwt::cli::execution_state::heal_missing_generation_publication(worktree, owner) {
+        Ok(GenerationPublicationHeal::Republished) => tracing::warn!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            worktree = %worktree.display(),
+            "execution generation pointer/projection were missing after ledger ownership; republished from the owner ledger"
+        ),
+        Ok(GenerationPublicationHeal::ForeignWorktree) => tracing::warn!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            worktree = %worktree.display(),
+            "execution generation pointer is missing and the current generation belongs to another worktree; left fail-closed"
+        ),
+        Ok(
+            GenerationPublicationHeal::NoLedger
+            | GenerationPublicationHeal::AlreadyPublished
+            | GenerationPublicationHeal::NotApplicable,
+        ) => {}
+        Err(error) => tracing::warn!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            worktree = %worktree.display(),
+            %error,
+            "execution generation publication heal failed; the strict authority read decides"
+        ),
+    }
+}
+
 /// Issue #3426: explain a refused genesis launch instead of stating the bare
 /// single-writer rule.
 ///
@@ -749,36 +879,16 @@ enum AgentCapabilityLaunchAuthority<'a> {
 /// generation. When a holder Session dies without settling, every later fresh
 /// launch (Issue Monitor retries included) collides here, so the refusal names
 /// the blocking generation, its holder and durable state, and both recovery
-/// routes. Diagnostics are best effort: an unreadable holder Session degrades
-/// the detail, never the refusal.
+/// routes. Issue #4042 AC-1: the holder is read through the same
+/// `OwnerGenerationHold` projection the Issue Monitor reclaim uses, so the
+/// refusal and the reclaim can never describe one holder differently.
 fn existing_generation_conflict_detail(
     sessions_dir: &Path,
     owner: gwt::cli::execution_state::ExecutionOwnerKey,
     ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
 ) -> String {
-    let status = ledger
-        .current_effective_status()
-        .map_or("unknown", |status| match status {
-            gwt::cli::execution_state::ExecutionControlStatus::Active => "active",
-            gwt::cli::execution_state::ExecutionControlStatus::Completed => "completed",
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked => "blocked",
-        });
-    let holder = ledger.current_generation().map(|generation| {
-        let session_id = generation.identity.initial_session_id.clone();
-        let session_state =
-            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).map_or_else(
-                |_| "durable Session unreadable".to_string(),
-                |session| format!("{:?}", session.status),
-            );
-        format!(" held by Session {session_id} ({session_state})")
-    });
-    format!(
-        "an execution generation already exists for {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
-        owner.kind.as_str(),
-        owner.number,
-        status,
-        holder.unwrap_or_default(),
-    )
+    let hold = gwt::cli::execution_state::owner_generation_hold_from_ledger(sessions_dir, ledger);
+    gwt::cli::execution_state::execution_generation_conflict_refusal(owner, hold.as_ref())
 }
 
 struct FinalizedAgentCapabilityLaunch<'a> {
@@ -999,6 +1109,14 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             container_runtime,
         )?;
 
+        // Issue #3759: the owner ledger commits before the worktree
+        // pointer/projection pair, and trusted-store GC of a removed
+        // worktree drops that pair while the ledger stays. Rebuild a lost
+        // publication from the ledger before the strict authority read
+        // below; otherwise every relaunch on this worktree dies before the
+        // PTY and burns the Issue Monitor retry budget. A heal failure is
+        // logged and the strict read reports the real state.
+        heal_lost_generation_publication_best_effort(worktree, owner);
         let mut current_binding =
             gwt::cli::execution_state::current_execution_binding(worktree, owner)
                 .map_err(|error| error.to_string())?;
@@ -1657,6 +1775,45 @@ pub(super) fn dispatch_agent_launch_success<F>(
     spawn_project_index_bootstrap(proxy, project_index_root);
 }
 
+/// Why a restored Session cannot be handed to the agent CLI as `--resume`
+/// (SPEC-3966 AC-4).
+///
+/// `None` means the Session does carry a usable handle. Every other answer is
+/// the reason the restore falls back to a brand-new conversation, so the
+/// fallback is never silent.
+pub(super) fn resume_handle_unavailable_reason(
+    session: &gwt_agent::Session,
+) -> Option<&'static str> {
+    if session.exact_resume_session_id().is_some() {
+        return None;
+    }
+    match session.agent_session_id.as_deref().map(str::trim) {
+        None => Some(
+            "no agent_session_id was ever persisted for this Session \
+             (the SessionStart managed hook never reached persist_agent_session_id)",
+        ),
+        Some("") => Some("the persisted agent_session_id is empty"),
+        Some(_) => Some(
+            "the persisted agent_session_id is the Codex placeholder, not a conversation handle",
+        ),
+    }
+}
+
+/// Carry a restored launch's conversation identity onto the successor Session
+/// record (SPEC-3966 AC-5).
+///
+/// Without this the successor is written with no `agent_session_id`, so the
+/// *next* restore has nothing to resume from either and every restart leaves
+/// one more handle-less Session behind.
+pub(super) fn apply_resume_identity_to_session(
+    session: &mut gwt_agent::Session,
+    config: &gwt_agent::LaunchConfig,
+) {
+    if config.session_mode == gwt_agent::SessionMode::Resume {
+        session.agent_session_id = config.resume_session_id.clone();
+    }
+}
+
 pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
@@ -1696,6 +1853,21 @@ pub(super) fn launch_config_from_persisted_session(
         builder = builder.tool_runtime_provenance(provenance);
     }
     builder = builder.tool_runtime_source_session_id(session.id.clone());
+    // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
+    // originally stamped, so a restored or resumed monitor launch does not
+    // quietly become a human-driven one.
+    builder = builder.launch_route(session.launch_route);
+
+    // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
+    // any structured `Session` field, so rebuilding a config here used to drop
+    // it and restore the PM as a plain agent under no PM contract. Re-apply it
+    // from the same PM detection that already restores the scratch dir below —
+    // unconditionally, because a persisted `launch_args` that still records the
+    // prompt is not consulted by the builder and would otherwise lose it too.
+    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
+    if pm_scratch.is_some() {
+        builder = builder.extra_arg(super::pm::PM_BOOTSTRAP_PROMPT);
+    }
 
     if let Some(resume_id) = session.exact_resume_session_id() {
         builder = builder
@@ -1703,6 +1875,18 @@ pub(super) fn launch_config_from_persisted_session(
             .resume_session_id(resume_id.to_string())
             .predecessor_session_id(session.id.clone());
     } else {
+        // SPEC-3966 AC-4: restoring without a resume handle silently started a
+        // brand-new conversation, which is how the resident PM lost its whole
+        // decision history on every gwt restart without anyone noticing. Say so
+        // instead, with the reason, so the next reader does not have to
+        // reverse-engineer it from an empty Session TOML.
+        tracing::warn!(
+            session_id = %session.id,
+            worktree = %session.worktree_path.display(),
+            agent = ?session.agent_id,
+            reason = resume_handle_unavailable_reason(session).unwrap_or("unknown"),
+            "restored Session has no resume handle; launching a new conversation instead of --resume"
+        );
         builder = builder.session_mode(gwt_agent::SessionMode::Normal);
     }
 
@@ -1713,8 +1897,7 @@ pub(super) fn launch_config_from_persisted_session(
     if !session.display_name.is_empty() {
         config.display_name = session.display_name.clone();
     }
-    if let Some(scratch) = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path)
-    {
+    if let Some(scratch) = pm_scratch {
         config.env_vars.insert(
             "GWT_PM_SCRATCH_DIR".to_string(),
             scratch.to_string_lossy().into_owned(),
@@ -1818,11 +2001,26 @@ fn persist_lazy_tool_runtime_provenance_migration(
     }
 }
 
-fn apply_post_resolution_bun_cache_fast_path(config: &mut gwt_agent::LaunchConfig) -> bool {
+fn apply_post_resolution_bun_cache_fast_path(
+    config: &mut gwt_agent::LaunchConfig,
+) -> gwt_agent::HostBunxCacheFastPath {
     if config.tool_runtime_provenance.is_some() {
-        return false;
+        return gwt_agent::HostBunxCacheFastPath::NotApplicable;
     }
     gwt_agent::apply_host_bunx_cache_fast_path(config)
+}
+
+/// Issue #3857 AC-5: terminal line shown in the agent window when a validated
+/// Bun package cache entry resolved to a bin target gwt could not launch. It
+/// names the resolved path and the reason, then states that the launch falls
+/// back to the package runner.
+fn bun_cache_fast_path_rejection_terminal_bytes(executable: &Path, reason: &str) -> Vec<u8> {
+    format!(
+        "[gwt] Bun package cache entry {} was not launched directly: {}. Falling back to the bunx package runner.\r\n",
+        executable.display(),
+        reason.trim().trim_end_matches('.')
+    )
+    .into_bytes()
 }
 
 fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
@@ -1836,22 +2034,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
         return WindowProcessStatus::Starting;
     }
     WindowProcessStatus::Running
-}
-
-/// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this tab.
-/// A canvas Issue window is preferred over one that is itself contained, and creation
-/// order breaks ties so repeated launches land in the same pane.
-fn issue_preview_host_window_id(workspace: &gwt::WindowCanvasState) -> Option<String> {
-    let windows = &workspace.persisted().windows;
-    windows
-        .iter()
-        .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
-        .or_else(|| {
-            windows
-                .iter()
-                .find(|window| window.preset.hosts_issue_preview())
-        })
-        .map(|window| window.id.clone())
 }
 
 #[derive(Debug, Clone)]
@@ -1877,11 +2059,78 @@ struct AgentWindowSpawnOptions {
     continuation: Option<PendingContinueWork>,
 }
 
+/// Provenance carried only by Issue Monitor launches. Possessing this value is
+/// not sufficient to trust a path: [`validate_issue_monitor_managed_codex_worktree`]
+/// still reconciles it with the resolved launch and Git's authoritative
+/// worktree inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IssueMonitorTrustCandidate {
+    pub(super) issue_number: u64,
+    pub(super) project_root: PathBuf,
+    pub(super) session_mode: gwt_agent::SessionMode,
+}
+
+/// A canonical worktree whose Issue Monitor ownership and Git inventory have
+/// been checked together. Keep the path private so an arbitrary launch cwd
+/// cannot be passed directly to the Codex trust writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ManagedCodexWorktree(PathBuf);
+
+impl ManagedCodexWorktree {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+pub(super) fn issue_monitor_trust_candidate_from_feedback(
+    agent_id: &gwt_agent::AgentId,
+    context: Option<&LaunchFeedbackContext>,
+) -> Result<Option<IssueMonitorTrustCandidate>, String> {
+    if agent_id != &gwt_agent::AgentId::Codex {
+        return Ok(None);
+    }
+    let Some((context, issue_number)) = context.and_then(|context| {
+        context
+            .issue_monitor_issue_number
+            .map(|issue_number| (context, issue_number))
+    }) else {
+        return Ok(None);
+    };
+    let project_root = context.issue_monitor_project_root.clone().ok_or_else(|| {
+        format!("Issue Monitor launch for Issue #{issue_number} has no project root provenance")
+    })?;
+    let session_mode = context.issue_monitor_session_mode.ok_or_else(|| {
+        format!("Issue Monitor launch for Issue #{issue_number} has no session mode provenance")
+    })?;
+    if !matches!(
+        session_mode,
+        gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
+    ) {
+        return Err(format!(
+            "Issue Monitor managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
+        ));
+    }
+    Ok(Some(IssueMonitorTrustCandidate {
+        issue_number,
+        project_root,
+        session_mode,
+    }))
+}
+
+/// SPEC-3864 T-006: install detection runs off the startup critical path.
+/// The slot starts as a background thread and is joined on first wizard
+/// access; clones share the same slot so a joined result is reused.
+#[derive(Debug)]
+enum AgentOptionsSlot {
+    Loading(Option<std::thread::JoinHandle<Vec<gwt::AgentOption>>>),
+    Ready(Vec<gwt::AgentOption>),
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchWizardMemoryCache {
     sessions_dir: PathBuf,
     sessions: Vec<gwt_agent::Session>,
-    agent_options: Vec<gwt::AgentOption>,
+    agent_options: Arc<Mutex<AgentOptionsSlot>>,
     // SPEC-3170 FR-001: Claude capability detection may read settings and run
     // `claude --version` once per process. The wizard stores the booleans at
     // cache load time and reuses them on every open.
@@ -1895,7 +2144,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options: Self::load_agent_options(),
+            agent_options: Self::spawn_agent_options_detection(),
             claude_ultracode_supported: claude_capabilities.ultracode_supported,
             claude_workflows_enabled: claude_capabilities.workflows_enabled,
         }
@@ -1919,7 +2168,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options,
+            agent_options: Arc::new(Mutex::new(AgentOptionsSlot::Ready(agent_options))),
             claude_ultracode_supported,
             claude_workflows_enabled,
         }
@@ -1946,12 +2195,44 @@ impl LaunchWizardMemoryCache {
         ))
     }
 
+    /// Start install detection on a background thread so `load` (and thus
+    /// app startup / settings updates) never waits on `<agent> --version`
+    /// probes. A thread that cannot be spawned falls back to synchronous
+    /// detection so the options are never silently empty.
+    fn spawn_agent_options_detection() -> Arc<Mutex<AgentOptionsSlot>> {
+        let slot = match std::thread::Builder::new()
+            .name("gwt-agent-detect".to_string())
+            .spawn(Self::load_agent_options)
+        {
+            Ok(handle) => AgentOptionsSlot::Loading(Some(handle)),
+            Err(error) => {
+                tracing::warn!(error = %error, "agent detection thread unavailable; detecting inline");
+                AgentOptionsSlot::Ready(Self::load_agent_options())
+            }
+        };
+        Arc::new(Mutex::new(slot))
+    }
+
     pub(super) fn refresh_agent_options(&mut self) {
-        self.agent_options = Self::load_agent_options();
+        self.agent_options = Self::spawn_agent_options_detection();
     }
 
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
-        self.agent_options.clone()
+        let mut slot = self
+            .agent_options
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let AgentOptionsSlot::Loading(handle) = &mut *slot {
+            let options = handle
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_else(Self::load_agent_options);
+            *slot = AgentOptionsSlot::Ready(options);
+        }
+        match &*slot {
+            AgentOptionsSlot::Ready(options) => options.clone(),
+            AgentOptionsSlot::Loading(_) => unreachable!("slot joined above"),
+        }
     }
 
     /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
@@ -2481,16 +2762,24 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
     })
 }
 
+/// `generated_hook_bin` is the fallback binary the materialization that just
+/// ran pinned into the hook commands it wrote (#3967). Trust has to compare
+/// against that exact value: the pin is released when materialization returns,
+/// and re-deriving it here answered `target/debug/gwtd` — reduced to the bare
+/// `gwtd` for a config outside that checkout — for every gwt started from a
+/// development build, while the generated command carried the installed
+/// absolute path. All five managed hooks then failed the exact-command match
+/// and Codex stopped the launch on `Hooks need review`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
     profile_config_path: &Path,
     worktree_path: &Path,
-    agent_id: &gwt_agent::AgentId,
-    runtime_target: gwt_agent::LaunchRuntimeTarget,
-    docker_service: Option<&str>,
-    codex_home: Option<&Path>,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
     codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
+    generated_hook_bin: Option<&str>,
 ) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
-    if agent_id != &gwt_agent::AgentId::Codex {
+    if config.agent_id != gwt_agent::AgentId::Codex {
         return Ok(None);
     }
 
@@ -2513,41 +2802,86 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
         return Ok(None);
     }
 
-    match runtime_target {
+    match config.runtime_target {
         gwt_agent::LaunchRuntimeTarget::Host => {
-            let Some(codex_config_path) = codex_home
-                .map(|home| home.join("config.toml"))
-                .or_else(|| codex_config_path_for_profile_config(profile_config_path))
-            else {
+            let child_cwd = config.working_dir.as_deref().unwrap_or(worktree_path);
+            let codex_config_path = match effective_host_codex_config_path(
+                child_cwd,
+                &config.env_vars,
+                HostEnvKeySemantics::native(),
+                dirs::home_dir().as_deref(),
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_config = %profile_config_path.display(),
+                        error = %error,
+                        "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
+                    );
+                    return Ok(None);
+                }
+            };
+            // Issue #3967 AC-1: trust every managed hooks file that can exist
+            // on disk, not just the one this launch would generate. The
+            // `Both`-mode managed-asset writers (startup self-heal, hook front
+            // door, health repair, SessionStart re-materialization) keep the
+            // worktree-local copy refreshed even when generation targets the
+            // workspace-home copy, and Codex discovers whichever it finds
+            // first. Narrowing trust to the generation mode left the other copy
+            // orphaned — present, gwt-generated, and untrusted. Trust state is
+            // keyed by absolute hooks path, so entries for a file Codex does
+            // not read are inert.
+            let report = gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+                worktree_path,
+                &codex_config_path,
+                gwt::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+                generated_hook_bin,
+            )
+            .map_err(|error| {
+                format!(
+                    "Codex hook trust registration failed for worktree {} (config {}): {error}",
+                    worktree_path.display(),
+                    codex_config_path.display()
+                )
+            })?;
+            // Issue #4071 AC-2: the reason says whether any trust state was
+            // written and what each hooks file was compared against, so a
+            // skipped registration and a trusted_hash / path-form mismatch
+            // are told apart in the launch failure record.
+            if let Some(reason) = report.hooks_need_review_reason() {
+                return Err(reason);
+            }
+            Ok(Some(report))
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            let Some(binding) = docker_binding else {
                 tracing::warn!(
-                    profile_config = %profile_config_path.display(),
-                    "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
+                    worktree = %worktree_path.display(),
+                    "Docker launch has no resolved binding while preparing Codex hook trust; continuing launch"
                 );
                 return Ok(None);
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
-                worktree_path,
-                &codex_config_path,
-                codex_hook_discovery_mode,
-            ) {
-                Ok(report) => Ok(Some(report)),
-                Err(error) => {
-                    tracing::warn!(
-                        worktree = %worktree_path.display(),
-                        codex_config = %codex_config_path.display(),
-                        error = %error,
-                        "failed to register gwt-managed Codex hook trust; continuing launch"
-                    );
-                    Ok(None)
-                }
-            }
-        }
-        gwt_agent::LaunchRuntimeTarget::Docker => {
-            if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
-                worktree_path,
-                docker_service,
-                codex_hook_discovery_mode,
-            ) {
+            let host_gwt_bin = std::env::current_exe()
+                .map_err(|error| format!("current_exe: {error}"))
+                .map(|current_exe| {
+                    gwt_agent::resolve_public_gwt_bin_with_lookup(&current_exe, |command| {
+                        which::which(command).ok()
+                    })
+                })
+                .and_then(|path| {
+                    path.into_os_string()
+                        .into_string()
+                        .map_err(|_| "host gwtd path is not valid UTF-8".to_string())
+                });
+            let result = host_gwt_bin.and_then(|host_gwt_bin| {
+                register_codex_managed_hook_trust_in_docker(
+                    binding,
+                    &config.env_vars,
+                    &host_gwt_bin,
+                    codex_hook_discovery_mode,
+                )
+            });
+            if let Err(error) = result {
                 tracing::warn!(
                     worktree = %worktree_path.display(),
                     error = %error,
@@ -2559,12 +2893,261 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
     }
 }
 
-fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<PathBuf> {
-    let gwt_config_dir = profile_config_path.parent()?;
-    if gwt_config_dir.file_name().and_then(|name| name.to_str()) != Some(".gwt") {
-        return None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostEnvKeySemantics {
+    CaseSensitive,
+    WindowsCaseInsensitive,
+}
+
+impl HostEnvKeySemantics {
+    fn native() -> Self {
+        if cfg!(windows) {
+            Self::WindowsCaseInsensitive
+        } else {
+            Self::CaseSensitive
+        }
     }
-    Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
+}
+
+fn effective_host_env_value<'a>(
+    env_vars: &'a HashMap<String, String>,
+    key: &str,
+    semantics: HostEnvKeySemantics,
+) -> Result<Option<&'a str>, String> {
+    match semantics {
+        HostEnvKeySemantics::CaseSensitive => Ok(env_vars.get(key).map(String::as_str)),
+        HostEnvKeySemantics::WindowsCaseInsensitive => {
+            let mut values = env_vars
+                .iter()
+                .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(key));
+            let value = values.next().map(|(_, value)| value.as_str());
+            if values.next().is_some() {
+                return Err(format!(
+                    "ambiguous {key}: the final Windows child environment contains multiple case-insensitive variants"
+                ));
+            }
+            Ok(value)
+        }
+    }
+}
+
+/// Resolve the Codex config file exactly as Codex 0.148 resolves its home.
+///
+/// A configured CODEX_HOME is resolved from the final child cwd and must
+/// already exist before Codex canonicalizes it. Without CODEX_HOME, Unix uses
+/// an absolute HOME while Windows uses the OS known-folder home and ignores
+/// HOME/USERPROFILE environment overrides.
+pub(super) fn effective_host_codex_config_path(
+    child_cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    semantics: HostEnvKeySemantics,
+    os_user_home: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let codex_home = effective_host_env_value(env_vars, "CODEX_HOME", semantics)?
+        .filter(|value| !value.is_empty());
+    if let Some(codex_home) = codex_home {
+        let codex_home = Path::new(codex_home);
+        let resolved = if codex_home.is_absolute() {
+            codex_home.to_path_buf()
+        } else {
+            child_cwd.join(codex_home)
+        };
+        return canonical_launch_path(&resolved, "CODEX_HOME").map(|home| home.join("config.toml"));
+    }
+
+    let user_home = match semantics {
+        HostEnvKeySemantics::CaseSensitive => {
+            effective_host_env_value(env_vars, "HOME", semantics)?
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        }
+        HostEnvKeySemantics::WindowsCaseInsensitive => os_user_home.map(Path::to_path_buf),
+    }
+    .ok_or_else(|| match semantics {
+        HostEnvKeySemantics::CaseSensitive => {
+            "cannot determine HOME for the Codex child environment".to_string()
+        }
+        HostEnvKeySemantics::WindowsCaseInsensitive => {
+            "cannot determine the OS user home for Codex".to_string()
+        }
+    })?;
+    if !user_home.is_absolute() {
+        return Err(format!(
+            "HOME must be absolute when CODEX_HOME is unset, got {}",
+            user_home.display()
+        ));
+    }
+    Ok(user_home.join(".codex").join("config.toml"))
+}
+
+fn canonical_launch_path(path: &Path, role: &str) -> Result<PathBuf, String> {
+    std::fs::canonicalize(path)
+        .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+        .map_err(|error| format!("failed to canonicalize {role} {}: {error}", path.display()))
+}
+
+pub(super) fn validate_issue_monitor_managed_codex_worktree(
+    candidate: Option<&IssueMonitorTrustCandidate>,
+    actual_project_root: &Path,
+    config: &gwt_agent::LaunchConfig,
+    worktrees: &[gwt_git::WorktreeInfo],
+) -> Result<Option<ManagedCodexWorktree>, String> {
+    if config.agent_id != gwt_agent::AgentId::Codex {
+        return Ok(None);
+    }
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    let candidate_root =
+        canonical_launch_path(&candidate.project_root, "Issue Monitor project root")?;
+    let actual_root = canonical_launch_path(actual_project_root, "launch project root")?;
+    if candidate_root != actual_root {
+        return Err(format!(
+            "Issue Monitor project root {} does not match launch project root {}",
+            candidate_root.display(),
+            actual_root.display()
+        ));
+    }
+    if config.linked_issue_number != Some(candidate.issue_number) {
+        return Err(format!(
+            "Issue Monitor linked Issue #{} does not match launch metadata {:?}",
+            candidate.issue_number, config.linked_issue_number
+        ));
+    }
+    if !matches!(
+        candidate.session_mode,
+        gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
+    ) || config.session_mode != candidate.session_mode
+    {
+        return Err(format!(
+            "Issue Monitor session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
+            candidate.session_mode, config.session_mode
+        ));
+    }
+
+    let expected_branch = format!("work/issue-{}", candidate.issue_number);
+    if config.branch.as_deref() != Some(expected_branch.as_str()) {
+        return Err(format!(
+            "Issue Monitor branch must be {expected_branch}, got {:?}",
+            config.branch
+        ));
+    }
+
+    let configured_worktree = config.working_dir.as_deref().ok_or_else(|| {
+        "Issue Monitor Codex launch has no resolved working directory to validate".to_string()
+    })?;
+    let configured_worktree = canonical_launch_path(configured_worktree, "launch worktree")?;
+    let authoritative_worktree =
+        crate::usable_worktree_path_for_branch(worktrees, &expected_branch).ok_or_else(|| {
+            format!("Issue Monitor branch {expected_branch} has no authoritative gwt worktree")
+        })?;
+    let authoritative_worktree =
+        canonical_launch_path(&authoritative_worktree, "authoritative gwt worktree")?;
+    if configured_worktree != authoritative_worktree {
+        return Err(format!(
+            "launch worktree {} is not the authoritative gwt worktree {} for {expected_branch}",
+            configured_worktree.display(),
+            authoritative_worktree.display()
+        ));
+    }
+
+    Ok(Some(ManagedCodexWorktree(authoritative_worktree)))
+}
+
+pub(super) fn register_codex_managed_project_trust_for_resolved_launch(
+    profile_config_path: &Path,
+    managed_worktree: &ManagedCodexWorktree,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
+) -> Result<Option<gwt_skills::CodexProjectTrustReport>, String> {
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+        profile_config_path,
+        managed_worktree,
+        config,
+        docker_binding,
+        std::env::var_os("CODEX_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+pub(super) fn register_codex_managed_project_trust_for_resolved_launch_with_host_context(
+    _profile_config_path: &Path,
+    managed_worktree: &ManagedCodexWorktree,
+    config: &gwt_agent::LaunchConfig,
+    docker_binding: Option<&DockerLaunchBinding>,
+    process_codex_home: Option<&OsStr>,
+    os_user_home: Option<&Path>,
+) -> Result<Option<gwt_skills::CodexProjectTrustReport>, String> {
+    match config.runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            let child_cwd = config.working_dir.as_deref().ok_or_else(|| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {}: launch has no final child cwd",
+                    managed_worktree.path().display()
+                )
+            })?;
+            let child_codex_config_path = effective_host_codex_config_path(
+                child_cwd,
+                &config.env_vars,
+                HostEnvKeySemantics::native(),
+                os_user_home,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {}: {error}",
+                    managed_worktree.path().display()
+                )
+            })?;
+            let Some(codex_config_path) =
+                gwt::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                    managed_worktree.path(),
+                    process_codex_home,
+                    os_user_home,
+                )
+            else {
+                return Ok(None);
+            };
+            if !gwt::managed_assets::codex_config_paths_equivalent(
+                &child_codex_config_path,
+                &codex_config_path,
+            ) {
+                tracing::info!(
+                    worktree = %managed_worktree.path().display(),
+                    "skipping project trust for a profile-owned Codex config"
+                );
+                return Ok(None);
+            }
+            gwt_skills::register_codex_managed_project_trust(
+                managed_worktree.path(),
+                &codex_config_path,
+            )
+            .map(Some)
+            .map_err(|error| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {} using config {}: {error}",
+                    managed_worktree.path().display(),
+                    codex_config_path.display()
+                )
+            })
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            let binding = docker_binding.ok_or_else(|| {
+                format!(
+                    "failed to trust gwt-managed Codex worktree {}: Docker launch has no resolved binding",
+                    managed_worktree.path().display()
+                )
+            })?;
+            register_codex_managed_project_trust_in_docker(binding, &config.env_vars)
+                .map(|()| None)
+                .map_err(|error| {
+                    format!(
+                        "failed to trust gwt-managed Codex worktree {}: {error}",
+                        managed_worktree.path().display()
+                    )
+                })
+        }
+    }
 }
 
 impl AppRuntime {
@@ -2670,6 +3253,25 @@ impl AppRuntime {
         window_id: String,
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
+        // Issue #3851: an Err result is produced before this handler spawns a
+        // PTY. If this window already owns a live agent runtime, the result is
+        // necessarily from an older preparation attempt and must not consume
+        // the current launch context or overwrite the live pane. Failures
+        // after PTY spawn enter through the Ok arm below and remain visible.
+        let stale_pre_pty_failure = result.is_err()
+            && self.active_agent_sessions.contains_key(&window_id)
+            && self.runtimes.contains_key(&window_id)
+            && self.window_status(&window_id).is_some_and(|status| {
+                !matches!(
+                    status,
+                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                )
+            });
+        if stale_pre_pty_failure {
+            self.inflight_launches
+                .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+            return Vec::new();
+        }
         let is_continue_work = self.pending_continue_work.contains_key(&window_id);
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let mut launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
@@ -2677,6 +3279,17 @@ impl AppRuntime {
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
         let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
+        // request, so the pane-create route is the span from that stamp to this
+        // completion — worktree resolution, Docker probing and the PTY spawn
+        // included. Recorded before the entry is dropped below.
+        if let Some((_, (_, started_at))) = self
+            .inflight_launches
+            .iter()
+            .find(|(_, (pending_window_id, _))| pending_window_id == &window_id)
+        {
+            gwt::perf::record_route(gwt::perf::PerfRoute::PaneCreate, started_at.elapsed());
+        }
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -3300,9 +3913,14 @@ impl AppRuntime {
                         // `launch_feedback_context` (and therefore the same
                         // delivery id).
                         if !is_fresh_execution_launch && autonomous_handoff_delivery.is_none() {
-                            if let Some(issue_number) = launch_feedback_context
-                                .as_ref()
-                                .and_then(|context| context.issue_monitor_issue_number)
+                            // Issue #4041: a review dispatch window never
+                            // ACKs the Issue's launch — that would rebind
+                            // `launched_issues` away from the running
+                            // implementation window.
+                            if let Some(issue_number) =
+                                launch_feedback_context.as_ref().and_then(|context| {
+                                    context.issue_monitor_launch_binding_issue_number()
+                                })
                             {
                                 let delivery_id =
                                     launch_feedback_context.as_ref().and_then(|context| {
@@ -3515,6 +4133,12 @@ impl AppRuntime {
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
             return Self::status_events(window_id, WindowProcessStatus::Running, None);
         }
+        // Issue #4145 AC-1: a process pane is created synchronously here —
+        // shell resolution, env, resource policy and the PTY spawn all happen
+        // before this returns — so one guard is the whole pane-create route for
+        // the non-agent half of the surface. Agent panes are asynchronous and
+        // are recorded from `handle_launch_complete` instead.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneCreate);
 
         let project_root = self
             .tab(tab_id)
@@ -3552,7 +4176,7 @@ impl AppRuntime {
             }
         }
         .with_project_root(&project_root);
-        let (env, remove_env) = effective_env.into_parts();
+        let (mut env, remove_env) = effective_env.into_parts();
 
         // SPEC-2809 (revised) — Surface the launch pipeline for AI
         // agent presets (Codex / Claude / Gemini / Agent) so the Console
@@ -3563,6 +4187,22 @@ impl AppRuntime {
             preset,
             WindowPreset::Claude | WindowPreset::Codex | WindowPreset::Agent
         );
+        // SPEC #1921 Phase 86 (#3813): agent presets carry the resource
+        // policy and cargo budget; Shell panes keep the direct spawn path.
+        let resource_policy = if is_agent_preset {
+            match self.profile_config_path().and_then(|config_path| {
+                resolve_agent_resource_launch(&config_path, &project_root, &mut env)
+            }) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                    self.window_details.insert(window_id.clone(), error.clone());
+                    return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+                }
+            }
+        } else {
+            None
+        };
         let console_kind =
             is_agent_preset.then_some(gwt_core::process_console::ProcessKind::AgentBootstrap);
         let stage_id =
@@ -3590,6 +4230,7 @@ impl AppRuntime {
                 remove_env,
                 cwd: Some(project_root),
                 pending_tool_runtime_migration: None,
+                resource_policy,
             },
             console_kind,
         ) {
@@ -3621,19 +4262,35 @@ impl AppRuntime {
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let pane = Pane::new_with_spawn_config(
-            id.to_string(),
-            gwt_terminal::pty::SpawnConfig {
-                command: launch.command,
-                args: launch.args,
-                cols,
-                rows,
-                env: launch.env,
-                remove_env: launch.remove_env,
-                cwd: launch.cwd,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let resource_policy = launch.resource_policy;
+        let spawn_config = gwt_terminal::pty::SpawnConfig {
+            command: launch.command,
+            args: launch.args,
+            cols,
+            rows,
+            env: launch.env,
+            remove_env: launch.remove_env,
+            cwd: launch.cwd,
+        };
+        // SPEC #1921 Phase 86 (#3813): a policy-bearing AgentBootstrap launch
+        // goes through the start gate so priority / Job limits exist before
+        // the target can create its first descendant. Shell panes stay direct.
+        let pane = if let Some(policy) = resource_policy {
+            let (gate_program, gate_args) = pty_gate_launch_parts()?;
+            let pending = Pane::new_pending_with_spawn_config(
+                id.to_string(),
+                spawn_config,
+                gate_program,
+                gate_args,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+            best_effort_apply_policy(id, &pending, policy);
+            pending.release().map_err(|error| error.to_string())?
+        } else {
+            Pane::new_with_spawn_config(id.to_string(), spawn_config)
+                .map_err(|error| error.to_string())?
+        };
         let incarnation = next_window_runtime_incarnation();
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
@@ -3649,16 +4306,8 @@ impl AppRuntime {
         handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let gate_program = bound_pty_gate_program()
-            .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
-        #[cfg(not(test))]
-        let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
-        #[cfg(test)]
-        let gate_args = vec![
-            "app_runtime::tests::pty_start_gate_helper".to_string(),
-            "--exact".to_string(),
-            "--nocapture".to_string(),
-        ];
+        let (gate_program, gate_args) = pty_gate_launch_parts()?;
+        let resource_policy = launch.resource_policy;
         let pending = Pane::new_pending_with_spawn_config(
             id.to_string(),
             gwt_terminal::pty::SpawnConfig {
@@ -3721,6 +4370,12 @@ impl AppRuntime {
             );
         }
 
+        // SPEC #1921 Phase 86 (#3813): the policy lands on the gated tree
+        // after identity proof and before release, so the target never runs
+        // ungoverned.
+        if let Some(policy) = resource_policy {
+            best_effort_apply_policy(id, &pending, policy);
+        }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
@@ -3759,6 +4414,9 @@ impl AppRuntime {
         // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
         self.register_pty_writer(id, &pane);
         self.runtimes.insert(id.to_string(), runtime);
+        // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
+        // the pre-PTY failure guard.
+        self.restore_launch_windows.remove(id);
     }
 
     /// Issue #3475: start the authenticated SessionStart readiness deadline for
@@ -4022,6 +4680,10 @@ impl AppRuntime {
             .as_ref()
             .and_then(|context| context.issue_monitor_issue_number);
         let issue_monitor_launch = issue_monitor_issue_number.is_some();
+        let issue_monitor_trust_candidate = issue_monitor_trust_candidate_from_feedback(
+            &config.agent_id,
+            launch_feedback_context.as_ref(),
+        )?;
         if continuation.is_some() {
             if let Some(window_id) =
                 self.pending_continue_work
@@ -4131,6 +4793,11 @@ impl AppRuntime {
         let _ = tab
             .workspace
             .set_agent_id(&window.id, config.agent_id.command().to_string());
+        // SPEC-3885 FR-011: an Issue-originated launch produces an Issue window, not a
+        // bare terminal, wherever it is drawn. FR-013 leaves a non-Issue session `None`.
+        let _ = tab
+            .workspace
+            .set_linked_issue_number(&window.id, config.linked_issue_number);
         if let Some(target) = agent_kanban_target.as_ref() {
             let _ = tab.workspace.place_agent_window_in_kanban(
                 &window.id,
@@ -4143,7 +4810,7 @@ impl AppRuntime {
             // window instead of opening a canvas window. FR-003 keeps every manual
             // launch (Start Work / Launch Agent) on the canvas, and a tab with no
             // Issue window keeps the canvas fallback so the agent is never invisible.
-            if let Some(issue_window_id) = issue_preview_host_window_id(&tab.workspace) {
+            if let Some(issue_window_id) = tab.workspace.issue_preview_host_window_id() {
                 let _ = tab.workspace.place_agent_window_in_issue_preview(
                     &window.id,
                     &issue_window_id,
@@ -4191,6 +4858,13 @@ impl AppRuntime {
             );
         }
         if let Some(context) = launch_feedback_context {
+            // Issue #4084 AC-2: remember which windows are independent review
+            // dispatches (Issue #4041) so an idle one with a published verdict
+            // is classified as review rather than as an unexplained stall.
+            if context.issue_monitor_review_dispatch {
+                self.issue_monitor_review_dispatch_windows
+                    .insert(window_id.clone());
+            }
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }
@@ -4209,6 +4883,7 @@ impl AppRuntime {
                 profile_config_path,
                 agent_capability_issuer,
                 prepared_manual_launch_claim,
+                issue_monitor_trust_candidate,
             );
         });
 
@@ -4248,6 +4923,7 @@ impl AppRuntime {
             profile_config_path,
             agent_capability_issuer,
             prepared_manual_launch_claim,
+            None,
         );
     }
 
@@ -4261,6 +4937,7 @@ impl AppRuntime {
         profile_config_path: PathBuf,
         agent_capability_issuer: Option<AgentCapabilityIssuer>,
         prepared_manual_launch_claim: Option<gwt_agent::SessionActiveLaunchHandshake>,
+        issue_monitor_trust_candidate: Option<IssueMonitorTrustCandidate>,
     ) {
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -4281,13 +4958,31 @@ impl AppRuntime {
                 message: "Preparing worktree...".to_string(),
             });
             resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+            let managed_codex_worktree = if issue_monitor_trust_candidate.is_some()
+                && config.agent_id == gwt_agent::AgentId::Codex
+            {
+                let main_worktree_root =
+                    gwt_git::worktree::main_worktree_root(Path::new(&project_root))
+                        .map_err(|error| error.to_string())?;
+                let worktrees = gwt_git::WorktreeManager::new(&main_worktree_root)
+                    .list()
+                    .map_err(|error| error.to_string())?;
+                validate_issue_monitor_managed_codex_worktree(
+                    issue_monitor_trust_candidate.as_ref(),
+                    Path::new(&project_root),
+                    &config,
+                    &worktrees,
+                )?
+            } else {
+                None
+            };
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Starting Docker service...".to_string(),
             });
-            let container_runtime =
-                apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+            let docker_launch_binding =
+                prepare_docker_runtime_for_launch(Path::new(&project_root), &mut config)?;
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -4308,6 +5003,21 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
+            if let Some(managed_worktree) = managed_codex_worktree.as_ref() {
+                let report = register_codex_managed_project_trust_for_resolved_launch(
+                    &profile_config_path,
+                    managed_worktree,
+                    &config,
+                    docker_launch_binding.as_ref(),
+                )?;
+                if report.is_some() {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: "Trusted the gwt-managed Codex worktree.".to_string(),
+                    });
+                }
+            }
+            resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
             let tool_runtime_migration_source =
                 hydrate_tool_runtime_provenance_from_source_session(&sessions_dir, &mut config)?;
             let runner_health_report = (config.runtime_target
@@ -4324,30 +5034,29 @@ impl AppRuntime {
             }
             let codex_hook_discovery_mode =
                 codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
-            refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
-                &worktree_path,
-                &config.agent_id,
-                codex_hook_discovery_mode,
-                config.is_ephemeral,
-            )
-            .map_err(|error| {
-                // Attribute managed-asset failures to the worktree so the
-                // operator sees which worktree's setup failed, not a bare
-                // skill-writer error.
-                format!(
-                    "managed asset setup failed for worktree {}: {error}",
-                    worktree_path.display()
+            let managed_assets =
+                refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+                    &worktree_path,
+                    &config.agent_id,
+                    codex_hook_discovery_mode,
+                    config.is_ephemeral,
                 )
-            })?;
-            let codex_home = config.env_vars.get("CODEX_HOME").map(PathBuf::from);
+                .map_err(|error| {
+                    // Attribute managed-asset failures to the worktree so the
+                    // operator sees which worktree's setup failed, not a bare
+                    // skill-writer error.
+                    format!(
+                        "managed asset setup failed for worktree {}: {error}",
+                        worktree_path.display()
+                    )
+                })?;
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
                 &worktree_path,
-                &config.agent_id,
-                config.runtime_target,
-                config.docker_service.as_deref(),
-                codex_home.as_deref(),
+                &config,
+                docker_launch_binding.as_ref(),
                 codex_hook_discovery_mode,
+                managed_assets.hook_bin.as_deref(),
             )? {
                 if !report.trusted_entries.is_empty() {
                     proxy.send(UserEvent::LaunchProgress {
@@ -4360,16 +5069,42 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_post_resolution_bun_cache_fast_path(&mut config)
-            {
-                tracing::debug!(
-                    agent = %config.agent_id,
-                    command = %config.command,
-                    "reusing fresh Bun agent package cache"
-                );
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                match apply_post_resolution_bun_cache_fast_path(&mut config) {
+                    gwt_agent::HostBunxCacheFastPath::Applied => {
+                        tracing::debug!(
+                            agent = %config.agent_id,
+                            command = %config.command,
+                            "reusing fresh Bun agent package cache"
+                        );
+                    }
+                    gwt_agent::HostBunxCacheFastPath::Rejected { executable, reason } => {
+                        tracing::warn!(
+                            agent = %config.agent_id,
+                            executable = %executable.display(),
+                            reason = %reason,
+                            "Bun agent package cache entry is not launchable; falling back to the package runner"
+                        );
+                        proxy.send(UserEvent::LaunchTerminalOutput {
+                            window_id: window_id.clone(),
+                            data: bun_cache_fast_path_rejection_terminal_bytes(
+                                &executable,
+                                &reason,
+                            ),
+                        });
+                    }
+                    gwt_agent::HostBunxCacheFastPath::NotApplicable => {}
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
+            // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
+            // build parallelism before Docker materializes the exec environment
+            // so container agents receive the same budget variables.
+            let resource_policy = resolve_agent_resource_launch(
+                &profile_config_path,
+                Path::new(&project_root),
+                &mut config.env_vars,
+            )?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
             // launch argv BEFORE the Windows host shell wrapper rewrites it
             // (the `$gwt-*` prompt token moves into an env var / embedded
@@ -4404,14 +5139,13 @@ impl AppRuntime {
             session.docker_service = config.docker_service.clone();
             session.docker_lifecycle_intent = config.docker_lifecycle_intent;
             session.linked_issue_number = config.linked_issue_number;
+            session.launch_route = config.launch_route;
             session.launch_command =
                 durable_tool_runtime_command.unwrap_or_else(|| config.command.clone());
             session.launch_args = config.args.clone();
             session.windows_shell = config.windows_shell;
             session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
-            if session.session_mode == gwt_agent::SessionMode::Resume {
-                session.agent_session_id = config.resume_session_id.clone();
-            }
+            apply_resume_identity_to_session(&mut session, &config);
             session.update_status(gwt_agent::AgentStatus::Running);
             // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
             // recovers producing authority through the continuation
@@ -4541,10 +5275,9 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
-                Path::new(&project_root),
+            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_binding(
                 &mut config,
-                container_runtime.as_ref(),
+                docker_launch_binding.as_ref(),
             )?;
             let agent_project_root = docker_runtime_worktree.unwrap_or_else(|| {
                 config
@@ -4602,7 +5335,9 @@ impl AppRuntime {
                 rebound_continuation: rebound_continuation.as_ref(),
                 execution_entrypoint: &execution_entrypoint,
                 runtime_target,
-                container_runtime: container_runtime.as_ref(),
+                container_runtime: docker_launch_binding
+                    .as_ref()
+                    .map(DockerLaunchBinding::runtime),
             }
             .install_with_prepared_claim(
                 &mut config.env_vars,
@@ -4690,7 +5425,26 @@ impl AppRuntime {
                 remove_env: config.remove_env.clone(),
                 cwd: config.working_dir.clone(),
                 pending_tool_runtime_migration,
+                resource_policy,
             };
+            // Issue #3490 AC-1: without a Backend Override profile every Codex
+            // process shares the user's `~/.codex`, and two of them
+            // initializing its SQLite state together lose the race with
+            // `database is locked`. gwt fans launches out in parallel, so it
+            // owns the mitigation: hold the last step before dispatch until
+            // the previous shared-`~/.codex` spawn has cleared its
+            // initialization window. This runs on the per-launch worker
+            // thread, never on the UI thread, and a worktree-local CODEX_HOME
+            // has no contention to pace.
+            if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
+                let waited = gwt_agent::pace_shared_codex_spawn();
+                if !waited.is_zero() {
+                    tracing::debug!(
+                        waited_ms = waited.as_millis() as u64,
+                        "paced Codex spawn to avoid shared ~/.codex state contention"
+                    );
+                }
+            }
             Ok((
                 process_launch,
                 session_id,
@@ -5112,11 +5866,17 @@ impl AppRuntime {
             }
         }
 
-        if let Err(error) = manager.remove_force(worktree_path) {
+        if let Err(error) =
+            gwt::managed_assets::cleanup_worktree_with_codex_project_trust(worktree_path, || {
+                manager
+                    .remove_force(worktree_path)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            })
+        {
             tracing::warn!(
                 worktree_path = %worktree_path.display(),
                 error = %error,
-                "failed to remove clean ephemeral worktree"
+                "failed to revoke Codex project trust and remove clean ephemeral worktree"
             );
         }
     }
@@ -5353,8 +6113,11 @@ mod docker_session_persistence_tests {
         config.command = "codex".to_string();
         config.args = vec!["--no-alt-screen".to_string()];
         let runtime = crate::resolved_test_docker_runtime(temp.path());
+        let plan = crate::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
         let runtime_worktree =
-            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+            finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
                 .expect("finalize Docker launch")
                 .expect("Docker runtime worktree");
 
@@ -5383,6 +6146,7 @@ mod docker_session_persistence_tests {
             remove_env: config.remove_env,
             cwd: config.working_dir,
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         };
         assert_eq!(process_launch.command, runtime.binary());
         let workdir_index = process_launch
@@ -5965,6 +6729,138 @@ mod agent_endpoint_env_tests {
             .clone()
             .expect("the superseding launch must be bound");
         assert_eq!(binding.session_id, relaunch.id);
+        assert_ne!(
+            binding.identity.generation_id,
+            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+                .expect("reload holder Session")
+                .execution_binding
+                .expect("holder binding")
+                .identity
+                .generation_id,
+            "the successor must own a new generation, not the holder's"
+        );
+    }
+
+    /// Issue #3759: the owner ledger is committed before the worktree-scoped
+    /// pointer/projection pair (`write_activated_generation`), and trusted-
+    /// store GC of a removed worktree deletes that pair while the owner ledger
+    /// stays. Either way the next Issue Monitor / Start Work launch on the
+    /// same worktree used to die before the PTY with "execution generation
+    /// pointer is missing after ledger ownership was established", burning
+    /// every retry. A lost publication is a pure function of the ledger and
+    /// must be rebuilt before the fresh-launch preflight reads authority.
+    #[test]
+    fn fresh_launch_republishes_a_lost_generation_pointer_before_reading_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut genesis_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut genesis_env)
+        .expect("materialize the first producing generation");
+
+        // The holder's Host is gone (forced restart) ...
+        let holder_id = launch.session.id.clone();
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &launch.sessions_dir,
+            &holder_id,
+        ))
+        .expect("clear the holder runtime sidecar");
+        // ... and the worktree-scoped publication was lost while the owner
+        // ledger survived (GC of the trusted worktree directory).
+        let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&launch.project)
+            .expect("trusted worktree directory");
+        std::fs::remove_file(trusted_dir.join("execution-generation-pointer.json"))
+            .expect("drop trusted pointer");
+        std::fs::remove_file(trusted_dir.join("execution-control.json"))
+            .expect("drop trusted projection");
+        let _ = std::fs::remove_file(
+            launch
+                .project
+                .join(".gwt/skill-state/execution-generation-pointer.json"),
+        );
+        let _ = std::fs::remove_file(
+            launch
+                .project
+                .join(".gwt/skill-state/execution-control.json"),
+        );
+        let error =
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect_err("fixture must reproduce the strict-view failure");
+        assert!(
+            error.to_string().contains(
+                "execution generation pointer is missing after ledger ownership was established"
+            ),
+            "{error}"
+        );
+
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.update_status(gwt_agent::AgentStatus::Running);
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut relaunch,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("a fresh launch must self-heal a lost pointer instead of failing before the PTY");
+
+        assert!(
+            env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "the healed launch must receive its producing capability"
+        );
+        let binding = relaunch
+            .execution_binding
+            .clone()
+            .expect("the healed launch must be bound");
+        assert_eq!(binding.session_id, relaunch.id);
+        // The successor is Prepared at install time and activates once the
+        // PTY handshake completes, so the published current generation is
+        // still the healed predecessor; what matters is that the strict view
+        // is readable again instead of failing before the PTY.
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("strict view is readable again")
+                .is_some(),
+            "the healed pointer/projection must publish the predecessor generation"
+        );
         assert_ne!(
             binding.identity.generation_id,
             gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
@@ -7860,8 +8756,34 @@ mod tool_runtime_integration_tests {
         config.args = vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()];
         let expected = (config.command.clone(), config.args.clone());
 
-        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config));
+        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config).is_applied());
         assert_eq!((config.command, config.args), expected);
+    }
+
+    // Issue #3857 AC-5: a rejected cache entry is explained in the agent
+    // terminal with the resolved path and the reason it could not be launched.
+    #[test]
+    fn bun_cache_fast_path_rejection_names_the_path_and_reason_in_the_terminal() {
+        let executable =
+            Path::new("/tmp/bunx-501-opencode-ai@latest/node_modules/opencode-ai/bin/opencode.exe");
+
+        let bytes = bun_cache_fast_path_rejection_terminal_bytes(
+            executable,
+            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE).",
+        );
+        let text = String::from_utf8(bytes).expect("utf8 terminal line");
+
+        assert!(text.starts_with("[gwt] "), "{text}");
+        assert!(text.contains("opencode-ai/bin/opencode.exe"), "{text}");
+        assert!(
+            text.contains("neither a script nor a recognized native executable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Falling back to the bunx package runner"),
+            "{text}"
+        );
+        assert!(text.ends_with("\r\n"), "{text}");
     }
 
     #[cfg(windows)]

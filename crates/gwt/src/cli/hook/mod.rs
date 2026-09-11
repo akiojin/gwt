@@ -26,7 +26,6 @@ pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
 pub mod forward;
-pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
 pub mod pm_loop_stop_check;
@@ -85,11 +84,11 @@ pub enum HookKind {
     WorkflowPolicy,
     Forward,
     RegisterCodexManagedHookTrust,
+    RegisterCodexManagedProjectTrust,
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
     SkillRegisterSpecStopCheck,
-    GwtSelfImprovementStop,
 }
 
 impl HookKind {
@@ -108,11 +107,11 @@ impl HookKind {
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
             "register-codex-managed-hook-trust" => Some(Self::RegisterCodexManagedHookTrust),
+            "register-codex-managed-project-trust" => Some(Self::RegisterCodexManagedProjectTrust),
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
             "skill-register-spec-stop-check" => Some(Self::SkillRegisterSpecStopCheck),
-            "gwt-self-improvement-stop" => Some(Self::GwtSelfImprovementStop),
             _ => None,
         }
     }
@@ -171,6 +170,28 @@ pub enum HookError {
     MissingEnv(&'static str),
     #[error("invalid hook event: {0}")]
     InvalidEvent(String),
+    /// A named dispatcher step failed (Issue #3541). Wraps the underlying
+    /// error so diagnostics can attribute the failure to `event`/`handler`.
+    #[error("hook handler {handler} failed: {source}")]
+    HandlerFailure {
+        event: String,
+        handler: String,
+        #[source]
+        source: Box<HookError>,
+    },
+}
+
+impl HookError {
+    pub fn handler_failure(self, event: &str, handler: &str) -> Self {
+        match self {
+            already @ Self::HandlerFailure { .. } => already,
+            source => Self::HandlerFailure {
+                event: event.to_string(),
+                handler: handler.to_string(),
+                source: Box::new(source),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +277,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, gwt_self_improvement_stop, provider_event,
+        block_bash_policy, event_dispatcher, provider_event, runtime_state,
         skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
         skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
     };
@@ -268,6 +289,21 @@ pub fn run_daemon_hook<E: CliEnv>(
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
     fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        write_hook_output(env, output).unwrap_or_else(|code| code)
+    }
+    /// Issue #3541: an event only counts as completed once its protocol
+    /// output has been written, so stamp the runtime state on `Ok` only.
+    fn emit_event_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match write_hook_output(env, output) {
+            Ok(code) => {
+                runtime_state::record_hook_event_completed_from_env();
+                code
+            }
+            Err(code) => code,
+        }
+    }
+    /// `Ok(exit_code)` when the envelope reached stdout, `Err(1)` otherwise.
+    fn write_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> Result<i32, i32> {
         match output.serialize_to(env.stdout()) {
             Ok(()) => {
                 if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
@@ -284,16 +320,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                     );
                     let _ = writeln!(env.stderr(), "{grok_reason}");
                 }
-                output.exit_code()
+                Ok(output.exit_code())
             }
             Err(err) => {
                 let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
-                1
+                Err(1)
             }
         }
     }
+    /// Legacy per-kind hooks (runtime-state, forward, ...) keep the plain
+    /// ledger row from Issue #3778; the event dispatcher uses
+    /// `emit_event_error` below for handler-attributed diagnostics.
     fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let message = format!("{err}");
+        let message = gwt_core::error_ledger::sanitize_error_message(&format!("{err}"));
         crate::error_report::report_error_and_publish(
             gwt_core::error_ledger::ErrorKind::HookFailure,
             format!("{name}: {message}"),
@@ -304,6 +343,54 @@ pub fn run_daemon_hook<E: CliEnv>(
             },
         );
         let _ = writeln!(env.stderr(), "gwtd hook {name}: {message}");
+        1
+    }
+    /// Issue #3541: persist the failure with event/handler context in the
+    /// host error ledger and tell the user where it is and that no Board /
+    /// Issue report has been sent for it.
+    fn emit_event_error<E: CliEnv>(env: &mut E, name: &str, event: &str, err: &HookError) -> i32 {
+        use gwt_core::error_ledger::{sanitize_error_message, ErrorKind, ErrorTarget};
+
+        let (event, handler, detail) = match err {
+            HookError::HandlerFailure {
+                event,
+                handler,
+                source,
+            } => (event.as_str(), handler.as_str(), source.to_string()),
+            other => (event, "dispatch", other.to_string()),
+        };
+        let detail = sanitize_error_message(&detail);
+        let linked_issue = runtime_state::linked_issue_from_env();
+        let context = std::collections::BTreeMap::from([
+            ("event".to_string(), event.to_string()),
+            ("handler".to_string(), handler.to_string()),
+            ("exit_status".to_string(), "1".to_string()),
+            ("fail_open".to_string(), "false".to_string()),
+        ]);
+        let recorded = crate::error_report::report_error_and_publish_with_context(
+            ErrorKind::HookFailure,
+            format!("{event}/{handler}: {detail}"),
+            ErrorTarget {
+                issue: linked_issue,
+                session_id: std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok(),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..ErrorTarget::default()
+            },
+            context,
+        );
+        let diagnostic = match recorded {
+            Some(record) => format!("errors.list id={}", record.id),
+            None => {
+                "errors.list (row not appended: recent duplicate or ledger unavailable)".to_string()
+            }
+        };
+        let report_target = linked_issue
+            .map(|number| format!("Board/Issue #{number}"))
+            .unwrap_or_else(|| "Board/owning Issue".to_string());
+        let _ = writeln!(
+            env.stderr(),
+            "gwtd hook {name}: {event}/{handler} failed: {detail} | diagnostic={diagnostic} report_status=not_sent report_target={report_target}"
+        );
         1
     }
 
@@ -322,8 +409,8 @@ pub fn run_daemon_hook<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
+                Ok(output) => Ok(emit_event_output(env, &output)),
+                Err(err) => Ok(emit_event_error(env, name, event, &err)),
             }
         }
         HookKind::ProviderEvent => {
@@ -351,8 +438,13 @@ pub fn run_daemon_hook<E: CliEnv>(
                 current_session.as_deref(),
             );
             match dispatch_result {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
+                Ok(output) => Ok(emit_event_output(env, &output)),
+                Err(err) => Ok(emit_event_error(
+                    env,
+                    name,
+                    &format!("{provider}:{native_event}"),
+                    &err,
+                )),
             }
         }
         HookKind::RuntimeState => {
@@ -434,10 +526,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                 },
                 None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // #3967: compare against the binary managed hook generation embeds,
+            // resolved the same way materialization resolves it. Guessing here
+            // is what left every hook untrusted for a gwt started from a
+            // development build.
+            let expected_hook_bin = match crate::managed_assets::managed_hook_bin() {
+                Ok(hook_bin) => hook_bin,
+                Err(err) => return Ok(emit_hook_error(env, name, err)),
+            };
+            match gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
                 &project_root,
                 &codex_config_path,
                 discovery_mode,
+                Some(expected_hook_bin.as_str()),
             ) {
                 Ok(report) => {
                     let _ = writeln!(
@@ -445,14 +546,101 @@ pub fn run_daemon_hook<E: CliEnv>(
                         "trusted {} gwt-managed Codex hooks",
                         report.trusted_entries.len()
                     );
-                    Ok(0)
+                    // #3967 AC-4: a silent success here is how an operator was
+                    // told the pre-registration had worked while Codex was
+                    // still going to stop the launch. Report the hooks gwt
+                    // could not vouch for, and fail — this is the front door an
+                    // operator runs to check a real machine.
+                    match report.hooks_need_review_reason() {
+                        Some(reason) => {
+                            let _ = writeln!(env.stdout(), "{reason}");
+                            Ok(1)
+                        }
+                        None => Ok(0),
+                    }
                 }
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
+        HookKind::RegisterCodexManagedProjectTrust => {
+            let project_root = option_value(rest, "--project-root")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let explicit_config =
+                option_value(rest, "--codex-config").map(std::path::PathBuf::from);
+            let docker_local = option_value(rest, "--runtime-target") == Some("docker");
+            let codex_config_path = if docker_local {
+                if explicit_config.is_some() {
+                    return Err(io_as_api_error(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Docker-local project trust derives its config from the effective environment; --codex-config is not accepted",
+                    )));
+                }
+                default_codex_config_path()
+            } else {
+                let stable_config =
+                    crate::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                        &project_root,
+                        std::env::var_os("CODEX_HOME").as_deref(),
+                        dirs::home_dir().as_deref(),
+                    );
+                if let Some(explicit_config) = explicit_config {
+                    if !explicit_config.is_absolute() {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    let Some(stable_config) = stable_config else {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    };
+                    if !crate::managed_assets::codex_config_paths_equivalent(
+                        &explicit_config,
+                        &stable_config,
+                    ) {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    Some(stable_config)
+                } else {
+                    stable_config
+                }
+            };
+            let Some(codex_config_path) = codex_config_path else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "hook.register_codex_managed_project_trust: process-stable/default Codex config is unavailable"
+                );
+                return Ok(2);
+            };
+            match gwt_skills::register_codex_managed_project_trust(
+                &project_root,
+                &codex_config_path,
+            ) {
+                Ok(report) => {
+                    let _ = writeln!(
+                        env.stdout(),
+                        "trusted gwt-managed Codex worktree {}",
+                        report.project_path.display()
+                    );
+                    Ok(0)
+                }
+                Err(err) => Err(io_as_api_error(err)),
+            }
+        }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
-            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_discussion_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
             Ok(emit_hook_output(env, &output))
         }
         HookKind::SkillPlanSpecStopCheck => {
@@ -485,10 +673,6 @@ pub fn run_daemon_hook<E: CliEnv>(
             );
             Ok(emit_hook_output(env, &output))
         }
-        HookKind::GwtSelfImprovementStop => {
-            let output = gwt_self_improvement_stop::handle_with_input(env, &stdin);
-            Ok(emit_hook_output(env, &output))
-        }
     }
 }
 
@@ -499,9 +683,15 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {
-    gwt_core::paths::gwt_home()
-        .parent()
-        .map(|home| home.join(".codex/config.toml"))
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("config.toml"))
+        .or_else(|| {
+            gwt_core::paths::gwt_home()
+                .parent()
+                .map(|home| home.join(".codex/config.toml"))
+        })
 }
 
 #[cfg(test)]
