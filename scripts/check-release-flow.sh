@@ -72,6 +72,28 @@ else
     echo "[FAIL] prepare-release.yml does not use scripts/compute_release_version.py for version calc"
     fail=1
   fi
+  # Issue #3545: the Release PR body must be reference-only. A closing keyword
+  # in a develop->main PR closes Issues on merge regardless of open acceptance
+  # criteria, so the body is rendered by `release_issue_refs.py --format pr-body`
+  # and the workflow itself never spells a closing keyword.
+  if ! grep -q -- "--format pr-body" "$PREPARE"; then
+    echo "[FAIL] prepare-release.yml does not render the Release PR body with release_issue_refs.py --format pr-body"
+    fail=1
+  fi
+  if grep -qiE '(close[sd]?|fix(e[sd])?|resolve[sd]?):? *#' "$PREPARE"; then
+    echo "[FAIL] prepare-release.yml spells a GitHub closing keyword; Release PR bodies must be reference-only (Issue #3545)"
+    fail=1
+  fi
+fi
+
+if ! grep -q "release_close_guard.py" "$RELEASE"; then
+  echo "[FAIL] release.yml does not run scripts/release_close_guard.py after the merge (Issue #3545)"
+  fail=1
+fi
+
+if ! grep -qE '^\s*issues: write' "$RELEASE"; then
+  echo "[FAIL] release.yml lacks the issues: write permission the close guard needs to reopen Issues"
+  fail=1
 fi
 
 if ! python3 "$ROOT/scripts/test_compute_release_version.py" >/dev/null 2>&1; then
@@ -81,6 +103,11 @@ fi
 
 if ! python3 "$ROOT/scripts/test_release_issue_refs.py" >/dev/null 2>&1; then
   echo "[FAIL] release_issue_refs unit tests failed"
+  fail=1
+fi
+
+if ! python3 "$ROOT/scripts/test_release_close_guard.py" >/dev/null 2>&1; then
+  echo "[FAIL] release_close_guard unit tests failed"
   fail=1
 fi
 

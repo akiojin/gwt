@@ -810,6 +810,7 @@ pub(super) fn continuation_launch_config(
         }
     };
     config.linked_issue_number = Some(owner.number);
+    config.launch_route = gwt_agent::LaunchRoute::Manual;
     (config, outcome)
 }
 
