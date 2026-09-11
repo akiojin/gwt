@@ -257,7 +257,10 @@ use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
+    effective_host_codex_config_path, issue_monitor_trust_candidate_from_feedback,
     maybe_register_codex_managed_hook_trust_for_launch,
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context,
+    validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
 pub(crate) use launch::{
     continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
@@ -3449,6 +3452,19 @@ impl AppRuntime {
             })
     }
 
+    fn issue_monitor_live_issue_number_for_window(
+        &self,
+        project_root: &Path,
+        window_id: &str,
+    ) -> Option<u64> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).ok()?;
+        prefs
+            .launched_issues
+            .iter()
+            .find_map(|launched| (launched.window_id == window_id).then_some(launched.issue_number))
+    }
+
     fn publish_active_issue_monitor_control(
         &self,
         payload: serde_json::Value,
@@ -4032,6 +4048,7 @@ impl AppRuntime {
                     // agent must be running to be refused), and the daemon
                     // rejects it, so nothing committed.
                     Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
+                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
                             self.issue_monitor_launch_failure_committed(
@@ -4069,6 +4086,9 @@ impl AppRuntime {
                         // Issue #3616: unreachable from the launch path — the
                         // agent must be running to receive a provider refusal.
                         Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
+                            IssueMonitorFailureCommit::Rejected
+                        }
+                        Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                             IssueMonitorFailureCommit::Rejected
                         }
                         None => {
@@ -4375,6 +4395,29 @@ impl AppRuntime {
             .get(window_id)
             .and_then(|context| context.issue_monitor_issue_number);
         let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
+        self.issue_monitor_agent_failed_events_with_failure(
+            project_root,
+            window_id,
+            message,
+            issue_number_hint,
+            failure,
+        )
+    }
+
+    pub(crate) fn issue_monitor_agent_failed_events_with_failure(
+        &mut self,
+        project_root: &Path,
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        failure: Option<gwt::IssueMonitorFailure>,
+    ) -> Vec<OutboundEvent> {
+        let message = message.trim();
+        let message = if message.is_empty() {
+            "Agent entered error state"
+        } else {
+            message
+        };
         let publication = self.publish_issue_monitor_control(
             project_root,
             Self::issue_monitor_agent_failed_payload_with_failure(
@@ -4389,7 +4432,7 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
-            session_mode,
+            failure,
             publication,
         )
     }
@@ -4510,7 +4553,11 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
-            self.issue_monitor_session_mode_for_window(window_id),
+            self.issue_monitor_failure_for_window(
+                window_id,
+                message,
+                self.issue_monitor_session_mode_for_window(window_id),
+            ),
             publication,
         )
     }
@@ -4521,10 +4568,9 @@ impl AppRuntime {
         window_id: &str,
         message: &str,
         issue_number_hint: Option<u64>,
-        session_mode: gwt_agent::SessionMode,
+        failure: Option<gwt::IssueMonitorFailure>,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
-        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         match publication {
             Ok(()) => self.finalize_issue_monitor_agent_failed_events(
                 project_root,
@@ -4616,6 +4662,22 @@ impl AppRuntime {
                                     }
                                 }
                             }
+                            Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
+                                let issue_number = issue_number_hint
+                                    .or_else(|| monitor.launched_window_issue(window_id));
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                if monitor.try_escalate_codex_directory_trust_prompt(
+                                    issue_number,
+                                    window_id,
+                                    message.to_string(),
+                                ) {
+                                    IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                } else {
+                                    IssueMonitorFailureCommit::Rejected
+                                }
+                            }
                             None => {
                                 let issue_number = if let Some(issue_number) = issue_number_hint {
                                     monitor.record_agent_issue_failed(
@@ -4670,6 +4732,14 @@ impl AppRuntime {
                         issue_number_hint,
                     ),
                 }
+            }
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_))
+                if matches!(
+                    failure,
+                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                ) =>
+            {
+                Vec::new()
             }
             Err(error) => self.issue_monitor_control_error_events(
                 None,

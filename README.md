@@ -513,6 +513,16 @@ gwt respects any explicit value (`true` or `false`) and does not change it. A
 config that cannot be parsed or written never blocks startup; the path and
 cause are recorded in the error ledger (`errors.list`).
 
+Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
+`[features.context_management]` table makes the whole config unreadable
+(`invalid type: map, expected a boolean`), which also stops `codex login`. The
+codex gwt launches and the `codex` on your `PATH` can be different versions, so
+gwt checks the `PATH` one (`codex --version`) at startup. When it is older than
+0.153.0, or its version cannot be read, gwt does not write the key and removes
+an existing `[features.context_management]` table so that codex keeps working.
+After you upgrade the `PATH` codex to 0.153.0 or later, the next gwt startup
+writes the key again.
+
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
 the loopback endpoint and bearer token that gwt injects for that session, then
