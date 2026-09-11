@@ -3859,9 +3859,11 @@ where
         {
             return Ok(PmWorktreeCleanupOutcome::RetainedLocalWork);
         }
-        manager
-            .remove_force_twice(&worktree)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        crate::managed_assets::cleanup_worktree_with_codex_project_trust(&worktree, || {
+            manager
+                .remove_force_twice(&worktree)
+                .map_err(|error| io::Error::other(error.to_string()))
+        })?;
         Ok(PmWorktreeCleanupOutcome::Removed)
     })
 }
