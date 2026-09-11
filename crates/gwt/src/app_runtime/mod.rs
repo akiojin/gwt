@@ -109,6 +109,7 @@ mod pm;
 mod profile;
 mod project_tabs;
 mod pty_io;
+mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
@@ -289,6 +290,12 @@ pub enum DispatchTarget {
 pub(crate) enum KnowledgeWireMetadata {
     SemanticRetry(gwt::KnowledgeSemanticRetry),
     NonSemanticError,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryCenterAction {
+    pub(crate) generation: u64,
+    pub(crate) board_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -670,6 +677,10 @@ pub struct AppRuntime {
     pub(crate) launch_error_terminal_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
     pub(crate) board_all_view_windows: HashSet<String>,
+    /// Process-local Recovery Center row capabilities for the latest
+    /// generation. Values contain only an optional public Board entry id.
+    pub(crate) recovery_center_handles: HashMap<String, RecoveryCenterAction>,
+    pub(crate) recovery_center_generation: u64,
     pub(crate) session_state_path: PathBuf,
     pub(crate) log_dir: PathBuf,
     pub(crate) proxy: AppEventProxy,
@@ -1338,6 +1349,8 @@ impl AppRuntime {
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: HashSet::new(),
+            recovery_center_handles: HashMap::new(),
+            recovery_center_generation: 0,
             session_state_path,
             log_dir,
             proxy: AppEventProxy::new(proxy),
@@ -3704,6 +3717,19 @@ impl AppRuntime {
                 }
                 self.frontend_sync_events(&client_id)
             }
+            FrontendEvent::LoadRecoveryCenter { request_id } => {
+                self.load_recovery_center_events(&client_id, &request_id)
+            }
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id,
+                generation,
+                action_handle,
+            } => self.open_recovery_center_board_entry_events(
+                &client_id,
+                &request_id,
+                generation,
+                &action_handle,
+            ),
             FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
                 self.set_claude_account_usage_enabled_events(enabled)
             }

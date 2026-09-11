@@ -26,10 +26,15 @@ use gwt_config::{Profile, Settings};
 use gwt_core::{
     coordination::{
         coordination_events_path, load_snapshot, post_entry, AuthorKind, BoardAudienceScope,
-        BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, CoordinationEvent,
+        BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, BoardWorktreeForm,
+        CoordinationEvent,
     },
     logging::{current_log_file, LogLevel},
     paths::gwt_cache_dir,
+    recovery::{
+        RecoveryAcknowledgement, RecoveryConflictKind, RecoveryIntent, RecoveryProvider,
+        RecoveryProviderReceipt, RecoveryState, RecoveryStore,
+    },
     repo_hash::detect_repo_hash,
     test_support::ScopedGwtHome,
 };
@@ -238,6 +243,312 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
     assert!(!debug.contains(readiness));
     assert!(!debug.contains("session-private"));
     assert!(debug.contains("<redacted>"));
+}
+
+fn recovery_center_test_intent(
+    session_id: &str,
+    recovery_id: &str,
+    entry_id: &str,
+    worktree_form: BoardWorktreeForm,
+    body: &str,
+) -> RecoveryIntent {
+    let mut entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "codex",
+        BoardEntryKind::Status,
+        body,
+        Some("Recovery delivery".to_string()),
+        Some("Public recovery summary".to_string()),
+        Vec::new(),
+        Vec::new(),
+    );
+    entry.id = entry_id.to_string();
+    entry.origin_branch = Some("work/issue-1974".to_string());
+    entry.origin_session_id = Some(session_id.to_string());
+    entry.origin_agent_id = Some("codex".to_string());
+    entry.origin_worktree_form = Some(worktree_form);
+    entry.origin_recovery_id = Some(recovery_id.to_string());
+    RecoveryIntent::new(recovery_id, RecoveryProvider::Local, worktree_form, entry)
+        .expect("valid recovery intent")
+}
+
+#[test]
+fn recovery_center_projects_only_active_project_records_without_rewriting_sessions() {
+    let temp = tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("home");
+    let _gwt_home = ScopedGwtHome::set(&home);
+    let active_repo = temp.path().join("active");
+    let foreign_repo = temp.path().join("foreign");
+    fs::create_dir_all(&active_repo).expect("active repo");
+    fs::create_dir_all(&foreign_repo).expect("foreign repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Active",
+        active_repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut active_session =
+        gwt_agent::Session::new(&active_repo, "work/issue-1974", gwt_agent::AgentId::Codex);
+    active_session.id = "recovery-session-active".to_string();
+    active_session
+        .save(&runtime.sessions_dir)
+        .expect("save active Session");
+    let active_session_path = runtime
+        .sessions_dir
+        .join(format!("{}.toml", active_session.id));
+    let session_before = fs::read(&active_session_path).expect("read Session before projection");
+
+    let active_store = RecoveryStore::for_repo(&active_repo, &active_session.id).expect("store");
+    let pending = active_store
+        .prepare(
+            "prepare-pending",
+            recovery_center_test_intent(
+                &active_session.id,
+                "recovery-pending",
+                "board-pending",
+                BoardWorktreeForm::Ephemeral,
+                "pending public body",
+            ),
+        )
+        .expect("prepare pending")
+        .record;
+    let acknowledged_pending = active_store
+        .prepare(
+            "prepare-acknowledged",
+            recovery_center_test_intent(
+                &active_session.id,
+                "recovery-acknowledged",
+                "board-acknowledged",
+                BoardWorktreeForm::BranchBacked,
+                "acknowledged public body",
+            ),
+        )
+        .expect("prepare acknowledged")
+        .record;
+    let acknowledgement = RecoveryAcknowledgement::for_record(
+        &acknowledged_pending,
+        RecoveryProviderReceipt::new("board-acknowledged").expect("receipt"),
+    )
+    .expect("acknowledgement");
+    active_store
+        .acknowledge(
+            "recovery-acknowledged",
+            acknowledged_pending.revision,
+            "ack-acknowledged",
+            acknowledgement,
+        )
+        .expect("acknowledge");
+    let conflict_pending = active_store
+        .prepare(
+            "prepare-conflicted",
+            recovery_center_test_intent(
+                &active_session.id,
+                "recovery-conflicted",
+                "board-conflicted",
+                BoardWorktreeForm::Unknown,
+                "conflicted public body",
+            ),
+        )
+        .expect("prepare conflicted")
+        .record;
+    active_store
+        .mark_conflicted(
+            "recovery-conflicted",
+            conflict_pending.revision,
+            "conflict-conflicted",
+            RecoveryConflictKind::StorageUncertain,
+        )
+        .expect("mark conflicted");
+
+    let mut foreign_session =
+        gwt_agent::Session::new(&foreign_repo, "work/foreign", gwt_agent::AgentId::Codex);
+    foreign_session.id = "recovery-session-foreign".to_string();
+    foreign_session
+        .save(&runtime.sessions_dir)
+        .expect("save foreign Session");
+    RecoveryStore::for_repo(&foreign_repo, &foreign_session.id)
+        .expect("foreign store")
+        .prepare(
+            "prepare-foreign",
+            recovery_center_test_intent(
+                &foreign_session.id,
+                "recovery-foreign",
+                "board-foreign",
+                BoardWorktreeForm::BranchBacked,
+                "foreign private sentinel",
+            ),
+        )
+        .expect("prepare foreign");
+
+    let events = runtime.handle_frontend_event(
+        "client-recovery".to_string(),
+        FrontendEvent::LoadRecoveryCenter {
+            request_id: "request-1".to_string(),
+        },
+    );
+    let (generation, items) = events
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+            BackendEvent::RecoveryCenterState {
+                request_id,
+                generation,
+                status: gwt::RecoveryCenterLoadStatus::Ready,
+                items,
+            } if request_id == "request-1" => Some((*generation, items.clone())),
+            _ => None,
+        })
+        .expect("ready Recovery Center projection");
+    assert!(generation > 0);
+    assert_eq!(items.len(), 3);
+    assert!(items.iter().any(|item| {
+        item.state == gwt::RecoveryCenterItemState::Pending
+            && item.worktree_form == BoardWorktreeForm::Ephemeral
+    }));
+    assert!(items.iter().any(|item| {
+        item.state == gwt::RecoveryCenterItemState::Acknowledged
+            && item.worktree_form == BoardWorktreeForm::BranchBacked
+    }));
+    assert!(items.iter().any(|item| {
+        item.state == gwt::RecoveryCenterItemState::Conflicted
+            && item.worktree_form == BoardWorktreeForm::Unknown
+    }));
+    assert!(items.iter().all(|item| {
+        !item.action_handle.contains("recovery-")
+            && !item.action_handle.contains(&active_session.id)
+            && !item.summary.contains("foreign private sentinel")
+    }));
+    assert_eq!(
+        fs::read(&active_session_path).expect("read Session after projection"),
+        session_before,
+        "Recovery Center must use Session::load without migration or mutation"
+    );
+    assert_eq!(pending.state, RecoveryState::Pending);
+}
+
+#[test]
+fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle() {
+    let temp = tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("home");
+    let _gwt_home = ScopedGwtHome::set(&home);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-1974", gwt_agent::AgentId::Codex);
+    session.id = "recovery-action-session".to_string();
+    session.save(&runtime.sessions_dir).expect("save Session");
+    let store = RecoveryStore::for_repo(&repo, &session.id).expect("store");
+    let pending = store
+        .prepare(
+            "prepare-pending-action",
+            recovery_center_test_intent(
+                &session.id,
+                "recovery-pending-action",
+                "board-pending-action",
+                BoardWorktreeForm::Ephemeral,
+                "pending action",
+            ),
+        )
+        .expect("pending")
+        .record;
+    let ack_pending = store
+        .prepare(
+            "prepare-ack-action",
+            recovery_center_test_intent(
+                &session.id,
+                "recovery-ack-action",
+                "board-ack-action",
+                BoardWorktreeForm::BranchBacked,
+                "ack action",
+            ),
+        )
+        .expect("prepare ack")
+        .record;
+    store
+        .acknowledge(
+            "recovery-ack-action",
+            ack_pending.revision,
+            "ack-action",
+            RecoveryAcknowledgement::for_record(
+                &ack_pending,
+                RecoveryProviderReceipt::new("board-ack-action").expect("receipt"),
+            )
+            .expect("acknowledgement"),
+        )
+        .expect("acknowledge");
+
+    let load = runtime.handle_frontend_event(
+        "client-recovery".to_string(),
+        FrontendEvent::LoadRecoveryCenter {
+            request_id: "request-load".to_string(),
+        },
+    );
+    let (generation, pending_handle, acknowledged_handle) = load
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+            BackendEvent::RecoveryCenterState {
+                generation, items, ..
+            } => Some((
+                *generation,
+                items
+                    .iter()
+                    .find(|item| item.state == gwt::RecoveryCenterItemState::Pending)?
+                    .action_handle
+                    .clone(),
+                items
+                    .iter()
+                    .find(|item| item.state == gwt::RecoveryCenterItemState::Acknowledged)?
+                    .action_handle
+                    .clone(),
+            )),
+            _ => None,
+        })
+        .expect("projection handles");
+
+    let open = |runtime: &mut AppRuntime, generation, action_handle: String| {
+        runtime.handle_frontend_event(
+            "client-recovery".to_string(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "request-open".to_string(),
+                generation,
+                action_handle,
+            },
+        )
+    };
+    let pending_result = open(&mut runtime, generation, pending_handle);
+    assert!(matches!(
+        &pending_result[0].event,
+        BackendEvent::RecoveryCenterBoardEntry {
+            board_entry_id: None,
+            ..
+        }
+    ));
+    let acknowledged_result = open(&mut runtime, generation, acknowledged_handle.clone());
+    assert!(matches!(
+        &acknowledged_result[0].event,
+        BackendEvent::RecoveryCenterBoardEntry {
+            board_entry_id: Some(entry_id),
+            ..
+        } if entry_id == "board-ack-action"
+    ));
+    let stale_result = open(
+        &mut runtime,
+        generation.saturating_sub(1),
+        acknowledged_handle,
+    );
+    assert!(matches!(
+        &stale_result[0].event,
+        BackendEvent::RecoveryCenterBoardEntry {
+            board_entry_id: None,
+            ..
+        }
+    ));
+    assert_eq!(pending.state, RecoveryState::Pending);
 }
 
 #[test]
@@ -3075,6 +3386,8 @@ fn sample_runtime_with_events(
         launch_error_terminal_details: HashMap::new(),
         window_lookup: HashMap::new(),
         board_all_view_windows: std::collections::HashSet::new(),
+        recovery_center_handles: HashMap::new(),
+        recovery_center_generation: 0,
         session_state_path: temp_root.join("session-state.json"),
         log_dir,
         proxy,

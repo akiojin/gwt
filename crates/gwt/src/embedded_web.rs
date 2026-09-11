@@ -101,6 +101,7 @@ root_js_modules! {
     "hotkey.js" => "createHotkeyManager",
     "operator-shell.js" => "initOperatorShell",
     "focus-trap.js" => "createFocusTrap",
+    "recovery-center-modal.js" => "createRecoveryCenterController",
     // Issue #2698 — stable project tab renderer. Keeps tab DOM keyed by
     // project tab id so status-only workspace refreshes do not rebuild the
     // whole tab strip.

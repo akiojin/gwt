@@ -6631,3 +6631,184 @@ button.workspace-board-ref:focus-visible {
     transition: none;
   }
 }
+
+/* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center. */
+.recovery-center-modal__shell {
+  width: min(760px, calc(100vw - var(--space-6)));
+  max-height: min(760px, calc(100vh - var(--space-6)));
+  overflow: hidden;
+}
+
+.recovery-center-modal__header,
+.recovery-center-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.recovery-center-modal__header h2,
+.recovery-center-modal__kicker,
+.recovery-center-row__summary,
+.recovery-center-row__meta,
+.recovery-center-empty {
+  margin: 0;
+}
+
+.recovery-center-modal__kicker {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-wide);
+}
+
+.recovery-center-modal__close {
+  min-width: var(--space-8);
+}
+
+.recovery-center-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 280px;
+  overflow: hidden;
+}
+
+.recovery-center-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.recovery-center-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.recovery-center-filters select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.recovery-center-filters select:focus-visible,
+.recovery-center-row:focus-visible,
+.recovery-center-row__board-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.recovery-center-status,
+.recovery-center-empty {
+  padding: var(--space-6);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.recovery-center-status.is-error {
+  color: var(--color-state-blocked);
+}
+
+.recovery-center-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: auto;
+  padding: var(--space-1);
+}
+
+.recovery-center-row {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.recovery-center-row:hover,
+.recovery-center-row.is-selected {
+  border-color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 9%, var(--color-surface-elevated));
+}
+
+.recovery-center-row__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.recovery-center-row__title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--color-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-center-row__badge {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.recovery-center-row__badge.is-pending {
+  border-color: var(--color-state-waiting);
+  color: var(--color-state-waiting);
+}
+
+.recovery-center-row__badge.is-acknowledged {
+  border-color: var(--color-state-running);
+  color: var(--color-state-running);
+}
+
+.recovery-center-row__badge.is-conflicted {
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.recovery-center-row__summary,
+.recovery-center-row__meta,
+.recovery-center-count {
+  color: var(--color-text-muted);
+}
+
+.recovery-center-row__summary {
+  line-height: var(--leading-normal);
+}
+
+.recovery-center-row__meta,
+.recovery-center-count {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.recovery-center-row__board-action {
+  justify-self: end;
+}
+
+@media (max-width: 640px) {
+  .recovery-center-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-center-row__heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}

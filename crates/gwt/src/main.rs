@@ -2633,6 +2633,8 @@ mod tests {
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: std::collections::HashSet::new(),
+            recovery_center_handles: HashMap::new(),
+            recovery_center_generation: 0,
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
             proxy,
