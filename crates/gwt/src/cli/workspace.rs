@@ -8041,6 +8041,7 @@ pub(crate) mod tests {
             crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands: plan.commands,
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .expect("run the status-advertised verification plan");
