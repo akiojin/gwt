@@ -75,6 +75,39 @@ pub const PR_ESCALATE_AFTER_UNCHANGED_CYCLES: u32 = 3;
 pub const PR_FALLBACK_WHEN_NOT_EXECUTABLE: &str = "PM triages the failure (#3790) → flake: \
 arrange a rerun → regression: arrange a fresh launch → neither possible: escalate to a human now";
 
+/// The evidence-bundle line that records who looked at the change, and what
+/// they concluded (SPEC-1935 FR-133).
+pub const USER_VERIFICATION_RESULT_LABEL: &str = "User Verification Result:";
+
+/// The value an autonomous execution records when its change has a UI surface
+/// that nobody was there to look at (Issue #4217 FR-003).
+///
+/// Deliberately distinct from both `confirmed` and `n/a`: the verification was
+/// not performed and was not unnecessary — it was postponed. A PR carrying it
+/// stays Draft until the owner sweeps it (FR-004).
+pub const DEFERRED_USER_VERIFICATION_RESULT: &str = "deferred (autonomous execution)";
+
+/// Whether a PR body records a *postponed* user verification.
+///
+/// Matches the recorded value rather than the whole line, so the reason text an
+/// agent appends cannot smuggle the PR past the Draft gate, and a body that
+/// merely discusses deferral in prose does not trip it.
+#[must_use]
+pub fn body_defers_user_verification(body: &str) -> bool {
+    body.lines().any(|line| {
+        line.trim_start()
+            .trim_start_matches(['-', '*', '#', '>', ' '])
+            .strip_prefix(USER_VERIFICATION_RESULT_LABEL)
+            .map(|value| {
+                value
+                    .trim()
+                    .trim_start_matches(['*', '`', ' '])
+                    .to_ascii_lowercase()
+            })
+            .is_some_and(|value| value.starts_with("deferred"))
+    })
+}
+
 /// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6) and the
 /// budget behaviour of the read itself (Issue #3891).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +324,14 @@ pub struct PrInventoryItem {
     /// reach the human with what was done or why nothing could be done.
     #[serde(default)]
     pub escalation_due: bool,
+    /// Issue #4217 FR-005: whether this PR's body postpones the owner's visual
+    /// verification, which is the list the owner sweeps later.
+    ///
+    /// `None` means the read did not hydrate bodies (`include: ["body"]`), so
+    /// the answer is unknown rather than negative — an absent body must never
+    /// read as "nothing is waiting for you".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_user_verification: Option<bool>,
 }
 
 fn lifecycle_source_observed() -> String {
@@ -571,6 +612,10 @@ fn inventory_item_from_fields(
     } else {
         "observed"
     };
+    let deferred_user_verification = options
+        .include
+        .body
+        .then(|| body_defers_user_verification(&fields.body));
     PrInventoryItem {
         number: fields.number,
         title: fields.title,
@@ -598,6 +643,7 @@ fn inventory_item_from_fields(
         unchanged_cycles: 0,
         escalate_after_cycles: options.escalate_after_cycles,
         escalation_due: decision.stale,
+        deferred_user_verification,
     }
 }
 
@@ -4223,6 +4269,70 @@ mod tests {
             PrLifecycleClass::Superseded,
             "supersession does not depend on mergeability"
         );
+    }
+
+    /// Issue #4217 FR-003: the marker separates a *postponed* verification
+    /// from one that was performed and from one that never applied. Only the
+    /// recorded value counts, so neither prose about deferral nor a reason
+    /// appended after `confirmed` can move a PR into or out of the sweep list.
+    #[test]
+    fn deferred_user_verification_is_read_from_the_recorded_value() {
+        for deferring in [
+            "User Verification Result: deferred (autonomous execution)",
+            "- User Verification Result: deferred (autonomous execution)",
+            "**User Verification Result:** deferred (autonomous execution)",
+            "User Verification Result: Deferred — owner sweeps this later",
+        ] {
+            assert!(
+                body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
+                "must recognize the deferred value: {deferring}"
+            );
+        }
+        for settled in [
+            "User Verification Result: confirmed",
+            "User Verification Result: n/a (autonomous)",
+            "User Verification Result: n/a (no UI surface)",
+            "User Verification Result: rejected(deferred rendering broke)",
+            "We deferred the redesign, but User Verification Result: confirmed",
+            "Agent Visual Check: pass",
+        ] {
+            assert!(
+                !body_defers_user_verification(&format!("## Verification\n{settled}\n")),
+                "must not treat this as deferred: {settled}"
+            );
+        }
+    }
+
+    /// FR-005: the sweep list is only trustworthy when an unhydrated body
+    /// reads as unknown. Reporting `false` for a body nobody fetched would
+    /// tell the owner nothing is waiting when something is.
+    #[test]
+    fn deferred_user_verification_is_unknown_until_bodies_are_hydrated() {
+        let mut fields = sample_inventory_fields();
+        fields.body = format!(
+            "Closes #10\n{USER_VERIFICATION_RESULT_LABEL} {DEFERRED_USER_VERIFICATION_RESULT}\n"
+        );
+
+        let without_body =
+            inventory_item_from_fields(fields.clone(), now_3868(), &PrInventoryOptions::default());
+        assert_eq!(
+            without_body.deferred_user_verification, None,
+            "an un-hydrated body is unknown, never a negative answer"
+        );
+
+        let options = PrInventoryOptions {
+            include: PrInventoryInclude {
+                checks: true,
+                body: true,
+            },
+            ..PrInventoryOptions::default()
+        };
+        let hydrated = inventory_item_from_fields(fields.clone(), now_3868(), &options);
+        assert_eq!(hydrated.deferred_user_verification, Some(true));
+
+        fields.body = "Closes #10\nUser Verification Result: confirmed\n".to_string();
+        let confirmed = inventory_item_from_fields(fields, now_3868(), &options);
+        assert_eq!(confirmed.deferred_user_verification, Some(false));
     }
 
     fn sample_item(number: u64, updated_at: &str, mergeable: &str, ci: &str) -> PrInventoryItem {
