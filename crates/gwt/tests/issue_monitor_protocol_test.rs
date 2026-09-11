@@ -80,10 +80,9 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
 
     // SPEC #3165 TQ-9: the row's "Remove from queue" action must reach the
     // backend instead of being rejected as an unknown variant.
-    let event: FrontendEvent = serde_json::from_str(
-        r#"{"kind":"issue_monitor_queue_remove","issue_numbers":[42]}"#,
-    )
-    .expect("queue remove event");
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"issue_monitor_queue_remove","issue_numbers":[42]}"#)
+            .expect("queue remove event");
     assert!(matches!(
         event,
         FrontendEvent::IssueMonitorQueueRemove { issue_numbers } if issue_numbers == vec![42]

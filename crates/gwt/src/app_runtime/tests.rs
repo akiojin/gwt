@@ -43746,11 +43746,13 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
     let queue = |numbers: &[u64]| gwt::issue_monitor::IssueMonitorTerminalQueue {
         entries: numbers
             .iter()
-            .map(|number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
-                number: *number,
-                queued_at: "2026-09-10T00:00:00Z".to_string(),
-                queued_by: "operator".to_string(),
-            })
+            .map(
+                |number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "operator".to_string(),
+                },
+            )
             .collect(),
         last_seen_at: None,
     };
@@ -43759,7 +43761,9 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
         max_active_agents: 1,
         ..gwt::IssueMonitorPrefs::default()
     };
-    seeded.terminal_queues.insert(host.clone(), queue(&[42, 43]));
+    seeded
+        .terminal_queues
+        .insert(host.clone(), queue(&[42, 43]));
     seeded
         .terminal_queues
         .insert(format!("{host}-other"), queue(&[42]));
@@ -43774,7 +43778,10 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
         },
     );
 
-    assert!(!events.is_empty(), "removal answers with a refreshed snapshot");
+    assert!(
+        !events.is_empty(),
+        "removal answers with a refreshed snapshot"
+    );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let numbers = |terminal: &str| {
         persisted.terminal_queues[terminal]
