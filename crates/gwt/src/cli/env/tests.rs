@@ -1078,7 +1078,7 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
         .set_labels(created.number, &["chore".to_string()])
         .expect("set labels");
     client_ref
-        .set_state(created.number, gwt_github::IssueState::Closed)
+        .set_state(created.number, gwt_github::IssueState::Closed, None)
         .expect("set state");
 
     let specs = client_ref

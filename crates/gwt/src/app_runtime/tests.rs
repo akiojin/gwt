@@ -46116,6 +46116,7 @@ impl IssueClient for PermissionDeniedCreateIssueClient {
         &self,
         _number: IssueNumber,
         _state: IssueState,
+        _reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<IssueSnapshot, ApiError> {
         unreachable!("quick register only creates issues")
     }

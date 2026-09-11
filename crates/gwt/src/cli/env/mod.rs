@@ -192,8 +192,9 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.inner.set_state(number, state)
+        self.inner.set_state(number, state, reason)
     }
     fn list_spec_issues(
         &self,

@@ -154,6 +154,14 @@ pub(super) fn run<E: CliEnv>(
             body,
             labels,
         } => run_issue_edit(env, number, title, body, labels, out)?,
+        IssueCommand::Close {
+            number,
+            reason,
+            comment,
+        } => run_issue_set_state(env, number, IssueState::Closed, reason, comment, out)?,
+        IssueCommand::Reopen { number, comment } => {
+            run_issue_set_state(env, number, IssueState::Open, None, comment, out)?
+        }
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
@@ -2548,6 +2556,85 @@ fn run_issue_edit<E: CliEnv>(
     Ok(0)
 }
 
+/// SPEC #4249 FR-001: the shared body of `issue.close` and `issue.reopen`.
+///
+/// The Issue body is never touched, so neither the section-managed refusal that
+/// guards `issue.edit` on `gwt-spec` Issues nor the `auto-merge` acceptance
+/// block guard applies — both exist to protect a body rewrite.
+///
+/// An Issue already in the target state is reported with `changed: false` and
+/// nothing reaches the API, not even `comment`: replaying the same envelope
+/// after a lost response must not duplicate the rationale on the Issue.
+fn run_issue_set_state<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    target: IssueState,
+    reason: Option<gwt_github::client::IssueCloseReason>,
+    comment: Option<String>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let issue = IssueNumber(number);
+    // Authoritative, not cached: the idempotence answer below is only as good
+    // as the state it is compared against.
+    let current = load_or_refresh_issue(env, issue, true)?.snapshot;
+    if current.state == target {
+        // `reason` describes what was written, and nothing was: echoing the
+        // requested one here would claim a rationale GitHub never recorded.
+        write_issue_state_result(out, number, target, false, None, None);
+        return Ok(0);
+    }
+
+    // The rationale lands before the state change, so a reader who finds the
+    // Issue closed already sees why it was closed.
+    let comment_id = match comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+    {
+        Some(body) => Some(env.client().create_comment(issue, body)?.id.0),
+        None => None,
+    };
+    env.client().set_state(issue, target, reason)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        match target {
+            IssueState::Closed => "issue.close",
+            IssueState::Open => "issue.reopen",
+        },
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    // One-way flow: the cache is refreshed from the post-write server state so
+    // the UI and the Monitor never read a state this operation already changed.
+    let _ = refresh_issue_cache(env, issue)?;
+    write_issue_state_result(out, number, target, true, reason, comment_id);
+    Ok(0)
+}
+
+fn write_issue_state_result(
+    out: &mut String,
+    number: u64,
+    state: IssueState,
+    changed: bool,
+    reason: Option<gwt_github::client::IssueCloseReason>,
+    comment_id: Option<u64>,
+) {
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": match state {
+                IssueState::Closed => "closed",
+                IssueState::Open => "open",
+            },
+            "changed": changed,
+            "reason": reason.map(gwt_github::client::IssueCloseReason::as_str),
+            "comment_id": comment_id,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+}
+
 fn write_issue_edit_refusal(out: &mut String, number: u64, reason: &str) -> i32 {
     out.push_str(
         &serde_json::json!({
@@ -3727,6 +3814,274 @@ mod tests {
                 .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")),
             "nothing may reach the API"
         );
+    }
+
+    fn state_result(out: &str) -> serde_json::Value {
+        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("state result JSON: {e}: {out}"))
+    }
+
+    /// SPEC #4249 AC-1: both a plain Issue and a `gwt-spec` Issue move between
+    /// open and closed, and the local cache — the one-way flow the UI and the
+    /// Monitor read — carries the new state afterwards.
+    #[test]
+    fn issue_close_and_reopen_move_the_state_and_the_cache() {
+        for labels in [&["bug"][..], &["gwt-spec", "phase/draft"][..]] {
+            let (_tmp, mut env) = seeded_edit_env(labels);
+
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                IssueCommand::Close {
+                    number: 7,
+                    reason: None,
+                    comment: None,
+                },
+                &mut out,
+            )
+            .unwrap_or_else(|e| panic!("close {labels:?}: {e}"));
+            assert_eq!(code, 0, "{out}");
+            let result = state_result(&out);
+            assert_eq!(result["status"], "closed", "{out}");
+            assert_eq!(result["changed"], true, "{out}");
+            assert_eq!(fetched(&env, 7).state, IssueState::Closed);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .expect("cache entry after close")
+                    .snapshot
+                    .state,
+                IssueState::Closed,
+                "the cache must follow the write, or the UI keeps showing an open Issue"
+            );
+
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                IssueCommand::Reopen {
+                    number: 7,
+                    comment: None,
+                },
+                &mut out,
+            )
+            .unwrap_or_else(|e| panic!("reopen {labels:?}: {e}"));
+            assert_eq!(code, 0, "{out}");
+            let result = state_result(&out);
+            assert_eq!(result["status"], "open", "{out}");
+            assert_eq!(result["changed"], true, "{out}");
+            assert_eq!(fetched(&env, 7).state, IssueState::Open);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .expect("cache entry after reopen")
+                    .snapshot
+                    .state,
+                IssueState::Open
+            );
+            // The body is never touched, so the section-managed refusal that
+            // guards `issue.edit` has nothing to protect here.
+            assert_eq!(fetched(&env, 7).body, "Original body");
+        }
+    }
+
+    /// SPEC #4249 FR-001: the close reason reaches the client, and an explaining
+    /// comment is posted *before* the close so a reader who finds the Issue
+    /// closed already sees why.
+    #[test]
+    fn issue_close_carries_the_reason_and_comments_before_closing() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::Duplicate),
+                comment: Some("absorbed by #4249".to_string()),
+            },
+            &mut out,
+        )
+        .expect("close with reason and comment");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["reason"], "duplicate", "{out}");
+        assert!(result["comment_id"].is_u64(), "{out}");
+
+        let calls: Vec<String> = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("create_comment") || call.starts_with("set_state"))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                "create_comment:#7".to_string(),
+                "set_state:#7:duplicate".to_string()
+            ],
+            "the comment must land before the close, and the reason must reach the client"
+        );
+    }
+
+    /// SPEC #4249 FR-001: replaying the same envelope is a no-op. Nothing
+    /// reaches the API — a second `comment` would otherwise duplicate itself on
+    /// every retry.
+    #[test]
+    fn issue_close_and_reopen_are_idempotent() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("first close");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                comment: Some("second pass".to_string()),
+            },
+            &mut out,
+        )
+        .expect("replayed close is a success, not a failure");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["status"], "closed", "{out}");
+        assert_eq!(result["changed"], false, "{out}");
+
+        let mutations = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("set_state") || call.starts_with("create_comment"))
+            .count();
+        assert_eq!(mutations, 1, "the replay must not reach the API");
+
+        // The mirror case: reopening an already-open Issue.
+        let (_tmp2, mut open) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut open,
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("replayed reopen");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(state_result(&out)["changed"], false, "{out}");
+        assert!(
+            !open
+                .client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("set_state")),
+            "nothing may reach the API"
+        );
+    }
+
+    /// SPEC #4249 FR-001: an unknown Issue number fails with its own cause and
+    /// writes nothing.
+    #[test]
+    fn issue_close_reports_a_missing_issue() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let missing = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 999,
+                reason: None,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect_err("missing issue");
+        assert!(missing.to_string().contains("#999 not found"), "{missing}");
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("set_state")),
+            "a missing Issue must not reach the state endpoint"
+        );
+    }
+
+    /// SPEC #4249 AC-2: closing and reopening an Issue leaves the Monitor's
+    /// local queue accounting alone, so a `issue.monitor.requeue` right after a
+    /// reopen still returns the Issue to the queue. The operations write GitHub
+    /// and the Issue cache only; if either ever started writing a durable
+    /// closure hold, this test is the one that catches it.
+    #[test]
+    fn reopened_issue_still_requeues_into_the_monitor_queue() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 7,
+                    message: "agent window closed without a PR".to_string(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.seed(IssueSnapshot {
+            number: IssueNumber(7),
+            title: "Closed by mistake".to_string(),
+            body: "Original body".to_string(),
+            labels: vec!["bug".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: vec![],
+        });
+
+        for command in [
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::Duplicate),
+                comment: None,
+            },
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+        ] {
+            let mut out = String::new();
+            run(&mut env, command, &mut out).expect("state change");
+        }
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 7,
+                reason: "reopened after an absorption was reversed".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue after reopen");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["status"], "requeued", "{out}");
     }
 
     #[test]
