@@ -22,12 +22,15 @@ pub use codex_home::{
 pub use codex_hook_trust::{
     collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
     register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
-    register_codex_managed_hook_trust_for_mode_with_expected_bin, CodexHookTrustEntry,
-    CodexHookTrustExpectation, CodexHookTrustReport,
+    register_codex_managed_hook_trust_for_mode_with_expected_bin,
+    register_codex_managed_project_trust, revoke_codex_managed_project_trust,
+    revoke_codex_managed_project_trust_with_cleanup, CodexHookTrustEntry,
+    CodexHookTrustExpectation, CodexHookTrustReport, CodexProjectTrustReport,
 };
 pub use codex_managed_config::{
-    ensure_codex_context_management_experimental_mode, CodexManagedConfigOutcome,
-    CodexManagedConfigReport, CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+    ensure_codex_context_management_experimental_mode, CodexFeaturesSchema,
+    CodexManagedConfigOutcome, CodexManagedConfigReport,
+    CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY, CODEX_FEATURE_TABLE_MIN_VERSION,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,

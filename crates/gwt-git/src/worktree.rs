@@ -911,11 +911,71 @@ impl WorktreeManager {
             .find(|wt| wt.branch.as_deref() == Some(branch))
             .map(|wt| wt.path);
 
+        self.cleanup_branch_with_resolved_worktree_path(
+            branch,
+            worktree_path.as_deref(),
+            force_filesystem_delete,
+        )
+    }
+
+    /// Remove `branch` only when it is still bound to `expected_path`.
+    ///
+    /// Lifecycle callers use this after recording state for one exact
+    /// worktree. Revalidating the binding prevents a later inventory lookup
+    /// from deleting a rebound worktree whose state was not part of the same
+    /// transaction.
+    pub fn cleanup_branch_at_path_with_force_filesystem_delete(
+        &self,
+        branch: &str,
+        expected_path: &Path,
+        force_filesystem_delete: bool,
+    ) -> Result<()> {
+        let current_path = self
+            .list()?
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch))
+            .map(|wt| wt.path);
+        match current_path.as_deref() {
+            Some(current_path)
+                if normalize_windows_child_process_path(current_path)
+                    != normalize_windows_child_process_path(expected_path) =>
+            {
+                Err(GwtError::Git(format!(
+                    "branch {branch} changed worktree path from {} to {}; refusing cleanup",
+                    expected_path.display(),
+                    current_path.display()
+                )))
+            }
+            None if expected_path.exists() => {
+                Err(GwtError::Git(format!(
+                    "branch {branch} changed worktree path from {} to no registered worktree; refusing cleanup",
+                    expected_path.display()
+                )))
+            }
+            Some(_) => self.cleanup_branch_with_resolved_worktree_path(
+                branch,
+                Some(expected_path),
+                force_filesystem_delete,
+            ),
+            None => self.cleanup_branch_with_resolved_worktree_path(
+                branch,
+                None,
+                force_filesystem_delete,
+            ),
+        }
+    }
+
+    fn cleanup_branch_with_resolved_worktree_path(
+        &self,
+        branch: &str,
+        worktree_path: Option<&Path>,
+        force_filesystem_delete: bool,
+    ) -> Result<()> {
         if let Some(path) = worktree_path {
             let remove_result = if force_filesystem_delete {
-                self.remove_force_twice(&path)
+                self.remove_force_twice(path)
             } else {
-                self.remove_force(&path)
+                self.remove_force(path)
             };
             match remove_result {
                 Ok(()) => {}
@@ -924,8 +984,8 @@ impl WorktreeManager {
                     self.prune()?;
                 }
                 Err(err) if force_filesystem_delete && is_filesystem_residue_error(&err) => {
-                    validate_force_filesystem_residue_path(&self.repo_path, branch, &path)?;
-                    remove_worktree_filesystem_residue(&path)?;
+                    validate_force_filesystem_residue_path(&self.repo_path, branch, path)?;
+                    remove_worktree_filesystem_residue(path)?;
                     self.prune()?;
                 }
                 Err(err) => return Err(err),
@@ -2963,6 +3023,44 @@ prunable gitdir file points to non-existent location
                 .any(|b| b.is_local && b.name == "feature/cleanup-me"),
             "branch should be deleted: {branches:?}"
         );
+    }
+
+    #[test]
+    fn cleanup_branch_at_path_rejects_a_rebound_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let actual_path = sibling_worktree_path(&repo_path, "feature/rebound-current");
+        manager
+            .create_from_base("main", "feature/rebound", &actual_path)
+            .or_else(|_| manager.create_from_base("master", "feature/rebound", &actual_path))
+            .unwrap();
+        let stale_path = sibling_worktree_path(&repo_path, "feature/rebound-stale");
+
+        let error = manager
+            .cleanup_branch_at_path_with_force_filesystem_delete(
+                "feature/rebound",
+                &stale_path,
+                false,
+            )
+            .expect_err("a changed branch-to-worktree binding must fail closed");
+
+        assert!(
+            error.to_string().contains("changed worktree path"),
+            "{error}"
+        );
+        assert!(
+            actual_path.exists(),
+            "the rebound worktree must be retained"
+        );
+        let branches = crate::branch::list_branches(&repo_path).unwrap();
+        assert!(branches
+            .iter()
+            .any(|branch| branch.is_local && branch.name == "feature/rebound"));
     }
 
     #[test]
