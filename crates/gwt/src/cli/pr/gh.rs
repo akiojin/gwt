@@ -489,6 +489,78 @@ mutation($id: ID!) {
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+/// Whether a `updatePullRequestBranch` failure is GitHub saying the merge
+/// would conflict, rather than the call itself breaking.
+///
+/// GitHub answers a conflicting update with an ordinary GraphQL error, so the
+/// wording is the only signal available. Anything unrecognised stays an error:
+/// a PM must never read an unknown failure as "conflict, owner's problem".
+pub fn update_branch_failure_is_conflict(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("conflict") || message.contains("merge conflict")
+}
+
+/// Merge the base branch into the PR head through the GraphQL mutation
+/// `updatePullRequestBranch` (SPEC #3835 AC-15). This is the PM's only way out
+/// of `BEHIND`, and the one action `default_action` has been recommending
+/// without an operation behind it.
+///
+/// A conflicting update is reported as [`PrUpdateBranchOutcome::Conflicted`]
+/// and pushes nothing: resolving conflicts stays the owner's work (FR-007).
+pub fn update_pr_branch_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+) -> io::Result<super::types::PrUpdateBranchResult> {
+    use super::types::{PrUpdateBranchOutcome, PrUpdateBranchResult};
+
+    let node_id = fetch_pr_node_id_via_gh(repo_slug, repo_path, number)?;
+    let mutation = r#"
+mutation($id: ID!) {
+  updatePullRequestBranch(input: { pullRequestId: $id }) {
+    pullRequest { number }
+  }
+}
+"#;
+    let output = run_gh(
+        "gh api graphql updatePullRequestBranch",
+        [
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={mutation}"),
+            "-f",
+            &format!("id={node_id}"),
+        ],
+    )?;
+    if !output.success() {
+        // `gh api graphql` reports a GraphQL-level error on stdout (the
+        // `errors` array) and a transport-level one on stderr, and a
+        // conflicting update is the former. Read both so a conflict is not
+        // mistaken for a broken call.
+        let detail = [output.stderr.trim(), output.stdout.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if update_branch_failure_is_conflict(&detail) {
+            return Ok(PrUpdateBranchResult {
+                number,
+                outcome: PrUpdateBranchOutcome::Conflicted,
+                detail,
+            });
+        }
+        return Err(io::Error::other(format!(
+            "gh api graphql updatePullRequestBranch: {detail}"
+        )));
+    }
+    Ok(PrUpdateBranchResult {
+        number,
+        outcome: PrUpdateBranchOutcome::Updated,
+        detail: String::new(),
+    })
+}
+
 pub fn extract_pr_url(stdout: &str) -> Option<String> {
     stdout
         .lines()
@@ -1086,6 +1158,36 @@ mod tests {
             path: "src/lib.rs".to_string(),
             line: Some(12),
             comments: Vec::new(),
+        }
+    }
+
+    /// SPEC #3835 AC-15: GitHub answers a conflicting update with an ordinary
+    /// GraphQL error, so only the wording separates "the base would conflict"
+    /// from "the call broke". An unrecognised failure stays an error: reading
+    /// it as a conflict would tell the PM to relaunch an owner for a problem
+    /// that is not theirs.
+    #[test]
+    fn only_a_conflict_message_is_read_as_a_conflict() {
+        for message in [
+            "merge conflict between base and head",
+            "GraphQL: Merge conflict (updatePullRequestBranch)",
+            "CONFLICT: cannot update branch",
+        ] {
+            assert!(
+                update_branch_failure_is_conflict(message),
+                "must be read as a conflict: {message}"
+            );
+        }
+        for message in [
+            "HTTP 401: Bad credentials",
+            "GraphQL: Resource not accessible by integration",
+            "could not resolve to a PullRequest",
+            "",
+        ] {
+            assert!(
+                !update_branch_failure_is_conflict(message),
+                "must stay an error: {message}"
+            );
         }
     }
 

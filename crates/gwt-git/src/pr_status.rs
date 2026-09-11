@@ -272,6 +272,15 @@ pub struct PrLifecycleDecision {
     pub dwell_hours: Option<i64>,
     /// Whether the PM can execute `default_action` through JSON operations.
     pub default_action_executable: bool,
+    /// SPEC #3835 AC-17: the JSON operation that performs `default_action`,
+    /// when the action needs one. `None` means the action is advisory (a
+    /// digest line, a hold, "leave in progress") or runs through the owner
+    /// relaunch path, whose executability `blocker` already governs.
+    ///
+    /// An action that needs an operation and has none must never be reported
+    /// executable — that is exactly how `update-branch` spent 21 of 25 open
+    /// PRs recommending a step no surface could take.
+    pub default_action_operation: Option<&'static str>,
     /// Why the owner cannot be relaunched, when known (Issue #3868 AC-1).
     pub blocker: Option<String>,
     /// The fallback order to apply when `default_action` is not executable.
@@ -311,6 +320,9 @@ pub struct PrInventoryItem {
     pub stale_after_hours: i64,
     #[serde(default = "default_true")]
     pub default_action_executable: bool,
+    /// SPEC #3835 AC-17: the JSON operation that performs `default_action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_action_operation: Option<String>,
     #[serde(default)]
     pub blocker: Option<String>,
     #[serde(default)]
@@ -456,6 +468,7 @@ impl PrInventoryItem {
         self.lifecycle_source = "held".to_string();
         self.default_action = decision.default_action;
         self.default_action_executable = decision.default_action_executable;
+        self.default_action_operation = decision.default_action_operation.map(str::to_string);
         self.blocker = decision.blocker;
         self.fallback = decision.fallback;
     }
@@ -585,6 +598,7 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     } else {
         None
     };
+    let default_action_operation = default_action_operation(class, fields.is_draft);
     let default_action_executable = !(class.relaunches_owner() && blocker.is_some());
     let fallback =
         (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string());
@@ -596,8 +610,29 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         default_action,
         dwell_hours: None,
         default_action_executable,
+        default_action_operation,
         blocker: blocker.map(str::to_string),
         fallback,
+    }
+}
+
+/// The JSON operation that performs the class's default action, when the
+/// action is one a surface executes rather than advice the PM acts on
+/// (SPEC #3835 AC-17).
+///
+/// Every name returned here must be an operation the envelope parser accepts;
+/// `crates/gwt` fixes that with a test, because this crate cannot see the
+/// operation table.
+fn default_action_operation(class: PrLifecycleClass, is_draft: bool) -> Option<&'static str> {
+    match (class, is_draft) {
+        // "mark ready"
+        (PrLifecycleClass::MergeCandidate, true) => Some("pr.ready"),
+        // "update-branch"
+        (PrLifecycleClass::Behind, _) => Some("pr.update_branch"),
+        // "propose merge" is a proposal, and merging is `auto-merge.yml`'s job.
+        // Conflict and CI-red relaunch the owner; superseded, in-progress and
+        // undetermined are digest lines and holds.
+        _ => None,
     }
 }
 
@@ -638,6 +673,7 @@ fn inventory_item_from_fields(
         dwell_hours: decision.dwell_hours,
         stale_after_hours: options.stale_after_hours,
         default_action_executable: decision.default_action_executable,
+        default_action_operation: decision.default_action_operation.map(str::to_string),
         blocker: decision.blocker,
         fallback: decision.fallback,
         unchanged_cycles: 0,
@@ -4083,6 +4119,53 @@ mod tests {
         let decision = classify_pr_lifecycle_with(&fields, now_3868(), &tight);
         assert!(decision.stale, "25h exceeds a 24h threshold");
         assert_eq!(decision.default_action, "escalate: no update for 24h");
+    }
+
+    /// SPEC #3835 AC-17: `update-branch` names the operation that performs it,
+    /// so "the PM may do this" and "a surface can do this" stop disagreeing.
+    #[test]
+    fn a_behind_pr_names_the_operation_that_resolves_it() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Behind);
+        assert_eq!(decision.default_action, "update-branch");
+        assert_eq!(decision.default_action_operation, Some("pr.update_branch"));
+        assert!(decision.default_action_executable);
+    }
+
+    /// SPEC #3835 AC-17: advisory actions name no operation. "leave in
+    /// progress" and "propose close in digest" are things the PM decides, not
+    /// calls it makes, so claiming an operation for them would be the same
+    /// dishonesty in the other direction.
+    #[test]
+    fn advisory_default_actions_name_no_operation() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "PENDING".to_string();
+        let in_progress = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(in_progress.class, PrLifecycleClass::InProgress);
+        assert_eq!(in_progress.default_action_operation, None);
+
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("CLOSED".to_string()),
+        }];
+        let superseded = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(superseded.class, PrLifecycleClass::Superseded);
+        assert_eq!(superseded.default_action_operation, None);
+    }
+
+    /// SPEC #3835 AC-17: a Draft merge candidate is promoted through the
+    /// canonical `pr.ready`, never through a bare `gh` mutation.
+    #[test]
+    fn a_draft_merge_candidate_names_pr_ready() {
+        let mut fields = sample_inventory_fields();
+        fields.is_draft = true;
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert_eq!(decision.default_action, "mark ready");
+        assert_eq!(decision.default_action_operation, Some("pr.ready"));
     }
 
     /// Issue #4074 AC-2: the launch guard now inherits a launch ref carrying

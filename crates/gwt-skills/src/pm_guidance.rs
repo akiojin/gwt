@@ -727,8 +727,23 @@ quota:
   (the triage procedure is #3790's, not yours to redefine), arrange a
   rerun when it is a flake, arrange a fresh launch when it is a
   regression, and escalate to the user immediately when neither is
-  possible. You may run `gh pr update-branch` and canonical `pr.ready`
-  yourself; never bypass them with other `gh` mutations.
+  possible. You may run canonical `pr.update_branch` and `pr.ready`
+  yourself; never bypass them with `gh` mutations.
+- `default_action_operation` names the operation that performs
+  `default_action` when it needs one: `pr.update_branch` for `BEHIND`,
+  `pr.ready` for a Draft `MERGE-CANDIDATE`. A row with no
+  `default_action_operation` is advice you act on, not a call you make.
+  Never invent an operation for a row that names none.
+- **Run `pr.update_branch` one PR at a time.** Every merge into the base
+  puts every other open PR back to `BEHIND`, so a fan-out re-runs CI on
+  branches that are about to go stale again. Each cycle, pick the single
+  PR closest to promotion — `BEHIND` with no failing check, nothing in
+  progress, and no unresolved review thread — update that one, and let
+  the next cycle pick the next. Do not update a second PR in the same
+  cycle, and never update every `BEHIND` row at once.
+- `pr.update_branch` refuses a PR whose base would conflict and reports
+  `CONFLICTED` without pushing anything. That is the owner's work:
+  relaunch the owner, and never resolve a conflict yourself.
 - A cycle in which at least one open PR is `CI-RED` or `CONFLICTED` is
   never a no-change cycle. Advance at least one such PR (triage posted,
   rerun arranged, fresh launch arranged, update-branch run) or state in
@@ -1686,7 +1701,7 @@ mod tests {
             "arrange a rerun when it is a flake",
             "arrange a fresh launch when it is a regression",
             "escalate to the user immediately when neither is possible",
-            "`gh pr update-branch`",
+            "canonical `pr.update_branch` and `pr.ready`",
             "at least one open PR is `CI-RED` or `CONFLICTED` is never a no-change cycle",
             "`dwell_hours`",
             "`stale_after_hours`",
@@ -1709,6 +1724,42 @@ mod tests {
             ),
             "the silent-cycle rule must carry the red-PR exception"
         );
+    }
+
+    /// SPEC #3835 AC-16: `update-branch` is serialized. One merge into the
+    /// base puts every other open PR back to `BEHIND`, so updating them all at
+    /// once burns CI on branches that go stale again before they land. The PM
+    /// advances the single PR closest to promotion and leaves the rest.
+    #[test]
+    fn contract_serializes_update_branch_to_the_pr_closest_to_promotion() {
+        let body = body();
+        for phrase in [
+            "Run `pr.update_branch` one PR at a time",
+            "puts every other open PR back to `BEHIND`",
+            "pick the single PR closest to promotion",
+            "Do not update a second PR in the same cycle",
+            "never update every `BEHIND` row at once",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// SPEC #3835 AC-17 / FR-007: a row says which operation performs its
+    /// default action, and a conflicting update is handed back to the owner
+    /// rather than resolved by the PM.
+    #[test]
+    fn contract_names_the_operation_behind_each_default_action() {
+        let body = body();
+        for phrase in [
+            "`default_action_operation` names the operation that performs `default_action`",
+            "`pr.update_branch` for `BEHIND`",
+            "`pr.ready` for a Draft `MERGE-CANDIDATE`",
+            "Never invent an operation for a row that names none",
+            "refuses a PR whose base would conflict and reports `CONFLICTED`",
+            "never resolve a conflict yourself",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
     }
 
     /// Issue #3868 AC-9 / AC-10 / AC-11: quota exhaustion is reported as an
