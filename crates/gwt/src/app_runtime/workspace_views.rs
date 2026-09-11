@@ -25,6 +25,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
 use super::{
     active_agent_summary_from_session, current_git_branch, local_branch_exists,
     merge_active_sessions_into_projection, normalize_branch_name, origin_remote_ref,
@@ -337,35 +339,16 @@ fn managed_hook_health_view_for_project(
     project_root: &Path,
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
-    hook_binaries: &gwt::cli::hook::health::HookBinaryResolutionCache,
+    hook_failures: &ManagedHookFailureSnapshot,
 ) -> Option<gwt::ManagedHookHealthView> {
-    managed_hook_health_view_for_worktree_with_cache(
-        project_root,
-        sessions_dir,
-        sessions,
-        hook_binaries,
-    )
+    managed_hook_health_view_for_worktree(project_root, sessions_dir, sessions, hook_failures)
 }
 
-#[cfg(test)]
 pub(super) fn managed_hook_health_view_for_worktree(
     worktree: &Path,
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
-) -> Option<gwt::ManagedHookHealthView> {
-    managed_hook_health_view_for_worktree_with_cache(
-        worktree,
-        sessions_dir,
-        sessions,
-        &gwt::cli::hook::health::HookBinaryResolutionCache::default(),
-    )
-}
-
-fn managed_hook_health_view_for_worktree_with_cache(
-    worktree: &Path,
-    sessions_dir: &Path,
-    sessions: &[&ActiveAgentSession],
-    hook_binaries: &gwt::cli::hook::health::HookBinaryResolutionCache,
+    hook_failures: &ManagedHookFailureSnapshot,
 ) -> Option<gwt::ManagedHookHealthView> {
     let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(worktree);
     input.runtime_state_path = None;
@@ -389,7 +372,7 @@ fn managed_hook_health_view_for_worktree_with_cache(
     if let Some(runtime_state_path) = selected_runtime_state {
         input = input.with_runtime_state_path(runtime_state_path);
     }
-    let health = gwt::cli::hook::health::read_managed_hook_health_with_cache(&input, hook_binaries);
+    let health = hook_failures.read_health(&input);
     let should_show = health.status != gwt::cli::hook::health::ManagedHookHealthStatus::Inactive
         || health.pending_discussion.is_some()
         || health.pending_goal.is_some()
@@ -402,8 +385,11 @@ fn attach_managed_hook_health_to_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
-    hook_binaries: &gwt::cli::hook::health::HookBinaryResolutionCache,
+    hook_failures: &ManagedHookFailureSnapshot,
 ) {
+    // Count the input Work rows, including rows without a materialized worktree.
+    let work_count = active_works.len();
+    let started = std::time::Instant::now();
     for work in active_works {
         let Some(worktree) = work.worktree_path.as_deref().map(Path::new) else {
             continue;
@@ -413,13 +399,52 @@ fn attach_managed_hook_health_to_active_works(
             .copied()
             .filter(|session| projection_worktree_paths_match(&session.worktree_path, worktree))
             .collect::<Vec<_>>();
-        work.managed_hook_health = managed_hook_health_view_for_worktree_with_cache(
+        work.managed_hook_health = managed_hook_health_view_for_worktree(
             worktree,
             sessions_dir,
             &matching_sessions,
-            hook_binaries,
+            hook_failures,
         );
     }
+    log_work_hook_health_timing(started.elapsed().as_millis() as u64, work_count);
+}
+
+fn log_work_hook_health_timing(elapsed_ms: u64, work_count: usize) {
+    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            stage = "work_rows_hook_health_excluding_project",
+            elapsed_ms,
+            work_count,
+            "Work row hook health aggregation exceeded budget (project health excluded)"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            stage = "work_rows_hook_health_excluding_project",
+            elapsed_ms,
+            work_count,
+            "Work row hook health aggregated (project health excluded)"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn work_hook_health_timing_warns_at_budget_with_work_count() {
+    let output = crate::tests::capture_timing_warnings(|| {
+        log_work_hook_health_timing(30, 9);
+        log_work_hook_health_timing(29, 9);
+    });
+    let logs: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("hook health timing JSON"))
+        .collect();
+    assert_eq!(logs.len(), 1, "29ms must not warn; 30ms must warn");
+    let fields = &logs[0]["fields"];
+    assert_eq!(fields["stage"], "work_rows_hook_health_excluding_project");
+    assert_eq!(fields["elapsed_ms"], 30);
+    assert_eq!(fields["work_count"], 9);
 }
 
 fn managed_hook_health_status_wire(
@@ -3638,9 +3663,6 @@ impl AppRuntime {
             .values()
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
-        // Issue #4257: every Work row audits hook health; resolve each hook
-        // binary once for the whole build, not once per command and row.
-        let hook_binaries = gwt::cli::hook::health::HookBinaryResolutionCache::default();
         let saved_projection =
             gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
                 .ok()
@@ -3730,11 +3752,14 @@ impl AppRuntime {
                 workspaces,
                 cleanup_candidate,
             );
+            // Issue #4172: one ledger read for the whole projection instead of
+            // one per Work row, so hook health stops scaling with Work count.
+            let hook_failures = ManagedHookFailureSnapshot::read();
             view.managed_hook_health = managed_hook_health_view_for_project(
                 &tab.project_root,
                 &self.sessions_dir,
                 &sessions,
-                &hook_binaries,
+                &hook_failures,
             );
             // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
             // branch into one Workspace row before the ledger attach, so the
@@ -3754,7 +3779,7 @@ impl AppRuntime {
                 &mut view.active_works,
                 &self.sessions_dir,
                 &sessions,
-                &hook_binaries,
+                &hook_failures,
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background merge-scan cache plus the recorded PR state.
@@ -3800,6 +3825,8 @@ impl AppRuntime {
             return Some(view);
         }
 
+        // Issue #4172: same single ledger read for the live-session projection.
+        let hook_failures = ManagedHookFailureSnapshot::read();
         let mut view = active_work_projection_from_live_sessions(
             tab_id,
             tab,
@@ -3808,7 +3835,7 @@ impl AppRuntime {
                 &tab.project_root,
                 &self.sessions_dir,
                 &sessions,
-                &hook_binaries,
+                &hook_failures,
             ),
         );
         if let Some(view) = view.as_mut() {
@@ -3816,7 +3843,7 @@ impl AppRuntime {
                 &mut view.active_works,
                 &self.sessions_dir,
                 &sessions,
-                &hook_binaries,
+                &hook_failures,
             );
         }
         let mut cache = self.active_work_projection_cache.borrow_mut();
