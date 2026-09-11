@@ -289,7 +289,7 @@ pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
     derive_for_host(worktree, VerificationHost::current())
 }
 
-/// [`derive`] against an explicit host, so both branches of the
+/// [`derive()`] against an explicit host, so both branches of the
 /// host-sensitive matrix stay reachable from tests on any machine (#4182).
 fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPlan, String> {
     if git_lines(worktree, &["rev-parse", "--git-dir"]).is_empty() {
