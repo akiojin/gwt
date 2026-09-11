@@ -20,6 +20,23 @@ test.describe("Recovery Center", () => {
     await page.goto(APP_URL);
   });
 
+  test("filters independently and resets both filters when reopened", async ({ page }) => {
+    await runPaletteCommand(page, "Open Recovery Center");
+    const modal = page.locator("#recovery-center-modal");
+    const state = modal.locator("#recovery-center-state-filter");
+    const form = modal.locator("#recovery-center-worktree-filter");
+    await state.selectOption("all");
+    await form.selectOption("branch-backed");
+    await expect(modal.locator(".recovery-center-row")).toHaveCount(1);
+    await expect(modal.locator(".recovery-center-row")).toContainText("Acknowledged");
+    await page.keyboard.press("Escape");
+    await expect(modal).not.toHaveClass(/\bopen\b/);
+    await runPaletteCommand(page, "Open Recovery Center");
+    await expect(state).toHaveValue("attention");
+    await expect(form).toHaveValue("all");
+    await expect(modal.locator(".recovery-center-row")).toHaveCount(2);
+  });
+
   test("renders all public facets and reuses the Board deep-link path", async ({
     page,
   }) => {
