@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -59,6 +60,147 @@ fn with_managed_asset_lock<T>(
 /// newer Codex). Deduplicated when both resolve to the same file.
 pub fn managed_codex_hook_paths(worktree: &Path) -> Vec<PathBuf> {
     gwt_skills::codex_hooks_paths_for_codex_discovery(worktree, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
+}
+
+/// Resolve the only Host Codex config whose project trust lifecycle gwt can
+/// own without durable per-launch provenance.
+///
+/// A process-level absolute `CODEX_HOME` is stable across worktrees. When it
+/// is absent, Codex uses the OS user home. Relative or profile-only homes are
+/// deliberately unsupported because their launch-time path cannot be
+/// recovered exactly by every later cleanup route.
+pub fn process_stable_codex_config_path_with(
+    process_codex_home: Option<&OsStr>,
+    os_user_home: Option<&Path>,
+) -> Option<PathBuf> {
+    let codex_home = match process_codex_home.filter(|value| !value.is_empty()) {
+        Some(value) => {
+            let configured = PathBuf::from(value);
+            if !configured.is_absolute() {
+                return None;
+            }
+            dunce::canonicalize(&configured).unwrap_or(configured)
+        }
+        None => {
+            let home = os_user_home?.to_path_buf();
+            if !home.is_absolute() {
+                return None;
+            }
+            home.join(".codex")
+        }
+    };
+    Some(gwt_core::paths::normalize_windows_child_process_path(&codex_home).join("config.toml"))
+}
+
+/// Resolve the shared Host Codex config for one managed worktree.
+///
+/// Even an absolute process-level `CODEX_HOME` is not a shared lifecycle
+/// target when it lives inside the worktree that gwt will eventually remove.
+pub fn process_stable_codex_config_path_for_worktree_with(
+    worktree: &Path,
+    process_codex_home: Option<&OsStr>,
+    os_user_home: Option<&Path>,
+) -> Option<PathBuf> {
+    let config_path = process_stable_codex_config_path_with(process_codex_home, os_user_home)?;
+    let comparable_config = comparable_lifecycle_path(&config_path);
+    let comparable_worktree = comparable_lifecycle_path(worktree);
+    (!path_is_same_or_descendant(&comparable_config, &comparable_worktree)).then_some(config_path)
+}
+
+fn comparable_lifecycle_path(path: &Path) -> PathBuf {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(mut canonical) = dunce::canonicalize(ancestor) {
+            for component in suffix.iter().rev() {
+                canonical.push(component);
+            }
+            return gwt_core::paths::normalize_windows_child_process_path(&canonical);
+        }
+        let (Some(file_name), Some(parent)) = (ancestor.file_name(), ancestor.parent()) else {
+            break;
+        };
+        suffix.push(file_name.to_os_string());
+        ancestor = parent;
+    }
+    gwt_core::paths::normalize_windows_child_process_path(path)
+}
+
+/// Compare two Codex config paths after resolving the deepest existing
+/// component and normalizing child-process path syntax.
+pub fn codex_config_paths_equivalent(left: &Path, right: &Path) -> bool {
+    let left = comparable_lifecycle_path(left);
+    let right = comparable_lifecycle_path(right);
+    paths_equivalent(&left, &right)
+}
+
+#[cfg(not(windows))]
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+#[cfg(windows)]
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy()
+        .replace('/', "\\")
+        .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
+}
+
+#[cfg(not(windows))]
+fn path_is_same_or_descendant(candidate: &Path, root: &Path) -> bool {
+    candidate.starts_with(root)
+}
+
+#[cfg(windows)]
+fn path_is_same_or_descendant(candidate: &Path, root: &Path) -> bool {
+    let candidate = candidate
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_lowercase();
+    let root = root
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase();
+    candidate == root
+        || candidate
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
+}
+
+/// Revoke gwt-owned Codex project trust and remove a managed worktree as one
+/// config-lock transaction.
+///
+/// The callback runs while `config.toml.gwt-lock` is held, so a concurrent
+/// registrar cannot republish trust after filesystem removal. When the
+/// process uses a relative `CODEX_HOME`, no project trust is automatically
+/// written and cleanup proceeds without touching that user-owned config.
+pub fn cleanup_worktree_with_codex_project_trust<T>(
+    worktree: &Path,
+    cleanup: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let Some(config_path) = process_stable_codex_config_path_for_worktree_with(
+        worktree,
+        std::env::var_os("CODEX_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    ) else {
+        return cleanup();
+    };
+    gwt_skills::revoke_codex_managed_project_trust_with_cleanup(
+        worktree,
+        &config_path,
+        cleanup,
+    )
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Codex project trust cleanup transaction failed for worktree {} (config {}): {error}",
+                worktree.display(),
+                config_path.display()
+            ),
+        )
+    })
 }
 
 /// Whether a present worktree-local merged hook config contains only
@@ -1119,6 +1261,95 @@ mod tests {
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn process_stable_codex_config_path_uses_os_default_and_absolute_process_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let os_user_home = dir.path().join("home");
+        let explicit_codex_home = dir.path().join("shared-codex");
+        std::fs::create_dir_all(&explicit_codex_home).expect("create explicit Codex home");
+
+        assert_eq!(
+            super::process_stable_codex_config_path_with(None, Some(&os_user_home)),
+            Some(os_user_home.join(".codex/config.toml"))
+        );
+        assert_eq!(
+            super::process_stable_codex_config_path_with(
+                Some(explicit_codex_home.as_os_str()),
+                Some(&os_user_home),
+            ),
+            Some(
+                dunce::canonicalize(&explicit_codex_home)
+                    .expect("canonical explicit Codex home")
+                    .join("config.toml")
+            )
+        );
+    }
+
+    #[test]
+    fn process_stable_codex_config_path_rejects_relative_process_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            super::process_stable_codex_config_path_with(
+                Some(std::ffi::OsStr::new("relative/codex-home")),
+                Some(dir.path()),
+            ),
+            None,
+            "a worktree-relative process CODEX_HOME cannot have one shared lifecycle"
+        );
+    }
+
+    #[test]
+    fn cleanup_ignores_a_process_codex_home_inside_the_removed_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("worktree");
+        let nested_codex_home = worktree.join(".codex");
+        std::fs::create_dir_all(&nested_codex_home).expect("create nested Codex home");
+        std::fs::write(nested_codex_home.join("config.toml"), "projects = [\n")
+            .expect("write malformed nested config");
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &nested_codex_home);
+
+        super::cleanup_worktree_with_codex_project_trust(&worktree, || {
+            std::fs::remove_dir_all(&worktree)
+        })
+        .expect("nested process CODEX_HOME is outside the shared trust lifecycle");
+
+        assert!(!worktree.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_detects_an_uncreated_nested_codex_home_through_a_symlink_alias() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_parent = dir.path().join("real");
+        let worktree = real_parent.join("worktree");
+        std::fs::create_dir_all(&worktree).expect("create real worktree");
+        let alias_parent = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).expect("create parent alias");
+        let aliased_codex_home = alias_parent.join("worktree/.codex");
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &aliased_codex_home);
+
+        super::cleanup_worktree_with_codex_project_trust(&worktree, || {
+            if worktree.join(".codex").exists() {
+                return Err(std::io::Error::other(
+                    "policy created a config lock inside the deletion target",
+                ));
+            }
+            std::fs::remove_dir_all(&worktree)
+        })
+        .expect("an aliased uncreated nested Codex home is not shared lifecycle state");
+
+        assert!(!worktree.exists());
+    }
 
     #[test]
     fn materialize_into_missing_worktree_fails_with_clear_attribution() {

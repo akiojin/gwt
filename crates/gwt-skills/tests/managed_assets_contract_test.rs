@@ -564,11 +564,13 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
-        // Issue #4001 AC-A1: `n/a (autonomous)` is the recorded value for an
-        // Issue Monitor launch, distinct from the agent judging a skip.
+        // Issue #4001 AC-A1: the autonomous values are distinct from the agent
+        // judging a skip. Issue #4217 AC-3: a postponed check needs a value of
+        // its own — `deferred (autonomous execution)` is neither `confirmed`
+        // (nobody looked) nor `n/a` (something was there to look at).
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
-            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous)",
+            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous) | deferred (autonomous execution)",
             "{} evidence-bundle enum must include every supported result",
             skill_path.display()
         );

@@ -1,6 +1,55 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.95.0] - 2026-09-11
+
+### Bug Fixes
+
+- **launch:** Trust managed Codex worktrees before spawn
+- **verify:** 解放された host 検証 lease を待機順に渡す
+- **ci:** Linux 依存インストールの締切をスクリプト側へ移しリトライとキャッシュを導入する
+- **ci:** 契約テストの bash 起動を禁止 API から resolved_command へ置き換える
+- **daemon:** 待ちヘルパーが broadcast の lag を「状態が来なかった」と誤報告するのを修正
+- **hooks:** Fail-openのhook失敗でbrowser-checkを拒否しない
+- **test:** Authority load の成功前提を負荷から分離
+- **index:** Issue再構築の失敗を停止して明示修復と差分更新を可能にする
+- **index:** 空コーパス拒否と衝突する公開失敗テストの前提を修正
+- **index:** 空の再構築が健全なコレクションを破壊するのを止める
+- **execution:** 視覚検証の記録とPR制御および手動再開の判定漏れを修正
+- **execution:** GUI起動経路の保存と手動Restartの判定を修正
+- **launch:** Manage Codex project trust lifecycle
+- **verify:** 予約待機中も検証leaseのFIFO順を維持する
+
+### Features
+
+- **execution:** 自律実行の起動経路を実行記録に持たせ視覚検証を待たずにDraft PRへ到達させる
+- **index:** Query encode を heavy lease へ組み込み v2 build に協調 yield を追加
+
+### Miscellaneous Tasks
+
+- **work:** Record execution state
+- **work:** Issue #4169 の作業イベントシャードを保存する
+- **work:** Issue #4169 の終端 Work 更新を保存する
+- **work:** Issue #4169 の Work を完了状態で保存する
+- **work:** #4199 の終端 Work イベントを記録する
+- **work:** #4199 の終端 Work イベントを記録する
+- **work:** #4199 の Work イベントシャードを記録する
+- **work:** #4199 の settlement Work イベントを記録する
+- **work:** #4199 の検証イベントを記録
+- **work:** #4217 の Work イベントシャードを記録する
+- **work:** #4205 の Work イベントシャードを記録する
+- **work:** #4217 の再起動世代の Work イベントシャードを記録する
+- **work:** Work event shard を記録する
+- **work:** Issue #4169 の終端 Work イベントを保存する
+
+### Testing
+
+- **verify:** 待機列の譲り合いが循環しないことを検証する
+- **daemon:** Issue Monitor 権限テストの判定を 250ms 予算から切り離す
+- **index:** 空Issueキャッシュの公開前停止を期待値に反映する
+- **execution:** 再起動テストのCodex状態を隔離
+- **index:** Interactive burst の livelock を pin し双方向の非 starvation を固定する
+
 ## [9.94.1] - 2026-09-09
 
 ### Bug Fixes

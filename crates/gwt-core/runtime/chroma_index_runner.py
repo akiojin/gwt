@@ -3341,18 +3341,32 @@ def _materialize_file_artifact_pair(
     descriptor_identity: Dict[str, Any],
     descriptor: Dict[str, Any],
     cas_root: Path,
-) -> tuple[int, int]:
+    qos: str = "interactive",
+    heavy_target: Optional[str] = None,
+    progress_offset: int = 0,
+    progress_total: Optional[int] = None,
+) -> tuple[int, int, bool]:
+    """Build one Base or Overlay artifact pair.
+
+    Returns `(computed, cache_hits, yielded)`. A background build checkpoints
+    every `FILE_INDEX_V2_VECTOR_BATCH` documents and hands the host-wide heavy
+    lease back when a higher-priority claimant queues behind it (FR-418). The
+    repo-scoped Embedding CAS is the checkpoint: every vector computed before
+    the yield is already durable, so the follow-up run resolves it as a cache
+    hit instead of re-embedding it. A yielded build publishes nothing — the
+    caller must not materialize a View from a partial artifact.
+    """
     if _artifact_pair_metadata_is_verified(
         artifact_dir, records, descriptor_identity
     ):
-        return 0, len(records)
+        return 0, len(records), False
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
     with acquire_lock(lock_dir, exclusive=True):
         if _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
-            return 0, len(records)
+            return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
         if artifact_dir.exists():
@@ -3381,11 +3395,20 @@ def _materialize_file_artifact_pair(
                 stop = min(start + FILE_INDEX_V2_VECTOR_BATCH, len(records))
                 batch_records = records[start:stop]
                 batch_identities = identities[start:stop]
+                batch_started = time.monotonic()
                 vectors, batch_computed, batch_hits = _resolve_record_vector_batch(
                     batch_records, batch_identities, descriptor, cas_root
                 )
                 computed += batch_computed
                 hits += batch_hits
+                if heavy_target is not None:
+                    _write_heavy_progress(
+                        heavy_target,
+                        progress_offset + stop,
+                        progress_total if progress_total is not None else len(records),
+                        FILE_INDEX_V2_VECTOR_BATCH,
+                        int((time.monotonic() - batch_started) * 1000),
+                    )
                 manifest_entries.extend(
                     _manifest_entry_with_vector(plan, vector)
                     for plan, vector in zip(manifest_plans[start:stop], vectors)
@@ -3404,6 +3427,30 @@ def _materialize_file_artifact_pair(
                         documents=[record["document"] for record, _ in selected],
                         metadatas=[record["metadata"] for record, _ in selected],
                     )
+                # FR-418: hand the heavy lease back at the checkpoint boundary
+                # when an interactive search is queued behind this build. Only
+                # a batch that actually loaded the model can yield — a batch
+                # served entirely from the CAS did no heavy work, and yielding
+                # on it would let a resumed build spin without progressing.
+                # The final Base batch also has work remaining when an Overlay
+                # follows; the quantum spans the whole build, not one artifact.
+                if (
+                    (
+                        stop < len(records)
+                        or (
+                            progress_total is not None
+                            and progress_offset + stop < progress_total
+                        )
+                    )
+                    and batch_computed > 0
+                    and qos == "background"
+                    and _pending_higher_priority("background")
+                ):
+                    for client, _ in opened.values():
+                        _close_chroma_client(client)
+                    opened.clear()
+                    shutil.rmtree(staging, ignore_errors=True)
+                    return computed, hits, True
             for bucket in ("code", "docs"):
                 expected_count = sum(
                     record["bucket"] == bucket for record in records
@@ -3438,7 +3485,7 @@ def _materialize_file_artifact_pair(
             ):
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
-            return computed, hits
+            return computed, hits, False
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -4548,6 +4595,35 @@ def _validated_file_index_v2_action_inputs(
     return root, descriptor
 
 
+def _file_index_v2_yielded_result(
+    scope: str, requested: int, computed: int, cache_hits: int
+) -> dict:
+    """Payload for a v2 build that handed the heavy lease back mid-artifact
+    (FR-418). No View is materialized and no head is replaced, so readers keep
+    serving whatever was already published. `yielded` is the flag the Rust
+    orchestrator reads to reschedule the continuation."""
+    emit_progress(
+        {
+            "phase": "yielded",
+            "scope": scope,
+            "staged": computed + cache_hits,
+            "total": requested,
+        }
+    )
+    return {
+        "ok": True,
+        "scope": scope,
+        "yielded": True,
+        "resumable": True,
+        "published": False,
+        "requested_embeddings": requested,
+        "computed_embeddings": computed,
+        "embedding_cache_hits": cache_hits,
+        "newly_embedded": computed,
+        "total": requested,
+    }
+
+
 def _action_index_files_protocol_v2(
     project_root: str,
     repo_hash: str,
@@ -4555,6 +4631,7 @@ def _action_index_files_protocol_v2(
     db_root: Optional[Path],
     scope: str,
     compatibility_descriptor: Optional[Dict[str, Any]],
+    qos: str = "interactive",
 ) -> dict:
     with _file_index_v2_pin(
         repo_hash,
@@ -4569,6 +4646,7 @@ def _action_index_files_protocol_v2(
             db_root,
             scope,
             compatibility_descriptor,
+            qos=qos,
         )
 
 
@@ -4579,6 +4657,7 @@ def _action_index_files_protocol_v2_pinned(
     db_root: Optional[Path],
     scope: str,
     compatibility_descriptor: Optional[Dict[str, Any]],
+    qos: str = "interactive",
 ) -> dict:
     root, descriptor = _validated_file_index_v2_action_inputs(
         project_root,
@@ -4680,7 +4759,9 @@ def _action_index_files_protocol_v2_pinned(
         "document_counts": base_document_counts,
         "build_state": "verified",
     }
-    base_computed, base_hits = _materialize_file_artifact_pair(
+    requested = len(base_records) + len(overlay_records)
+    heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
+    base_computed, base_hits, base_yielded = _materialize_file_artifact_pair(
         base_dir,
         base_records,
         base_identities,
@@ -4688,7 +4769,15 @@ def _action_index_files_protocol_v2_pinned(
         base_descriptor_identity,
         descriptor,
         cas_root,
+        qos=qos,
+        heavy_target=heavy_target,
+        progress_offset=0,
+        progress_total=requested,
     )
+    if base_yielded:
+        return _file_index_v2_yielded_result(
+            scope, requested, base_computed, base_hits
+        )
     overlay_descriptor_identity = {
         "schema_version": 1,
         "kind": "overlay",
@@ -4705,7 +4794,7 @@ def _action_index_files_protocol_v2_pinned(
         "tombstones": tombstones,
         "build_state": "verified",
     }
-    overlay_computed, overlay_hits = _materialize_file_artifact_pair(
+    overlay_computed, overlay_hits, overlay_yielded = _materialize_file_artifact_pair(
         overlay_dir,
         overlay_records,
         overlay_identities,
@@ -4713,10 +4802,15 @@ def _action_index_files_protocol_v2_pinned(
         overlay_descriptor_identity,
         descriptor,
         cas_root,
+        qos=qos,
+        heavy_target=heavy_target,
+        progress_offset=len(base_records),
+        progress_total=requested,
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
-    requested = len(base_records) + len(overlay_records)
+    if overlay_yielded:
+        return _file_index_v2_yielded_result(scope, requested, computed, cache_hits)
     if requested != computed + cache_hits:
         raise RuntimeError("file-index-v2 CAS accounting invariant violated")
     visible_counts = {
@@ -4800,6 +4894,7 @@ def action_index_files_v2(
             db_root=db_root,
             scope=scope,
             compatibility_descriptor=compatibility_descriptor,
+            qos=qos,
         )
     if file_index_protocol != "legacy":
         raise ValueError(f"unknown file index protocol: {file_index_protocol}")

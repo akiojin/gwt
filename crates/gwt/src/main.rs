@@ -81,18 +81,20 @@ pub(crate) use app_runtime::{
     WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
-pub(crate) use docker_launch::{
-    apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
-    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
-    resolve_docker_shell_command,
-};
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
     mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
     resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
+};
+pub(crate) use docker_launch::{
+    detect_wizard_docker_context_and_status, docker_binary_for_launch,
+    docker_compose_exec_env_args, ensure_docker_launch_service_ready,
+    finalize_docker_agent_launch_config_with_binding, prepare_docker_runtime_for_launch,
+    register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
+    resolve_docker_agent_program_with_binding, resolve_docker_launch_plan,
+    resolve_docker_shell_command, DockerLaunchBinding,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
@@ -7074,8 +7076,13 @@ mod tests {
     fn prune_orphan_intake_worktrees_removes_clean_keeps_dirty_and_is_bounded() {
         // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
         // are reaped — clean ones removed, dirty ones kept, capped per run.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -7105,6 +7112,18 @@ mod tests {
             .expect("intake worktree");
         gwt_skills::generate_settings_local(&generated_hook).expect("generate hook config");
 
+        let codex_config_path = temp.path().join(".codex/config.toml");
+        let trusted_projects = [&clean_a, &clean_b, &dirty, &branch_named, &generated_hook]
+            .into_iter()
+            .map(|path| {
+                gwt_skills::register_codex_managed_project_trust(path, &codex_config_path)
+                    .expect("seed Codex project trust")
+                    .project_path
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+
         let removed = super::prune_orphan_intake_worktrees(&repo, 10);
         assert_eq!(
             removed, 3,
@@ -7126,6 +7145,35 @@ mod tests {
             branch_named.exists(),
             "a real branch worktree named .intake-* is never reaped"
         );
+        let config: toml::Value = toml::from_str(
+            &fs::read_to_string(&codex_config_path).expect("read Codex config after prune"),
+        )
+        .expect("parse Codex config after prune");
+        let projects = config
+            .get("projects")
+            .and_then(toml::Value::as_table)
+            .expect("remaining project table");
+        for removed_project in [
+            &trusted_projects[0],
+            &trusted_projects[1],
+            &trusted_projects[4],
+        ] {
+            assert!(
+                !projects.contains_key(removed_project),
+                "pruned worktree trust must be revoked: {removed_project}"
+            );
+        }
+        for retained_project in [&trusted_projects[2], &trusted_projects[3]] {
+            assert_eq!(
+                projects
+                    .get(retained_project)
+                    .and_then(toml::Value::as_table)
+                    .and_then(|project| project.get("trust_level"))
+                    .and_then(toml::Value::as_str),
+                Some("trusted"),
+                "retained worktree trust must remain: {retained_project}"
+            );
+        }
 
         // Bounded: a second batch of clean intakes is capped at the limit.
         let clean_c = temp.path().join(".intake-c");
@@ -7137,6 +7185,39 @@ mod tests {
         }
         let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
         assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let orphan = temp.path().join(".intake-invalid-codex-config");
+        gwt_git::WorktreeManager::new(&repo)
+            .create_detached("HEAD", &orphan)
+            .expect("create orphan intake worktree");
+        let config_path = temp.path().join(".codex/config.toml");
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config parent");
+        fs::write(&config_path, "projects = [\n").expect("write malformed Codex config");
+
+        let removed = super::prune_orphan_intake_worktrees(&repo, 10);
+
+        assert_eq!(removed, 0, "failed trust revocation is not a removal");
+        assert!(
+            orphan.exists(),
+            "trust revocation failure must keep the orphan worktree"
+        );
+        assert_eq!(
+            fs::read_to_string(config_path).expect("malformed config remains"),
+            "projects = [\n"
+        );
     }
 
     #[test]
@@ -8088,14 +8169,14 @@ mod tests {
             .env_vars
             .insert("EXTRA_FLAG".to_string(), "1".to_string());
         let runtime = super::resolved_test_docker_runtime(temp.path());
+        let plan = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = super::DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
 
-        let runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
-            &project,
-            &mut config,
-            Some(&runtime),
-        )
-        .expect("finalize docker launch")
-        .expect("Docker runtime worktree");
+        let runtime_worktree =
+            super::finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalize docker launch")
+                .expect("Docker runtime worktree");
 
         assert_eq!(config.command, runtime.binary());
         assert_eq!(runtime_worktree, "/workspace/app");
@@ -8144,13 +8225,13 @@ mod tests {
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
         let runtime = super::resolved_test_docker_runtime(temp.path());
+        let plan = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = super::DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
 
-        let _runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
-            &project,
-            &mut config,
-            Some(&runtime),
-        )
-        .expect("finalize docker launch");
+        let _runtime_worktree =
+            super::finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalize docker launch");
 
         assert_eq!(config.command, runtime.binary());
         assert_eq!(
