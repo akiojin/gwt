@@ -354,6 +354,8 @@ pub fn pm_delivery_prompt_sha256(prompt: &str) -> String {
     format!("{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
+const PM_DELIVERY_SOURCE: &str = "[gwt PM delivery — not an owner message] ";
+
 pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Result<String> {
     if uuid::Uuid::parse_str(operation_id)
         .ok()
@@ -368,7 +370,7 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
     }
     let body_sha256 = pm_delivery_prompt_sha256(body);
     Ok(format!(
-        "{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
+        "{PM_DELIVERY_SOURCE}{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
     ))
 }
 
@@ -384,7 +386,10 @@ pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, Strin
         .ok()
         .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
         || !is_canonical_sha256(body_sha256)
-        || pm_delivery_prompt_sha256(body) != body_sha256
+        || (pm_delivery_prompt_sha256(body) != body_sha256
+            && !body
+                .strip_prefix(PM_DELIVERY_SOURCE)
+                .is_some_and(|body| pm_delivery_prompt_sha256(body) == body_sha256))
     {
         return None;
     }
@@ -4429,6 +4434,17 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
     })
 }
 
+/// Identify a PM pane across Session replacement without persisting a role flag.
+pub fn pane_is_pm(
+    repo_path: &Path,
+    worktree_path: Option<&Path>,
+    session_id: Option<&str>,
+) -> bool {
+    worktree_path.is_some_and(is_canonical_pm_worktree)
+        || session_id
+            .is_some_and(|id| session_is_registered_pm(&pm_prefs_path_for_repo_path(repo_path), id))
+}
+
 /// SPEC-3431 FR-009: is `session_id` the project's registered PM?
 ///
 /// This is the whole privileged-subject rule. It is deliberately an exact
@@ -7325,6 +7341,26 @@ mod tests {
 
         assert_eq!(monitor.active_count(), before);
         assert_eq!(monitor.active_count(), 0);
+    }
+
+    #[test]
+    fn pm_delivery_prompt_identifies_its_source_and_preserves_body_hash() {
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "report exact status";
+        let hash = pm_delivery_prompt_sha256(body);
+        let prompt = protected_pm_delivery_prompt(operation_id, body).unwrap();
+        assert!(prompt.contains("PM delivery"), "{prompt}");
+        assert!(prompt.contains("not an owner message"), "{prompt}");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&prompt),
+            Some((operation_id.to_string(), hash.clone()))
+        );
+        assert!(parse_protected_pm_delivery_prompt(&prompt.replace(body, "tampered")).is_none());
+        let legacy = format!("{body} [gwt-delivery:{operation_id}:{hash}]\r");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&legacy),
+            Some((operation_id.to_string(), hash))
+        );
     }
 
     #[test]
