@@ -1093,7 +1093,7 @@ where
     }
 
     let (mut rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
-    let owner_calls = hydrate_fallback_owners(repo_path, &mut rows, &mut run_gh)?;
+    let owner_calls = hydrate_fallback_owners(repo_path, &mut rows, ledger, now, &mut run_gh)?;
     github_calls += owner_calls as u32;
     let mut heavy = BTreeMap::new();
     let mut hydrated = owner_calls;
@@ -1156,6 +1156,8 @@ where
 fn hydrate_fallback_owners<F>(
     repo_path: &Path,
     rows: &mut [serde_json::Value],
+    ledger: &BudgetLedger,
+    now: DateTime<Utc>,
     run_gh: &mut F,
 ) -> Result<usize>
 where
@@ -1184,7 +1186,8 @@ where
         .map(|n| format!("owner_{n}:issue(number:{n}){{state}}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let query = format!("query=query($owner:String!,$repo:String!){{repository(owner:$owner,name:$repo){{{fields}}}}}");
+    let rate_limit = github_budget::GRAPHQL_RATE_LIMIT_SELECTION;
+    let query = format!("query=query($owner:String!,$repo:String!){{{rate_limit} repository(owner:$owner,name:$repo){{{fields}}}}}");
     let output = run_gh(
         repo_path,
         &[
@@ -1200,6 +1203,13 @@ where
     )?;
     let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|e| GwtError::Other(format!("owner issue states JSON: {e}")))?;
+    if let Some(rate_limit) = github_budget::parse_graphql_rate_limit(&value) {
+        ledger.record_graphql_response(
+            &github_budget::spawn_source(&["api", "graphql"]),
+            &rate_limit,
+            now,
+        );
+    }
     // gh exits nonzero for partial GraphQL responses too. Only a NOT_FOUND
     // attached to a requested issue alias is a recoverable per-owner failure.
     let mut missing = std::collections::BTreeSet::new();
@@ -4797,11 +4807,13 @@ mod tests {
 
     #[test]
     fn missing_fallback_owner_does_not_hide_other_closed_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(tmp.path());
         let mut rows = vec![
             serde_json::json!({"headRefName":"work/issue-3972"}),
             serde_json::json!({"headRefName":"work/issue-999999"}),
         ];
-        hydrate_fallback_owners(Path::new("/tmp/repo"), &mut rows, &mut |_, _| Ok(GhCliOutput {
+        hydrate_fallback_owners(Path::new("/tmp/repo"), &mut rows, &ledger, now_3891(), &mut |_, _| Ok(GhCliOutput {
             success: false, stderr: "Could not resolve to an Issue".into(),
             stdout: serde_json::json!({"data":{"repository":{"owner_3972":{"state":"CLOSED"},"owner_999999":null}},
                 "errors":[{"type":"NOT_FOUND","path":["repository","owner_999999"]}]}).to_string()
@@ -4826,21 +4838,30 @@ mod tests {
         for offset in [0, PR_INVENTORY_CACHE_TTL_SECS + 1] {
             let mut owner_calls = 0;
             let calls_before = gh.calls.len();
+            let now = now_3891() + chrono::Duration::seconds(offset);
             let read = fetch_pr_inventory_cached_with(
                 Path::new("/tmp/repo"),
                 &tmp.path().join(PR_INVENTORY_CACHE_FILE),
                 &ledger,
-                now_3891() + chrono::Duration::seconds(offset),
+                now,
                 &PrInventoryOptions::default(),
                 |_, args| {
                     if args.starts_with(&["api", "graphql"]) {
                         owner_calls += 1;
                         let query = args.join(" ");
                         assert_eq!(query.matches("issue(number:3972)").count(), 1);
+                        assert!(query.contains(github_budget::GRAPHQL_RATE_LIMIT_SELECTION));
+                        ledger.record_spawn_from(
+                            GitHubQuota::GraphQl,
+                            &github_budget::spawn_source(args),
+                            now,
+                        );
                         Ok(GhCliOutput {
                             success: true,
                             stderr: String::new(),
-                            stdout: serde_json::json!({"data":{"repository":{"owner_3972":{"state":
+                            stdout: serde_json::json!({"data":{
+                                "rateLimit":{"cost":3,"remaining":4700,"resetAt":"2026-09-02T01:00:00Z","nodeCount":1},
+                                "repository":{"owner_3972":{"state":
                                 if owner_closed {"CLOSED"} else {"OPEN"}
                             }}}})
                             .to_string(),
@@ -4852,6 +4873,12 @@ mod tests {
             )
             .unwrap();
             assert_eq!(owner_calls, 1);
+            let budget = ledger.snapshot(now);
+            assert_eq!(
+                budget.local["graphql"].points_last_hour,
+                if offset == 0 { 3 } else { 6 }
+            );
+            assert_eq!(budget.probe.unwrap().resources["graphql"].remaining, 4700);
             let actual_calls = owner_calls
                 + gh.calls[calls_before..]
                     .iter()
