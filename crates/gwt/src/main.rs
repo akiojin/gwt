@@ -1700,7 +1700,7 @@ mod tests {
     /// poll interval.
     #[test]
     fn the_gui_drives_daemon_supervision_on_its_own_timer() {
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").replace("\r\n", "\n");
         let supervision = source
             .split_once("runtime-daemon-ensure-tick")
             .expect("the GUI must own a daemon supervision thread")

@@ -1435,7 +1435,13 @@ mod tests {
         run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
         run_git(
             root,
-            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+            &[
+                "clone",
+                "--config",
+                "core.autocrlf=false",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
         );
         run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
         run_git(&repo, &["config", "user.name", "gwt"]);
@@ -1711,7 +1717,15 @@ mod tests {
         assert!(error.contains("needs_human"), "{error}");
         assert!(error.contains("unique commits present"), "{error}");
         assert!(error.contains(&session.id), "{error}");
-        assert!(error.contains(&worktree.display().to_string()), "{error}");
+        let reported_worktree = error
+            .split_once("Residual worktree location: `")
+            .and_then(|(_, suffix)| suffix.split_once('`'))
+            .map(|(path, _)| Path::new(path))
+            .expect("diagnostic must identify the residual worktree");
+        assert!(
+            crate::same_worktree_path(reported_worktree, &worktree),
+            "{error}"
+        );
         assert!(working_dir.is_none());
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
