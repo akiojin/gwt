@@ -3947,6 +3947,7 @@ async fn client_session_with_scope(
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
+                        let received_at = Instant::now();
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
@@ -3964,6 +3965,7 @@ async fn client_session_with_scope(
                                             &client_id,
                                             &input_seq,
                                             event,
+                                            received_at,
                                         );
                                     }
                                     Some(ScopedFrontendRequest::AgentPmRefusal {
@@ -4255,6 +4257,7 @@ fn handle_frontend_message(
     client_id: &str,
     input_seq: &AtomicU64,
     event: FrontendEvent,
+    received_at: Instant,
 ) {
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
@@ -4262,6 +4265,7 @@ fn handle_frontend_message(
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
                 event: other,
+                received_at,
             });
             return;
         }
@@ -4285,7 +4289,7 @@ fn handle_frontend_message(
     );
 
     let pty_handle = match state.pty_writers.read() {
-        Ok(guard) => guard.get(&id).cloned(),
+        Ok(guard) => guard.get(&id).map(|pty| (pty.clone(), guard.len())),
         Err(_error) => {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -4301,7 +4305,7 @@ fn handle_frontend_message(
 
     let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
     let mut resolution_marked = false;
-    if let Some(pty) = pty_handle {
+    if let Some((pty, pty_writer_count)) = pty_handle {
         if approval_resolution {
             // `EventLoopProxy::send_event` completes the tao channel enqueue
             // synchronously. Enqueue the causal marker before the PTY write so
@@ -4315,14 +4319,14 @@ fn handle_frontend_message(
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
-                tracing::debug!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write",
-                    client_id = %client_id,
+                let completed_at = Instant::now();
+                log_terminal_input_completion(
+                    client_id,
                     seq,
-                    window_id = %id,
-                    write_us = write_started.elapsed().as_micros() as u64,
-                    "terminal_input written to PTY via WS fast-path"
+                    &id,
+                    completed_at.duration_since(write_started).as_micros() as u64,
+                    completed_at.duration_since(received_at).as_millis() as u64,
+                    pty_writer_count,
                 );
                 if had_unsent && !pty.has_unsent_user_input() {
                     state
@@ -4359,7 +4363,7 @@ fn handle_frontend_message(
         );
     }
 
-    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data);
+    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data, received_at);
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_dispatch",
@@ -4376,11 +4380,48 @@ fn forward_terminal_input_to_event_loop(
     client_id: &str,
     id: String,
     data: String,
+    received_at: Instant,
 ) {
     state.proxy.send(UserEvent::Frontend {
         client_id: client_id.to_string(),
         event: FrontendEvent::TerminalInput { id, data },
+        received_at,
     });
+}
+
+fn log_terminal_input_completion(
+    client_id: &str,
+    seq: u64,
+    window_id: &str,
+    write_us: u64,
+    elapsed_ms: u64,
+    pty_writer_count: usize,
+) {
+    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt_input_trace",
+            stage = "fast_path_write",
+            client_id,
+            seq,
+            window_id,
+            write_us,
+            elapsed_ms,
+            pty_writer_count,
+            "terminal_input receive-to-PTY latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "fast_path_write",
+            client_id,
+            seq,
+            window_id,
+            write_us,
+            elapsed_ms,
+            pty_writer_count,
+            "terminal_input written to PTY via WS fast-path"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4460,7 +4501,7 @@ mod tests {
         pin::Pin,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
         task::{Context, Poll},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use axum::extract::ws::Message as AxumMessage;
@@ -8111,12 +8152,14 @@ mod tests {
     #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
         let (state, events) = sample_server_state();
+        let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             FrontendEvent::FrontendReady,
+            received_at,
         );
 
         let recorded = events
@@ -8124,14 +8167,35 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady }]
-                if client_id == "client-1"
+            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady, received_at: forwarded_at }]
+                if client_id == "client-1" && *forwarded_at == received_at
         ));
+    }
+
+    #[test]
+    fn terminal_input_timing_warns_only_for_slow_successful_write() {
+        let output = crate::tests::capture_timing_warnings(|| {
+            super::log_terminal_input_completion("client-1", 7, "window-1", 1000, 30, 9);
+            super::log_terminal_input_completion("client-1", 8, "window-1", 1000, 29, 9);
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 1, "29ms must not warn; 30ms must warn");
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["stage"], "fast_path_write");
+        assert_eq!(fields["elapsed_ms"], 30);
+        assert_eq!(fields["write_us"], 1000);
+        assert_eq!(fields["pty_writer_count"], 9);
+        assert_eq!(fields["seq"], 7);
+        assert!(fields.get("data").is_none());
     }
 
     #[test]
     fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
         let (state, events) = sample_server_state();
+        let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
             &state,
@@ -8141,6 +8205,7 @@ mod tests {
                 id: "tab-1::shell-1".to_string(),
                 data: "ls\n".to_string(),
             },
+            received_at,
         );
 
         let recorded = events
@@ -8148,10 +8213,11 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data } }]
+            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data }, received_at: forwarded_at }]
                 if client_id == "client-1"
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
+                    && *forwarded_at == received_at
         ));
     }
 
@@ -8185,6 +8251,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "1\r".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8236,6 +8303,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "1\r".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8245,6 +8313,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "\u{1b}[A".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8254,6 +8323,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "x".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8296,6 +8366,7 @@ mod tests {
                 id: "tab-1::pm-window".to_string(),
                 data: "実行されてい".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8305,6 +8376,7 @@ mod tests {
                 id: "tab-1::pm-window".to_string(),
                 data: "ますか？\r".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events

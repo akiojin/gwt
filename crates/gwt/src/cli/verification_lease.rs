@@ -29,8 +29,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, IndexCoordinator, JobAdmission,
-    JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
+    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, HeavyQueueEntry, IndexCoordinator,
+    JobAdmission, JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -508,6 +508,9 @@ struct LeaseStatusSnapshot {
     expired: bool,
     #[serde(default)]
     pending: usize,
+    /// Issue #4169: who is waiting, in the order they will be served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    queue: Vec<HeavyQueueEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,6 +531,7 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             remaining_ms: status.remaining_ms,
             expired: status.expired,
             pending: status.pending,
+            queue: status.queue,
             holder_kind: status.holder_kind.map(|kind| kind.as_str().to_string()),
             remaining_batches: status.remaining_batches,
             estimated_remaining_ms: status.estimated_remaining_ms,
@@ -692,6 +696,18 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
         out.push_str(&format!("estimated_remaining_ms: {estimate}\n"));
     }
     out.push_str(&format!("pending: {}\n", status.pending));
+    // Issue #4169 AC-2: `pending` is a count, and a count cannot tell an agent
+    // whether it is next or fifth. The queue names every claimant and how long
+    // it has been waiting, in the order the lease will be handed over.
+    for (position, entry) in status.queue.iter().enumerate() {
+        out.push_str(&format!(
+            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={}\n",
+            entry.target.as_deref().unwrap_or("unknown"),
+            entry.priority.as_str(),
+            entry.queued_at_ms,
+            entry.waiting_ms,
+        ));
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -772,11 +788,27 @@ mod tests {
                 remaining_ms: Some(60_000),
                 expired: false,
                 pending: 2,
+                queue: vec![
+                    HeavyQueueEntry {
+                        target: Some("repo--verification--early".to_string()),
+                        priority: JobPriority::ManualRebuild,
+                        queued_at_ms: 500,
+                        waiting_ms: 90_000,
+                    },
+                    HeavyQueueEntry {
+                        target: Some("repo--verification--late".to_string()),
+                        priority: JobPriority::ManualRebuild,
+                        queued_at_ms: 900,
+                        waiting_ms: 89_600,
+                    },
+                ],
                 holder_kind: Some("verification".to_string()),
                 remaining_batches: None,
                 estimated_remaining_ms: Some(60_000),
             },
         );
+        // Issue #4169 AC-2: the waiters are named in service order, each with
+        // the moment it joined and how long it has been waiting.
         assert_eq!(
             out,
             "verification lease: held\n\
@@ -789,7 +821,11 @@ mod tests {
              expired: false\n\
              holder_kind: verification\n\
              estimated_remaining_ms: 60000\n\
-             pending: 2\n"
+             pending: 2\n\
+             queue[0]: target=repo--verification--early priority=manual-rebuild \
+             queued_at_ms=500 waiting_ms=90000\n\
+             queue[1]: target=repo--verification--late priority=manual-rebuild \
+             queued_at_ms=900 waiting_ms=89600\n"
         );
     }
 
