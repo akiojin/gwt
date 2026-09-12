@@ -68974,28 +68974,37 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
 
 #[test]
 fn pm_delivery_refuses_self_with_durable_receipt() {
-    assert_pm_delivery_refused(false, false);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_pm_delivery_refused(&temp, false, false);
 }
 
 #[test]
 fn pm_delivery_refuses_pm_role_with_durable_receipt() {
-    assert_pm_delivery_refused(true, false);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_pm_delivery_refused(&temp, true, false);
 }
 
 #[test]
 fn pm_delivery_replay_preserves_pending_refusal() {
-    assert_pm_delivery_refused(false, true);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_pm_delivery_refused(&temp, false, true);
 }
 
-fn assert_pm_delivery_refused(other_session: bool, pending_refusal: bool) {
+fn assert_pm_delivery_refused(
+    temp: &tempfile::TempDir,
+    other_session: bool,
+    pending_refusal: bool,
+) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     {
-        let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+        let (repo, mut runtime, pm_window_id) = pm_wake_fixture(temp);
         insert_test_pane_runtime(&mut runtime, &pm_window_id);
         let pm_pane = runtime.runtimes[&pm_window_id].pane.clone();
         runtime.register_pty_writer(&pm_window_id, &pm_pane);
