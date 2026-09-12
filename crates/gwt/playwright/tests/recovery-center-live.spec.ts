@@ -108,6 +108,5 @@ async function installRecoveryCenterWireCapture(page: any): Promise<void> {
         });
       }
     };
-    Object.assign(window.WebSocket, NativeWebSocket);
   });
 }
