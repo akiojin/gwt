@@ -313,7 +313,15 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
                 ),
                 (
                     "fast_path_write",
-                    vec!["client_id", "seq", "stage", "window_id", "write_us"],
+                    vec![
+                        "client_id",
+                        "elapsed_ms",
+                        "pty_writer_count",
+                        "seq",
+                        "stage",
+                        "window_id",
+                        "write_us",
+                    ],
                 ),
                 (
                     "fast_path_write_err",
@@ -363,10 +371,14 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
                 })
                 .collect::<Vec<_>>();
             fields.sort_unstable();
-            assert!(
-                actual.insert(stage, fields).is_none(),
-                "{source_name} repeats gwt_input_trace stage {stage}",
+            // A stage can have separate WARN/DEBUG sites; audit every site
+            // before collecting stages so one cannot hide another's fields.
+            assert_eq!(
+                Some(&fields),
+                expected[source_name].get(stage),
+                "{source_name} gwt_input_trace stage {stage} changed its allowed fields",
             );
+            actual.insert(stage, fields);
         }
         assert_eq!(
             actual,
@@ -28092,8 +28104,12 @@ fn managed_hook_health_for_saved_row_ignores_ambient_session_runtime_state() {
         &foreign_runtime_path,
     );
 
-    let health =
-        super::workspace_views::managed_hook_health_view_for_worktree(&worktree, temp.path(), &[]);
+    let health = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        temp.path(),
+        &[],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
+    );
 
     assert!(health.is_none(), "{health:?}");
 }
@@ -28144,6 +28160,7 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
         &worktree,
         &sessions_dir,
         &[&first, &second],
+        &gwt::cli::hook::health::ManagedHookFailureSnapshot::read(),
     )
     .expect("managed hook health");
 
@@ -68112,7 +68129,10 @@ fn codex_managed_config_startup_writes_experimental_mode_into_home_codex_config(
     let config_path = super::startup::codex_home_for_startup(None).join("config.toml");
     assert_eq!(config_path, home.path().join(".codex/config.toml"));
 
-    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        gwt_skills::CodexFeaturesSchema::AcceptsTables,
+    );
 
     let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(
@@ -68157,7 +68177,10 @@ fn codex_managed_config_startup_records_operation_refusal_on_unparseable_config(
 not toml";
     fs::write(&config_path, broken).unwrap();
 
-    super::startup::ensure_codex_recommended_config_at_path(&config_path);
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        gwt_skills::CodexFeaturesSchema::AcceptsTables,
+    );
 
     assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
     let rows = gwt_core::error_ledger::list_since(None).unwrap();
@@ -68178,6 +68201,53 @@ not toml";
         "ledger row must carry the key and the cause, got: {}",
         rows[0].message
     );
+}
+
+// Issue #4229 AC-5: the codex gwt launches (`bunx @openai/codex@latest`, which
+// loads the table) and the `codex` on PATH are different binaries. The managed
+// key follows the PATH codex, so an old one there keeps the table out.
+#[test]
+fn codex_managed_config_follows_path_codex_not_launch_target() {
+    use gwt_skills::CodexFeaturesSchema::{AcceptsTables, BooleansOnly};
+
+    let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let config_path = home.path().join(".codex/config.toml");
+    let schema_for = |version: Option<&str>| {
+        super::startup::codex_features_schema_for_path_codex(Some(&gwt_agent::DetectedAgent {
+            agent_id: gwt_agent::AgentId::Codex,
+            version: version.map(str::to_string),
+            path: std::path::PathBuf::from("codex"),
+        }))
+    };
+
+    assert_eq!(schema_for(Some("codex-cli 0.148.0")), BooleansOnly);
+    assert_eq!(schema_for(Some("codex-cli 0.152.0")), BooleansOnly);
+    assert_eq!(schema_for(Some("codex-cli 0.153.0")), AcceptsTables);
+    assert_eq!(schema_for(Some("codex-cli 0.154.0")), AcceptsTables);
+    assert_eq!(
+        schema_for(None),
+        BooleansOnly,
+        "a PATH codex whose version gwt cannot read must not risk the table"
+    );
+    assert_eq!(
+        super::startup::codex_features_schema_for_path_codex(None),
+        AcceptsTables,
+        "with no PATH codex only the gwt launch target reads the config"
+    );
+
+    super::startup::ensure_codex_recommended_config_at_path(
+        &config_path,
+        schema_for(Some("codex-cli 0.148.0")),
+    );
+
+    assert!(
+        fs::read_to_string(&config_path)
+            .map(|content| !content.contains("context_management"))
+            .unwrap_or(true),
+        "PATH codex 0.148.0 must never receive the table"
+    );
+    assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
