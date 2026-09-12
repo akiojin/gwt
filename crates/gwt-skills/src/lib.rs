@@ -28,8 +28,9 @@ pub use codex_hook_trust::{
     CodexHookTrustExpectation, CodexHookTrustReport, CodexProjectTrustReport,
 };
 pub use codex_managed_config::{
-    ensure_codex_context_management_experimental_mode, CodexManagedConfigOutcome,
-    CodexManagedConfigReport, CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+    ensure_codex_context_management_experimental_mode, CodexFeaturesSchema,
+    CodexManagedConfigOutcome, CodexManagedConfigReport,
+    CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY, CODEX_FEATURE_TABLE_MIN_VERSION,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
@@ -37,9 +38,9 @@ pub use coordination_guidance::{
 };
 pub use distribute::{
     distribute_to_worktree, distribute_to_worktree_for_targets,
-    distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
-    prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
-    TrackedAssetWritePolicy,
+    distribute_to_worktree_for_targets_with_policy, is_gwt_managed_skill_or_command_path,
+    prune_stale_gwt_assets, prune_stale_gwt_assets_for_targets, DistributeReport,
+    ManagedAssetTarget, TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
