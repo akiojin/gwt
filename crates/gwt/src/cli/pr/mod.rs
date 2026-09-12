@@ -1053,6 +1053,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
                 "dwell_hours": item.dwell_hours,
                 "owner_issue_closed": item.owner_issue_closed,
                 "owner_issue": item.owner_issue,
+                "owner_issue_source": item.owner_issue_source,
                 "default_action": item.default_action,
                 "default_action_executable": item.default_action_executable,
                 "default_action_operation": item.default_action_operation,
@@ -1109,6 +1110,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
+    out.push_str(&format!("head_ref_name: {}\n", pr.head_ref_name));
     out.push_str(&format!("ci: {}\n", pr.ci_status));
     out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
     out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
@@ -1222,6 +1224,7 @@ mod tests {
             stale: false,
             owner_issue_closed: false,
             owner_issue: Some(7),
+            owner_issue_source: Some("head_branch".to_string()),
             default_action: "propose merge".to_string(),
             dwell_hours: Some(5),
             stale_after_hours: 72,
@@ -1238,6 +1241,7 @@ mod tests {
 
     fn seeded_pr() -> gwt_git::PrStatus {
         gwt_git::PrStatus {
+            head_ref_name: String::new(),
             number: 7,
             title: "CLI family split".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -2528,6 +2532,11 @@ mod tests {
 
         assert_eq!(code, 0);
         assert_eq!(env.pr_list_call_count, 1);
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            payload["pull_requests"][0]["owner_issue_source"],
+            "head_branch"
+        );
         assert!(out.contains("\"lifecycle\": \"MERGE-CANDIDATE\""), "{out}");
         assert!(
             out.contains("\"default_action\": \"propose merge\""),
@@ -2568,6 +2577,16 @@ mod tests {
             env.pr_list_options,
             Some(gwt_git::PrInventoryOptions::default())
         );
+    }
+
+    #[test]
+    fn pr_view_renders_the_head_branch() {
+        let mut value = serde_json::to_value(seeded_pr()).unwrap();
+        value["head_ref_name"] = serde_json::json!("work/issue-3835");
+        let pr = serde_json::from_value(value).unwrap();
+        let mut out = String::new();
+        render_pr(&mut out, &pr);
+        assert!(out.contains("head_ref_name: work/issue-3835\n"), "{out}");
     }
 
     #[test]
@@ -2868,6 +2887,7 @@ mod tests {
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
             number: 2538,
+            head_ref_name: String::new(),
             title: "Active Work title".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://github.com/akiojin/gwt/pull/2538".to_string(),
@@ -2931,6 +2951,7 @@ mod tests {
         env.files.insert("body.md".to_string(), "Body".to_string());
         env.seed_created_pr(gwt_git::PrStatus {
             number: 2540,
+            head_ref_name: String::new(),
             title: "Other branch PR".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://github.com/akiojin/gwt/pull/2540".to_string(),
@@ -3273,6 +3294,7 @@ mod tests {
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
             number: 9999,
+            head_ref_name: String::new(),
             title: "Auto-done PR".to_string(),
             state: gwt_git::pr_status::PrState::Merged,
             url: "https://github.com/akiojin/gwt/pull/9999".to_string(),

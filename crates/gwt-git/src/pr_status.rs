@@ -31,6 +31,8 @@ impl std::fmt::Display for PrState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrStatus {
     pub number: u64,
+    #[serde(default)]
+    pub head_ref_name: String,
     pub title: String,
     pub state: PrState,
     pub url: String,
@@ -313,6 +315,9 @@ pub struct PrInventoryItem {
     pub owner_issue_closed: bool,
     #[serde(default)]
     pub owner_issue: Option<u64>,
+    /// Whether the owner is explicit (`closing_issues`) or inferred (`head_branch`).
+    #[serde(default)]
+    pub owner_issue_source: Option<String>,
     pub default_action: String,
     #[serde(default)]
     pub dwell_hours: Option<i64>,
@@ -651,6 +656,13 @@ fn inventory_item_from_fields(
         .include
         .body
         .then(|| body_defers_user_verification(&fields.body));
+    let owner_issue_source = if !fields.closing_issues.is_empty() {
+        Some("closing_issues")
+    } else if decision.owner_issue.is_some() {
+        Some("head_branch")
+    } else {
+        None
+    };
     PrInventoryItem {
         number: fields.number,
         title: fields.title,
@@ -669,6 +681,7 @@ fn inventory_item_from_fields(
         stale: decision.stale,
         owner_issue_closed: decision.owner_issue_closed,
         owner_issue: decision.owner_issue,
+        owner_issue_source: owner_issue_source.map(str::to_string),
         default_action: decision.default_action,
         dwell_hours: decision.dwell_hours,
         stale_after_hours: options.stale_after_hours,
@@ -1357,7 +1370,7 @@ pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
         "--repo",
         repo_slug,
         "--json",
-        "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+        "number,title,state,url,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
     ];
     let label = format!("gh pr view {}", number);
     let output = gwt_core::process_console::spawn_logged_blocking(
@@ -1406,6 +1419,7 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
 
     Ok(PrStatus {
         number,
+        head_ref_name: v["headRefName"].as_str().unwrap_or_default().to_string(),
         title,
         state,
         url,
@@ -1806,7 +1820,7 @@ where
             "pr",
             "list",
             "--json",
-            "number,title,state,url,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
+            "number,title,state,url,headRefName,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
             "--state",
             "all",
             "--limit",
@@ -1890,6 +1904,7 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
                 }
             };
             PrStatus {
+                head_ref_name: v["head"]["ref"].as_str().unwrap_or_default().to_string(),
                 number: v
                     .get("number")
                     .and_then(serde_json::Value::as_u64)
@@ -2972,6 +2987,7 @@ mod tests {
         let json = r#"{
             "number": 123,
             "title": "Add feature",
+            "headRefName": "work/issue-3835",
             "state": "OPEN",
             "url": "https://github.com/owner/repo/pull/123",
             "mergeable": "MERGEABLE",
@@ -2985,12 +3001,46 @@ mod tests {
         let pr = parse_pr_status_json(json).unwrap();
         assert_eq!(pr.number, 123);
         assert_eq!(pr.title, "Add feature");
+        assert_eq!(
+            serde_json::to_value(&pr).unwrap()["head_ref_name"],
+            "work/issue-3835"
+        );
         assert_eq!(pr.state, PrState::Open);
         assert_eq!(pr.ci_status, "SUCCESS");
         assert_eq!(pr.mergeable, "MERGEABLE");
         assert_eq!(pr.merge_state_status, "CLEAN");
         assert_eq!(pr.effective_merge_status(), "MERGEABLE");
         assert_eq!(pr.review_status, "APPROVED");
+    }
+
+    #[test]
+    fn inventory_owner_source_distinguishes_closing_issue_branch_and_unknown() {
+        let mut fields = sample_inventory_fields();
+        fields.head_ref_name = "work/issue-3835".to_string();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("OPEN".to_string()),
+        }];
+        for (owner, source) in [
+            (Some(10), Some("closing_issues")),
+            (Some(3835), Some("head_branch")),
+            (None, None),
+        ] {
+            let row = inventory_item_from_fields(
+                fields.clone(),
+                now_3868(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.owner_issue, owner);
+            assert_eq!(
+                serde_json::to_value(row).unwrap()["owner_issue_source"],
+                serde_json::json!(source)
+            );
+            if fields.closing_issues.is_empty() {
+                fields.head_ref_name = "feature/no-owner".to_string();
+            }
+            fields.closing_issues.clear();
+        }
     }
 
     #[test]
@@ -3212,6 +3262,7 @@ mod tests {
     #[test]
     fn latest_pr_by_created_at_prefers_newest_pr() {
         let older = PrStatus {
+            head_ref_name: String::new(),
             number: 2537,
             title: "Older PR".to_string(),
             state: PrState::Closed,
@@ -3223,6 +3274,7 @@ mod tests {
             review_status: "APPROVED".to_string(),
         };
         let newer = PrStatus {
+            head_ref_name: String::new(),
             number: 2538,
             title: "Newer PR".to_string(),
             state: PrState::Open,
@@ -3251,6 +3303,7 @@ mod tests {
             {
                 "number": 11,
                 "title": "REST fallback PR",
+                "head": { "ref": "work/issue-3835" },
                 "state": "open",
                 "html_url": "https://github.com/o/r/pull/11"
             }
@@ -3260,6 +3313,10 @@ mod tests {
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].number, 11);
         assert_eq!(prs[0].title, "REST fallback PR");
+        assert_eq!(
+            serde_json::to_value(&prs[0]).unwrap()["head_ref_name"],
+            "work/issue-3835"
+        );
         assert_eq!(prs[0].state, PrState::Open);
         assert_eq!(prs[0].url, "https://github.com/o/r/pull/11");
         assert_eq!(prs[0].ci_status, "UNKNOWN");
@@ -3275,6 +3332,8 @@ mod tests {
 
         let prs = fetch_pr_list_with(repo_path, |path, args| {
             assert_eq!(path, repo_path);
+            assert!(args.windows(2).any(|pair| pair[0] == "--json"
+                && pair[1].split(',').any(|field| field == "headRefName")));
             calls.push(args[..2].join(" "));
             match args {
                 ["pr", "list", ..] => Ok(GhCliOutput {

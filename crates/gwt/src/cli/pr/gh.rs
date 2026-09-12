@@ -78,7 +78,7 @@ where
 }
 
 const PR_STATUS_FIELDS: &str =
-    "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
+    "number,title,state,url,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
 const PR_LIST_FIELDS: &str = "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,headRepository,headRepositoryOwner";
 
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
