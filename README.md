@@ -510,6 +510,16 @@ gwt respects any explicit value (`true` or `false`) and does not change it. A
 config that cannot be parsed or written never blocks startup; the path and
 cause are recorded in the error ledger (`errors.list`).
 
+Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
+`[features.context_management]` table makes the whole config unreadable
+(`invalid type: map, expected a boolean`), which also stops `codex login`. The
+codex gwt launches and the `codex` on your `PATH` can be different versions, so
+gwt checks the `PATH` one (`codex --version`) at startup. When it is older than
+0.153.0, or its version cannot be read, gwt does not write the key and removes
+an existing `[features.context_management]` table so that codex keeps working.
+After you upgrade the `PATH` codex to 0.153.0 or later, the next gwt startup
+writes the key again.
+
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
 the loopback endpoint and bearer token that gwt injects for that session, then
@@ -952,6 +962,14 @@ switching to `develop` locally. The `bump` input is `auto` (default),
 merging to `main` then runs the release pipeline (tag, GitHub Release,
 cross‑platform binaries). The manual fallback procedure lives in
 `.claude/commands/release.md`.
+
+The Release PR body is reference-only: it lists delivered Issues as bare
+`#N` references and never carries a closing keyword, because `main` is the
+default branch and `Closes #N` there would close an Issue whose acceptance
+criteria are still open. Issues are settled when their work merges into
+`develop` (see above). After the merge, `release.yml` runs
+`scripts/release_close_guard.py`, which reopens any Issue the Release PR
+merge itself closed and leaves a marker comment.
 
 ### Release Asset Contract
 

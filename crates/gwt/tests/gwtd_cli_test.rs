@@ -245,6 +245,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
         ["board", "show"].as_slice(),
         ["issue", "view", "1"].as_slice(),
         ["hook", "register-codex-managed-hook-trust"].as_slice(),
+        ["hook", "register-codex-managed-project-trust"].as_slice(),
         ["index", "--help"].as_slice(),
         ["workspace", "update", "--title-summary", "legacy"].as_slice(),
     ] {
@@ -344,6 +345,308 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         config.matches("enabled = true").count(),
         5,
         "Codex config must enable every trusted managed hook, got: {config}"
+    );
+}
+
+/// Issue #3967 AC-4: this is the front door an operator runs to check a real
+/// machine, and it used to answer `trusted 0 gwt-managed Codex hooks` with exit
+/// 0 while Codex was still going to stop every launch on `Hooks need review`.
+/// Hooks gwt cannot vouch for have to be reported, and the operation has to
+/// fail.
+#[test]
+fn gwtd_hook_register_codex_managed_hook_trust_fails_on_hooks_it_cannot_vouch_for() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    // Generate against one installed binary, then ask a gwt that resolves a
+    // different one to vouch for the result.
+    let generated_with = project.path().join("Programs").join("GWT").join("gwtd");
+    // #4057: pin the generator per thread. `GWT_HOOK_BIN` is process-global, so
+    // setting it here would leak this pin into any materialization another test
+    // runs at the same time.
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(&generated_with);
+        gwt_skills::generate_codex_hooks(project.path()).expect("generate hooks");
+    }
+
+    let mut child = isolated_gwtd_command()
+        .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd hook register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_hook_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child.wait_with_output().expect("wait gwtd hook register");
+
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("hook registration stdout must be JSON");
+    assert_eq!(
+        response["ok"].as_bool(),
+        Some(false),
+        "registration must not report success while hooks stay untrusted, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        response["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Hooks need review")),
+        "the refusal must name the launch Codex would stop, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_writes_exact_project() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    let canonical_project = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(project.path()).expect("canonical project"),
+    );
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(
+        output.status.success(),
+        "registration should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("project trust registration stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(true));
+    assert!(
+        response["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("trusted gwt-managed Codex worktree")),
+        "JSON output should report the exact project trust registration, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(config_path).expect("read config")).unwrap();
+    assert_eq!(
+        config["projects"][canonical_project.to_string_lossy().as_ref()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_refuses_explicit_untrusted() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    let canonical_project = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(project.path()).expect("canonical project"),
+    );
+    let mut project_config = toml::Table::new();
+    project_config.insert(
+        "trust_level".to_string(),
+        toml::Value::String("untrusted".to_string()),
+    );
+    let mut projects = toml::Table::new();
+    projects.insert(
+        canonical_project.to_string_lossy().into_owned(),
+        toml::Value::Table(project_config),
+    );
+    let mut root = toml::Table::new();
+    root.insert("projects".to_string(), toml::Value::Table(projects));
+    let config = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+    fs::write(&config_path, &config).expect("seed explicit untrusted config");
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(!output.status.success());
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("project trust refusal stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(false));
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("explicitly untrusted")),
+        "JSON error should preserve the fail-closed reason, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fs::read_to_string(config_path).unwrap(), config);
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_uses_effective_codex_home() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    let canonical_project = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(project.path()).expect("canonical project"),
+    );
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(
+        output.status.success(),
+        "registration should use CODEX_HOME, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(config_path).expect("read config")).unwrap();
+    assert_eq!(
+        config["projects"][canonical_project.to_string_lossy().as_ref()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_refuses_arbitrary_host_config() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let stable_codex_home = tempfile::tempdir().expect("stable Codex tempdir");
+    let arbitrary_codex_home = tempfile::tempdir().expect("arbitrary Codex tempdir");
+    let arbitrary_config = arbitrary_codex_home.path().join("config.toml");
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", stable_codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": arbitrary_config.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(!output.status.success());
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("project trust refusal stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(false));
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("process-stable/default")),
+        "refusal must identify the supported Host config boundary: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !arbitrary_config.exists(),
+        "the explicit arbitrary Host config must remain untouched"
+    );
+}
+
+#[test]
+fn gwtd_internal_docker_marker_refuses_an_explicit_codex_config() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let stable_codex_home = tempfile::tempdir().expect("stable Codex tempdir");
+    let arbitrary_codex_home = tempfile::tempdir().expect("arbitrary Codex tempdir");
+    let arbitrary_config = arbitrary_codex_home.path().join("config.toml");
+
+    let output = isolated_gwtd_command()
+        .args([
+            "__internal",
+            "daemon-hook",
+            "register-codex-managed-project-trust",
+            "--project-root",
+            project.path().to_str().expect("project path utf8"),
+            "--runtime-target",
+            "docker",
+            "--codex-config",
+            arbitrary_config.to_str().expect("config path utf8"),
+        ])
+        .env("CODEX_HOME", stable_codex_home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run internal Docker project trust registration");
+
+    assert!(!output.status.success());
+    assert!(
+        !arbitrary_config.exists(),
+        "a caller-controlled Docker marker must not authorize an explicit config"
     );
 }
 
