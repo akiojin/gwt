@@ -2070,6 +2070,145 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
     );
 }
 
+/// Issue #4231: a paged list that misses one open Issue mints an absence
+/// closure whose floor is the Issue's last observed revision. An Issue nobody
+/// edits afterwards is observed Open at exactly that revision forever, so a tie
+/// must reopen it or the Issue drops out of the inbox with no reason attached.
+#[test]
+fn live_open_at_the_absence_floor_revision_returns_the_issue_to_the_inbox() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let open = issue(42, &["bug"]);
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        std::slice::from_ref(&open),
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:01:00Z",
+    );
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:02:00Z",
+    );
+    assert!(
+        monitor.inbox_item(42).is_none(),
+        "the absence closes the row"
+    );
+
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[open],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:03:00Z",
+    );
+
+    assert_eq!(
+        monitor.inbox_item(42).map(|item| item.state),
+        Some(MonitorInboxState::Queued),
+        "an Open observation at the absence floor revision refutes the absence"
+    );
+}
+
+/// Issue #4231 AC-2: an open Issue a closure record keeps out of the inbox is
+/// named in the status instead of vanishing without a row.
+#[test]
+fn status_names_open_issues_a_closure_record_holds_out_of_the_inbox() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let open = issue(42, &["bug"]);
+    for (source, observed, at) in [
+        (
+            IssueMonitorCandidateSource::Live,
+            true,
+            "2026-08-01T00:01:00Z",
+        ),
+        (
+            IssueMonitorCandidateSource::Live,
+            false,
+            "2026-08-01T00:02:00Z",
+        ),
+        (
+            IssueMonitorCandidateSource::Cache,
+            true,
+            "2026-08-01T00:03:00Z",
+        ),
+    ] {
+        let issues = if observed { vec![open.clone()] } else { vec![] };
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &issues,
+            source,
+            repo.path(),
+            at,
+        );
+    }
+
+    assert!(
+        monitor.inbox_item(42).is_none(),
+        "a cache scan cannot reopen"
+    );
+    assert_eq!(monitor.agent_status().closure_held, vec![42]);
+
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[open],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:04:00Z",
+    );
+    assert!(monitor.agent_status().closure_held.is_empty());
+}
+
+/// Issue #4231: the reopen at the floor revision must survive the cross-process
+/// rebase in both directions; the tie is decided by generation, not by state.
+#[test]
+fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
+    let reopened = IssueClosureRecord {
+        issue_number: 42,
+        generation: 3,
+        state: IssueClosureState::Reopened,
+        evidence: IssueClosureEvidence::ExplicitRevision,
+        issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+    };
+    let absence = IssueClosureRecord {
+        issue_number: 42,
+        generation: 2,
+        state: IssueClosureState::Closed,
+        evidence: IssueClosureEvidence::CompleteLiveAbsence,
+        issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+    };
+    for (local, disk) in [
+        (reopened.clone(), absence.clone()),
+        (absence.clone(), reopened.clone()),
+    ] {
+        let prefs = |record: IssueClosureRecord| IssueMonitorPrefs {
+            closure_records: vec![record],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs(local.clone()));
+
+        monitor.rebase_daemon_driver_prefs(&prefs(disk));
+
+        let record = monitor
+            .prefs()
+            .closure_records
+            .into_iter()
+            .find(|record| record.issue_number == 42)
+            .expect("merged closure record");
+        assert_eq!(
+            (record.state, record.generation),
+            (IssueClosureState::Reopened, 3),
+            "local {:?}",
+            local.state
+        );
+    }
+}
+
 #[test]
 fn revision_winner_preserves_the_highest_merged_generation() {
     let local_prefs = IssueMonitorPrefs {

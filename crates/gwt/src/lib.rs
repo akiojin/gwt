@@ -50,6 +50,7 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
+pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
@@ -197,7 +198,7 @@ pub use launch_wizard::{
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    refresh_managed_gwt_assets_for_worktree,
+    refresh_managed_gwt_assets_for_worktree, ManagedAssetMaterialization,
 };
 pub use native_app::{
     macos_bundle_identifier, APP_NAME, GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME,

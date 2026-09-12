@@ -1394,6 +1394,10 @@ pub enum IssueMonitorFailure {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder_window_id: Option<String>,
     },
+    /// Codex rendered its directory-trust onboarding prompt in a live pane.
+    /// Only the exact Issue Monitor window binding may commit this terminal
+    /// human handoff; standalone and stale panes are rejected by the driver.
+    CodexDirectoryTrustPrompt,
     /// Issue #3616: the provider backing the agent ran out of quota.
     ///
     /// Distinct from every other agent exit because the cause is stated by the
@@ -2672,6 +2676,11 @@ pub struct IssueMonitorAgentStatus {
     /// pane that is working on it.
     #[serde(default)]
     pub inbox: Vec<IssueMonitorInboxSummary>,
+    /// Issue #4231 AC-2: open Issues the last scan kept out of `inbox`
+    /// because a closure record holds them. They have no row, so without
+    /// this list the exclusion is unobservable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closure_held: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3295,6 +3304,10 @@ pub struct IssueMonitorState {
     /// necessarily reached disk. Baseline Open observations do not enter it.
     #[serde(default, skip)]
     closure_reopen_tombstones: BTreeSet<u64>,
+    /// Issue #4231 AC-2: open Issues the last scan skipped because a closure
+    /// record holds them. Rebuilt by every scan; never persisted.
+    #[serde(default, skip)]
+    closure_held: BTreeSet<u64>,
     /// SPEC #3200 FR-001: opt-in autonomous (unattended) resolution mode.
     autonomous_mode: bool,
     /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
@@ -5150,6 +5163,7 @@ impl IssueMonitorState {
             completion_records: BTreeMap::new(),
             closure_records: BTreeMap::new(),
             closure_reopen_tombstones: BTreeSet::new(),
+            closure_held: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
             auto_apply_updates: None,
@@ -5537,10 +5551,13 @@ impl IssueMonitorState {
         }
 
         // A carried floor is only a lower bound for a non-explicit closure,
-        // not its exact revision. It can reject an explicit Open at or below
-        // that floor, or prove an incoming closure is at/above the current
-        // explicit Open. Other cross-process orderings remain generation
-        // fenced until a subsequent complete Live scan resolves them.
+        // not its exact revision. It can reject an explicit Open below that
+        // floor, or prove an incoming closure is above the current explicit
+        // Open. A tie is left to the generation fence (Issue #4231): the floor
+        // is the revision last seen Open, so an Open at it is either the stale
+        // pre-absence record (lower generation) or the reopen that refuted the
+        // absence (higher generation). Other cross-process orderings remain
+        // generation fenced until a subsequent complete Live scan resolves them.
         if current.state == IssueClosureState::Closed
             && current.evidence != IssueClosureEvidence::ExplicitRevision
             && current
@@ -5551,8 +5568,8 @@ impl IssueMonitorState {
             && incoming.evidence == IssueClosureEvidence::ExplicitRevision
         {
             return ordering.and_then(|ordering| match ordering {
-                std::cmp::Ordering::Less | std::cmp::Ordering::Equal => Some(false),
-                std::cmp::Ordering::Greater => None,
+                std::cmp::Ordering::Less => Some(false),
+                std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => None,
             });
         }
         if current.state == IssueClosureState::Reopened
@@ -5565,8 +5582,8 @@ impl IssueMonitorState {
                 .is_some_and(Self::closure_revision_floor_is_valid)
         {
             return ordering.and_then(|ordering| match ordering {
-                std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => Some(true),
-                std::cmp::Ordering::Less => None,
+                std::cmp::Ordering::Greater => Some(true),
+                std::cmp::Ordering::Equal | std::cmp::Ordering::Less => None,
             });
         }
         None
@@ -5778,7 +5795,15 @@ impl IssueMonitorState {
                 return match ordering {
                     std::cmp::Ordering::Greater => true,
                     std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Equal => incoming_state == IssueClosureState::Closed,
+                    // Issue #4231: an absence floor is the last revision seen
+                    // Open. Seeing it Open at that revision again refutes the
+                    // absence; failing closed here parked every Issue nobody
+                    // edited after one incomplete page read.
+                    std::cmp::Ordering::Equal => {
+                        incoming_state == IssueClosureState::Closed
+                            || (current.state == IssueClosureState::Closed
+                                && current.evidence != IssueClosureEvidence::ExplicitRevision)
+                    }
                 };
             }
         }
@@ -6608,6 +6633,27 @@ impl IssueMonitorState {
             self.review_windows.remove(issue_number);
         }
         resumed
+    }
+
+    /// Escalate a Codex directory-trust prompt only while its source pane is
+    /// still the exact live window bound to `issue_number`.
+    pub fn try_escalate_codex_directory_trust_prompt(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        reason: impl Into<String>,
+    ) -> bool {
+        if !self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|stored_window_id| {
+                issue_monitor_window_ids_match(stored_window_id, source_window_id)
+            })
+        {
+            return false;
+        }
+        self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, reason);
+        true
     }
 
     /// Issue #3944 AC-2: ask the PM to steer `issue_number` — a live launch the
@@ -8817,6 +8863,7 @@ impl IssueMonitorState {
                     }
                 })
                 .collect(),
+            closure_held: self.closure_held.iter().copied().collect(),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             scan_stall: None,
@@ -13611,6 +13658,7 @@ pub fn scan_issue_monitor_candidates(
     monitor.last_scan_at = Some(now.to_string());
     monitor.last_error = None;
     monitor.launch_auth_required = false;
+    monitor.closure_held.clear();
 
     for issue in issues {
         summary.scanned += 1;
@@ -13628,6 +13676,7 @@ pub fn scan_issue_monitor_candidates(
             // Cache and LiveIncomplete inputs cannot supersede a durable close.
             // A complete Live observation transitions the fact before reaching
             // this shared scan loop.
+            monitor.closure_held.insert(issue.number);
             summary.skipped += 1;
             continue;
         }
@@ -14022,6 +14071,7 @@ mod tests {
                     attempts: 0,
                     last_failure_message: None,
                 }],
+                closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
                 // `agent_status` reports the queue; the scan-cadence check is
@@ -18994,6 +19044,70 @@ mod tests {
             monitor.prefs(),
             successor,
             "a stale source window cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_escalates_exact_live_window_and_releases_slot() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+
+        assert!(monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-1::agent-old",
+            "Codex requires directory trust confirmation for the managed worktree",
+        ));
+
+        assert_eq!(monitor.active_count(), 0, "NeedsHuman releases the slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert_eq!(
+            monitor
+                .inbox_item(42)
+                .and_then(|item| item.error_message.as_deref()),
+            Some("Codex requires directory trust confirmation for the managed worktree")
+        );
+        assert!(
+            !monitor
+                .try_escalate_codex_directory_trust_prompt(42, "tab-1::agent-old", "duplicate",),
+            "replayed prompt output is idempotently rejected after the live binding is cleared"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_cannot_escalate_foreign_or_successor_window() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let original = monitor.prefs();
+
+        assert!(!monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-2::agent-old",
+            "foreign tab",
+        ));
+        assert!(!monitor.try_escalate_codex_directory_trust_prompt(
+            43,
+            "tab-1::agent-old",
+            "foreign issue",
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-1::agent-old",
+            "first prompt",
+        ));
+        monitor.complete_active_launch(42, "tab-1::agent-successor");
+        let successor = monitor.prefs();
+        assert!(!monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-1::agent-old",
+            "stale prompt replay",
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale prompt must not revoke the successor launch"
         );
     }
 

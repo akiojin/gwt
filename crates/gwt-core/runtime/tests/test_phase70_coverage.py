@@ -182,6 +182,25 @@ class PublishFailurePropagationTests(unittest.TestCase):
             db_root = base / "index"
             project = base / "project"
             project.mkdir()
+            # Issue #4205: the issues build refuses an empty corpus before it
+            # ever reaches publication, so a cached issue is required to keep
+            # this test exercising the publish-failure branch.
+            issue_dir = base / ".gwt" / "cache" / "issues" / REPO_HASH / "1"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "number": 1,
+                        "title": "Cached issue",
+                        "labels": [],
+                        "state": "open",
+                        "updated_at": "2026-09-10T00:00:00Z",
+                        "comment_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (issue_dir / "body.md").write_text("Body", encoding="utf-8")
             cases = [
                 lambda: runner.action_index_specs_v2(
                     project_root=str(project),
@@ -232,14 +251,22 @@ class PublishFailurePropagationTests(unittest.TestCase):
                     self.assertEqual(result, failure)
                 with mock.patch.object(
                     runner, "_publish_generation", return_value=failure
-                ):
+                ) as publish:
                     result = runner.action_index_issues_v2(
                         repo_hash=REPO_HASH,
                         project_root=str(project),
                         db_root=db_root,
                         respect_ttl=False,
                     )
-                self.assertEqual(result, failure)
+                # The issues scope records the failure in its repair gate
+                # (Issue #4205) instead of returning the publisher dict
+                # verbatim, but the failure must still propagate. The
+                # EMPTY_CORPUS short-circuit is covered separately in
+                # test_issue_ttl / test_auto_build_fallback; this case must keep
+                # reaching the publisher.
+                publish.assert_called_once()
+                self.assertFalse(result.get("ok"), result)
+                self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
 
 
 class SearchClassificationBranchTests(unittest.TestCase):
