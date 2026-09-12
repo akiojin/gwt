@@ -220,7 +220,18 @@ fn run_docker_status_query_with_retry(
     current_dir: Option<&std::path::Path>,
 ) -> Result<Output> {
     let timeout = docker_status_timeout();
-    match run_docker_with_timeout_in_dir_and_timeout(args, action, current_dir, timeout) {
+    retry_docker_status_query(action, timeout, || {
+        run_docker_with_timeout_in_dir_and_timeout(args, action, current_dir, timeout)
+    })
+}
+
+// Keep retry decisions independent of process scheduling and wall-clock timing.
+fn retry_docker_status_query<T>(
+    action: &str,
+    timeout: Duration,
+    mut run: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    match run() {
         Err(error) if is_docker_timeout_error(&error) => {
             tracing::warn!(
                 category = "docker",
@@ -228,7 +239,7 @@ fn run_docker_status_query_with_retry(
                 timeout_ms = timeout.as_millis() as u64,
                 "docker status query timed out; retrying once"
             );
-            run_docker_with_timeout_in_dir_and_timeout(args, action, current_dir, timeout)
+            run()
         }
         result => result,
     }
@@ -1428,36 +1439,56 @@ mod tests {
 
     #[test]
     fn compose_ps_retries_once_after_timeout() {
-        let compose_dir = tempfile::tempdir().expect("temp compose dir");
-        let compose_path = compose_dir.path().join("docker-compose.yml");
-        fs::write(
-            &compose_path,
-            "services:\n  app:\n    image: nginx:latest\n",
-        )
-        .expect("compose");
-        let marker_dir = tempfile::tempdir().expect("temp marker dir");
-        let marker_path = marker_dir.path().join("first-call.marker");
-        let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ ! -f '{marker}' ]; then\n    : > '{marker}'\n    sleep 5\n    exit 0\n  fi\n  printf 'app\\trunning\\n'\n  exit 0\nfi\nexit 0\n",
-            marker = shell_script_path(&marker_path)
+        let mut attempts = 0;
+        let result =
+            retry_docker_status_query("docker compose ps", Duration::from_millis(500), || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(GwtError::Docker(
+                        "docker compose ps timed out after 500ms".into(),
+                    ))
+                } else {
+                    Ok("app\trunning\n")
+                }
+            });
+
+        assert_eq!(result.expect("retry should succeed"), "app\trunning\n");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn compose_ps_stops_after_second_timeout() {
+        let mut attempts = 0;
+        let result =
+            retry_docker_status_query("docker compose ps", Duration::from_millis(500), || {
+                attempts += 1;
+                Err::<(), _>(GwtError::Docker(format!(
+                    "attempt {attempts}: docker compose ps timed out after 500ms"
+                )))
+            });
+
+        assert_eq!(attempts, 2);
+        let error = result.expect_err("second timeout should propagate");
+        assert!(error.to_string().contains("attempt 2:"), "{error}");
+    }
+
+    #[test]
+    fn compose_ps_does_not_retry_other_errors() {
+        let mut attempts = 0;
+        let result =
+            retry_docker_status_query("docker compose ps", Duration::from_millis(500), || {
+                attempts += 1;
+                Err::<(), _>(GwtError::Docker("failed to run docker compose ps".into()))
+            });
+
+        assert_eq!(attempts, 1);
+        let error = result.expect_err("non-timeout failure should propagate");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to run docker compose ps"),
+            "{error}"
         );
-
-        with_fake_docker(&script, |_| {
-            let previous_status_timeout = std::env::var_os("GWT_DOCKER_STATUS_TIMEOUT_MS");
-            std::env::set_var("GWT_DOCKER_STATUS_TIMEOUT_MS", "500");
-
-            let result = compose_service_status(&compose_path, "app");
-
-            match previous_status_timeout {
-                Some(value) => std::env::set_var("GWT_DOCKER_STATUS_TIMEOUT_MS", value),
-                None => std::env::remove_var("GWT_DOCKER_STATUS_TIMEOUT_MS"),
-            }
-
-            assert_eq!(
-                result.expect("compose ps should succeed via retry after a timeout"),
-                ComposeServiceStatus::Running
-            );
-        });
     }
 
     #[test]
