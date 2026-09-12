@@ -6460,8 +6460,8 @@ mod tests {
 
     // Issue #4029 AC-1 / AC-2 / AC-3: `execution.status` advertises
     // `verify.plan` / `verify.run` through the exact gate `verify.*` enforces.
-    // The owning Session of a Blocked (terminal) record keeps them; any other
-    // Session loses them and is told the record needs a fresh launch.
+    // The owning Session of a Blocked (terminal) record keeps them; another
+    // Session loses them but can adopt the dead holder's record (Issue #4154).
     #[test]
     fn execution_status_advertises_verify_recoveries_only_to_the_authorized_session() {
         let _env_lock = crate::env_test_lock()
@@ -6526,14 +6526,14 @@ mod tests {
             denial.contains("current verification authority"),
             "denial must be the same gate `verify.*` enforces: {denial}"
         );
-        assert!(
-            other_status.available_recoveries.is_empty(),
-            "another Session must not be offered anything `verify.*` refuses: {:?}",
-            other_status.available_recoveries
+        assert_eq!(
+            other_status.available_recoveries,
+            vec!["execution.adopt"],
+            "another Session can adopt the dead holder's record, but cannot run `verify.*`"
         );
         assert_eq!(
-            other_status.recovery_hint.as_deref(),
-            Some(crate::cli::execution_state::RECOVERY_HINT_FRESH_LAUNCH_REQUIRED)
+            other_status.recovery_hint, None,
+            "a Session with an available ownership transfer does not need a fresh launch"
         );
         for operation in ["verify.plan", "verify.run"] {
             let probe = other_status
