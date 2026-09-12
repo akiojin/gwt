@@ -36,8 +36,6 @@ const DEP_STEP: &str = "Install tray + GTK dependencies (Linux)";
 const CACHE_STEP: &str = "Cache Linux GTK dependency packages";
 const CACHE_ENV: &str = "GWT_APT_CACHE_DIR";
 const GTK_DEPS_MODE: &str = "gtk-deps";
-/// Issue #4268: the apt drop-in `scripts/ci-apt.sh` writes before it fetches.
-const ACQUIRE_CONF: &str = "99-gwt-ci-apt-acquire";
 /// The cache namespace every Linux job that installs only `gtk-deps` writes to.
 const SHARED_CACHE_PREFIX: &str = "gwt-apt-gtk-${{ runner.os }}-";
 
@@ -367,6 +365,12 @@ mod wrapper {
 
     use std::os::unix::fs::PermissionsExt;
     use std::process::Output;
+
+    /// Issue #4268: the apt drop-in `scripts/ci-apt.sh` writes before it
+    /// fetches. It lives in here rather than beside the other constants
+    /// because only the harness reads it, and a module-level constant no
+    /// Windows target uses fails `Clippy (Windows)` on its dead-code lint.
+    const ACQUIRE_CONF: &str = "99-gwt-ci-apt-acquire";
 
     use gwt_core::process::{resolved_command, ProcessPlanRequest};
 
