@@ -9813,6 +9813,12 @@ fn settle_locked(
         });
     }
     if record.status != ExecutionControlStatus::Active {
+        if matches!(
+            settlement,
+            ExecutionSettlement::Completed | ExecutionSettlement::CompletedWithEvidence { .. }
+        ) {
+            complete_matching_build_lifecycle(worktree, &record)?;
+        }
         return Ok(SettleResult::AlreadySettled(record));
     }
     let lifecycle_reason = match settlement {
@@ -9856,7 +9862,34 @@ fn settle_locked(
     if !generation_updated {
         save(worktree, &record)?;
     }
-    Ok(SettleResult::Settled(load(worktree)?.unwrap_or(record)))
+    let record = load(worktree)?.unwrap_or(record);
+    complete_matching_build_lifecycle(worktree, &record)?;
+    Ok(SettleResult::Settled(record))
+}
+
+/// Completion owns the matching build's cleanup too: once the execution is
+/// terminal, a separate build.complete can no longer rely on its live binding.
+/// Run after the durable transition, and on completion retries, so cleanup I/O
+/// failures never reopen or discard an execution that already completed.
+fn complete_matching_build_lifecycle(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+) -> io::Result<()> {
+    if record.status != ExecutionControlStatus::Completed {
+        return Ok(());
+    }
+    let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
+    else {
+        return Ok(());
+    };
+    if state.active
+        && state.owner_spec == Some(record.owner_number)
+        && state.session_id == record.primary_session_id
+    {
+        state.active = false;
+        gwt_core::skill_state::save(worktree, crate::cli::build::SKILL_NAME, &state)?;
+    }
+    Ok(())
 }
 
 /// Complete an active execution only when the exact plan/run snapshot is
@@ -10475,6 +10508,15 @@ pub struct ExecutionDiagnosisSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_hint: Option<String>,
     pub warnings: Vec<String>,
+    /// Issue #4217 FR-002: `manual` or `autonomous` — who started this
+    /// session, read from the durable Session the launcher wrote.
+    ///
+    /// This is the answer the skills consume instead of inspecting
+    /// `GWT_AUTONOMOUS_EXECUTION`. `None` means the session is unknown to this
+    /// machine (no `GWT_SESSION_ID`, or a record that cannot be read), which
+    /// callers must treat as attended rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_route: Option<String>,
 }
 
 fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus) -> &'static str {
@@ -10718,6 +10760,85 @@ fn base_execution_recoveries(
     recoveries
 }
 
+/// The route the launcher stamped on `session_id`'s durable Session
+/// (Issue #4217 FR-002).
+///
+/// `GWT_AUTONOMOUS_EXECUTION` is written only when the project opted into
+/// unattended autonomous mode, so an Issue Monitor launch made while that
+/// preference reads false looked human-driven to every gate downstream — the
+/// agent then demanded a visual check from a human who was never there
+/// (#3777, #3697). The Session record is written by the launcher on every
+/// route, so it cannot drift that way.
+///
+/// `None` when the session is unknown here; callers treat that as attended.
+#[must_use]
+pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::LaunchRoute> {
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    gwt_agent::Session::load(&path)
+        .ok()
+        .map(|session| session.launch_route)
+}
+
+/// Whether a settlement reason blames a human who was supposed to look at the
+/// change.
+///
+/// The agent's own automated `Agent Visual Check` is deliberately excluded: a
+/// headed run that found console errors is a real defect, not an absent
+/// reviewer, and refusing to record it would hide a genuine blocker.
+fn blames_absent_human_verification(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("agent visual check") {
+        return false;
+    }
+    [
+        "user verification",
+        "user confirmation",
+        "visual verification",
+        "視覚検証",
+        "ユーザー確認",
+        "ユーザ確認",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+/// Issue #4217 AC-6: refuse a terminal block whose only blocker is that
+/// nobody watched an unattended run.
+///
+/// `execution.blocked` is terminal, not a pause: it defers every open
+/// obligation and revokes `pr.edit`, so the agent that takes it cannot even
+/// deliver the Draft PR afterwards (#4214). For an autonomous launch the
+/// answer is therefore to refuse the settlement and name the way out, not to
+/// record the stall more precisely.
+fn autonomous_verification_block_refusal(
+    route: Option<gwt_agent::LaunchRoute>,
+    reason: &str,
+    missing_verification: Option<&str>,
+) -> Option<String> {
+    if route != Some(gwt_agent::LaunchRoute::Autonomous) {
+        return None;
+    }
+    let names_absent_human = blames_absent_human_verification(reason)
+        || missing_verification.is_some_and(blames_absent_human_verification);
+    if !names_absent_human {
+        return None;
+    }
+    Some(format!(
+        "execution: blocked refused — this is an autonomous launch \
+         (launch_route: autonomous), so a missing user or visual verification \
+         is not a blocker: nobody is watching by design. Record \
+         `{label} {deferred}` in the PR body, hand off a Draft PR, and settle \
+         this execution normally; the owner sweeps the deferred PRs later. If \
+         something else is genuinely blocking you, restate params.reason \
+         without the verification clause.\n",
+        label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+        deferred = gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+    ))
+}
+
 /// Collect the current operation-local diagnosis without mutating trusted state.
 #[must_use]
 pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosisSnapshot {
@@ -10792,6 +10913,10 @@ fn diagnose_with_mode(
         available_recoveries: vec!["gwt-execute".to_string()],
         recovery_hint: None,
         warnings: Vec::new(),
+        // The route belongs to the session, not to the record, so it is
+        // reported even when this worktree carries no Execution Control
+        // Record at all.
+        launch_route: session_launch_route(session_id).map(|route| route.as_str().to_string()),
     };
 
     let record = match load(worktree) {
@@ -13376,6 +13501,14 @@ pub(super) fn run<E: CliEnv>(
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     "execution.blocked requires a non-empty params.reason".to_string(),
                 )));
+            }
+            if let Some(refusal) = autonomous_verification_block_refusal(
+                session_launch_route(Some(&session_id)),
+                &reason,
+                missing_verification.as_deref(),
+            ) {
+                out.push_str(&refusal);
+                return Ok(2);
             }
             deferral_reason = Some(reason.clone());
             settle(
@@ -21202,6 +21335,179 @@ exit 1
             }));
         }
 
+        /// Issue #4217: restamp a fixture Session's launch route the way the
+        /// launcher would have.
+        fn stamp_session_launch_route(session_id: &str, route: gwt_agent::LaunchRoute) {
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let mut session =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                    .expect("load fixture Session");
+            session.launch_route = route;
+            session
+                .save(&sessions_dir)
+                .expect("persist fixture launch route");
+        }
+
+        fn autonomous_blocked_fixture(
+            repo: &Path,
+            session_id: &str,
+            route: gwt_agent::LaunchRoute,
+        ) {
+            prepare_generation_bound_execution_for_owner(
+                repo,
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 4217,
+                },
+                ExecutionControlStatus::Active,
+            );
+            stamp_session_launch_route(session_id, route);
+        }
+
+        /// Issue #4217 AC-2: the route reaches the caller from the durable
+        /// Session, so a consumer never has to guess it from an environment
+        /// variable the launcher may not have set.
+        #[test]
+        fn status_reports_the_launch_route_recorded_at_launch() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-route";
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            assert_eq!(
+                status_snapshot(repo.path(), session_id)["launch_route"],
+                "autonomous"
+            );
+
+            stamp_session_launch_route(session_id, gwt_agent::LaunchRoute::Manual);
+            assert_eq!(
+                status_snapshot(repo.path(), session_id)["launch_route"],
+                "manual"
+            );
+        }
+
+        /// AC-1 / AC-6: an unattended execution may not end itself because
+        /// nobody looked at a screen. `execution.blocked` is terminal — it
+        /// defers every open obligation and revokes `pr.edit` (#4214) — so the
+        /// stall it records is also a closed loop the agent cannot leave. The
+        /// refusal names the way out instead.
+        #[test]
+        fn autonomous_execution_cannot_block_on_an_absent_human_verifier() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-autonomous";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            // The exact wording two windows stalled on (#3777, #3697).
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "AGENTS.md requires User Verification Result: confirmed before a \
+                             PR may be created"
+                        .to_string(),
+                    missing_verification: None,
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("launch_route: autonomous"), "{out}");
+            assert!(out.contains("deferred (autonomous execution)"), "{out}");
+            assert_eq!(
+                load(repo.path())
+                    .expect("load execution record")
+                    .expect("execution record")
+                    .status,
+                ExecutionControlStatus::Active,
+                "a refused block must leave the execution running, not half-settled"
+            );
+        }
+
+        /// AC-6: the refusal reads the blocker, not the launch. A genuine
+        /// blocker from the same unattended window still settles, and the
+        /// agent's *own* failing headed run is a genuine blocker — refusing it
+        /// would hide a real defect behind a rule about absent humans.
+        #[test]
+        fn autonomous_execution_still_blocks_on_a_genuine_blocker() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-genuine";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "Agent Visual Check: fail(console error on the canvas route)"
+                        .to_string(),
+                    missing_verification: Some("headed dark/light run".to_string()),
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                load(repo.path())
+                    .expect("load execution record")
+                    .expect("execution record")
+                    .status,
+                ExecutionControlStatus::Blocked
+            );
+        }
+
+        /// AC-7: a manual launch is unchanged. Somebody *is* watching, so a
+        /// pending user verification remains a legitimate reason to stop.
+        #[test]
+        fn manual_execution_may_still_block_on_a_pending_user_verification() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-manual";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Manual);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "AGENTS.md requires User Verification Result: confirmed before a \
+                             PR may be created"
+                        .to_string(),
+                    missing_verification: None,
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                load(repo.path())
+                    .expect("load execution record")
+                    .expect("execution record")
+                    .status,
+                ExecutionControlStatus::Blocked
+            );
+        }
+
         #[test]
         fn blocked_output_guides_build_abort_when_matching_build_lifecycle_remains() {
             let _env_lock = crate::env_test_lock()
@@ -24664,6 +24970,7 @@ exit 1
                     CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                         commands: Vec::new(),
                         max_wait_secs: None,
+                        user_verification_result: None,
                     }),
                 )
                 .unwrap();
@@ -25767,6 +26074,202 @@ exit 1
         }
 
         #[test]
+        fn complete_op_finishes_matching_build_lifecycle_for_issue_and_spec() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session_env = unset_live_session_env();
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            for owner_kind in [ExecutionOwnerKind::Issue, ExecutionOwnerKind::Spec] {
+                // Owner ledgers are repo-scoped, so each owner-kind case
+                // needs a separate trusted HOME even with distinct worktrees.
+                let home = tempfile::tempdir().unwrap();
+                let _home = ScopedEnvVar::set("HOME", home.path());
+                let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+                let dir = tempfile::tempdir().unwrap();
+                prepare_generation_bound_execution_for_owner(
+                    dir.path(),
+                    "sess-op",
+                    ExecutionOwnerKey {
+                        kind: owner_kind,
+                        number: 3248,
+                    },
+                    ExecutionControlStatus::Active,
+                );
+                let mut env = TestEnv::new(dir.path().to_path_buf());
+                let (code, out) = run_collect(
+                    &mut env,
+                    CliCommand::Build(crate::cli::SkillStateAction::Start { spec: 3248 }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(
+                    gwt_core::skill_state::load(dir.path(), "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active
+                );
+                save_covering_evidence(dir.path(), "sess-op", false);
+
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(
+                    load(dir.path()).unwrap().unwrap().status,
+                    ExecutionControlStatus::Completed
+                );
+                assert!(
+                    !gwt_core::skill_state::load(dir.path(), "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active,
+                    "successful execution.complete must also finish the matching build"
+                );
+                assert_eq!(
+                    crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                        dir.path(),
+                        "{}",
+                        Some("sess-op")
+                    ),
+                    crate::cli::hook::HookOutput::Silent,
+                    "a completed execution must not leave a still-active Stop loop"
+                );
+            }
+        }
+
+        #[test]
+        fn complete_op_retry_finishes_stranded_build_without_changing_completed_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = unset_live_session_env();
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            prepare_generation_bound_execution_for_owner(
+                dir.path(),
+                "sess-op",
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 3248,
+                },
+                ExecutionControlStatus::Completed,
+            );
+            let completed = load(dir.path()).unwrap().unwrap();
+            // A previous version, or a failed cleanup write, left only the
+            // local build lifecycle open after the execution was settled.
+            save_build_state(dir.path(), "sess-op", Some(3248), true);
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                !gwt_core::skill_state::load(dir.path(), "build-spec")
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+            let after = load(dir.path()).unwrap().unwrap();
+            assert_eq!(after, completed);
+            let state = gwt_core::skill_state::load(dir.path(), "build-spec").unwrap();
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                gwt_core::skill_state::load(dir.path(), "build-spec").unwrap(),
+                state
+            );
+        }
+
+        #[test]
+        fn complete_op_preserves_unrelated_build_lifecycles() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            for (build_session, build_owner) in [
+                ("sess-other", Some(3248)),
+                ("sess-op", Some(999)),
+                ("sess-op", None),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                save(dir.path(), &active_record("sess-op")).unwrap();
+                save_build_state(dir.path(), build_session, build_owner, true);
+                let before = gwt_core::skill_state::load(dir.path(), "build-spec").unwrap();
+                save_covering_evidence(dir.path(), "sess-op", false);
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(
+                    gwt_core::skill_state::load(dir.path(), "build-spec").unwrap(),
+                    before
+                );
+            }
+        }
+
+        #[test]
+        fn complete_op_reports_build_cleanup_io_error_and_can_retry() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            save_build_state(dir.path(), "sess-op", Some(3248), true);
+            save_covering_evidence(dir.path(), "sess-op", false);
+            let path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
+            let backup = path.with_extension("backup");
+            fs::rename(&path, &backup).unwrap();
+            fs::create_dir(&path).unwrap();
+
+            assert!(
+                run_cmd(dir.path(), ExecutionCommand::Complete).is_err(),
+                "cleanup I/O errors must not be reported as successful completion"
+            );
+            let completed = load(dir.path()).unwrap().unwrap();
+            assert_eq!(completed.status, ExecutionControlStatus::Completed);
+            fs::remove_dir(&path).unwrap();
+            fs::rename(&backup, &path).unwrap();
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(load(dir.path()).unwrap().unwrap(), completed);
+            assert!(
+                !gwt_core::skill_state::load(dir.path(), "build-spec")
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+        }
+
+        #[test]
+        fn blocked_op_does_not_finalize_build_of_already_completed_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            settle(dir.path(), "sess-op", ExecutionSettlement::Completed).unwrap();
+            save_build_state(dir.path(), "sess-op", Some(3248), true);
+            let before = gwt_core::skill_state::load(dir.path(), "build-spec").unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "late blocked notification".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                gwt_core::skill_state::load(dir.path(), "build-spec").unwrap(),
+                before
+            );
+        }
+
+        #[test]
         fn complete_op_settles_record_for_current_session() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -26275,6 +26778,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    user_verification_result: None,
                 }),
             )
             .unwrap();
@@ -26422,6 +26926,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    user_verification_result: None,
                 }),
             )
             .unwrap();

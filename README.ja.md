@@ -480,6 +480,16 @@ gwt は明示された値（`true` / `false` を問わず）を尊重し、変�
 config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
 error ledger（`errors.list`）に記録されます。
 
+0.153.0 より前の Codex CLI は `[features]` 配下の table を読めません。
+`[features.context_management]` が 1 つあるだけで config 全体が読めなくなり
+（`invalid type: map, expected a boolean`）、`codex login` も起動しなくなります。
+gwt が起動する codex と `PATH` 上の `codex` は別の version であり得るため、
+gwt は起動時に `PATH` 上の codex（`codex --version`）を確認します。それが
+0.153.0 より古い、または version を読み取れない場合、gwt はキーを書き込まず、
+既存の `[features.context_management]` table を削除してその codex が動き続ける
+ようにします。`PATH` 上の codex を 0.153.0 以降に更新すると、次回の gwt 起動時に
+キーが再び書き込まれます。
+
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に
 gwt が注入した loopback endpoint と bearer token だけへ hook event を POST し、
@@ -909,6 +919,13 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+
+Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
+closing keyword は書きません。`main` は default branch なので、そこに
+`Closes #N` があると受け入れ基準が未消化の Issue まで閉じてしまうためです。
+Issue の決着は work ブランチが `develop` に merge された時点で行われます
+（前述）。merge 後は `release.yml` が `scripts/release_close_guard.py` を実行し、
+Release PR の merge 自体が閉じた Issue を reopen してマーカー付きコメントを残します。
 
 ### Release Asset Contract
 

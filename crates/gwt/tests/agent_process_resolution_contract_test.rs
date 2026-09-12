@@ -457,33 +457,42 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
     assert!(shard_job.contains(
         "cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1"
     ));
-    assert_eq!(shard_job.matches("- provider:").count(), 4);
-    assert_eq!(shard_job.matches("selector:").count(), 4);
     for secret in ["secrets.", "CODEX_API_KEY", "ANTHROPIC_API_KEY"] {
         assert!(
             !shard_job.contains(secret),
             "ordinary deterministic Windows CI must stay credential-free: {secret}"
         );
     }
-    let normalized_workflow = shard_job
-        .lines()
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Issue #4134 AC-2: the four combinations used to be four matrix shards,
+    // each paying its own 279s cold build for 137s of tests. They now share one
+    // build inside a single job, so the coverage lives in the loop the job
+    // iterates rather than in matrix entries.
+    assert!(
+        shard_job.contains("cargo test -p gwt --test windows_agent_launch_e2e --no-run"),
+        "the four combinations must share one build step"
+    );
     for shard in [
         ("codex", "latest"),
         ("codex", "exact"),
         ("claude", "latest"),
         ("claude", "exact"),
     ] {
-        let entry = format!("- provider: {}\nselector: {}", shard.0, shard.1);
+        let entry = format!("{}/{}", shard.0, shard.1);
         assert!(
-            normalized_workflow.contains(&entry),
-            "Windows deterministic E2E matrix must contain {}/{}",
-            shard.0,
-            shard.1
+            shard_job.contains(&entry),
+            "Windows deterministic E2E must still cover {entry}"
         );
     }
+    assert!(
+        shard_job.contains("GWT_WINDOWS_AGENT_PROVIDER=\"$provider\"")
+            && shard_job.contains("GWT_WINDOWS_AGENT_SELECTOR=\"$selector\""),
+        "each iteration must select its own provider and selector"
+    );
+    assert!(
+        shard_job.contains("::error::") && shard_job.contains("status=1"),
+        "one job must keep the matrix's per-shard attribution and its \
+         fail-fast: false behaviour"
+    );
 }
 
 #[test]
