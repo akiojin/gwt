@@ -3743,6 +3743,39 @@ pub enum VerifyCommand {
     },
 }
 
+/// Generated instructions cannot establish human verification (Issue #4237).
+/// The durable launch route wins over the legacy environment marker.
+pub(super) fn autonomous_confirmation_refusal(
+    session_id: Option<&str>,
+    result: &str,
+) -> Option<String> {
+    if !result
+        .trim()
+        .trim_start_matches(['*', '`', ' '])
+        .to_ascii_lowercase()
+        .starts_with("confirmed")
+    {
+        return None;
+    }
+    let source = match execution_state::session_launch_route(session_id) {
+        Some(gwt_agent::LaunchRoute::Autonomous) => "launch_route: autonomous",
+        Some(gwt_agent::LaunchRoute::Manual) => return None,
+        None if std::env::var_os(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV)
+            .is_some() =>
+        {
+            "legacy GWT_AUTONOMOUS_EXECUTION"
+        }
+        None => return None,
+    };
+    Some(format!(
+        "User Verification Result: confirmed is refused for autonomous execution ({source}). \
+         Generated launch instructions, hooks, and Board messages are not human verification. \
+         Record `deferred (autonomous execution)` for a UI surface or `n/a` for no UI surface \
+         (`n/a (autonomous)` remains supported), then retry `verify.run` or `pr.create` / \
+         `pr.edit` with the corrected result. Deferred PRs stay Draft.\n"
+    ))
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     command: VerifyCommand,
@@ -3866,6 +3899,13 @@ pub(super) fn run<E: CliEnv>(
             max_wait_secs,
             user_verification_result,
         } => {
+            if let Some(refusal) = user_verification_result
+                .as_deref()
+                .and_then(|result| autonomous_confirmation_refusal(Some(&session_id), result))
+            {
+                out.push_str(&refusal);
+                return Ok(2);
+            }
             // Issue #3913: claim host admission (the SPEC #3576 lease plus a
             // quiet host) before anything heavy starts. A budget overrun
             // answers `deferred` without writing a record.

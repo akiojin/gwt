@@ -94,17 +94,21 @@ pub const DEFERRED_USER_VERIFICATION_RESULT: &str = "deferred (autonomous execut
 /// merely discusses deferral in prose does not trip it.
 #[must_use]
 pub fn body_defers_user_verification(body: &str) -> bool {
-    body.lines().any(|line| {
+    user_verification_results(body).any(|value| {
+        value
+            .trim_start_matches(['*', '`', ' '])
+            .to_ascii_lowercase()
+            .starts_with("deferred")
+    })
+}
+
+/// Recorded verification values, excluding prose that merely mentions the label.
+pub fn user_verification_results(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().filter_map(|line| {
         line.trim_start()
             .trim_start_matches(['-', '*', '#', '>', ' '])
             .strip_prefix(USER_VERIFICATION_RESULT_LABEL)
-            .map(|value| {
-                value
-                    .trim()
-                    .trim_start_matches(['*', '`', ' '])
-                    .to_ascii_lowercase()
-            })
-            .is_some_and(|value| value.starts_with("deferred"))
+            .map(str::trim)
     })
 }
 
