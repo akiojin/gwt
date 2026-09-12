@@ -84,6 +84,7 @@ pub enum HookKind {
     WorkflowPolicy,
     Forward,
     RegisterCodexManagedHookTrust,
+    RegisterCodexManagedProjectTrust,
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
@@ -106,6 +107,7 @@ impl HookKind {
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
             "register-codex-managed-hook-trust" => Some(Self::RegisterCodexManagedHookTrust),
+            "register-codex-managed-project-trust" => Some(Self::RegisterCodexManagedProjectTrust),
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
@@ -560,6 +562,77 @@ pub fn run_daemon_hook<E: CliEnv>(
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
+        HookKind::RegisterCodexManagedProjectTrust => {
+            let project_root = option_value(rest, "--project-root")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let explicit_config =
+                option_value(rest, "--codex-config").map(std::path::PathBuf::from);
+            let docker_local = option_value(rest, "--runtime-target") == Some("docker");
+            let codex_config_path = if docker_local {
+                if explicit_config.is_some() {
+                    return Err(io_as_api_error(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Docker-local project trust derives its config from the effective environment; --codex-config is not accepted",
+                    )));
+                }
+                default_codex_config_path()
+            } else {
+                let stable_config =
+                    crate::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                        &project_root,
+                        std::env::var_os("CODEX_HOME").as_deref(),
+                        dirs::home_dir().as_deref(),
+                    );
+                if let Some(explicit_config) = explicit_config {
+                    if !explicit_config.is_absolute() {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    let Some(stable_config) = stable_config else {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    };
+                    if !crate::managed_assets::codex_config_paths_equivalent(
+                        &explicit_config,
+                        &stable_config,
+                    ) {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    Some(stable_config)
+                } else {
+                    stable_config
+                }
+            };
+            let Some(codex_config_path) = codex_config_path else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "hook.register_codex_managed_project_trust: process-stable/default Codex config is unavailable"
+                );
+                return Ok(2);
+            };
+            match gwt_skills::register_codex_managed_project_trust(
+                &project_root,
+                &codex_config_path,
+            ) {
+                Ok(report) => {
+                    let _ = writeln!(
+                        env.stdout(),
+                        "trusted gwt-managed Codex worktree {}",
+                        report.project_path.display()
+                    );
+                    Ok(0)
+                }
+                Err(err) => Err(io_as_api_error(err)),
+            }
+        }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
@@ -610,9 +683,15 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {
-    gwt_core::paths::gwt_home()
-        .parent()
-        .map(|home| home.join(".codex/config.toml"))
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("config.toml"))
+        .or_else(|| {
+            gwt_core::paths::gwt_home()
+                .parent()
+                .map(|home| home.join(".codex/config.toml"))
+        })
 }
 
 #[cfg(test)]

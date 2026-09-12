@@ -179,15 +179,9 @@ fn manifest_entry_count(manifest_path: &Path) -> Option<u64> {
 fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
     let db_path = repo_dir.join("issues");
     let meta_path = db_path.join("meta.json");
-    let meta = read_json(&meta_path);
+    let meta = read_json(&meta_path).unwrap_or(Value::Null);
     let exists =
         active_store(&db_path).join(CHROMA_STORE_FILENAME).is_file() || meta_path.is_file();
-    if !exists {
-        return health(false, 0, "collection_missing");
-    }
-    let Some(meta) = meta else {
-        return health(false, 0, "metadata_missing");
-    };
     let document_count = meta
         .get("document_count")
         .and_then(Value::as_u64)
@@ -196,7 +190,15 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
     let source = crate::issue_cache::issue_cache_source_fingerprint(issue_cache_root)
         .ok()
         .flatten();
-    let mut reason = "ready";
+    let mut reason = if !exists {
+        "collection_missing"
+    } else if meta.is_null() {
+        "metadata_missing"
+    } else if document_count == 0 {
+        "empty_corpus"
+    } else {
+        "ready"
+    };
     if let Some(source) = &source {
         if source.document_count > 0 && document_count != source.document_count as u64 {
             reason = "count_mismatch";
@@ -207,7 +209,8 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
         }
     }
     let mut value = health(reason == "ready", document_count, reason);
-    value["exists"] = Value::Bool(true);
+    value["exists"] = Value::Bool(exists);
+    value["mode"] = meta.get("mode").cloned().unwrap_or(json!("full"));
     value["last_repair_at"] = meta
         .get("last_full_refresh")
         .cloned()
@@ -223,6 +226,36 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
             value["current_source_cache_fingerprint"] = Value::String(source.fingerprint.clone());
             value["current_source_document_count"] = json!(source.document_count);
         }
+    }
+    if let Some(repair) = read_json(&db_path.join("repair.json")) {
+        let source_fingerprint = source
+            .as_ref()
+            .map(|source| source.fingerprint.clone())
+            .unwrap_or_else(|| canonical_json_sha256(&json!([])));
+        let fingerprint_matches =
+            repair.get("fingerprint").and_then(Value::as_str) == Some(source_fingerprint.as_str());
+        if fingerprint_matches && repair.get("failures").and_then(Value::as_u64).unwrap_or(0) > 0 {
+            value["mode"] = repair
+                .get("mode")
+                .cloned()
+                .unwrap_or_else(|| value["mode"].clone());
+            value["healthy"] = json!(false);
+            value["repair_required"] = json!(true);
+            value["reason"] = json!(format!(
+                "repair_stopped: {} actual={} expected={} failures={} mode={}",
+                repair["last_error"].as_str().unwrap_or("unknown"),
+                repair["actual_document_count"],
+                repair["expected_document_count"],
+                repair["failures"],
+                repair["mode"].as_str().unwrap_or("full")
+            ));
+        }
+        value["repair"] = repair;
+    }
+    if db_path.join("cancel-requested").exists() {
+        value["healthy"] = json!(false);
+        value["repair_required"] = json!(true);
+        value["reason"] = json!("cancelled");
     }
     value
 }
@@ -536,6 +569,53 @@ fn verify_closure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issues_projection_exposes_cancelled_repair_and_build_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let issues = tmp.path().join("issues");
+        fs::create_dir_all(&issues).unwrap();
+        fs::write(issues.join("cancel-requested"), b"").unwrap();
+        assert_eq!(
+            issues_status(tmp.path(), &tmp.path().join("cache"))["reason"],
+            "cancelled"
+        );
+        fs::write(
+            issues.join("meta.json"),
+            r#"{"document_count":1,"mode":"incremental"}"#,
+        )
+        .unwrap();
+        let view = issues_status(tmp.path(), &tmp.path().join("cache"));
+        assert_eq!(view["mode"], "incremental");
+        assert_eq!(view["reason"], "cancelled");
+        assert_eq!(view["healthy"], false);
+        fs::remove_file(issues.join("cancel-requested")).unwrap();
+        fs::write(
+            issues.join("repair.json"),
+            r#"{"fingerprint":"old-source","failures":1,"last_error":"COUNT_MISMATCH"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            issues_status(tmp.path(), &tmp.path().join("cache"))["reason"],
+            "ready"
+        );
+        fs::write(
+            issues.join("repair.json"),
+            json!({
+                "fingerprint": canonical_json_sha256(&json!([])), "failures": 1,
+                "last_error": "COUNT_MISMATCH", "actual_document_count": 0,
+                "expected_document_count": 1, "mode": "full"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stopped = issues_status(tmp.path(), &tmp.path().join("cache"));
+        assert_eq!(stopped["mode"], "full");
+        assert!(stopped["reason"]
+            .as_str()
+            .unwrap()
+            .contains("actual=0 expected=1"));
+    }
 
     #[test]
     fn missing_index_projects_repair_required_for_every_scope() {

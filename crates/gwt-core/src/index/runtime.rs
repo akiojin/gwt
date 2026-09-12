@@ -697,6 +697,107 @@ struct IssueMetadata {
     schema_version: u32,
     last_full_refresh: String,
     ttl_minutes: u64,
+    #[serde(default)]
+    document_count: u64,
+}
+
+/// Issues runners must terminate before their heavy lease expires.
+pub const ISSUE_INDEX_BUILD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+fn issue_store_exists(repo_dir: &Path) -> bool {
+    let generations = repo_dir.join("issues.gen");
+    let pointer = generations.join("active.json");
+    let store = if pointer.exists() {
+        let generation = fs::read(&pointer)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value.get("generation")?.as_str().map(str::to_owned));
+        let Some(generation) = generation else {
+            return false;
+        };
+        generations.join(generation)
+    } else {
+        repo_dir.join("issues")
+    };
+    store.join("chroma.sqlite3").is_file()
+}
+
+/// Source drift can reuse vectors, but a missing/inconsistent manifest cannot.
+pub fn issue_rebuild_mode(index_root: &Path, repo_hash: &str) -> &'static str {
+    let repo_dir = index_root.join(repo_hash);
+    let read = |path: &Path| -> Option<serde_json::Value> {
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    };
+    let valid = (|| {
+        let count = read(&repo_dir.join("issues/meta.json"))?
+            .get("document_count")?
+            .as_u64()?;
+        let manifest = read(&repo_dir.join("manifest-issues.json"))?;
+        let entries = manifest
+            .as_array()
+            .or_else(|| manifest.get("entries")?.as_array())?;
+        Some(
+            count > 0
+                && count == entries.len() as u64
+                && issue_store_exists(&repo_dir)
+                && entries.iter().all(|entry| {
+                    ["path", "content_hash"].iter().all(|key| {
+                        entry
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                    })
+                }),
+        )
+    })()
+    .unwrap_or(false);
+    if valid {
+        "incremental"
+    } else {
+        "full"
+    }
+}
+
+/// Run the issues child with the shared process-tree deadline enforcement.
+pub fn run_issue_index_command(
+    command: &std::process::Command,
+) -> io::Result<std::process::Output> {
+    use crate::process_console::{ProcessConsoleHub, ProcessKind, SpawnOptions};
+    let deadline = std::time::Instant::now() + ISSUE_INDEX_BUILD_TIMEOUT;
+    let deadline =
+        crate::operation_deadline::current().map_or(deadline, |outer| outer.min(deadline));
+    let mut options = SpawnOptions::new("project index rebuild issues").forward_output(false);
+    options.current_dir = command.get_current_dir().map(Path::to_path_buf);
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => options.envs.push((key.to_owned(), value.to_owned())),
+            None => options.remove_env.push(key.to_owned()),
+        }
+    }
+    let args: Vec<_> = command.get_args().collect();
+    let output = crate::process_console::spawn_logged_blocking_with_deadline(
+        &ProcessConsoleHub::new(),
+        ProcessKind::IndexRunner,
+        command.get_program(),
+        &args,
+        options,
+        deadline,
+    )?;
+    #[cfg(unix)]
+    let status = {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(output.exit_code.unwrap_or(1) << 8)
+    };
+    #[cfg(windows)]
+    let status = {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(output.exit_code.unwrap_or(1) as u32)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: output.stdout.into_bytes(),
+        stderr: output.stderr.into_bytes(),
+    })
 }
 
 /// Trait abstraction over the Python runner spawn so tests can substitute a
@@ -742,20 +843,25 @@ pub async fn refresh_issues_if_stale<S: RunnerSpawner + ?Sized>(
     let mut remaining_seconds: u64 = 0;
     let stale = if meta_path.is_file() {
         match read_issue_meta(&meta_path) {
-            Some(meta) => match DateTime::parse_from_rfc3339(&meta.last_full_refresh) {
-                Ok(dt) => {
-                    let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
-                    let age_std = age.to_std().unwrap_or(Duration::MAX);
-                    if age_std >= opts.ttl {
-                        true
-                    } else {
-                        remaining_seconds = (opts.ttl - age_std).as_secs();
-                        false
+            Some(meta)
+                if meta.document_count > 0
+                    && issues_dir.parent().is_some_and(issue_store_exists) =>
+            {
+                match DateTime::parse_from_rfc3339(&meta.last_full_refresh) {
+                    Ok(dt) => {
+                        let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+                        let age_std = age.to_std().unwrap_or(Duration::MAX);
+                        if age_std >= opts.ttl {
+                            true
+                        } else {
+                            remaining_seconds = (opts.ttl - age_std).as_secs();
+                            false
+                        }
                     }
+                    Err(_) => true,
                 }
-                Err(_) => true,
-            },
-            None => true,
+            }
+            _ => true,
         }
     } else {
         true
@@ -793,6 +899,9 @@ pub fn issue_index_refreshed_since(
     let Some(meta) = read_issue_meta(&meta_path) else {
         return false;
     };
+    if meta.document_count == 0 || !issue_store_exists(&index_root.join(repo_hash)) {
+        return false;
+    }
     let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
         return false;
     };
@@ -931,7 +1040,7 @@ const ISSUE_INDEX_SHARED_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// refused with `host busy` for that whole time. The cap is the backstop for
 /// claimants that never register (a raw `cargo test`); a claimant that does
 /// register is served within one [`ISSUE_INDEX_HEAVY_YIELD_POLL`] instead.
-const ISSUE_INDEX_HEAVY_MAX_HOLD: Duration = Duration::from_secs(10 * 60);
+const ISSUE_INDEX_HEAVY_MAX_HOLD: Duration = ISSUE_INDEX_BUILD_TIMEOUT;
 /// How fast the job notices a verification claimant queueing behind it.
 const ISSUE_INDEX_HEAVY_YIELD_POLL: Duration = Duration::from_millis(200);
 
@@ -966,6 +1075,10 @@ fn run_coordinated_issue_index(
     let requested_at = Utc::now();
     match coordinator.request_job(&key, JobPriority::Background, ISSUE_INDEX_ADMISSION_TIMEOUT) {
         Ok(JobAdmission::Owner(guard)) => {
+            cmd.arg("--mode").arg(issue_rebuild_mode(
+                &crate::index::paths::gwt_index_root(),
+                repo_hash,
+            ));
             // FR-394 post-lock revalidation: skip the duplicate when an
             // equivalent refresh completed while we queued for the target.
             if issue_index_refreshed_since(
@@ -1016,7 +1129,7 @@ fn run_coordinated_issue_index(
             let runner = std::thread::Builder::new()
                 .name("gwt-index-issues-runner".to_string())
                 .spawn(move || {
-                    let result = cmd.spawn().and_then(|child| child.wait_with_output());
+                    let result = run_issue_index_command(&cmd);
                     runner_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     result
                 });
@@ -1052,13 +1165,17 @@ fn run_coordinated_issue_index(
             let outcome = match runner.join().unwrap_or_else(|_| {
                 Err(std::io::Error::other("issue index runner thread panicked"))
             }) {
-                Ok(output) if output.status.success() => JobOutcome::Completed,
+                Ok(output) if output.status.success() => {
+                    tracing::info!(target: "gwt::index", result = %String::from_utf8_lossy(&output.stdout), "issue index runner completed");
+                    JobOutcome::Completed
+                }
                 Ok(output) => {
                     tracing::warn!(
                         target: "gwt::index",
                         spawn_id = spawn_id,
                         exit_status = %output.status,
                         stderr = %String::from_utf8_lossy(&output.stderr),
+                        stdout = %String::from_utf8_lossy(&output.stdout),
                         "issue index runner failed"
                     );
                     JobOutcome::Failed {
@@ -1227,5 +1344,31 @@ mod tests {
         };
         reconcile_repo(&opts).unwrap();
         assert!(!orphan.exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_skip_an_empty_issue_index_within_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = compute_repo_hash("https://github.com/example/empty-issues.git");
+        let issues = tmp.path().join(repo.as_str()).join("issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        std::fs::write(
+            issues.join("meta.json"),
+            serde_json::json!({"schema_version": 2, "ttl_minutes": 15, "last_full_refresh": Utc::now().to_rfc3339(), "document_count": 0}).to_string(),
+        ).unwrap();
+        let spawner = RecordingSpawner::default();
+        let result = refresh_issues_if_stale(
+            &RefreshIssuesOptions {
+                index_root: tmp.path().to_path_buf(),
+                repo_hash: repo,
+                project_root: tmp.path().to_path_buf(),
+                ttl: Duration::from_secs(900),
+            },
+            &spawner,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RefreshDecision::Spawned);
+        assert_eq!(spawner.calls.lock().unwrap().len(), 1);
     }
 }
