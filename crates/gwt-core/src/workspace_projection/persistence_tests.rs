@@ -270,6 +270,215 @@ fn mixed_version_event_log_roundtrips_unknown_kind_and_fields_byte_exact() {
 }
 
 #[test]
+fn preserve_workspace_work_event_log_keeps_raw_records_visible_without_changing_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let original = format!("\t{}  ", T820_MIXED_EVENT_LOG.trim_end());
+    fs::write(&source, &original).expect("write mixed source without final newline");
+
+    let paths = crate::workspace_projection::preserve_workspace_work_event_log_as_shards(
+        &source,
+        &events_dir,
+    )
+    .expect("preserve future-compatible raw events");
+
+    assert_eq!(paths.len(), 3);
+    for (path, line) in paths.iter().zip(original.split('\n')) {
+        let value: serde_json::Value = serde_json::from_str(line).expect("source JSON");
+        assert_eq!(
+            *path,
+            gwt_work_event_shard_path(&events_dir, value["id"].as_str().unwrap())
+        );
+        assert_eq!(fs::read(path).unwrap(), format!("{line}\n").as_bytes());
+    }
+    let records = read_workspace_work_event_shard_records_from_dir(&events_dir)
+        .expect("ordinary reader sees all preserved events");
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .into_iter()
+            .filter_map(WorkEventLogRecord::into_known_event)
+            .count(),
+        2,
+        "future kind remains opaque while known events remain visible"
+    );
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_makes_flat_shard_canonical_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    fs::create_dir_all(&events_dir).unwrap();
+    let original = T820_MIXED_EVENT_LOG.lines().nth(1).unwrap().to_string() + "\n";
+    let canonical = gwt_work_event_shard_path(&events_dir, "event-known-additive");
+    let source = events_dir.join(canonical.file_name().unwrap());
+    fs::write(&source, &original).unwrap();
+
+    for input in [&source, &source, &canonical] {
+        assert_eq!(
+            preserve_workspace_work_event_log_as_shards(input, &events_dir).unwrap(),
+            vec![canonical.clone()]
+        );
+        assert_eq!(fs::read(&canonical).unwrap(), original.as_bytes());
+        assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+    }
+    assert_eq!(
+        fs::read_dir(canonical.parent().unwrap()).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn preserve_workspace_work_event_log_deduplicates_identical_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    let original = format!("{line}\n\n{line}\n");
+    fs::write(&source, &original).unwrap();
+
+    let paths = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(fs::read(&paths[0]).unwrap(), format!("{line}\n").as_bytes());
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_invalid_batch_before_publication() {
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    for invalid in [
+        "{\"id\":",
+        r#"{"id":"bad","kind":"update","work_item_id":{},"updated_at":"2026-07-22T02:00:00Z"}"#,
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.jsonl");
+        let events_dir = temp.path().join("repo/.gwt/work/events");
+        let original = format!("{line}\n{invalid}");
+        fs::write(&source, &original).unwrap();
+
+        assert!(preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err());
+        assert!(!events_dir.exists(), "valid prefix must not be published");
+        assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_divergent_batch_before_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    let original = format!("{line}\n{}\n", line.replace("Known title", "Changed title"));
+    fs::write(&source, &original).unwrap();
+
+    let error = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap_err();
+
+    assert!(error.to_string().contains("divergent"), "{error}");
+    assert!(!events_dir.exists());
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_existing_conflict_before_any_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+    let conflict = gwt_work_event_shard_path(&events_dir, "event-future-correction");
+    fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+    let conflicting_bytes = b"existing immutable bytes\n";
+    fs::write(&conflict, conflicting_bytes).unwrap();
+
+    let error = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap_err();
+
+    assert!(error.to_string().contains("divergent"), "{error}");
+    assert_eq!(fs::read(&conflict).unwrap(), conflicting_bytes);
+    assert!(!gwt_work_event_shard_path(&events_dir, "event-known-start").exists());
+    assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_workspace_work_event_log_rejects_symlinked_source_and_managed_parents() {
+    for linked_component in ["source", ".gwt", "work", "events"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp
+            .path()
+            .join("source-repo/.gwt/work/events/source.jsonl");
+        let events_dir = temp.path().join("destination/.gwt/work/events");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+        let indirect = if linked_component == "source" {
+            source.clone()
+        } else {
+            source
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == linked_component)
+                })
+                .unwrap()
+                .to_path_buf()
+        };
+        let external = temp.path().join("external");
+        fs::rename(&indirect, &external).unwrap();
+        std::os::unix::fs::symlink(&external, &indirect).unwrap();
+
+        assert!(
+            preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err(),
+            "must reject indirect {linked_component} source"
+        );
+        assert!(!events_dir.exists());
+        assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_workspace_work_event_log_rejects_symlinked_destination_before_any_publication() {
+    for linked_component in [".gwt", "work", "events", "bucket", "shard"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.jsonl");
+        let events_dir = temp.path().join("destination/.gwt/work/events");
+        fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+        let last = gwt_work_event_shard_path(&events_dir, "event-future-correction");
+        fs::create_dir_all(last.parent().unwrap()).unwrap();
+        let indirect = match linked_component {
+            "shard" => last.clone(),
+            "bucket" => last.parent().unwrap().to_path_buf(),
+            _ => last
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == linked_component)
+                })
+                .unwrap()
+                .to_path_buf(),
+        };
+        let external = temp.path().join("external");
+        if linked_component == "shard" {
+            fs::write(&external, b"external user bytes").unwrap();
+        } else {
+            fs::rename(&indirect, &external).unwrap();
+        }
+        std::os::unix::fs::symlink(&external, &indirect).unwrap();
+
+        assert!(
+            preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err(),
+            "must reject indirect {linked_component} destination"
+        );
+        assert!(!gwt_work_event_shard_path(&events_dir, "event-known-start").exists());
+        assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+        if linked_component == "shard" {
+            assert_eq!(fs::read(&external).unwrap(), b"external user bytes");
+        }
+    }
+}
+
+#[test]
 fn mixed_version_event_reader_keeps_identity_and_container_schemas_strict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cases = [
