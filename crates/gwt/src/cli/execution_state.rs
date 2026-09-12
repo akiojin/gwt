@@ -13323,13 +13323,24 @@ fn run_repair(
 ) -> Result<i32, SpecOpsError> {
     let probe = probe_execution_repair(worktree, Some(session_id));
     if !probe.executable() {
-        out.push_str(&format!(
-            "execution: repair refused — {}\n",
-            probe
-                .reason
-                .as_deref()
-                .unwrap_or("execution_repair_unavailable")
-        ));
+        let reason = probe
+            .reason
+            .as_deref()
+            .unwrap_or("execution_repair_unavailable");
+        out.push_str(&format!("execution: repair refused — {reason}\n"));
+        // Issue #4161 AC-11: `execution_repair_not_corrupt` is the refusal an
+        // operator hits while holding a generation whose pane is gone, and on
+        // its own it is a dead end — the help text sends them here, and here
+        // says no. Repair is still the wrong tool for that shape: the record
+        // is readable and integrity-valid, and repair would quarantine it and
+        // mint a fresh one. So name the operation that is the right tool
+        // rather than widening this one to cover a liveness problem.
+        if reason == "execution_repair_not_corrupt" {
+            if let Some(guidance) = repair_not_corrupt_guidance(worktree) {
+                out.push_str(&guidance);
+                out.push('\n');
+            }
+        }
         return Ok(2);
     }
     match repair_corrupt_execution_with_session_snapshot(
@@ -13352,6 +13363,32 @@ fn run_repair(
             Ok(2)
         }
     }
+}
+
+/// Issue #4161 AC-11: the next step a `execution_repair_not_corrupt` refusal
+/// owes its caller.
+///
+/// Read from [`diagnose_owner`] rather than restated here, so the refusal can
+/// never recommend a route the owner diagnosis disagrees with — the mismatch
+/// this Issue is about is precisely a recovery route that says one thing while
+/// the operation it names refuses. `None` when no owner can be resolved from
+/// the worktree, because a guess is worse than silence.
+fn repair_not_corrupt_guidance(worktree: &Path) -> Option<String> {
+    let record = load(worktree).ok().flatten()?;
+    let diagnosis = diagnose_owner(
+        worktree,
+        ExecutionOwnerKey {
+            kind: record.owner_kind,
+            number: record.owner_number,
+        },
+    );
+    Some(format!(
+        "execution: this authority is structurally intact, so repair is not its route; recovery for {kind} #{number} is `{recovery}` — {why}",
+        kind = record.owner_kind.as_str(),
+        number = record.owner_number,
+        recovery = diagnosis.recommended_recovery,
+        why = diagnosis.recommended_recovery_reason,
+    ))
 }
 
 fn blocked_build_abort_guidance(record: &ExecutionControlRecord) -> String {
@@ -16950,6 +16987,176 @@ mod tests {
         assert_eq!(released.ecr_status, Some(ExecutionControlStatus::Blocked));
         assert!(!released.reclaimable);
         assert_eq!(released.recommended_recovery, "gwt-execute");
+    }
+
+    /// Issue #4161 AC-11: the dead end an operator actually hit.
+    ///
+    /// `execution.repair` is what the help text points a stuck caller at, and
+    /// for a generation whose holder pane is gone it answers
+    /// `execution_repair_not_corrupt` — correctly. A readable, integrity-valid
+    /// record is not corrupt, and repair quarantines the authority and mints a
+    /// fresh Active one, so widening its eligibility to cover this shape would
+    /// trade a valid audit chain for a liveness problem that a different
+    /// operation already solves. The defect is that the refusal stops there:
+    /// the caller is told what will not happen and nothing about what will.
+    /// `diagnose_owner` already knows the route, so the refusal must carry it.
+    #[test]
+    fn repair_refusal_names_the_route_for_a_generation_whose_holder_is_gone() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "repair-guidance-dead-holder";
+        // The exact production shape: the durable record says `Running`, and
+        // the only runtime evidence is a sidecar written by a Host that is
+        // gone. Nothing about the ledger is malformed.
+        let (_candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let dead_host_pid = i32::MAX as u32;
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            82,
+            1,
+            dead_host_pid,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            dead_host_pid,
+            session_id,
+        ))
+        .unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.holder_session_state.as_deref(), Some("Running"));
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("host_dead"));
+        // Issue #4161 AC-11b (PM ruling 2026-09-12): a liveness problem must
+        // never be routed to a destructive repair. `execution.repair` is
+        // reserved for an authority that actually failed its integrity check.
+        assert_ne!(diagnosis.recommended_recovery, "execution.repair");
+        assert_eq!(diagnosis.recommended_recovery, "generation-reaper");
+
+        let probe = probe_execution_repair(worktree.path(), Some(session_id));
+        assert!(
+            !probe.executable(),
+            "a structurally healthy record is still not repair's business"
+        );
+        assert_eq!(
+            probe.reason.as_deref(),
+            Some("execution_repair_not_corrupt"),
+            "and the machine-readable reason must not drift"
+        );
+
+        let guidance = repair_not_corrupt_guidance(worktree.path())
+            .expect("a refusal that cannot act still owes the caller a next step");
+        assert!(
+            guidance.contains("generation-reaper"),
+            "the refusal has to name the route that does apply: {guidance}"
+        );
+    }
+
+    /// The guidance follows the diagnosis rather than hardcoding one route: a
+    /// Prepared fence is cleared by an operation, not by the reaper, and that
+    /// is the case where an operator has something to run right now.
+    #[test]
+    fn repair_refusal_names_the_release_operation_when_a_prepared_fence_holds() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let mut active = active_record("repair-guidance-fenced-holder");
+        active.owner_kind = owner.kind;
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        prepare_active_continuation_successor(
+            worktree.path(),
+            owner,
+            &SuccessorRequest {
+                operation_id: "guidance-fence".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "guidance-binding".to_string(),
+                initial_session_id: "guidance-candidate".to_string(),
+                entrypoint: "continue-work".to_string(),
+                requested_at: Utc::now() - chrono::Duration::hours(2),
+            },
+        )
+        .unwrap();
+
+        let guidance = repair_not_corrupt_guidance(worktree.path())
+            .expect("a fenced owner has a route too");
+        assert!(
+            guidance.contains("execution.release_prepared"),
+            "{guidance}"
+        );
+    }
+
+    /// Issue #4161 AC-11b (PM ruling 2026-09-12): the other half of the
+    /// carve-out. Withholding `execution.repair` from a healthy authority is
+    /// only correct if it is still offered to one that genuinely failed its
+    /// integrity check — otherwise the operation becomes unreachable and the
+    /// owner trades one dead end for another.
+    #[test]
+    fn owner_status_recommends_repair_only_for_an_authority_that_failed_integrity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let mut active = active_record("repair-recommendation-holder");
+        active.owner_kind = owner.kind;
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        assert_ne!(
+            diagnose_owner(worktree.path(), owner).recommended_recovery,
+            "execution.repair",
+            "an intact ledger is not repair's business"
+        );
+
+        let context = GenerationTransactionContext::resolve(worktree.path(), owner)
+            .expect("owner transaction context");
+        fs::write(
+            context.owner_dir.join(GENERATION_LEDGER_FILE),
+            b"{not-a-ledger",
+        )
+        .unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.recommended_recovery, "execution.repair");
+        assert!(
+            diagnosis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("malformed generation ledger")),
+            "{:?}",
+            diagnosis.warnings
+        );
     }
 
     /// A live holder is never advertised as reclaimable, whatever its durable

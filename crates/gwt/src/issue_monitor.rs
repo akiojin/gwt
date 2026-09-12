@@ -3177,6 +3177,19 @@ pub struct IssueMonitorInboxSummary {
     /// refused duplicate apart from a launch that died.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_launch_refusal: Option<IssueMonitorDuplicateLaunchRefusal>,
+    /// Issue #4161 AC-9: how many passes this row has already spent, and what
+    /// the last one failed with.
+    ///
+    /// A head of queue that cannot launch renders exactly like one waiting its
+    /// turn — `state: queued`, and `error_message` cleared again by every
+    /// relaunch — which is how three scans of nothing launching read as a
+    /// healthy queue from the outside. These two project the autonomous
+    /// record, the only place that survives the relaunch, so the pair the
+    /// escalation gate judges on is the pair the reader sees.
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_message: Option<String>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -8789,6 +8802,18 @@ impl IssueMonitorState {
                             .duplicate_launch_refusals
                             .get(&item.issue.number)
                             .cloned(),
+                        // Issue #4161 AC-9: same record, same counter the
+                        // escalation gate reads, so "this row has burned N
+                        // passes on one refusal" is answerable from the
+                        // snapshot instead of from the daemon's lossy ring.
+                        attempts: self
+                            .autonomous_records
+                            .get(&item.issue.number)
+                            .map_or(0, |record| record.attempts),
+                        last_failure_message: self
+                            .autonomous_records
+                            .get(&item.issue.number)
+                            .and_then(|record| record.last_failure_message.clone()),
                     }
                 })
                 .collect(),
@@ -13994,6 +14019,8 @@ mod tests {
                     idle_kind: None,
                     idle_since: None,
                     duplicate_launch_refusal: None,
+                    attempts: 0,
+                    last_failure_message: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -23877,6 +23904,58 @@ mod tests {
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::Queued)
         );
+    }
+
+    /// Issue #4161 AC-9: a row that has failed to launch on every pass and a
+    /// row that is simply waiting its turn both render as `queued`, and the
+    /// production incident was read from exactly that snapshot — three scans
+    /// where nothing launched while the head looked like an ordinary queue
+    /// entry. `error_message` cannot close the gap: `set_inbox_state` wipes it
+    /// the moment the retry launches, so a reader who samples mid-retry sees a
+    /// clean row. The attempt count and the failure that produced it are what
+    /// separate a stalled head from a patient one.
+    #[test]
+    fn agent_status_inbox_reports_repeated_launch_failures_on_a_queued_row() {
+        let fence = "manual successor refuses while a Prepared successor or takeover targets the current generation";
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.autonomous_tuning.max_attempts = 5;
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+
+        monitor.record_agent_issue_failed(42, fence);
+        monitor.complete_active_launch(42, "tab-1::agent-1b");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_agent_issue_failed(42, fence);
+
+        let row = monitor
+            .agent_status()
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 42)
+            .expect("the failing issue keeps its inbox row");
+        assert_eq!(
+            row.state,
+            MonitorInboxState::Queued,
+            "the ladder still owns the row, which is why `state` alone cannot answer"
+        );
+        assert_eq!(
+            row.attempts, 2,
+            "the snapshot has to say how many passes this row has already burned"
+        );
+        assert_eq!(
+            row.last_failure_message.as_deref(),
+            Some(fence),
+            "and what it failed with, so an unchanging refusal is readable as one"
+        );
+
+        let waiting = launched_monitor(7, "tab-1::agent-7")
+            .agent_status()
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 7)
+            .expect("a row that never failed still has one");
+        assert_eq!(waiting.attempts, 0);
+        assert_eq!(waiting.last_failure_message, None);
     }
 
     #[test]
