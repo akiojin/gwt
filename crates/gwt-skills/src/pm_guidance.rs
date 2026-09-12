@@ -286,13 +286,26 @@ things:
   launch's authority, frees its slot, and holds the issue.
   It spends no retry attempt and puts nothing back in the queue.
 
-  Send the identity exactly as the snapshot reports it. Omitting a
-  component the Monitor is holding is a mismatch, not a wildcard, and a
+  Send the identity exactly as the snapshot reports it. Naming a
+  different window or delivery than the one the Monitor holds — or
+  omitting one it is holding — is a mismatch, not a wildcard, and a
   mismatch stops nothing at all. That is deliberate: a stale snapshot
   names a real issue number just as convincingly as a fresh one, and
-  killing the wrong agent cannot be undone. If you get `refused`, re-read
-  the snapshot instead of retrying — the `mismatch` field names the
-  component that disagreed.
+  killing the wrong agent cannot be undone.
+
+  The claim is the one component that tolerates silence. The durable
+  state does not always record the claim behind a bound launch, so a
+  `claim_id` you read from the Issue's claim comment — or leave out
+  entirely — refuses only when the Monitor holds a *different* one. Before
+  that, a matching `window_id` still failed `claim_mismatch` and a launch
+  whose owner had already declared `execution.blocked` kept its slot with
+  no way to return it.
+
+  If you get `refused`, read `live_launch` in the reply: it reports the
+  `claim_id`, `delivery_id`, and `window_id` the Monitor actually holds,
+  plus whether the issue still holds a slot. Build the next request from
+  that answer rather than retrying blindly; the `mismatch` field names
+  the component that disagreed.
 
   The stop does not close the pane. Close it yourself afterwards with
   `pane.close`; the launch is already revoked, so that close cannot
@@ -507,6 +520,17 @@ re-derives the failure from the persisted hold, so the row does not move.
 - The reply returns `stale_window_id` when the failure retained an error
   window. Close it with `pane.close`; the release already unbound it, so
   the close cannot requeue the issue again.
+- A row that still reads `launched` while nothing owns it is the same
+  state wearing a different label, and it used to be the one state with
+  no way out at all. `issue.monitor.stop` answers `unknown_issue` —
+  there is no launch left to name — and the failure gate answers
+  `not_held`, because nothing failed. Both refusals are right; the
+  combination stranded four rows for five to nine hours in the reported
+  snapshot. `issue.monitor.requeue` now covers it too: when the live
+  projection shows a `launched` row holding no active slot, the reply is
+  `released_hold: "stranded_launch"` and the issue returns to the queue.
+  The scan does the same unattended once such a row has waited eight
+  hours without the completion evidence that would have ended it.
 - Recovering a row does not fix why it failed. If the launch is refused
   for a durable reason (a stranded execution generation, a repository
   lock), the requeued issue fails the same way on its next scan. Read the
@@ -1203,6 +1227,15 @@ mod tests {
             "starts a fresh bounded retry cycle",
             "launch_live",
             "not_held",
+            // Issue #3992: the two halves of the recovery this Issue added —
+            // the refusal that names the launch it disagreed with, and the
+            // escape from a `launched` row nothing owns. Without both in the
+            // contract the PM reads `unknown_issue` / `not_held` and concludes,
+            // correctly for the old build, that no recovery exists.
+            "`live_launch`",
+            "the one component that tolerates silence",
+            "stranded_launch",
+            "has waited eight",
             "Never repair Issue Monitor state by editing `issue-monitor.json`",
             "they re-stamp what you removed on their next commit",
             "Recovering a row does not fix why it failed",
