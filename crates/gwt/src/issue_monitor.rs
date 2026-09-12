@@ -7769,6 +7769,30 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        // An exact failover committed elsewhere revokes the old launch. An
+        // epoch alone is global; require the issue's explicit fresh-session
+        // marker and absence of a successor before undoing local accounting.
+        let restarted = disk
+            .queued_launch_session_strategies
+            .iter()
+            .filter(|(issue_number, strategy)| {
+                disk.effect_authority_epoch > self.effect_authority_epoch
+                    && **strategy == IssueMonitorLaunchSessionStrategy::FreshRequired
+                    && !disk
+                        .launched_issues
+                        .iter()
+                        .any(|launch| launch.issue_number == **issue_number)
+                    && !disk
+                        .launching_issues
+                        .iter()
+                        .any(|launch| launch.issue_number == **issue_number)
+                    && !disk
+                        .pending_launch_deliveries
+                        .iter()
+                        .any(|launch| launch.issue_number == **issue_number)
+            })
+            .map(|(issue_number, _)| *issue_number)
+            .collect::<Vec<_>>();
         let reopened_closure_fences = self.local_reopened_closure_fences(disk);
         let reopened_candidates = reopened_closure_fences
             .iter()
@@ -7861,6 +7885,11 @@ impl IssueMonitorState {
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
         self.refresh_disk_owned_prefs(disk);
+        for issue_number in restarted {
+            if !self.merged_issues.contains(&issue_number) && !self.issue_is_closed(issue_number) {
+                self.adopt_failover_restart(issue_number);
+            }
+        }
         // The refresh replaces durable delivery/effect projections. Reapply
         // the fence so a contradictory disk snapshot cannot restore an
         // abandoned delivery after the first cleanup.
@@ -7933,6 +7962,7 @@ impl IssueMonitorState {
             return;
         }
         let message = format!("{STOP_ONLY_REASON_PREFIX}{reason}");
+        self.revoke_launch_binding(issue_number);
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
@@ -8754,7 +8784,7 @@ impl IssueMonitorState {
                         claim_expires_at: item.claim_expires_at.clone(),
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
                         exclusion_reason: item.exclusion_reason.clone(),
-                        launched_window_id: item.launched_window_id.clone(),
+                        launched_window_id: self.launched_window_id(item.issue.number),
                         error_message: item.error_message.clone(),
                         // SPEC-3431 FR-068: the autonomous record already carries
                         // the heartbeat that hook arrivals refresh. Surfacing it here
@@ -11981,13 +12011,7 @@ impl IssueMonitorState {
 
     /// SPEC-3431 FR-033: the window currently bound to `issue_number`.
     pub fn launched_window_id(&self, issue_number: u64) -> Option<String> {
-        self.launched_windows
-            .get(&issue_number)
-            .cloned()
-            .or_else(|| {
-                self.inbox_item(issue_number)
-                    .and_then(|item| item.launched_window_id.clone())
-            })
+        self.launched_windows.get(&issue_number).cloned()
     }
 
     /// SPEC-3431 FR-033: the delivery still awaiting an ACK for `issue_number`.
@@ -12045,6 +12069,7 @@ impl IssueMonitorState {
         // on GitHub. Release it under the new authority, or the next acquire —
         // ours included — is refused by it until `claim_ttl_secs` lapses.
         self.release_confirmed_claim_for_issue(issue_number);
+        self.revoke_launch_binding(issue_number);
         self.record_autonomous_heartbeat(issue_number, now);
         // An operator stop is the operator's own decision; what happens next
         // is the operator's choice, so the row parks under that kind.
@@ -12074,9 +12099,8 @@ impl IssueMonitorState {
     /// SPEC-3431 FR-033: the claim backing the live launch for `issue_number`.
     ///
     /// The pending delivery carries it durably while the agent materializes;
-    /// once the GUI ACKs, the delivery is consumed and only a scanned inbox
-    /// row still knows it. Both are consulted so the answer is the same in the
-    /// daemon and in a bare `gwtd` process.
+    /// once the GUI ACKs, `launched_claims` retains it. Cached inbox claims
+    /// are not launch authority and cannot survive a bare `gwtd` reload.
     pub fn live_claim_id(&self, issue_number: u64) -> Option<String> {
         self.launched_claims
             .get(&issue_number)
@@ -12086,10 +12110,6 @@ impl IssueMonitorState {
                     .iter()
                     .find(|delivery| delivery.issue_number == issue_number)
                     .map(|delivery| delivery.claim_id.clone())
-            })
-            .or_else(|| {
-                self.inbox_item(issue_number)
-                    .and_then(|item| item.claim_id.clone())
             })
     }
 
@@ -12123,10 +12143,14 @@ impl IssueMonitorState {
                 IssueMonitorStopMismatch::UnknownIssue
             });
         }
-        // A terminal row still holding a slot is being reconciled elsewhere;
-        // relabelling it would overwrite that outcome.
-        if inbox_state.is_some_and(|state| state.is_terminal())
-            || self.merged_issues.contains(&issue_number)
+        // A failed/NeedsHuman row may still own a launch (for example when
+        // canonical Work rejects the session). Exact recovery must release it.
+        // Completed work remains protected from relaunch.
+        if matches!(
+            inbox_state,
+            Some(MonitorInboxState::Merged | MonitorInboxState::Released)
+        ) || self.merged_issues.contains(&issue_number)
+            || self.issue_is_closed(issue_number)
         {
             return Err(IssueMonitorStopMismatch::NotRunning);
         }
@@ -12187,11 +12211,45 @@ impl IssueMonitorState {
         if self.advance_effect_authority_epoch().is_none() {
             return IssueMonitorFailoverOutcome::AuthorityExhausted;
         }
+        self.release_confirmed_claim_for_issue(issue_number);
+        // Only the explicit operator command changes priority; a rebase
+        // preserves the committed ordering of all issues.
+        self.priority_order
+            .retain(|existing| *existing != issue_number);
+        self.priority_order.insert(0, issue_number);
+        self.adopt_failover_restart(issue_number);
+        self.record_autonomous_heartbeat(issue_number, now);
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} failover: {reason}"),
+        );
+
+        IssueMonitorFailoverOutcome::Restarting {
+            stopped_window_id: live_window,
+        }
+    }
+
+    fn revoke_launch_binding(&mut self, issue_number: u64) {
+        if let Some(window_id) = self.launched_window_id(issue_number) {
+            self.launch_bindings.retain(|window, bound_issue| {
+                *bound_issue != issue_number || !issue_monitor_window_ids_match(window, &window_id)
+            });
+        }
+    }
+
+    /// Apply the same release locally and when adopting another process's
+    /// committed failover, without advancing authority or spending attempts.
+    fn adopt_failover_restart(&mut self, issue_number: u64) {
+        self.revoke_launch_binding(issue_number);
         self.clear_active_tracking(issue_number);
         self.require_fresh_launch_session(issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
         self.set_active_launch_id(issue_number, None);
-        self.record_autonomous_heartbeat(issue_number, now);
+        let record = self.autonomous_record_mut(issue_number);
+        record.needs_human_kind = None;
+        record.steering = None;
+        record.review_dispatch_hold = None;
         // A failover is not a failure, so any earlier failure marker for this
         // issue must not survive to hold it out of the queue.
         self.failed_issues.remove(&issue_number);
@@ -12206,24 +12264,10 @@ impl IssueMonitorState {
             item.claim_id = None;
             item.error_message = None;
         }
-        // Head of the queue: the operator asked for this issue to run next, not
-        // eventually.
-        self.priority_order
-            .retain(|existing| *existing != issue_number);
-        self.priority_order.insert(0, issue_number);
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
         }
         self.apply_priority_order_to_queue();
-        self.push_autonomous_notice(
-            "info",
-            issue_number,
-            format!("Issue #{issue_number} failover: {reason}"),
-        );
-
-        IssueMonitorFailoverOutcome::Restarting {
-            stopped_window_id: live_window,
-        }
     }
 
     /// Issue #3645 / #3628: release the failure holding one issue out of the
