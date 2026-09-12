@@ -6131,6 +6131,8 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
         );
         thread::sleep(Duration::from_millis(10));
     }
+    // Close the retained ConPTY master before waiting for the reader's EOF.
+    drop(caller_pane);
     caller_output_thread
         .join()
         .expect("join caller PTY output drain");
@@ -43678,12 +43680,9 @@ fn app_runtime_lifecycle_recovery_blocked_preserves_corrupt_prefs() {
 
     assert_eq!(fs::read(&prefs_path).expect("read corrupt prefs"), corrupt);
     assert_eq!(quarantine_count(), before_quarantines);
-    assert!(events.iter().any(|event| matches!(
+    assert!(!events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorStatus { status }
-            if status.last_error.as_deref().is_some_and(|error| error.contains(
-                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
-            ))
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
@@ -44507,12 +44506,9 @@ fn app_runtime_recovery_blocked_control_never_recovers_or_mutates_corrupt_prefs(
 
     assert_eq!(fs::read(&prefs_path).expect("read corrupt prefs"), corrupt);
     assert_eq!(quarantine_count(), before_quarantines);
-    assert!(events.iter().any(|event| matches!(
+    assert!(!events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::IssueMonitorStatus { status }
-            if status.last_error.as_deref().is_some_and(|error| error.contains(
-                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
-            ))
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
@@ -45252,11 +45248,10 @@ fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
         BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error" && message.contains("authority epoch exhausted")
     )));
-    let status = events.iter().find_map(|event| match &event.event {
-        BackendEvent::IssueMonitorStatus { status } => Some(status),
-        _ => None,
-    });
-    assert!(status.is_some_and(|status| status.enabled));
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+    )));
 }
 
 #[test]
@@ -45293,11 +45288,10 @@ fn app_runtime_autonomous_fallback_epoch_overflow_is_zero_write_error() {
         BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error" && message.contains("authority epoch exhausted")
     )));
-    let status = events.iter().find_map(|event| match &event.event {
-        BackendEvent::IssueMonitorStatus { status } => Some(status),
-        _ => None,
-    });
-    assert!(status.is_some_and(|status| status.autonomous_mode));
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+    )));
 }
 
 #[test]
@@ -47068,6 +47062,9 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let codex_home = temp.path().join("codex-home");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
     let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
     let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
@@ -53469,6 +53466,8 @@ fn codex_hook_discovery_has_no_standalone_process_probe() {
 fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = home.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
     let profile_config_path = home.path().join(".gwt/config.toml");
     let mut settings = Settings::default();
     settings.agent.codex_trust_managed_hooks = Some(true);
@@ -53481,7 +53480,7 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         .build();
     launch_config
         .env_vars
-        .insert("HOME".to_string(), home.path().display().to_string());
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
 
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
@@ -53495,7 +53494,10 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
     .expect("enabled host Codex launch should register trust");
 
     assert_eq!(report.trusted_entries.len(), 5);
-    let codex_config_path = home.path().join(".codex/config.toml");
+    let codex_config_path = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(&codex_home).unwrap(),
+    )
+    .join("config.toml");
     let config = fs::read_to_string(&codex_config_path).unwrap();
     assert!(
         config.contains("trusted_hash"),
@@ -53517,6 +53519,8 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
 fn codex_hook_trust_launch_vouches_for_the_binary_materialization_pinned() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = home.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
 
@@ -53556,7 +53560,7 @@ fn codex_hook_trust_launch_vouches_for_the_binary_materialization_pinned() {
         .build();
     launch_config
         .env_vars
-        .insert("HOME".to_string(), home.path().display().to_string());
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
 
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
@@ -53655,9 +53659,10 @@ fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
     assert_eq!(report.project_path, canonical_worktree);
     assert_eq!(
         report.config_path,
-        fs::canonicalize(codex_home.path())
-            .unwrap()
-            .join("config.toml")
+        gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(codex_home.path()).unwrap(),
+        )
+        .join("config.toml")
     );
     let config: toml::Value =
         toml::from_str(&fs::read_to_string(&report.config_path).unwrap()).unwrap();
@@ -53679,7 +53684,9 @@ fn host_codex_config_path_matches_the_final_child_environment_and_cwd() {
     fs::create_dir_all(&child_cwd).expect("create child cwd");
     let relative_codex_home = child_cwd.join("relative/codex-home");
     fs::create_dir_all(&relative_codex_home).expect("create relative CODEX_HOME");
-    let canonical_codex_home = fs::canonicalize(&relative_codex_home).unwrap();
+    let canonical_codex_home = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(&relative_codex_home).unwrap(),
+    );
     let os_user_home = temp.path().join("os-user-home");
     fs::create_dir_all(&os_user_home).expect("create OS user home");
 
@@ -54456,9 +54463,10 @@ fn codex_hook_trust_launch_uses_effective_codex_home_config() {
     .unwrap()
     .expect("Codex launch should register trust into the effective CODEX_HOME");
 
-    let codex_home_config = fs::canonicalize(codex_home.path())
-        .unwrap()
-        .join("config.toml");
+    let codex_home_config = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(codex_home.path()).unwrap(),
+    )
+    .join("config.toml");
     assert_eq!(report.config_path, codex_home_config);
     let config = fs::read_to_string(&codex_home_config).unwrap();
     assert!(
@@ -54475,6 +54483,8 @@ fn codex_hook_trust_launch_uses_effective_codex_home_config() {
 fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_out() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = home.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
@@ -54483,7 +54493,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
         .build();
     codex_config
         .env_vars
-        .insert("HOME".to_string(), home.path().display().to_string());
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
 
     let unset = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
@@ -54668,6 +54678,8 @@ fn assert_every_codex_hook_is_trusted(config: &toml::Value, hooks_path: &Path) {
 fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = home.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
     let profile_config_path = home.path().join(".gwt/config.toml");
     let fixture_root = tempdir().expect("fixture tempdir");
     let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
@@ -54683,7 +54695,7 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
         .build();
     launch_config
         .env_vars
-        .insert("HOME".to_string(), home.path().display().to_string());
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
 
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
@@ -54714,6 +54726,8 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
 fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
     let home = tempdir().expect("home tempdir");
     let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_home = home.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
@@ -54733,7 +54747,7 @@ fn codex_hook_trust_launch_fails_when_a_gwt_hook_cannot_be_trusted() {
         .build();
     launch_config
         .env_vars
-        .insert("HOME".to_string(), home.path().display().to_string());
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
 
     let result = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
@@ -54768,9 +54782,10 @@ fn codex_hook_trust_launch_fails_when_codex_config_cannot_be_written() {
     let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(worktree.path())
         .build();
-    launch_config
-        .env_vars
-        .insert("HOME".to_string(), home.path().display().to_string());
+    launch_config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        codex_config_parent.display().to_string(),
+    );
 
     let result = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,
