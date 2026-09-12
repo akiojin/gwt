@@ -888,23 +888,11 @@ cargo test -p gwt-core -p gwt --all-features
 
 ### Serializing heavy verification
 
-Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
-Playwright, `verify.run`) contends for host CPU. Running two of them at once
-on the same machine makes wall-clock fixtures fail for no reason and pollutes
-coverage numbers, so gwt serializes them behind a host-wide lease — one
-holder per machine, across every repository and worktree.
-
-Take the lease before the heavy command and release it afterwards:
-
-```bash
-gwtd <<'JSON'
-{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
-JSON
-```
-
-The answer is immediate. `verification lease: granted` returns a `lease_id`
-to release with; `verification lease: unavailable` returns the current holder
-and its remaining TTL, so nothing has to watch another process:
+Only canonical `verify.run` acquires the host-wide verification lease.
+Register the verification matrix with `verify.plan`, then run it with
+`verify.run`; each run manages its own admission and release. A `deferred`
+result means admission timed out without a verification record. Inspect the
+holder before retrying:
 
 ```bash
 gwtd <<'JSON'
@@ -912,16 +900,24 @@ gwtd <<'JSON'
 JSON
 ```
 
+Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
+lint, coverage, direct headed browser checks, and pre-push checks run
+directly without a verification lease. Completion still requires canonical
+verification evidence.
+
+**Migration:** `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` now return an error without creating a holder or
+reservation. Replace manual acquisition around canonical verification with
+`verify.run`; remove acquisition around ordinary Cargo commands. Existing
+legacy holders can be drained explicitly without killing their processes:
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
 JSON
 ```
 
-Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
-TTL. The default TTL is 45 minutes; a lease that lapses is released
-automatically, and a holder that is killed releases immediately. Lease
-transitions are recorded in
+Lease transitions are recorded in
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
 ### GitHub API budget
