@@ -17236,8 +17236,8 @@ mod tests {
         )
         .unwrap();
 
-        let guidance = repair_not_corrupt_guidance(worktree.path())
-            .expect("a fenced owner has a route too");
+        let guidance =
+            repair_not_corrupt_guidance(worktree.path()).expect("a fenced owner has a route too");
         assert!(
             guidance.contains("execution.release_prepared"),
             "{guidance}"
